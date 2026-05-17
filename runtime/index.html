@@ -1,14 +1,63 @@
 <!doctype html>
 <meta charset="utf-8">
 <title>lua2wasm browser sanity</title>
+<style>
+  body { font: 14px/1.4 system-ui, sans-serif; margin: 2em auto; max-width: 60em; padding: 0 1em; }
+  pre  { background: #111; color: #eee; padding: 1em; border-radius: 4px; white-space: pre-wrap; min-height: 4em; }
+  h1   { font-size: 1.1em; color: #555; }
+  .err { color: #f88; }
+</style>
+<h1>lua2wasm — <span id="modname"></span></h1>
 <pre id="out"></pre>
 <script type="module">
 const out = document.getElementById("out");
-const log = (...a) => { out.textContent += a.join(" ") + "\n"; };
+const err = (m) => {
+    const span = document.createElement("span");
+    span.className = "err"; span.textContent = m + "\n";
+    out.appendChild(span);
+};
+const log = (m) => { out.appendChild(document.createTextNode(m + "\n")); };
 
-const url = new URLSearchParams(location.search).get("mod") || "print_sum.wasm";
-const bytes = await (await fetch(url)).arrayBuffer();
-await WebAssembly.instantiate(bytes, {
-    host: { print: (v) => log(String(v)) },
-});
+const url = new URLSearchParams(location.search).get("mod") || "../build/milestone8.wasm";
+document.getElementById("modname").textContent = url;
+
+let instance;
+function readLuaString(v) {
+    const n = instance.exports.lua_str_len(v);
+    const bytes = new Uint8Array(n);
+    for (let i = 0; i < n; i++) bytes[i] = instance.exports.lua_str_byte(v, i);
+    return new TextDecoder().decode(bytes);
+}
+function formatFloat(f) {
+    if (!Number.isFinite(f)) return f === Infinity ? "inf" : f === -Infinity ? "-inf" : "nan";
+    if (Number.isInteger(f)) return `${f}.0`;
+    return f.toPrecision(14).replace(/\.?0+(e|$)/, "$1");
+}
+function luaToString(v) {
+    if (v === null || v === undefined) return "nil";
+    const tag = instance.exports.lua_tag(v);
+    switch (tag) {
+        case 0: return "nil";
+        case 1: return instance.exports.lua_get_bool(v) ? "true" : "false";
+        case 2: return String(instance.exports.lua_get_int(v));
+        case 3: return formatFloat(instance.exports.lua_get_float(v));
+        case 4: return readLuaString(v);
+        case 5: return "function";
+        case 6: return "table";
+        default: return `<lua value tag=${tag}>`;
+    }
+}
+
+try {
+    const resp = await fetch(url);
+    if (!resp.ok) throw new Error(`fetch ${url}: ${resp.status} ${resp.statusText}`);
+    const bytes = await resp.arrayBuffer();
+    ({ instance } = await WebAssembly.instantiate(bytes, {
+        host: { print: (v) => log(luaToString(v)) },
+    }));
+    instance.exports.main();
+} catch (e) {
+    err("ERROR: " + (e && e.message ? e.message : e));
+    console.error(e);
+}
 </script>
