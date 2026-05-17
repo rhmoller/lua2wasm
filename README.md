@@ -14,27 +14,45 @@ browser.
 
 ## Try it now
 
-The simplest way to see what's possible:
+The default flow needs **no Emscripten** — just `clang`, `cmake`, Binaryen's
+`wasm-as`, and Node ≥ 22.
 
 ```sh
-. ~/path/to/emsdk/emsdk_env.sh           # if you have Emscripten
-./scripts/build-wasm.sh                   # cross-compiles the compiler itself to WASM
+# 1. Build the compiler (a native binary)
+CC=clang cmake -S . -B build -G Ninja
+cmake --build build
+
+# 2. Compile a Lua program to a .wasm module
+echo 'print("hello from " .. "lua2wasm")' > /tmp/hello.lua
+./build/lua2wasm /tmp/hello.lua -o /tmp/hello.wat
+wasm-as --all-features -o /tmp/hello.wasm /tmp/hello.wat
+
+# 3. Run it
+node --experimental-wasm-exnref runtime/host.mjs /tmp/hello.wasm
+#   → hello from lua2wasm
+```
+
+Or wrap that module up as a self-contained HTML page (no server needed) with
+[`scripts/package-html.sh`](scripts/package-html.sh) — see the
+[Packaging](#packaging) section below.
+
+### Optional: the live playground
+
+If you also have [Emscripten](https://emscripten.org/) on hand, there's a
+richer demo that cross-compiles **the compiler itself** to WASM and ships it
+to the browser. A CodeMirror editor on one side, output on the other; **Run**
+compiles + runs your Lua entirely client-side, **Show WAT** reveals the
+codegen output.
+
+```sh
+. ~/path/to/emsdk/emsdk_env.sh
+./scripts/build-wasm.sh                  # produces build-em/lua2wasm.{js,wasm}
 python3 -m http.server 8000
 # open http://localhost:8000/runtime/playground.html
 ```
 
-A two-pane editor with CodeMirror on one side, output on the other. The
-**Run** button compiles your Lua to WASM-GC entirely in the browser (the
-compiler itself runs as WASM) and executes the result. **Show WAT** reveals
-what the codegen emitted.
-
-If you don't want to set up Emscripten, the Node-side path is just:
-
-```sh
-./build/lua2wasm hello.lua -o hello.wat
-wasm-as --all-features -o hello.wasm hello.wat
-node runtime/host.mjs hello.wasm
-```
+Emscripten is *only* needed for this playground page — every other path in
+this README works without it.
 
 ## A tiny example
 
@@ -129,15 +147,15 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-Requirements:
+Requirements (required vs optional):
 
-| Tool       | Version       | Notes                                          |
-|------------|---------------|------------------------------------------------|
-| `clang`    | ≥ 16          | the compiler is C23                            |
-| `cmake`    | ≥ 3.25        |                                                |
-| `binaryen` | recent        | provides `wasm-as`. (We use Binaryen rather than wabt because as of mid-2026 wabt 1.0.39 still doesn't accept modern GC text syntax — `anyref`, recursive `(ref null $t)`, etc.) |
-| `node`     | ≥ 22          | needs WasmGC + reference types + exnref        |
-| `emcc`     | ≥ 4.0 (opt.)  | only for the in-browser compiler (playground)  |
+| Tool       | Version  | Required for                                                                                                                         |
+|------------|----------|--------------------------------------------------------------------------------------------------------------------------------------|
+| `clang`    | ≥ 16     | building the native compiler binary (C23 source)                                                                                     |
+| `cmake`    | ≥ 3.25   | building the native compiler binary                                                                                                  |
+| `binaryen` | recent   | `wasm-as` for `.wat` → `.wasm`. We use Binaryen rather than wabt because as of mid-2026 wabt 1.0.39 doesn't accept modern GC text syntax (`anyref`, recursive `(ref null $t)`, etc.) |
+| `node`     | ≥ 22     | running compiled `.wasm` modules from the command line (Browser hosts work equivalently, no Node needed there)                       |
+| `emcc`     | ≥ 4.0    | **optional** — only for cross-compiling the compiler itself to WASM so the playground page can call it. Skip if you don't need the playground. |
 
 ## Using the CLI
 
@@ -152,12 +170,16 @@ Run under Node:
 node --experimental-wasm-exnref runtime/host.mjs output.wasm
 ```
 
-Package as a self-contained HTML file (base64-embeds the wasm + a tiny
-loader; ~10 KB overhead):
+## Packaging
+
+`scripts/package-html.sh` wraps a compiled `.wasm` into a single
+self-contained HTML page — base64-embeds the module plus a tiny host loader,
+about 10 KB of HTML overhead. The result needs no server and no other
+files.
 
 ```sh
 ./scripts/package-html.sh output.wasm -o output.html
-# open output.html — runs in any GC-capable browser, no server needed
+# open output.html — runs in any GC-capable browser
 ```
 
 ## Architecture (in 30 seconds)
