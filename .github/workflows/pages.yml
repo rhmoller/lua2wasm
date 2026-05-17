@@ -1,6 +1,6 @@
 # Publishes the in-browser playground to GitHub Pages.
-# After merging this workflow once, enable Pages in the repo settings:
-#   Settings → Pages → Build and deployment → Source: GitHub Actions
+# The workflow auto-enables Pages on first run (via configure-pages' enablement
+# option) so no manual repo-settings step is needed.
 name: pages
 
 on:
@@ -17,6 +17,11 @@ permissions:
   contents: read
   pages: write
   id-token: write
+
+# Opt into Node.js 24 now so the deprecation warning for actions still
+# shipping a Node 20 runtime goes away. (Default flips in June 2026 anyway.)
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
   build:
@@ -56,6 +61,10 @@ jobs:
           touch dist/.nojekyll
 
       - uses: actions/configure-pages@v5
+        with:
+          # Auto-enable Pages on the repo the first time this runs, so the
+          # owner doesn't have to flip Settings → Pages by hand.
+          enablement: true
 
       - uses: actions/upload-pages-artifact@v3
         with:
