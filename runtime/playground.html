@@ -54,6 +54,9 @@
     background: #15151a; border-top: 1px solid #303038;
   }
   footer code { background: #2a2a32; padding: 1px 4px; border-radius: 3px; }
+  footer .warn {
+    background: #4a4520; color: #ffe27a; padding: 1px 6px; border-radius: 3px;
+  }
 </style>
 
 <header>
@@ -87,7 +90,7 @@
 
 <footer>
   Pipeline: <code>Lua → lua2wasm (in WASM) → WAT → Binaryen → WASM-GC → execute</code>
-  · Needs a browser with WasmGC + exnref (recent Chrome/Firefox).
+  · <span class="warn">Needs a browser with WasmGC + exnref (recent Chrome/Firefox).</span>
 </footer>
 
 <script type="module">
