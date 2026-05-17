@@ -32,6 +32,7 @@ typedef enum {
     VAR_LOCAL,          /* a local in the current function */
     VAR_UPVAL,          /* captured upvalue of the current function */
     VAR_BUILTIN_PRINT,  /* the magic `print` builtin (phase 3a) */
+    VAR_GLOBAL,         /* a module-level global declared with `global x` */
 } VarKind;
 
 /* ---------- expressions ---------- */
@@ -124,6 +125,11 @@ typedef enum {
     STMT_DO,
     STMT_RETURN,        /* return [expr] */
     STMT_LOCAL_FUNC,    /* local function name(...) ... end */
+    STMT_FOR_NUM,       /* for i = a, b [, c] do ... end */
+    STMT_FOR_GEN,       /* for k [, v, ...] in expr_list do ... end */
+    STMT_REPEAT,        /* repeat ... until cond */
+    STMT_BREAK,
+    STMT_GLOBAL,        /* global name1 [, name2, ...] [= expr1, ...] */
 } StmtKind;
 
 struct Block {
@@ -196,6 +202,34 @@ struct Stmt {
             int local_idx;
             LuaFunc *func;
         } local_func;
+        struct {                    /* for i = a, b [, c] do ... end */
+            const char *name;
+            size_t name_len;
+            int local_idx;
+            Expr *start;
+            Expr *stop;
+            Expr *step;             /* NULL → 1 */
+            Block body;
+        } for_num;
+        struct {                    /* for k [, v, ...] in exprs do ... end */
+            int n_names;
+            const char **names;
+            size_t *name_lens;
+            int *local_idxs;
+            int n_exprs;
+            Expr **exprs;
+            Block body;
+        } for_gen;
+        struct {                    /* repeat body until cond */
+            Block body;
+            Expr *cond;
+        } repeat;
+        struct {                    /* global a [, b, ...] [= e, ...] */
+            int n_names;
+            int *global_idxs;       /* assigned at parse time */
+            int n_values;
+            Expr **values;
+        } global_decl;
     } as;
 };
 

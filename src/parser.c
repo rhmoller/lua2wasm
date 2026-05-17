@@ -24,6 +24,7 @@
 #define MAX_UPVALS_PER_FN    64
 #define MAX_FRAME_DEPTH      32
 #define MAX_FUNCS            256
+#define MAX_GLOBALS          256
 
 typedef struct {
     const char *name;
@@ -50,9 +51,27 @@ typedef struct {
     LuaFunc *funcs[MAX_FUNCS];
     int n_funcs;
 
+    GlobalDecl globals[MAX_GLOBALS];
+    int n_globals;
+
     char error[256];
     int ok;
 } Parser;
+
+static int globals_lookup(Parser *p, const char *name, size_t name_len) {
+    for (int i = 0; i < p->n_globals; i++) {
+        if (p->globals[i].name_len == name_len &&
+            memcmp(p->globals[i].name, name, name_len) == 0) return i;
+    }
+    return -1;
+}
+static int globals_declare(Parser *p, const char *name, size_t name_len) {
+    int existing = globals_lookup(p, name, name_len);
+    if (existing >= 0) return existing;
+    if (p->n_globals >= MAX_GLOBALS) return -1;
+    p->globals[p->n_globals] = (GlobalDecl){ .name = name, .name_len = name_len };
+    return p->n_globals++;
+}
 
 static FuncFrame *cur_frame(Parser *p) { return &p->frames[p->frame_depth]; }
 
@@ -139,12 +158,14 @@ static int resolve_in_frame(Parser *p, int frame_idx, const char *name, size_t n
         return 1;
     }
     if (frame_idx == 0) {
-        /* top-level: try magic builtins */
+        /* top-level: try magic builtins, then globals */
         if (name_len == 5 && memcmp(name, "print", 5) == 0) {
             *out_kind = VAR_BUILTIN_PRINT;
             *out_idx = 0;
             return 1;
         }
+        int g = globals_lookup(p, name, name_len);
+        if (g >= 0) { *out_kind = VAR_GLOBAL; *out_idx = g; return 1; }
         return 0;
     }
     /* recurse into parent */
@@ -156,6 +177,12 @@ static int resolve_in_frame(Parser *p, int frame_idx, const char *name, size_t n
     if (parent_kind == VAR_BUILTIN_PRINT) {
         *out_kind = VAR_BUILTIN_PRINT;
         *out_idx = 0;
+        return 1;
+    }
+    if (parent_kind == VAR_GLOBAL) {
+        /* Globals are visible everywhere — propagate without making an upvalue. */
+        *out_kind = VAR_GLOBAL;
+        *out_idx = parent_idx;
         return 1;
     }
     UpvalSource src = (parent_kind == VAR_LOCAL) ? UPVAL_FROM_LOCAL : UPVAL_FROM_UPVAL;
@@ -682,6 +709,152 @@ static Stmt *parse_ident_stmt(Parser *p) {
     return s;
 }
 
+static Stmt *parse_for(Parser *p) {
+    int line = peek(p)->line;
+    advance(p); /* for */
+    if (peek(p)->kind != TOK_IDENT) { set_error(p, "expected identifier after `for`"); return NULL; }
+    const Token *first = advance(p);
+    if (peek(p)->kind == TOK_ASSIGN) {
+        /* numeric */
+        advance(p);
+        Expr *start = parse_expr(p);
+        if (!p->ok) return NULL;
+        expect(p, TOK_COMMA, ",");
+        Expr *stop = parse_expr(p);
+        if (!p->ok) return NULL;
+        Expr *step = NULL;
+        if (match(p, TOK_COMMA)) {
+            step = parse_expr(p);
+            if (!p->ok) return NULL;
+        }
+        expect(p, TOK_KW_DO, "do");
+        int mark = frame_mark(cur_frame(p));
+        int slot = frame_declare(cur_frame(p), first->start, first->len);
+        if (slot < 0) { set_error(p, "too many locals"); return NULL; }
+        Block body = {0};
+        parse_block(p, &body, TOK_KW_END, TOK_KW_END, TOK_KW_END);
+        frame_rewind(cur_frame(p), mark);
+        expect(p, TOK_KW_END, "end (of for)");
+        if (!p->ok) return NULL;
+        Stmt *s = stmt_new(p->pool, STMT_FOR_NUM, line);
+        s->as.for_num.name = first->start;
+        s->as.for_num.name_len = first->len;
+        s->as.for_num.local_idx = slot;
+        s->as.for_num.start = start;
+        s->as.for_num.stop = stop;
+        s->as.for_num.step = step;
+        s->as.for_num.body = body;
+        return s;
+    }
+    /* generic: for k [, v, ...] in expr_list do ... end */
+    const Token *names[16];
+    int n_names = 0;
+    names[n_names++] = first;
+    while (match(p, TOK_COMMA)) {
+        if (peek(p)->kind != TOK_IDENT) { set_error(p, "expected name"); return NULL; }
+        if (n_names >= 16) { set_error(p, "too many for-vars"); return NULL; }
+        names[n_names++] = advance(p);
+    }
+    expect(p, TOK_KW_IN, "in");
+    Expr *exprs[16];
+    int n_exprs = 0;
+    do {
+        if (n_exprs >= 16) { set_error(p, "too many exprs in for"); return NULL; }
+        exprs[n_exprs++] = parse_expr(p);
+        if (!p->ok) return NULL;
+    } while (match(p, TOK_COMMA));
+    expect(p, TOK_KW_DO, "do");
+    int mark = frame_mark(cur_frame(p));
+    int *local_idxs = node_pool_alloc(p->pool, sizeof(int) * n_names);
+    const char **names_arr = node_pool_alloc(p->pool, sizeof(char *) * n_names);
+    size_t *lens_arr = node_pool_alloc(p->pool, sizeof(size_t) * n_names);
+    for (int i = 0; i < n_names; i++) {
+        int slot = frame_declare(cur_frame(p), names[i]->start, names[i]->len);
+        if (slot < 0) { set_error(p, "too many locals"); return NULL; }
+        local_idxs[i] = slot;
+        names_arr[i] = names[i]->start;
+        lens_arr[i] = names[i]->len;
+    }
+    Block body = {0};
+    parse_block(p, &body, TOK_KW_END, TOK_KW_END, TOK_KW_END);
+    frame_rewind(cur_frame(p), mark);
+    expect(p, TOK_KW_END, "end (of for)");
+    if (!p->ok) return NULL;
+    Stmt *s = stmt_new(p->pool, STMT_FOR_GEN, line);
+    s->as.for_gen.n_names = n_names;
+    s->as.for_gen.names = names_arr;
+    s->as.for_gen.name_lens = lens_arr;
+    s->as.for_gen.local_idxs = local_idxs;
+    s->as.for_gen.n_exprs = n_exprs;
+    s->as.for_gen.exprs = node_pool_alloc(p->pool, sizeof(Expr *) * n_exprs);
+    for (int i = 0; i < n_exprs; i++) s->as.for_gen.exprs[i] = exprs[i];
+    s->as.for_gen.body = body;
+    return s;
+}
+
+static Stmt *parse_repeat(Parser *p) {
+    int line = peek(p)->line;
+    advance(p); /* repeat */
+    Block body = {0};
+    int mark = frame_mark(cur_frame(p));
+    parse_block(p, &body, TOK_KW_UNTIL, TOK_KW_UNTIL, TOK_KW_UNTIL);
+    /* `until cond` is evaluated in scope where the loop's locals are still visible */
+    expect(p, TOK_KW_UNTIL, "until");
+    Expr *cond = parse_expr(p);
+    frame_rewind(cur_frame(p), mark);
+    if (!p->ok) return NULL;
+    Stmt *s = stmt_new(p->pool, STMT_REPEAT, line);
+    s->as.repeat.body = body;
+    s->as.repeat.cond = cond;
+    return s;
+}
+
+static Stmt *parse_break(Parser *p) {
+    int line = peek(p)->line;
+    advance(p);
+    Stmt *s = stmt_new(p->pool, STMT_BREAK, line);
+    return s;
+}
+
+static Stmt *parse_global(Parser *p) {
+    int line = peek(p)->line;
+    advance(p); /* global */
+    if (peek(p)->kind != TOK_IDENT) { set_error(p, "expected identifier after `global`"); return NULL; }
+    const Token *names_buf[16];
+    int n_names = 0;
+    names_buf[n_names++] = advance(p);
+    while (match(p, TOK_COMMA)) {
+        if (peek(p)->kind != TOK_IDENT) { set_error(p, "expected identifier"); return NULL; }
+        if (n_names >= 16) { set_error(p, "too many names in global"); return NULL; }
+        names_buf[n_names++] = advance(p);
+    }
+    /* Register globals BEFORE parsing values so they can self-reference. */
+    int *global_idxs = node_pool_alloc(p->pool, sizeof(int) * n_names);
+    for (int i = 0; i < n_names; i++) {
+        int idx = globals_declare(p, names_buf[i]->start, names_buf[i]->len);
+        if (idx < 0) { set_error(p, "too many globals"); return NULL; }
+        global_idxs[i] = idx;
+    }
+    Expr *vals_buf[16];
+    int n_values = 0;
+    if (match(p, TOK_ASSIGN)) {
+        do {
+            if (n_values >= 16) { set_error(p, "too many values"); return NULL; }
+            vals_buf[n_values++] = parse_expr(p);
+            if (!p->ok) return NULL;
+        } while (match(p, TOK_COMMA));
+    }
+    Stmt *s = stmt_new(p->pool, STMT_GLOBAL, line);
+    s->as.global_decl.n_names = n_names;
+    s->as.global_decl.global_idxs = global_idxs;
+    s->as.global_decl.n_values = n_values;
+    if (n_values) {
+        s->as.global_decl.values = node_pool_alloc(p->pool, sizeof(Expr *) * n_values);
+        for (int i = 0; i < n_values; i++) s->as.global_decl.values[i] = vals_buf[i];
+    }
+    return s;
+}
+
 static Stmt *parse_stmt(Parser *p) {
     switch (peek(p)->kind) {
         case TOK_SEMI: advance(p); return NULL;
@@ -690,7 +863,19 @@ static Stmt *parse_stmt(Parser *p) {
         case TOK_KW_WHILE:  return parse_while(p);
         case TOK_KW_DO:     return parse_do(p);
         case TOK_KW_RETURN: return parse_return(p);
-        case TOK_IDENT:     return parse_ident_stmt(p);
+        case TOK_KW_FOR:    return parse_for(p);
+        case TOK_KW_REPEAT: return parse_repeat(p);
+        case TOK_KW_BREAK:  return parse_break(p);
+        case TOK_IDENT: {
+            /* `global x ...` is parsed as if `global` were a keyword, but we
+             * keep it as a normal identifier in the lexer for backward-compat
+             * and check for it here. */
+            const Token *t = peek(p);
+            if (t->len == 6 && memcmp(t->start, "global", 6) == 0) {
+                return parse_global(p);
+            }
+            return parse_ident_stmt(p);
+        }
         default:
             set_error(p, "expected a statement");
             return NULL;
@@ -780,6 +965,11 @@ ParseResult parse(const TokenList *tokens, NodePool *pool) {
         r.funcs.items = malloc(sizeof(LuaFunc *) * p.n_funcs);
         memcpy(r.funcs.items, p.funcs, sizeof(LuaFunc *) * p.n_funcs);
     }
+    r.globals.count = (size_t)p.n_globals;
+    if (p.n_globals) {
+        r.globals.items = malloc(sizeof(GlobalDecl) * p.n_globals);
+        memcpy(r.globals.items, p.globals, sizeof(GlobalDecl) * p.n_globals);
+    }
     if (!p.ok) memcpy(r.error, p.error, sizeof(r.error));
     return r;
 }
@@ -788,4 +978,7 @@ void parse_result_free(ParseResult *r) {
     free(r->funcs.items);
     r->funcs.items = NULL;
     r->funcs.count = 0;
+    free(r->globals.items);
+    r->globals.items = NULL;
+    r->globals.count = 0;
 }

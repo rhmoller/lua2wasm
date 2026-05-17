@@ -63,6 +63,8 @@ typedef struct {
     StrPool strs;
     int next_label;
     int in_main;            /* 1 while emitting $main body, 0 inside user fn */
+    int break_labels[16];   /* break targets for nested while/for/repeat */
+    int break_depth;
     char err[256];
     int ok;
 } CG;
@@ -129,12 +131,15 @@ static void emit_var_read(CG *c, VarKind kind, int idx, int depth) {
         case VAR_BUILTIN_PRINT:
             wat_append(c->w, "(global.get $g_print)\n");
             break;
+        case VAR_GLOBAL:
+            wat_appendf(c->w, "(global.get $g_user_%d)\n", idx);
+            break;
     }
 }
 
 /* Emit code that pushes the (ref $Box) for the named binding (not its value).
- * Used to: (a) write to it via struct.set, or (b) capture it into an upvalue
- * array of a child closure. */
+ * Used for upvalue capture into a child closure. Globals and builtins don't
+ * have boxes. */
 static void emit_box_ref(CG *c, VarKind kind, int idx, int depth) {
     emit_indent(c, depth);
     switch (kind) {
@@ -148,9 +153,41 @@ static void emit_box_ref(CG *c, VarKind kind, int idx, int depth) {
                 "(i32.const %d))\n", idx);
             break;
         case VAR_BUILTIN_PRINT:
-            cg_error(c, "cannot take a box reference to a builtin");
+        case VAR_GLOBAL:
+            cg_error(c, "cannot take a box reference to a builtin/global");
             break;
     }
+}
+
+/* Open the "store to this target" expression. The caller must then emit the
+ * value expression as a child, then call emit_target_close(). */
+static void emit_target_open(CG *c, const AssignTarget *t, int depth) {
+    if (t->kind == TGT_VAR) {
+        switch (t->as.var.kind) {
+            case VAR_LOCAL:
+            case VAR_UPVAL:
+                emit_indent(c, depth); wat_append(c->w, "(struct.set $Box $v\n");
+                emit_box_ref(c, t->as.var.kind, t->as.var.idx, depth + 1);
+                break;
+            case VAR_GLOBAL:
+                emit_indent(c, depth);
+                wat_appendf(c->w, "(global.set $g_user_%d\n", t->as.var.idx);
+                break;
+            case VAR_BUILTIN_PRINT:
+                cg_error(c, "cannot assign to builtin print");
+                break;
+        }
+    } else {
+        emit_indent(c, depth); wat_append(c->w, "(call $tab_set\n");
+        emit_indent(c, depth + 1); wat_append(c->w, "(ref.cast (ref $LuaTable)\n");
+        emit_expr(c, t->as.index.table, depth + 2);
+        emit_indent(c, depth + 1); wat_append(c->w, ")\n");
+        emit_expr(c, t->as.index.key, depth + 1);
+    }
+}
+static void emit_target_close(CG *c, const AssignTarget *t, int depth) {
+    (void)t;
+    emit_indent(c, depth); wat_append(c->w, ")\n");
 }
 
 /* ----- binary / unary ops ----- */
@@ -430,34 +467,15 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
                              s->as.assign.values[n_values - 1]->kind == EXPR_CALL);
             if (n_targets == 1) {
                 AssignTarget *t = &s->as.assign.targets[0];
-                /* Build the value expression first. */
-                if (t->kind == TGT_VAR) {
-                    emit_indent(c, depth); wat_append(c->w, "(struct.set $Box $v\n");
-                    emit_box_ref(c, t->as.var.kind, t->as.var.idx, depth + 1);
-                    if (last_call) {
-                        emit_indent(c, depth + 1); wat_append(c->w, "(call $args_first\n");
-                        emit_call_array(c, s->as.assign.values[0], depth + 2);
-                        emit_indent(c, depth + 1); wat_append(c->w, ")\n");
-                    } else {
-                        emit_expr(c, s->as.assign.values[0], depth + 1);
-                    }
-                    emit_indent(c, depth); wat_append(c->w, ")\n");
-                } else {
-                    /* TGT_INDEX: table[key] = value */
-                    emit_indent(c, depth); wat_append(c->w, "(call $tab_set\n");
-                    emit_indent(c, depth + 1); wat_append(c->w, "(ref.cast (ref $LuaTable)\n");
-                    emit_expr(c, t->as.index.table, depth + 2);
+                emit_target_open(c, t, depth);
+                if (last_call) {
+                    emit_indent(c, depth + 1); wat_append(c->w, "(call $args_first\n");
+                    emit_call_array(c, s->as.assign.values[0], depth + 2);
                     emit_indent(c, depth + 1); wat_append(c->w, ")\n");
-                    emit_expr(c, t->as.index.key, depth + 1);
-                    if (last_call) {
-                        emit_indent(c, depth + 1); wat_append(c->w, "(call $args_first\n");
-                        emit_call_array(c, s->as.assign.values[0], depth + 2);
-                        emit_indent(c, depth + 1); wat_append(c->w, ")\n");
-                    } else {
-                        emit_expr(c, s->as.assign.values[0], depth + 1);
-                    }
-                    emit_indent(c, depth); wat_append(c->w, ")\n");
+                } else {
+                    emit_expr(c, s->as.assign.values[0], depth + 1);
                 }
+                emit_target_close(c, t, depth);
                 break;
             }
             /* Multi-target: must evaluate ALL RHS before assigning (Lua spec).
@@ -490,29 +508,14 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
                 emit_indent(c, depth + 1); wat_append(c->w, ")\n");
             }
             emit_indent(c, depth); wat_append(c->w, ")\n");
-            /* Distribute. */
             for (int i = 0; i < n_targets; i++) {
                 AssignTarget *t = &s->as.assign.targets[i];
-                if (t->kind == TGT_VAR) {
-                    emit_indent(c, depth); wat_append(c->w, "(struct.set $Box $v\n");
-                    emit_box_ref(c, t->as.var.kind, t->as.var.idx, depth + 1);
-                    emit_indent(c, depth + 1);
-                    wat_appendf(c->w,
-                        "(call $args_at (ref.as_non_null (local.get $tmp_args)) "
-                        "(i32.const %d))\n", i);
-                    emit_indent(c, depth); wat_append(c->w, ")\n");
-                } else {
-                    emit_indent(c, depth); wat_append(c->w, "(call $tab_set\n");
-                    emit_indent(c, depth + 1); wat_append(c->w, "(ref.cast (ref $LuaTable)\n");
-                    emit_expr(c, t->as.index.table, depth + 2);
-                    emit_indent(c, depth + 1); wat_append(c->w, ")\n");
-                    emit_expr(c, t->as.index.key, depth + 1);
-                    emit_indent(c, depth + 1);
-                    wat_appendf(c->w,
-                        "(call $args_at (ref.as_non_null (local.get $tmp_args)) "
-                        "(i32.const %d))\n", i);
-                    emit_indent(c, depth); wat_append(c->w, ")\n");
-                }
+                emit_target_open(c, t, depth);
+                emit_indent(c, depth + 1);
+                wat_appendf(c->w,
+                    "(call $args_at (ref.as_non_null (local.get $tmp_args)) "
+                    "(i32.const %d))\n", i);
+                emit_target_close(c, t, depth);
             }
             break;
         }
@@ -556,16 +559,212 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
 
         case STMT_WHILE: {
             int label = c->next_label++;
-            emit_indent(c, depth); wat_appendf(c->w, "(block $while_break_%d\n", label);
-            emit_indent(c, depth + 1); wat_appendf(c->w, "(loop $while_cont_%d\n", label);
+            c->break_labels[c->break_depth++] = label;
+            emit_indent(c, depth); wat_appendf(c->w, "(block $brk_%d\n", label);
+            emit_indent(c, depth + 1); wat_appendf(c->w, "(loop $cont_%d\n", label);
             emit_expr(c, s->as.while_stmt.cond, depth + 2);
             emit_indent(c, depth + 2); wat_append(c->w, "(call $lua_truthy)\n");
             emit_indent(c, depth + 2); wat_append(c->w, "i32.eqz\n");
-            emit_indent(c, depth + 2); wat_appendf(c->w, "br_if $while_break_%d\n", label);
+            emit_indent(c, depth + 2); wat_appendf(c->w, "br_if $brk_%d\n", label);
             emit_block(c, &s->as.while_stmt.body, depth + 2);
-            emit_indent(c, depth + 2); wat_appendf(c->w, "br $while_cont_%d\n", label);
+            emit_indent(c, depth + 2); wat_appendf(c->w, "br $cont_%d\n", label);
             emit_indent(c, depth + 1); wat_append(c->w, ")\n");
             emit_indent(c, depth);     wat_append(c->w, ")\n");
+            c->break_depth--;
+            break;
+        }
+
+        case STMT_REPEAT: {
+            int label = c->next_label++;
+            c->break_labels[c->break_depth++] = label;
+            emit_indent(c, depth); wat_appendf(c->w, "(block $brk_%d\n", label);
+            emit_indent(c, depth + 1); wat_appendf(c->w, "(loop $cont_%d\n", label);
+            emit_block(c, &s->as.repeat.body, depth + 2);
+            emit_expr(c, s->as.repeat.cond, depth + 2);
+            emit_indent(c, depth + 2); wat_append(c->w, "(call $lua_truthy)\n");
+            emit_indent(c, depth + 2); wat_append(c->w, "i32.eqz\n");
+            emit_indent(c, depth + 2); wat_appendf(c->w, "br_if $cont_%d\n", label);
+            emit_indent(c, depth + 1); wat_append(c->w, ")\n");
+            emit_indent(c, depth);     wat_append(c->w, ")\n");
+            c->break_depth--;
+            break;
+        }
+
+        case STMT_BREAK: {
+            if (c->break_depth == 0) {
+                cg_error(c, "break outside loop"); break;
+            }
+            int label = c->break_labels[c->break_depth - 1];
+            emit_indent(c, depth);
+            wat_appendf(c->w, "br $brk_%d\n", label);
+            break;
+        }
+
+        case STMT_FOR_NUM: {
+            int label = c->next_label++;
+            c->break_labels[c->break_depth++] = label;
+            int slot = s->as.for_num.local_idx;
+            /* Initialize control variable's box with `start`, and stash
+             * stop/step in scratch locals. */
+            emit_indent(c, depth);
+            wat_appendf(c->w, "(local.set $L%d (struct.new $Box\n", slot);
+            emit_expr(c, s->as.for_num.start, depth + 1);
+            emit_indent(c, depth); wat_append(c->w, "))\n");
+            emit_indent(c, depth); wat_append(c->w, "(local.set $for_stop\n");
+            emit_expr(c, s->as.for_num.stop, depth + 1);
+            emit_indent(c, depth); wat_append(c->w, ")\n");
+            emit_indent(c, depth); wat_append(c->w, "(local.set $for_step\n");
+            if (s->as.for_num.step) {
+                emit_expr(c, s->as.for_num.step, depth + 1);
+            } else {
+                emit_indent(c, depth + 1); wat_append(c->w, "(ref.i31 (i32.const 1))\n");
+            }
+            emit_indent(c, depth); wat_append(c->w, ")\n");
+
+            emit_indent(c, depth); wat_appendf(c->w, "(block $brk_%d\n", label);
+            emit_indent(c, depth + 1); wat_appendf(c->w, "(loop $cont_%d\n", label);
+            /* terminate? */
+            emit_indent(c, depth + 2);
+            wat_append(c->w,
+                "(if (call $for_step_positive (local.get $for_step))\n");
+            emit_indent(c, depth + 2); wat_append(c->w, "  (then\n");
+            emit_indent(c, depth + 2);
+            wat_appendf(c->w,
+                "    (br_if $brk_%d (i32.eqz (call $num_le\n"
+                "      (struct.get $Box $v (local.get $L%d))\n"
+                "      (local.get $for_stop)))))\n", label, slot);
+            emit_indent(c, depth + 2); wat_append(c->w, "  (else\n");
+            emit_indent(c, depth + 2);
+            wat_appendf(c->w,
+                "    (br_if $brk_%d (i32.eqz (call $num_le\n"
+                "      (local.get $for_stop)\n"
+                "      (struct.get $Box $v (local.get $L%d)))))))\n", label, slot);
+            /* body */
+            emit_block(c, &s->as.for_num.body, depth + 2);
+            /* i = i + step */
+            emit_indent(c, depth + 2);
+            wat_appendf(c->w,
+                "(struct.set $Box $v (local.get $L%d) "
+                "(call $lua_add (struct.get $Box $v (local.get $L%d)) "
+                "(local.get $for_step)))\n", slot, slot);
+            emit_indent(c, depth + 2); wat_appendf(c->w, "br $cont_%d\n", label);
+            emit_indent(c, depth + 1); wat_append(c->w, ")\n");
+            emit_indent(c, depth);     wat_append(c->w, ")\n");
+            c->break_depth--;
+            break;
+        }
+
+        case STMT_FOR_GEN: {
+            /* Generic for: `for v1[, v2, ...] in iter [, state [, init]] do body end`.
+             * Evaluate the expr_list into ($for_iter_any, $for_state, $for_k),
+             * then loop: call iter(state, k); if first result is nil, break;
+             * otherwise bind v1..vN to results, set k = result[0]. */
+            int label = c->next_label++;
+            c->break_labels[c->break_depth++] = label;
+            int n_exprs = s->as.for_gen.n_exprs;
+            int last_call = (n_exprs > 0 &&
+                             s->as.for_gen.exprs[n_exprs - 1]->kind == EXPR_CALL);
+            /* Compute the full args array via the same singles+merge pattern. */
+            int singles = n_exprs - (last_call ? 1 : 0);
+            emit_indent(c, depth); wat_append(c->w, "(local.set $tmp_args\n");
+            if (last_call) {
+                emit_indent(c, depth + 1); wat_append(c->w, "(call $merge_args\n");
+                emit_indent(c, depth + 2);
+                wat_appendf(c->w, "(array.new_fixed $ArgArr %d\n", singles);
+                for (int i = 0; i < singles; i++) emit_expr(c, s->as.for_gen.exprs[i], depth + 3);
+                emit_indent(c, depth + 2); wat_append(c->w, ")\n");
+                emit_call_array(c, s->as.for_gen.exprs[n_exprs - 1], depth + 2);
+                emit_indent(c, depth + 1); wat_append(c->w, ")\n");
+            } else {
+                emit_indent(c, depth + 1);
+                wat_appendf(c->w, "(array.new_fixed $ArgArr %d\n", n_exprs);
+                for (int i = 0; i < n_exprs; i++) emit_expr(c, s->as.for_gen.exprs[i], depth + 2);
+                emit_indent(c, depth + 1); wat_append(c->w, ")\n");
+            }
+            emit_indent(c, depth); wat_append(c->w, ")\n");
+            /* iter = args[0]; state = args[1]; k = args[2]. */
+            emit_indent(c, depth); wat_append(c->w,
+                "(local.set $for_iter_any "
+                "(call $args_at (ref.as_non_null (local.get $tmp_args)) (i32.const 0)))\n");
+            emit_indent(c, depth); wat_append(c->w,
+                "(local.set $for_state "
+                "(call $args_at (ref.as_non_null (local.get $tmp_args)) (i32.const 1)))\n");
+            emit_indent(c, depth); wat_append(c->w,
+                "(local.set $for_k "
+                "(call $args_at (ref.as_non_null (local.get $tmp_args)) (i32.const 2)))\n");
+
+            /* Pre-allocate boxes for the loop variables. */
+            for (int i = 0; i < s->as.for_gen.n_names; i++) {
+                emit_indent(c, depth);
+                wat_appendf(c->w,
+                    "(local.set $L%d (struct.new $Box (ref.null any)))\n",
+                    s->as.for_gen.local_idxs[i]);
+            }
+
+            emit_indent(c, depth); wat_appendf(c->w, "(block $brk_%d\n", label);
+            emit_indent(c, depth + 1); wat_appendf(c->w, "(loop $cont_%d\n", label);
+            /* Call iter(state, k). */
+            emit_indent(c, depth + 2); wat_append(c->w, "(local.set $tmp_args\n");
+            emit_indent(c, depth + 3); wat_append(c->w, "(call $lua_call\n");
+            emit_indent(c, depth + 4);
+            wat_append(c->w,
+                "(ref.cast (ref $LuaClosure) (local.get $for_iter_any))\n");
+            emit_indent(c, depth + 4);
+            wat_append(c->w,
+                "(array.new_fixed $ArgArr 2 (local.get $for_state) (local.get $for_k))\n");
+            emit_indent(c, depth + 3); wat_append(c->w, ")\n");
+            emit_indent(c, depth + 2); wat_append(c->w, ")\n");
+            /* terminate if results[0] is nil */
+            emit_indent(c, depth + 2);
+            wat_appendf(c->w,
+                "(br_if $brk_%d (ref.is_null "
+                "(call $args_at (ref.as_non_null (local.get $tmp_args)) (i32.const 0))))\n",
+                label);
+            /* update k to results[0] */
+            emit_indent(c, depth + 2);
+            wat_append(c->w,
+                "(local.set $for_k "
+                "(call $args_at (ref.as_non_null (local.get $tmp_args)) (i32.const 0)))\n");
+            /* bind loop vars from results */
+            for (int i = 0; i < s->as.for_gen.n_names; i++) {
+                emit_indent(c, depth + 2);
+                wat_appendf(c->w,
+                    "(struct.set $Box $v (local.get $L%d) "
+                    "(call $args_at (ref.as_non_null (local.get $tmp_args)) "
+                    "(i32.const %d)))\n",
+                    s->as.for_gen.local_idxs[i], i);
+            }
+            /* body */
+            emit_block(c, &s->as.for_gen.body, depth + 2);
+            emit_indent(c, depth + 2); wat_appendf(c->w, "br $cont_%d\n", label);
+            emit_indent(c, depth + 1); wat_append(c->w, ")\n");
+            emit_indent(c, depth);     wat_append(c->w, ")\n");
+            c->break_depth--;
+            break;
+        }
+
+        case STMT_GLOBAL: {
+            int n_names = s->as.global_decl.n_names;
+            int n_values = s->as.global_decl.n_values;
+            if (n_values == 0) break;
+            int last_call = (n_values > 0 &&
+                             s->as.global_decl.values[n_values - 1]->kind == EXPR_CALL);
+            if (last_call) {
+                emit_indent(c, depth); wat_append(c->w, "(local.set $tmp_args\n");
+                emit_call_array(c, s->as.global_decl.values[n_values - 1], depth + 1);
+                emit_indent(c, depth); wat_append(c->w, ")\n");
+            }
+            for (int i = 0; i < n_names; i++) {
+                emit_indent(c, depth);
+                wat_appendf(c->w, "(global.set $g_user_%d\n", s->as.global_decl.global_idxs[i]);
+                if (n_values == 0) {
+                    emit_indent(c, depth + 1); wat_append(c->w, "(ref.null any)\n");
+                } else {
+                    emit_distributed_value(c, i, n_values, s->as.global_decl.values,
+                                           last_call, depth + 1);
+                }
+                emit_indent(c, depth); wat_append(c->w, ")\n");
+            }
             break;
         }
 
@@ -1011,6 +1210,12 @@ static const char *PRELUDE_HELPERS =
 "      (br $lp)))\n"
 "    (i32.sub (local.get $i) (i32.const 1)))\n"
 "\n"
+"  ;; --- numeric-for helper ---\n"
+"  (func $for_step_positive (param $s anyref) (result i32)\n"
+"    (if (result i32) (call $is_int (local.get $s))\n"
+"      (then (i64.ge_s (call $as_int (local.get $s)) (i64.const 0)))\n"
+"      (else (f64.ge (call $as_float (local.get $s)) (f64.const 0)))))\n"
+"\n"
 "  ;; --- closure dispatch + multi-value helpers + print builtin ---\n"
 "  (func $lua_call (param $closure (ref $LuaClosure)) (param $args (ref $ArgArr))\n"
 "                  (result (ref $ArgArr))\n"
@@ -1097,6 +1302,11 @@ static void emit_user_function(CG *c, const LuaFunc *fn) {
     wat_append(w, "    (local $tmp_args (ref null $ArgArr))\n");
     wat_append(w, "    (local $tmp_clo (ref null $LuaClosure))\n");
     wat_append(w, "    (local $tmp_tab (ref null $LuaTable))\n");
+    wat_append(w, "    (local $for_stop anyref)\n");
+    wat_append(w, "    (local $for_step anyref)\n");
+    wat_append(w, "    (local $for_iter_any anyref)\n");
+    wat_append(w, "    (local $for_state anyref)\n");
+    wat_append(w, "    (local $for_k anyref)\n");
 
     /* Param extraction: each declared parameter takes args[i] (nil if missing). */
     for (int i = 0; i < fn->n_params; i++) {
@@ -1126,6 +1336,14 @@ int codegen_module(const ParseResult *pr, WatBuilder *out,
     wat_append(out, "(module\n");
     wat_append(out, PRELUDE_TYPES);
     wat_append(out, PRELUDE_HELPERS);
+
+    /* User-declared globals: one mutable anyref wasm global each. */
+    if (pr->globals.count) {
+        wat_append(out, "\n  ;; --- user globals ---\n");
+        for (size_t i = 0; i < pr->globals.count; i++) {
+            wat_appendf(out, "  (global $g_user_%zu (mut anyref) (ref.null any))\n", i);
+        }
+    }
     wat_append(out, "\n  ;; --- user functions ---\n");
 
     for (size_t i = 0; i < pr->funcs.count; i++) {
@@ -1143,6 +1361,11 @@ int codegen_module(const ParseResult *pr, WatBuilder *out,
         wat_append(out, "    (local $tmp_args (ref null $ArgArr))\n");
         wat_append(out, "    (local $tmp_clo (ref null $LuaClosure))\n");
         wat_append(out, "    (local $tmp_tab (ref null $LuaTable))\n");
+        wat_append(out, "    (local $for_stop anyref)\n");
+        wat_append(out, "    (local $for_step anyref)\n");
+        wat_append(out, "    (local $for_iter_any anyref)\n");
+        wat_append(out, "    (local $for_state anyref)\n");
+        wat_append(out, "    (local $for_k anyref)\n");
 
         emit_block(&c, &pr->main_body, 2);
 

@@ -10,9 +10,20 @@ typedef struct {
 } FuncTable;
 
 typedef struct {
+    const char *name;
+    size_t name_len;
+} GlobalDecl;
+
+typedef struct {
+    GlobalDecl *items;
+    size_t count;
+} GlobalTable;
+
+typedef struct {
     Block main_body;
     int main_n_locals;
     FuncTable funcs;
+    GlobalTable globals;
     char error[256];
     int ok;
 } ParseResult;
