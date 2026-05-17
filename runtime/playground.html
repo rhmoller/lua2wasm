@@ -3,59 +3,108 @@
 <meta charset="utf-8">
 <title>lua2wasm playground</title>
 <style>
-  :root { color-scheme: light dark; }
+  /* Catppuccin Mocha palette.
+     https://github.com/catppuccin/catppuccin */
+  :root {
+    color-scheme: dark;
+    --ctp-rosewater: #f5e0dc;
+    --ctp-flamingo:  #f2cdcd;
+    --ctp-pink:      #f5c2e7;
+    --ctp-mauve:     #cba6f7;
+    --ctp-red:       #f38ba8;
+    --ctp-maroon:    #eba0ac;
+    --ctp-peach:     #fab387;
+    --ctp-yellow:    #f9e2af;
+    --ctp-green:     #a6e3a1;
+    --ctp-teal:      #94e2d5;
+    --ctp-sky:       #89dceb;
+    --ctp-sapphire:  #74c7ec;
+    --ctp-blue:      #89b4fa;
+    --ctp-lavender:  #b4befe;
+    --ctp-text:      #cdd6f4;
+    --ctp-subtext1:  #bac2de;
+    --ctp-subtext0:  #a6adc8;
+    --ctp-overlay2:  #9399b2;
+    --ctp-overlay1:  #7f849c;
+    --ctp-overlay0:  #6c7086;
+    --ctp-surface2:  #585b70;
+    --ctp-surface1:  #45475a;
+    --ctp-surface0:  #313244;
+    --ctp-base:      #1e1e2e;
+    --ctp-mantle:    #181825;
+    --ctp-crust:     #11111b;
+  }
   * { box-sizing: border-box; }
   html, body { height: 100%; margin: 0; }
   body {
     display: grid;
     grid-template-rows: auto auto 1fr auto;
     font: 14px/1.4 system-ui, sans-serif;
-    background: #1b1b1f;
-    color: #eaeaea;
+    background: var(--ctp-base);
+    color: var(--ctp-text);
   }
   #intro {
-    padding: .55em 1em; font-size: 13px; line-height: 1.5; color: #cdd;
-    background: #181820; border-bottom: 1px solid #303038;
+    padding: .55em 1em; font-size: 13px; line-height: 1.5;
+    color: var(--ctp-subtext1);
+    background: var(--ctp-mantle);
+    border-bottom: 1px solid var(--ctp-surface0);
   }
-  #intro strong { color: #fff; }
-  #intro a { color: #6cf; text-decoration: none; }
+  #intro strong { color: var(--ctp-text); }
+  #intro a { color: var(--ctp-sapphire); text-decoration: none; }
   #intro a:hover { text-decoration: underline; }
   header {
     display: flex; align-items: center; gap: 1em;
     padding: .6em 1em;
-    background: #15151a;
-    border-bottom: 1px solid #303038;
+    background: var(--ctp-mantle);
+    border-bottom: 1px solid var(--ctp-surface0);
   }
-  header h1 { font-size: 1em; margin: 0; color: #9aa; }
-  header h1 a { color: inherit; text-decoration: none; }
+  header h1 { font-size: 1em; margin: 0; color: var(--ctp-subtext0); font-weight: 500; }
+  header h1 a { color: var(--ctp-lavender); text-decoration: none; }
+  header h1 a:hover { text-decoration: underline; }
   button, select {
-    background: #2a2a32; color: #eee; border: 1px solid #444;
-    padding: .4em .9em; border-radius: 4px; font: inherit; cursor: pointer;
+    background: var(--ctp-surface0); color: var(--ctp-text);
+    border: 1px solid var(--ctp-surface1);
+    padding: .4em .9em; border-radius: 6px; font: inherit; cursor: pointer;
   }
-  button:hover { background: #353541; }
-  button[disabled] { opacity: .5; cursor: default; }
+  button:hover, select:hover { background: var(--ctp-surface1); border-color: var(--ctp-surface2); }
+  button[disabled] { opacity: .4; cursor: default; }
   main {
     display: grid; grid-template-columns: 1fr 1fr; min-height: 0;
-    border-bottom: 1px solid #303038;
+    border-bottom: 1px solid var(--ctp-surface0);
   }
-  #editor-host { overflow: auto; border-right: 1px solid #303038; }
+  #editor-host {
+    overflow: auto; border-right: 1px solid var(--ctp-surface0);
+    background: var(--ctp-base);
+  }
   .cm-editor   { height: 100%; }
   .cm-scroller { font: 13px/1.5 "JetBrains Mono", ui-monospace, monospace; }
   #out {
     margin: 0; padding: 1em; overflow: auto;
     font: 13px/1.5 ui-monospace, monospace;
-    background: #0d0d11; color: #d8d8d8;
+    background: var(--ctp-crust); color: var(--ctp-text);
     white-space: pre-wrap;
   }
-  .err { color: #f88; }
-  .info { color: #6cf; }
-  footer {
-    padding: .4em 1em; font-size: 12px; color: #888;
-    background: #15151a; border-top: 1px solid #303038;
+  .err  { color: var(--ctp-red); }
+  .info { color: var(--ctp-overlay1); }
+  .stdin-prompt { color: var(--ctp-sapphire); }
+  .stdin-input {
+    background: transparent; border: none; color: var(--ctp-text);
+    font: inherit; outline: none; min-width: 12em;
+    caret-color: var(--ctp-rosewater);
   }
-  footer code { background: #2a2a32; padding: 1px 4px; border-radius: 3px; }
+  .stdin-done { color: var(--ctp-sky); }
+  footer {
+    padding: .4em 1em; font-size: 12px; color: var(--ctp-overlay1);
+    background: var(--ctp-mantle);
+    border-top: 1px solid var(--ctp-surface0);
+  }
+  footer code {
+    background: var(--ctp-surface0); color: var(--ctp-subtext1);
+    padding: 1px 4px; border-radius: 3px;
+  }
   footer .warn {
-    background: #4a4520; color: #ffe27a; padding: 1px 6px; border-radius: 3px;
+    background: var(--ctp-surface0); color: var(--ctp-yellow);
+    padding: 1px 6px; border-radius: 3px;
   }
 </style>
 
@@ -70,6 +119,7 @@
       <option value="oo">OOP via metatables</option>
       <option value="pcall">pcall</option>
       <option value="forloop">for + ipairs</option>
+      <option value="stdin">interactive (io.read)</option>
     </optgroup>
     <optgroup label="from lua.org/extras">
       <option value="s_hello">hello.lua</option>
@@ -102,10 +152,76 @@
 </footer>
 
 <script type="module">
-import { basicSetup, EditorView } from "https://esm.sh/codemirror@6.0.2";
-import { StreamLanguage }         from "https://esm.sh/@codemirror/language@6.10.2";
-import { lua as luaMode }         from "https://esm.sh/@codemirror/legacy-modes@6.4.0/mode/lua";
-import { oneDark }                from "https://esm.sh/@codemirror/theme-one-dark@6.1.2";
+import { basicSetup, EditorView }              from "https://esm.sh/codemirror@6.0.2";
+import { StreamLanguage, HighlightStyle,
+         syntaxHighlighting }                  from "https://esm.sh/@codemirror/language@6.10.2";
+import { lua as luaMode }                      from "https://esm.sh/@codemirror/legacy-modes@6.4.0/mode/lua";
+import { tags as t }                           from "https://esm.sh/@lezer/highlight@1.2.1";
+
+/* ---- Catppuccin Mocha syntax theme + editor chrome ---- */
+const CTP = {
+  rosewater: "#f5e0dc", flamingo: "#f2cdcd", pink: "#f5c2e7", mauve: "#cba6f7",
+  red: "#f38ba8", maroon: "#eba0ac", peach: "#fab387", yellow: "#f9e2af",
+  green: "#a6e3a1", teal: "#94e2d5", sky: "#89dceb", sapphire: "#74c7ec",
+  blue: "#89b4fa", lavender: "#b4befe",
+  text: "#cdd6f4", subtext1: "#bac2de", subtext0: "#a6adc8",
+  overlay2: "#9399b2", overlay1: "#7f849c", overlay0: "#6c7086",
+  surface2: "#585b70", surface1: "#45475a", surface0: "#313244",
+  base: "#1e1e2e", mantle: "#181825", crust: "#11111b",
+};
+
+const catppuccinTheme = EditorView.theme({
+  "&":               { color: CTP.text, backgroundColor: CTP.base },
+  ".cm-content":     { caretColor: CTP.rosewater },
+  ".cm-cursor, .cm-dropCursor": { borderLeftColor: CTP.rosewater },
+  "&.cm-focused .cm-selectionBackground, .cm-selectionBackground, .cm-content ::selection": {
+    backgroundColor: CTP.surface1 + " !important",
+  },
+  ".cm-panels":              { backgroundColor: CTP.mantle, color: CTP.text },
+  ".cm-panels.cm-panels-top":    { borderBottom: "2px solid " + CTP.surface0 },
+  ".cm-panels.cm-panels-bottom": { borderTop:    "2px solid " + CTP.surface0 },
+  ".cm-searchMatch":         { backgroundColor: CTP.surface2, color: CTP.text },
+  ".cm-searchMatch.cm-searchMatch-selected": { backgroundColor: CTP.surface2 },
+  ".cm-activeLine":          { backgroundColor: CTP.mantle },
+  ".cm-selectionMatch":      { backgroundColor: CTP.surface1 },
+  ".cm-matchingBracket, .cm-nonmatchingBracket": {
+    backgroundColor: CTP.surface1, outline: "1px solid " + CTP.overlay0,
+  },
+  ".cm-gutters": {
+    backgroundColor: CTP.base, color: CTP.overlay0,
+    borderRight: "1px solid " + CTP.surface0,
+  },
+  ".cm-activeLineGutter": { backgroundColor: CTP.mantle, color: CTP.lavender },
+  ".cm-foldPlaceholder": { backgroundColor: CTP.surface1, color: CTP.subtext0, border: "none" },
+  ".cm-tooltip": {
+    backgroundColor: CTP.mantle, color: CTP.text,
+    border: "1px solid " + CTP.surface0,
+  },
+  ".cm-tooltip-autocomplete > ul > li[aria-selected]": {
+    backgroundColor: CTP.surface1, color: CTP.text,
+  },
+}, { dark: true });
+
+const luaHighlightStyle = HighlightStyle.define([
+  { tag: [t.keyword, t.controlKeyword, t.modifier, t.definitionKeyword], color: CTP.mauve, fontWeight: "500" },
+  { tag: t.operatorKeyword,               color: CTP.mauve },
+  { tag: [t.string, t.special(t.string)], color: CTP.green },
+  { tag: t.regexp,                        color: CTP.red },
+  { tag: t.escape,                        color: CTP.pink },
+  { tag: [t.number, t.bool, t.null, t.atom], color: CTP.peach },
+  { tag: [t.comment, t.lineComment, t.blockComment], color: CTP.overlay0, fontStyle: "italic" },
+  { tag: t.operator,                      color: CTP.sky },
+  { tag: [t.punctuation, t.bracket, t.brace, t.paren], color: CTP.overlay2 },
+  { tag: t.variableName,                  color: CTP.text },
+  { tag: t.function(t.variableName),      color: CTP.blue },
+  { tag: t.function(t.propertyName),      color: CTP.blue },
+  { tag: t.propertyName,                  color: CTP.lavender },
+  { tag: t.labelName,                     color: CTP.maroon },
+  { tag: t.typeName,                      color: CTP.yellow },
+  { tag: t.namespace,                     color: CTP.yellow },
+  { tag: t.self,                          color: CTP.red, fontStyle: "italic" },
+  { tag: t.invalid,                       color: CTP.red, textDecoration: "underline" },
+]);
 import createLua2WasmModule       from "../build-em/lua2wasm.js";
 import binaryen                   from "https://cdn.jsdelivr.net/npm/binaryen@121.0.0/index.js";
 
@@ -157,6 +273,20 @@ end
 print(pcall(safediv, 10, 2))   -- true 5.0
 print(pcall(safediv, 1, 0))    -- false "division by zero"
 `,
+  stdin: `-- Reads two lines of input interactively from the output pane.
+io.write("Name? ")
+local name = io.read()
+io.write("Favourite number? ")
+local n = tonumber(io.read())
+print()                           -- blank line
+print("Hello, " .. (name or "stranger") .. "!")
+if n then
+  print("Your number squared is " .. (n * n))
+else
+  print("Not a number, oh well.")
+end
+`,
+
   forloop: `local list = {"apple", "banana", "cherry"}
 for i, v in ipairs(list) do
   print(i)
@@ -266,7 +396,12 @@ dump(sample, "")
 const editor = new EditorView({
   doc: PRESETS.hello,
   parent: document.getElementById("editor-host"),
-  extensions: [basicSetup, StreamLanguage.define(luaMode), oneDark],
+  extensions: [
+    basicSetup,
+    StreamLanguage.define(luaMode),
+    catppuccinTheme,
+    syntaxHighlighting(luaHighlightStyle),
+  ],
 });
 
 document.getElementById("preset").onchange = e => {
@@ -371,6 +506,54 @@ async function run() {
       }
     }
     const MATH_FNS = [Math.sin, Math.cos, Math.tan, Math.asin, Math.acos, Math.atan, Math.exp, Math.log];
+
+    /* JSPI: io.read suspends the wasm caller while we wait for the user to
+     * type a line into the output pane. Falls back to "return -1" (EOF) if
+     * the browser lacks WebAssembly.Suspending / WebAssembly.promising. */
+    const hasJSPI = typeof WebAssembly.Suspending === "function"
+                 && typeof WebAssembly.promising  === "function";
+
+    function readLineUI() {
+      return new Promise(resolve => {
+        const span = document.createElement("span");
+        span.className = "stdin-prompt";
+        span.textContent = "» ";
+        const input = document.createElement("input");
+        input.className = "stdin-input";
+        input.spellcheck = false;
+        input.autocomplete = "off";
+        span.appendChild(input);
+        out.appendChild(span);
+        // Make sure the prompt is visible.
+        input.scrollIntoView({ block: "end" });
+        input.focus();
+        input.addEventListener("keydown", e => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            const text = input.value;
+            // Freeze the prompt as plain text.
+            span.replaceChildren();
+            const done = document.createElement("span");
+            done.className = "stdin-done";
+            done.textContent = "» " + text + "\n";
+            span.appendChild(done);
+            resolve(text);
+          }
+        });
+      });
+    }
+
+    async function readImpl() {
+      const line = await readLineUI();
+      for (let i = 0; i < line.length; i++)
+        instance.exports.fmt_buf_set(i, line.charCodeAt(i));
+      return line.length;
+    }
+
+    const readImport = hasJSPI
+      ? new WebAssembly.Suspending(readImpl)
+      : () => -1;
+
     ({ instance } = await WebAssembly.instantiate(bytes, {
       host: {
         print:     v => logLine(luaToString(v)),
@@ -381,11 +564,17 @@ async function run() {
           return s.length;
         },
         math: (kind, x) => MATH_FNS[kind](x),
-        read: () => -1,
+        read: readImport,
       },
     }));
     curInstance = instance;
-    instance.exports.main();
+
+    if (hasJSPI) {
+      const promisedMain = WebAssembly.promising(instance.exports.main);
+      await promisedMain();
+    } else {
+      instance.exports.main();
+    }
   } catch (e) {
     logLine("ERROR (run): " + (e && e.message ? e.message : e), "err");
     console.error(e); return;
