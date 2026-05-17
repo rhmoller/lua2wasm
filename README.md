@@ -1,113 +1,127 @@
 # lua2wasm
 
-A clean-room, **ahead-of-time** Lua 5.5 → WebAssembly compiler, written in C23.
-Lua values live as host-GC objects via the WebAssembly GC proposal — no linear
-memory, no bundled allocator, no bespoke garbage collector. The browser's V8 /
-SpiderMonkey collector *is* the Lua VM's memory manager.
+**An ahead-of-time compiler that turns Lua 5.5 source into standalone WebAssembly modules — no interpreter, no bytecode VM, no bundled garbage collector.**
 
-This is a research / educational project. The goal is to push as much of the
-runtime into the modern WASM type system as possible, and to learn what Lua
-semantics actually demand of a host that already has a managed runtime.
+`lua2wasm` is written in C23 and emits WebAssembly that leans on the modern WASM
+type system (the GC, typed-references, and exception-handling proposals). The
+runtime *is* the host: Lua tables are real WASM structs, Lua closures are
+typed function references, and the browser's V8/SpiderMonkey collector owns
+every Lua value. Compile once, ship a `.wasm`, run anywhere with a recent
+browser.
 
-For the long-form mission, non-goals, phase plan, and success criteria, see
-[`GOAL.md`](GOAL.md).
+> This is a research / educational project. The long-form mission, non-goals,
+> and roadmap live in [`GOAL.md`](GOAL.md).
 
-## Why Lua 5.5?
+## Try it now
 
-Lua 5.5 (Dec 2025) is the current stable language. Targeting it from the start
-costs nothing extra and sidesteps a future deprecation cycle. The 5.5-specific
-features that affect the compiler frontend:
+The simplest way to see what's possible:
 
-- **Global variable declarations** — `global x` must be present before any
-  use; undeclared global access is a compile-time error.
-- **`for`-loop control variables are read-only** — assigning to the loop
-  variable inside the body is rejected.
-- **Named vararg tables** — cleaner alternative to manually packing `...`.
-
-The 5.5 VM-level wins (60% smaller arrays, incremental major GC, external
-strings, generational mode) we get for free: the host runtime owns those
-concerns.
-
-## Status
-
-**Phases 1–8 + 10 complete.** A practical Lua 5.5 subset compiles and runs.
-
-| Area | Supported | Deferred / known limits |
-|---|---|---|
-| Lexer | all keywords / operators / single+double-quoted strings with escapes / int + float literals / `--[[ ]]` long comments | long-string brackets `[[ ]]`, `\xHH`/`\u{…}` escapes, hex/binary literals |
-| Values | `nil`, booleans, integers (i31ref / boxed `$LuaInt`), floats, strings, tables, closures | userdata, threads |
-| Statements | `local`, `local function`, multi-name `local`, single/multi assign (to vars or `t[k]` / `t.x`), `if/elseif/else`, `while`, `repeat ... until`, bare `do`, `break`, expression-statement, **`return e1, …`**, `for i = a, b [, c]`, `for k[,v,…] in …`, `global x [= e]` | `goto / ::label::`, top-level `function f() end` sugar |
-| Expressions | all literals, anonymous `function`, variable refs (local/upvalue/builtin/global), N-arg calls, **multiple return values**, table constructors (positional / named / `[expr]=` keys), `t.x` / `t[k]`, all operators below | varargs `...`, method-call sugar `obj:m()` |
-| Operators | `+ - * / // % ^`, `== ~= < <= > >=`, `and or not`, `..`, `#` (strings + tables) | bitwise `& \| ~ << >>` (lexed only), float `%` |
-| Calling | uniform `(closure, args) → results-array`, **proper tail calls via `return_call_ref`** | varargs in function defs |
-| Metatables | `setmetatable` / `getmetatable`, `__index` (table chain or function), `__add`, `__eq` | `__newindex`, `__call`, `__tostring`, other arithmetic metamethods |
-| Errors | `error(v)` / `pcall(f, …)` via WASM exception handling (`throw $LuaError` + `try_table`) | error message annotations, traceback |
-| Stdlib | `print`, `error`, `pcall`, `type`, `tostring`, `tonumber`, `ipairs`, `pairs`, `next`, `setmetatable`, `getmetatable`, `math.{floor,abs,sqrt}`, `string.{len,sub}` | the rest of `string`, `table`, `math`, `io`, `os` |
-| Coroutines | — | blocked on the WASM stack-switching proposal shipping in browsers |
-
-Browse [`tests/fixtures/`](tests/fixtures/) for what a working program looks like
-at each phase. The most exercised, end-to-end fixture is
-[`milestone8.lua`](tests/fixtures/milestone8.lua) (metatables, inheritance, custom
-`__add` and `__eq`).
-
-## Value representation
-
-Every Lua value is uniformly an `anyref`. Decoding:
-
-| Lua value      | WASM representation                                      |
-|----------------|----------------------------------------------------------|
-| `nil`          | `(ref.null any)`                                         |
-| `false`/`true` | global singletons of `(ref $LuaBool)` struct             |
-| integer (small)| `i31ref` — unboxed 31-bit tagged int                     |
-| integer (big)  | `(ref $LuaInt)` boxing `i64`                             |
-| float          | `(ref $LuaFloat)` boxing `f64`                           |
-| string         | `(ref $LuaString)` wrapping `(array (mut i8))` (UTF-8)   |
-| table*         | `(ref $LuaTable)` — *milestone 3*                        |
-| function       | `(ref $LuaClosure)` = `(ref $LuaFn)` code + `(ref $UpvalArr)` upvalues |
-| userdata*      | `externref` slot for opaque JS values — *later*          |
-
-The browser's GC owns lifetime for all of these.
-
-## Architecture
-
-```
-              ┌─────────┐   ┌──────────┐   ┌──────────┐   ┌──────────┐
-  Lua source ─▶  lexer  ├──▶│  parser  ├──▶│ codegen  ├──▶│ wasm-as  │──▶ .wasm
-              └─────────┘   └──────────┘   └──────────┘   └──────────┘
-                                  │              │
-                                  │              └─ static WAT prelude
-                                  │                 (types, runtime helpers,
-                                  │                  arithmetic, comparison,
-                                  │                  string ops, decoders)
-                                  │
-                                  └─ scope resolution: each
-                                     identifier → wasm local index
+```sh
+. ~/path/to/emsdk/emsdk_env.sh           # if you have Emscripten
+./scripts/build-wasm.sh                   # cross-compiles the compiler itself to WASM
+python3 -m http.server 8000
+# open http://localhost:8000/runtime/playground.html
 ```
 
-The compiler emits **WAT text**, then Binaryen's `wasm-as` assembles it. We
-use Binaryen rather than wabt because as of mid-2026 the wabt build shipping
-on Arch (1.0.39) doesn't accept modern GC text syntax (`anyref`, recursive
-`(ref null $t)` refs).
+A two-pane editor with CodeMirror on one side, output on the other. The
+**Run** button compiles your Lua to WASM-GC entirely in the browser (the
+compiler itself runs as WASM) and executes the result. **Show WAT** reveals
+what the codegen emitted.
 
-### Layout
+If you don't want to set up Emscripten, the Node-side path is just:
 
+```sh
+./build/lua2wasm hello.lua -o hello.wat
+wasm-as --all-features -o hello.wasm hello.wat
+node runtime/host.mjs hello.wasm
 ```
-src/         lexer, parser, AST, codegen, WAT builder, main()
-runtime/     host.mjs (Node), index.html (browser sanity)
-tests/       µnit unit tests + bash E2E scripts
-third_party/ vendored µnit
+
+## A tiny example
+
+```lua
+local function counter()
+  local n = 0
+  return function() n = n + 1; return n end
+end
+
+local tick = counter()
+print(tick())   -- 1
+print(tick())   -- 2
+print(tick())   -- 3
 ```
 
-## Build & test
+That compiles to a ~5 KB `.wasm` module. The closure becomes a real
+`(ref $LuaClosure)` — a WASM struct holding a typed `funcref` plus an array
+of captured upvalue boxes — and is *called* through `call_ref`, the WASM
+indirect-call instruction for typed function references. The captured `n` is
+shared by reference (a struct cell), not copied, so multiple closures over
+the same outer scope mutate the same slot — exactly as Lua specifies.
 
-Requirements:
+## What works today
 
-| Tool       | Version             | Notes                                          |
-|------------|---------------------|------------------------------------------------|
-| `clang`    | ≥ 16 (for `-std=c23`) | the compiler is written in C23                |
-| `cmake`    | ≥ 3.25              |                                                |
-| `binaryen` | recent              | provides `wasm-as` (Arch: `pacman -S binaryen`)|
-| `node`     | ≥ 22                | needs WasmGC + reference types                 |
+`lua2wasm` is an AOT compiler. There's no Lua interpreter sitting around at
+runtime; what you write is what the compiler *statically* lowers to WASM
+instructions. Anything not in this table is a compile-time error.
+
+| Area              | Supported                                                                                                                                                                                                                                                                       | Not yet                                                          |
+|-------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|------------------------------------------------------------------|
+| **Values**        | `nil`, booleans, integers, floats, strings, tables, first-class functions / closures                                                                                                                                                                                            | userdata, threads                                                |
+| **Numbers**       | int + float subtypes with Lua-compliant promotion (`/` always float, `+ - *` keep int if both ints, `//` floor-div, `^` pow)                                                                                                                                                    | float `%` (returns 0), bitwise `& \| ~ << >>` (parsed not codegen'd) |
+| **Strings**       | single / double-quoted, escape decoding (`\n \t \\ \" \' \0 \a \b \f \r \v`), concat `..`, length `#`, structural equality                                                                                                                                                      | long-bracket literals `[[...]]`, `\xHH` / `\u{…}` escapes        |
+| **Tables**        | array part + hash part, positional / named / `[expr]=` constructors, `t.k` and `t[k]` read+write, nil-assignment delete, `#t` border rule, nesting                                                                                                                              | metatable performance tricks                                     |
+| **Locals**        | `local x`, `local x, y, z = …`, lexical block scoping, shadowing                                                                                                                                                                                                                | const / close attributes                                         |
+| **Globals**       | Lua 5.5 `global x` declarations (undeclared globals = compile error), `global x = expr`                                                                                                                                                                                         | implicit `_G` table                                              |
+| **Statements**    | `local function`, anonymous `function`, multi-assign, `if/elseif/else`, `while`, `for i = a,b[,c]`, generic `for k[,v,…] in …`, `repeat ... until`, `break`, bare `do`, expression-statement (call), `return e1, …`                                                             | `goto / ::label::`, top-level `function f() end` sugar           |
+| **Operators**     | `+ - * / // % ^`, `== ~= < <= > >=`, `and or not`, `..`, `#`                                                                                                                                                                                                                    | bitwise                                                           |
+| **Functions**     | N-ary arguments, multiple return values (`return a, b, c`), upvalue capture (with mutable shared boxes), transitive captures, proper tail calls (`return f(...)` → `return_call_ref`, doesn't grow the stack)                                                                   | varargs `...`, method-call sugar `obj:m()`                       |
+| **Errors**        | `error(v)` / `pcall(f, …)` lowered to WASM exception handling (`throw $LuaError` + `try_table`)                                                                                                                                                                                | error message annotations, tracebacks                            |
+| **Metatables**    | `setmetatable` / `getmetatable`, `__index` (table chain *and* function form, with cycle limit), `__add`, `__eq`                                                                                                                                                                | `__newindex`, `__call`, `__tostring`, `__lt`, `__le`, other arithmetic metamethods |
+| **Standard lib**  | `print`, `error`, `pcall`, `type`, `tostring`, `tonumber`, `ipairs`, `pairs`, `next`, `setmetatable`, `getmetatable`, `math.{floor, abs, sqrt}`, `string.{len, sub}`                                                                                                            | most of `string`, `table`, `math`, `io`, `os`                    |
+| **Coroutines**    | —                                                                                                                                                                                                                                                                               | blocked on the WASM stack-switching proposal shipping in browsers |
+
+Browse [`tests/fixtures/`](tests/fixtures/) to see what valid programs look
+like across each capability area.
+
+## How we use modern WebAssembly
+
+The whole point of `lua2wasm` is to take the new WASM proposals seriously —
+**not** as a portable assembler with a hand-rolled allocator on top, but as a
+managed runtime that already has most of what a dynamic language needs.
+
+| WASM feature                                  | What we use it for                                                                                                                                          |
+|-----------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| **GC: `struct` and `array` types**            | Every Lua value is a host-GC object. `$LuaString` wraps `(array i8)`, `$LuaTable` is a struct of (keys, vals, n, cap, meta), `$LuaClosure` is a struct of (funcref, upvalues). **No linear memory.** No bundled allocator. The browser's GC owns lifetime. |
+| **`i31ref`**                                  | Unboxed small integers. Lua ints in the 31-bit range live as tagged immediates with zero allocation; only overflowed ints get boxed in `$LuaInt`.            |
+| **Typed function references + `call_ref`**    | Closures are *real* references, not table-of-functions indices. Every function call goes through `call_ref` on a `(ref $LuaFn)` extracted from the closure struct. |
+| **`return_call_ref` (tail calls)**            | `return f(...)` lowers to `return_call_ref`. Deep recursion (e.g. 20 000-step countdown) doesn't grow the WASM call stack — a property the JS embedding can't offer. |
+| **Mutually-recursive types (`rec` blocks)**   | `$LuaClosure` references `$LuaFn`, `$LuaFn` mentions `$LuaClosure`. We declare them in a single recursion group so the type system accepts the cycle. Same trick for `$LuaTable` referencing itself via its metatable field. |
+| **Reference-type tests / casts**              | Dynamic dispatch (e.g. `print` of arbitrary values, or `+` falling back to `__add`) uses `ref.test (ref $LuaTable)`, `ref.cast`, `ref.is_null` to switch on the type without a tag word. |
+| **Exception handling (`tag` + `throw` + `try_table`)** | `error(v)` is `throw $LuaError v` carrying the error as an `anyref` payload. `pcall(f, ...)` is `try_table` with a single catch label that lands the error value on a block exit. Real call-stack unwinding, no setjmp/longjmp emulation. |
+| **`array.new_data` from data segments**       | String literals are materialized in a single shared data segment; constructing a `$LuaString` is one `array.new_data` instruction that copies the byte range out. |
+| **`array.copy` between GC arrays**            | String concat and table-array resizing copy ranges between GC-managed `(array …)` instances directly — no manual loop, no memcpy, no linear-memory staging. |
+| **`anyref` + null tracking in the type system** | Lua values flow as `anyref`. Non-nullable refs (`(ref $X)` vs `(ref null $X)`) are tracked separately so the validator catches whole classes of NPE-style bugs in our generated code at module-instantiation time. |
+| **`(start)` *not* used**                      | We *deliberately don't* run code at instantiation time, so the JS host can wire up its decoder helpers before `main()` is called — otherwise imports couldn't see the module's own exports. |
+
+The practical consequence: a typical compiled module is **a few KB**. The
+host has zero Lua-specific runtime; everything that *is* the Lua VM lives in
+the produced `.wasm`. A program that defines a closure and calls it once
+fits in 5 KB; the full milestone-8 OO demo fits in 5.5 KB.
+
+## Targets
+
+Anything with a current WASM-GC + reference-types + exception-handling
+implementation:
+
+- **Chrome / Edge** ≥ 137 (or any recent build with `chrome://flags/#enable-experimental-webassembly-features` for `exnref`)
+- **Firefox** ≥ 131 (set `javascript.options.wasm_exnref = true` in `about:config` if needed)
+- **Safari** ≥ 18.2 — same caveat on the exception-handling flag
+- **Node** ≥ 22 with `--experimental-wasm-exnref`
+
+Compiled modules need no other runtime files. They `import "host"` for `print`
+only — and even that can be replaced with whatever host imports your
+embedding cares about.
+
+## Building from source
 
 ```sh
 CC=clang cmake -S . -B build -G Ninja
@@ -115,84 +129,92 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-The test suite currently has three µnit binaries (lexer, parser, codegen) and
-two end-to-end scripts (`print(1+2)` and the milestone-2 fixture). All five
-are wired into CTest.
+Requirements:
 
-## Manual run
+| Tool       | Version       | Notes                                          |
+|------------|---------------|------------------------------------------------|
+| `clang`    | ≥ 16          | the compiler is C23                            |
+| `cmake`    | ≥ 3.25        |                                                |
+| `binaryen` | recent        | provides `wasm-as`. (We use Binaryen rather than wabt because as of mid-2026 wabt 1.0.39 still doesn't accept modern GC text syntax — `anyref`, recursive `(ref null $t)`, etc.) |
+| `node`     | ≥ 22          | needs WasmGC + reference types + exnref        |
+| `emcc`     | ≥ 4.0 (opt.)  | only for the in-browser compiler (playground)  |
 
-```sh
-./build/lua2wasm tests/fixtures/milestone2.lua -o /tmp/m2.wat
-wasm-as --all-features -o /tmp/m2.wasm /tmp/m2.wat
-node runtime/host.mjs /tmp/m2.wasm
-```
-
-## Browser sanity
+## Using the CLI
 
 ```sh
-( cd build && python3 -m http.server 8000 )
-# then open http://localhost:8000/../runtime/index.html?mod=milestone8.wasm
+./build/lua2wasm input.lua -o output.wat
+wasm-as --all-features -o output.wasm output.wat
 ```
 
-`runtime/host.mjs` does not use any Node-specific WASM features; the same
-module loads in any GC-capable browser via `runtime/index.html`.
-
-## Playground (in-browser compile)
-
-The compiler itself can be cross-compiled to WebAssembly with Emscripten
-and dropped into a web page alongside a CodeMirror editor and Binaryen.js.
-The pipeline runs entirely client-side:
-
-```
-Lua source → lua2wasm.wasm (compiler) → WAT → binaryen.js → WASM-GC → execute
-```
-
-Build the compiler-as-wasm and serve:
+Run under Node:
 
 ```sh
-. ~/code/3rdparty/emsdk/emsdk_env.sh    # adjust path to your emsdk
-./scripts/build-wasm.sh                 # produces build-em/lua2wasm.{js,wasm}
-python3 -m http.server 8000
-# open http://localhost:8000/runtime/playground.html
+node --experimental-wasm-exnref runtime/host.mjs output.wasm
 ```
 
-There's a preset dropdown (factorial, counter, tables, OO via metatables,
-pcall, for + ipairs). The **Show WAT** button is handy for seeing what the
-compiler emits for any snippet.
-
-## Ship a script as one HTML file
-
-`scripts/package-html.sh` base64-embeds a `.wasm` and a tiny loader into a
-single self-contained HTML page (no external assets):
+Package as a self-contained HTML file (base64-embeds the wasm + a tiny
+loader; ~10 KB overhead):
 
 ```sh
-./build/lua2wasm my-script.lua -o my-script.wat
-wasm-as --all-features -o my-script.wasm my-script.wat
-./scripts/package-html.sh my-script.wasm -o my-script.html
-# open my-script.html in Chrome/Firefox — output appears inline
+./scripts/package-html.sh output.wasm -o output.html
+# open output.html — runs in any GC-capable browser, no server needed
 ```
 
-## Roadmap
+## Architecture (in 30 seconds)
 
-3. **Functions + closures.** `function` declarations, multi-arg/multi-return,
-   upvalue capture, proper tail calls via `return_call_ref`. Unlocks recursion,
-   the `return` value path, and most of the stdlib.
-4. **Tables.** Array part + hash part as two `$LuaTable` struct fields.
-   `t[k]`, `t.k`, table constructors.
-5. **Globals (5.5 semantics)** and the `for` loop (with the 5.5 const-control-
-   variable rule).
-6. **Error handling** via WASM exception handling (`throw` / `try_table`).
-7. **Minimal stdlib**: `tostring`, `tonumber`, `string.len/sub/upper/lower`,
-   `math.floor/ceil/abs/...`.
-8. **Metatables** and `__index` chains.
-9. **Coroutines** once the stack-switching proposal ships in browsers.
+```
+              ┌─────────┐   ┌──────────┐   ┌──────────┐   ┌──────────┐
+  Lua source ─▶  lexer  ├──▶│  parser  ├──▶│ codegen  ├──▶│ wasm-as  │──▶ .wasm
+              └─────────┘   └──────────┘   └──────────┘   └──────────┘
+                                  │              │
+                                  │              └─ static WAT prelude
+                                  │                 (~30 runtime helpers,
+                                  │                  type defs, builtin
+                                  │                  closures, stdlib init)
+                                  │
+                                  └─ scope analysis: function-frame stack
+                                     resolves identifiers to local / upvalue
+                                     / global / builtin slots
+```
+
+| Source file              | Job                                                                                              |
+|--------------------------|--------------------------------------------------------------------------------------------------|
+| `src/lexer.{c,h}`        | Hand-written lexer for the full Lua 5.5 lexical surface                                          |
+| `src/parser.{c,h}`       | Recursive-descent + Pratt expressions; scope and upvalue analysis                                |
+| `src/ast.{c,h}`          | Tagged-union AST with a bump-allocator pool                                                      |
+| `src/codegen.{c,h}`      | Emits WAT to a `WatBuilder`; embeds a static runtime prelude                                     |
+| `src/builtins.{c,h}`     | Single source of truth for builtin names → wasm function symbols                                 |
+| `src/wat_builder.{c,h}`  | Dynamic string buffer for WAT emission                                                            |
+| `src/emscripten_entry.c` | One-function entry point used when the compiler is itself compiled to WASM for the playground   |
+| `runtime/host.mjs`       | Reference host: instantiates a compiled module and renders `print` output                        |
+| `runtime/playground.html`| CodeMirror editor + in-browser compile + Binaryen.js wat→wasm + execute                          |
+| `tests/`                 | µnit unit tests + bash end-to-end fixtures (currently 12 in CTest, all green)                    |
+
+## Deferred / planned
+
+Cards in roughly priority order. Open a discussion before tackling
+anything large.
+
+1. Method-call sugar `obj:method(args)` (purely sugar — lowers to `obj.method(obj, args)`)
+2. Top-level `function f() end` sugar over `global function f` (one-line parser change)
+3. Varargs (`function f(...) end` and `...` in expression position)
+4. Wider stdlib (`assert`, `select`, `math.{ceil, min, max, pi, huge}`, `table.{insert, remove, concat}`, `string.{upper, lower, rep, byte, char, format}`)
+5. Long-bracket string literals `[[ ... ]]`
+6. `goto / ::label::`
+7. More metamethods (`__newindex`, `__call`, `__tostring`, `__lt`, `__le`, `__sub`/`__mul`/…)
+8. Coroutines — waits on the WASM stack-switching proposal landing in browsers
+9. Source maps so DevTools can step into Lua
+10. `wasm-opt` integration in the build pipeline
 
 ## Contributing
 
-Commits follow the [Conventional Commits](https://www.conventionalcommits.org/)
-format. Common types in this repo: `feat:`, `fix:`, `refactor:`, `test:`,
-`docs:`, `chore:`, `build:`. Use a scope when it's useful, e.g.
-`feat(parser): handle long-string literals`.
+Commits follow [Conventional Commits](https://www.conventionalcommits.org/).
+Common types in this repo: `feat:`, `fix:`, `refactor:`, `test:`, `docs:`,
+`chore:`, `build:`. Use a scope when it helps,
+e.g. `feat(parser): handle long-string literals`.
+
+New language features land behind an end-to-end fixture before they land as
+syntax in the parser. *If you can't print it, you didn't build it.*
 
 ## License
 
