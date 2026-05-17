@@ -1,0 +1,55 @@
+cmake_minimum_required(VERSION 3.25)
+project(lua2wasm C)
+
+set(CMAKE_C_STANDARD 23)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+set(CMAKE_C_EXTENSIONS OFF)
+
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Debug)
+endif()
+
+add_compile_options(-Wall -Wextra -Wpedantic -Wno-unused-parameter)
+
+set(COMPILER_SOURCES
+    src/ast.c
+    src/lexer.c
+    src/parser.c
+    src/wat_builder.c
+    src/codegen.c
+)
+
+add_library(lua2wasm_core STATIC ${COMPILER_SOURCES})
+target_include_directories(lua2wasm_core PUBLIC src)
+
+add_executable(lua2wasm src/main.c)
+target_link_libraries(lua2wasm PRIVATE lua2wasm_core)
+
+# --- µnit tests ---------------------------------------------------------
+enable_testing()
+
+add_library(munit STATIC third_party/munit/munit.c)
+target_include_directories(munit PUBLIC third_party/munit)
+# munit predates C23 (uses removed ATOMIC_VAR_INIT). Build it as C11.
+set_source_files_properties(third_party/munit/munit.c PROPERTIES
+    LANGUAGE C
+    COMPILE_FLAGS "-std=c11 -Wno-pedantic -Wno-extra")
+
+function(add_unit_test name file)
+    add_executable(${name} ${file})
+    target_link_libraries(${name} PRIVATE lua2wasm_core munit)
+    add_test(NAME ${name} COMMAND ${name})
+endfunction()
+
+add_unit_test(test_lexer   tests/test_lexer.c)
+add_unit_test(test_parser  tests/test_parser.c)
+add_unit_test(test_codegen tests/test_codegen.c)
+
+# --- End-to-end test ----------------------------------------------------
+add_test(
+    NAME test_e2e_print_sum
+    COMMAND bash ${CMAKE_SOURCE_DIR}/tests/test_e2e.sh
+            $<TARGET_FILE:lua2wasm>
+            ${CMAKE_SOURCE_DIR}
+            ${CMAKE_BINARY_DIR}
+)
