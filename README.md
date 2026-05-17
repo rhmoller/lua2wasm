@@ -134,10 +134,15 @@ fits in 5 KB; the full milestone-8 OO demo fits in 5.5 KB.
 Anything with a current WASM-GC + reference-types + exception-handling
 implementation:
 
-- **Chrome / Edge** ≥ 137 (or any recent build with `chrome://flags/#enable-experimental-webassembly-features` for `exnref`)
-- **Firefox** ≥ 131 (set `javascript.options.wasm_exnref = true` in `about:config` if needed)
-- **Safari** ≥ 18.2 — same caveat on the exception-handling flag
-- **Node** ≥ 22 with `--experimental-wasm-exnref`
+- **Chrome / Edge** ≥ 137 — works out of the box, no flags
+- **Firefox** ≥ 131 — works out of the box, no flags
+- **Safari** ≥ 18.4 — works out of the box, no flags
+- **Node** ≥ 22 — needs `--experimental-wasm-exnref` (still gated as of Node 24); future Node releases are expected to default it on
+
+The new exception-handling proposal (with `exnref` / `try_table`) is the
+only opcode family in our output that's still flag-gated *anywhere*. It's
+shipped in every modern browser by default; the Node holdout is a runtime
+config detail, not a missing implementation.
 
 Compiled modules need no other runtime files. They `import "host"` for `print`
 only — and even that can be replaced with whatever host imports your
