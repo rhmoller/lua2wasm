@@ -5,13 +5,14 @@ FIXTURE="$SRC_DIR/tests/fixtures/iterator.lua"
 WAT="$BUILD_DIR/iterator.wat"; WASM="$BUILD_DIR/iterator.wasm"
 "$BIN" "$FIXTURE" -o "$WAT"
 wasm-as --all-features -o "$WASM" "$WAT"
+# Trailing print(g()) emits an empty line — bash command substitution
+# strips trailing newlines from OUT, so the expected ends at "12".
 EXPECTED="2
 3
 4
 5
 11
-12
-nil"
+12"
 OUT="$(node --experimental-wasm-exnref "$SRC_DIR/runtime/host.mjs" "$WASM")"
 if [[ "$OUT" != "$EXPECTED" ]]; then
     echo "FAIL: output mismatch" >&2

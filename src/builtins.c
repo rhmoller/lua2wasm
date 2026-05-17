@@ -20,6 +20,7 @@ static const struct {
     { "setmetatable", 12, "$builtin_setmetatable", BLT_TOPLEVEL },
     { "getmetatable", 12, "$builtin_getmetatable", BLT_TOPLEVEL },
     { "assert",       6,  "$builtin_assert",       BLT_TOPLEVEL },
+    { "select",       6,  "$builtin_select",       BLT_TOPLEVEL },
     /* iterators for ipairs/pairs (not user-visible by name) */
     { "_ipairs_iter", 12, "$builtin_ipairs_iter", BLT_TOPLEVEL },
     /* math library (installed into the `math` table) */

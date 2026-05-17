@@ -253,6 +253,54 @@ static void emit_unop(CG *c, const Expr *e, int depth) {
     }
 }
 
+/* An expression whose value in a multi-value position is a full $ArgArr
+ * (call/method-call/vararg) rather than a single anyref. */
+static int is_multival_tail(const Expr *e) {
+    return e->kind == EXPR_CALL ||
+           e->kind == EXPR_METHOD_CALL ||
+           e->kind == EXPR_VARARG;
+}
+
+/* Emit (ref $ArgArr) for a multi-value expression (last-in-list context). */
+static void emit_call_array(CG *c, const Expr *e, int depth);
+static void emit_multival_array(CG *c, const Expr *e, int depth) {
+    if (e->kind == EXPR_VARARG) {
+        emit_indent(c, depth);
+        wat_append(c->w, "(ref.as_non_null (local.get $varargs))\n");
+        return;
+    }
+    emit_call_array(c, e, depth);
+}
+
+/* Build a (ref $ArgArr) from a sequence of argument expressions, splicing
+ * the trailing expression's full multi-value result if it is a call or `...`. */
+static void emit_args_array(CG *c, Expr **args, size_t nargs, int depth) {
+    if (nargs == 0) {
+        emit_indent(c, depth); wat_append(c->w, "(global.get $g_empty_args)\n");
+        return;
+    }
+    int last_mv = is_multival_tail(args[nargs - 1]);
+    if (!last_mv) {
+        emit_indent(c, depth);
+        wat_appendf(c->w, "(array.new_fixed $ArgArr %zu\n", nargs);
+        for (size_t i = 0; i < nargs; i++) emit_expr(c, args[i], depth + 1);
+        emit_indent(c, depth); wat_append(c->w, ")\n");
+        return;
+    }
+    size_t singles = nargs - 1;
+    emit_indent(c, depth); wat_append(c->w, "(call $merge_args\n");
+    if (singles == 0) {
+        emit_indent(c, depth + 1); wat_append(c->w, "(global.get $g_empty_args)\n");
+    } else {
+        emit_indent(c, depth + 1);
+        wat_appendf(c->w, "(array.new_fixed $ArgArr %zu\n", singles);
+        for (size_t i = 0; i < singles; i++) emit_expr(c, args[i], depth + 2);
+        emit_indent(c, depth + 1); wat_append(c->w, ")\n");
+    }
+    emit_multival_array(c, args[nargs - 1], depth + 1);
+    emit_indent(c, depth); wat_append(c->w, ")\n");
+}
+
 /* Emit a call returning (ref $ArgArr) — the full multi-value result. */
 static void emit_call_array(CG *c, const Expr *e, int depth) {
     if (e->kind == EXPR_METHOD_CALL) {
@@ -272,11 +320,21 @@ static void emit_call_array(CG *c, const Expr *e, int depth) {
             "(i32.const %zu) (i32.const %zu)))\n", sr.offset, sr.len);
         emit_indent(c, depth + 2); wat_append(c->w, ")\n");
         emit_indent(c, depth + 1); wat_append(c->w, ")\n");
-        emit_indent(c, depth + 1);
-        wat_appendf(c->w, "(array.new_fixed $ArgArr %zu\n", e->as.method_call.nargs + 1);
-        emit_indent(c, depth + 2); wat_append(c->w, "(local.get $tmp_any)\n");
-        for (size_t i = 0; i < e->as.method_call.nargs; i++) {
-            emit_expr(c, e->as.method_call.args[i], depth + 2);
+        /* args = [recv] ++ method args */
+        size_t mna = e->as.method_call.nargs;
+        int has_mv = mna > 0 && is_multival_tail(e->as.method_call.args[mna - 1]);
+        emit_indent(c, depth + 1); wat_append(c->w, "(call $merge_args\n");
+        emit_indent(c, depth + 2);
+        wat_append(c->w, "(array.new_fixed $ArgArr 1 (local.get $tmp_any))\n");
+        if (mna == 0) {
+            emit_indent(c, depth + 2); wat_append(c->w, "(global.get $g_empty_args)\n");
+        } else if (!has_mv) {
+            emit_indent(c, depth + 2);
+            wat_appendf(c->w, "(array.new_fixed $ArgArr %zu\n", mna);
+            for (size_t i = 0; i < mna; i++) emit_expr(c, e->as.method_call.args[i], depth + 3);
+            emit_indent(c, depth + 2); wat_append(c->w, ")\n");
+        } else {
+            emit_args_array(c, e->as.method_call.args, mna, depth + 2);
         }
         emit_indent(c, depth + 1); wat_append(c->w, ")\n");
         emit_indent(c, depth); wat_append(c->w, ")\n");
@@ -286,16 +344,7 @@ static void emit_call_array(CG *c, const Expr *e, int depth) {
     emit_indent(c, depth + 1); wat_append(c->w, "(ref.cast (ref $LuaClosure)\n");
     emit_expr(c, e->as.call.callee, depth + 2);
     emit_indent(c, depth + 1); wat_append(c->w, ")\n");
-    emit_indent(c, depth + 1);
-    if (e->as.call.nargs == 0) {
-        wat_append(c->w, "(array.new_fixed $ArgArr 0)\n");
-    } else {
-        wat_appendf(c->w, "(array.new_fixed $ArgArr %zu\n", e->as.call.nargs);
-        for (size_t i = 0; i < e->as.call.nargs; i++) {
-            emit_expr(c, e->as.call.args[i], depth + 2);
-        }
-        emit_indent(c, depth + 1); wat_append(c->w, ")\n");
-    }
+    emit_args_array(c, e->as.call.args, e->as.call.nargs, depth + 1);
     emit_indent(c, depth); wat_append(c->w, ")\n");
 }
 
@@ -320,16 +369,7 @@ static void emit_tail_call(CG *c, const Expr *e, int depth) {
     emit_indent(c, depth + 1);
     wat_append(c->w, "(ref.as_non_null (local.get $tmp_clo))\n");
     /* args */
-    emit_indent(c, depth + 1);
-    if (e->as.call.nargs == 0) {
-        wat_append(c->w, "(global.get $g_empty_args)\n");
-    } else {
-        wat_appendf(c->w, "(array.new_fixed $ArgArr %zu\n", e->as.call.nargs);
-        for (size_t i = 0; i < e->as.call.nargs; i++) {
-            emit_expr(c, e->as.call.args[i], depth + 2);
-        }
-        emit_indent(c, depth + 1); wat_append(c->w, ")\n");
-    }
+    emit_args_array(c, e->as.call.args, e->as.call.nargs, depth + 1);
     /* funcref */
     emit_indent(c, depth + 1);
     wat_append(c->w, "(struct.get $LuaClosure $code "
@@ -381,7 +421,13 @@ static void emit_table_ctor(CG *c, const Expr *e, int depth) {
     emit_indent(c, depth); wat_append(c->w, "(block (result anyref)\n");
     emit_indent(c, depth + 1); wat_append(c->w, "(call $tab_new)\n");
     int pos_idx = 1;
-    for (int i = 0; i < n; i++) {
+    /* If the final entry is positional AND a multi-value tail (call/vararg),
+     * we splice all of its values rather than just taking the first. */
+    int splice_last = (n > 0 &&
+                       e->as.table_ctor.entries[n - 1].kind == TENT_POSITIONAL &&
+                       is_multival_tail(e->as.table_ctor.entries[n - 1].value));
+    int last_normal = splice_last ? n - 1 : n;
+    for (int i = 0; i < last_normal; i++) {
         TableEntry *ent = &e->as.table_ctor.entries[i];
         emit_indent(c, depth + 1); wat_append(c->w, "local.tee $tmp_tab\n");
         emit_indent(c, depth + 1); wat_append(c->w, "(ref.as_non_null (local.get $tmp_tab))\n");
@@ -393,6 +439,15 @@ static void emit_table_ctor(CG *c, const Expr *e, int depth) {
         }
         emit_expr(c, ent->value, depth + 1);
         emit_indent(c, depth + 1); wat_append(c->w, "call $tab_set\n");
+    }
+    if (splice_last) {
+        /* (call $tab_append_args (local.tee $tmp_tab) (i32.const pos_idx) <args>) */
+        emit_indent(c, depth + 1); wat_append(c->w, "local.tee $tmp_tab\n");
+        emit_indent(c, depth + 1); wat_append(c->w, "(call $tab_append_args\n");
+        emit_indent(c, depth + 2); wat_append(c->w, "(ref.as_non_null (local.get $tmp_tab))\n");
+        emit_indent(c, depth + 2); wat_appendf(c->w, "(i32.const %d)\n", pos_idx);
+        emit_multival_array(c, e->as.table_ctor.entries[n - 1].value, depth + 2);
+        emit_indent(c, depth + 1); wat_append(c->w, ")\n");
     }
     emit_indent(c, depth); wat_append(c->w, ")\n");
 }
@@ -424,6 +479,11 @@ static void emit_expr(CG *c, const Expr *e, int depth) {
             emit_indent(c, depth); wat_append(c->w, ")\n");
             break;
         }
+        case EXPR_VARARG:
+            emit_indent(c, depth);
+            wat_append(c->w,
+                "(call $args_first (ref.as_non_null (local.get $varargs)))\n");
+            break;
     }
 }
 
@@ -473,11 +533,10 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
             int n_names = s->as.local.n_names;
             int n_values = s->as.local.n_values;
             int last_call = (n_values > 0 &&
-                             (s->as.local.values[n_values - 1]->kind == EXPR_CALL ||
-                              s->as.local.values[n_values - 1]->kind == EXPR_METHOD_CALL));
+                             is_multival_tail(s->as.local.values[n_values - 1]));
             if (last_call) {
                 emit_indent(c, depth); wat_append(c->w, "(local.set $tmp_args\n");
-                emit_call_array(c, s->as.local.values[n_values - 1], depth + 1);
+                emit_multival_array(c, s->as.local.values[n_values - 1], depth + 1);
                 emit_indent(c, depth); wat_append(c->w, ")\n");
             }
             for (int i = 0; i < n_names; i++) {
@@ -500,14 +559,13 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
             int n_targets = s->as.assign.n_targets;
             int n_values = s->as.assign.n_values;
             int last_call = (n_values > 0 &&
-                             (s->as.assign.values[n_values - 1]->kind == EXPR_CALL ||
-                              s->as.assign.values[n_values - 1]->kind == EXPR_METHOD_CALL));
+                             is_multival_tail(s->as.assign.values[n_values - 1]));
             if (n_targets == 1) {
                 AssignTarget *t = &s->as.assign.targets[0];
                 emit_target_open(c, t, depth);
                 if (last_call) {
                     emit_indent(c, depth + 1); wat_append(c->w, "(call $args_first\n");
-                    emit_call_array(c, s->as.assign.values[0], depth + 2);
+                    emit_multival_array(c, s->as.assign.values[0], depth + 2);
                     emit_indent(c, depth + 1); wat_append(c->w, ")\n");
                 } else {
                     emit_expr(c, s->as.assign.values[0], depth + 1);
@@ -534,7 +592,7 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
                 } else {
                     emit_indent(c, depth + 2); wat_append(c->w, ")\n");
                 }
-                emit_call_array(c, s->as.assign.values[n_values - 1], depth + 2);
+                emit_multival_array(c, s->as.assign.values[n_values - 1], depth + 2);
                 emit_indent(c, depth + 1); wat_append(c->w, ")\n");
             } else {
                 emit_indent(c, depth + 1);
@@ -581,16 +639,12 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
                 emit_tail_call(c, s->as.return_stmt.values[0], depth);
                 break;
             }
-            /* Otherwise build the result array and return it. */
-            if (n_values == 0) {
-                emit_indent(c, depth); wat_append(c->w, "(global.get $g_empty_args)\n");
+            /* `return f(), x, ...` and similar: build the result array. A lone
+             * multi-value tail (a single call/vararg) returns its array as-is. */
+            if (n_values == 1 && is_multival_tail(s->as.return_stmt.values[0])) {
+                emit_multival_array(c, s->as.return_stmt.values[0], depth);
             } else {
-                emit_indent(c, depth);
-                wat_appendf(c->w, "(array.new_fixed $ArgArr %d\n", n_values);
-                for (int i = 0; i < n_values; i++) {
-                    emit_expr(c, s->as.return_stmt.values[i], depth + 1);
-                }
-                emit_indent(c, depth); wat_append(c->w, ")\n");
+                emit_args_array(c, s->as.return_stmt.values, n_values, depth);
             }
             emit_indent(c, depth); wat_append(c->w, "return\n");
             break;
@@ -702,8 +756,7 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
             c->break_labels[c->break_depth++] = label;
             int n_exprs = s->as.for_gen.n_exprs;
             int last_call = (n_exprs > 0 &&
-                             (s->as.for_gen.exprs[n_exprs - 1]->kind == EXPR_CALL ||
-                              s->as.for_gen.exprs[n_exprs - 1]->kind == EXPR_METHOD_CALL));
+                             is_multival_tail(s->as.for_gen.exprs[n_exprs - 1]));
             /* Compute the full args array via the same singles+merge pattern. */
             int singles = n_exprs - (last_call ? 1 : 0);
             emit_indent(c, depth); wat_append(c->w, "(local.set $tmp_args\n");
@@ -713,7 +766,7 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
                 wat_appendf(c->w, "(array.new_fixed $ArgArr %d\n", singles);
                 for (int i = 0; i < singles; i++) emit_expr(c, s->as.for_gen.exprs[i], depth + 3);
                 emit_indent(c, depth + 2); wat_append(c->w, ")\n");
-                emit_call_array(c, s->as.for_gen.exprs[n_exprs - 1], depth + 2);
+                emit_multival_array(c, s->as.for_gen.exprs[n_exprs - 1], depth + 2);
                 emit_indent(c, depth + 1); wat_append(c->w, ")\n");
             } else {
                 emit_indent(c, depth + 1);
@@ -788,11 +841,10 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
             int n_values = s->as.global_decl.n_values;
             if (n_values == 0) break;
             int last_call = (n_values > 0 &&
-                             (s->as.global_decl.values[n_values - 1]->kind == EXPR_CALL ||
-                              s->as.global_decl.values[n_values - 1]->kind == EXPR_METHOD_CALL));
+                             is_multival_tail(s->as.global_decl.values[n_values - 1]));
             if (last_call) {
                 emit_indent(c, depth); wat_append(c->w, "(local.set $tmp_args\n");
-                emit_call_array(c, s->as.global_decl.values[n_values - 1], depth + 1);
+                emit_multival_array(c, s->as.global_decl.values[n_values - 1], depth + 1);
                 emit_indent(c, depth); wat_append(c->w, ")\n");
             }
             for (int i = 0; i < n_names; i++) {
@@ -1374,6 +1426,31 @@ static const char *PRELUDE_HELPERS =
 "      (then (ref.null any))\n"
 "      (else (array.get $ArgArr (local.get $args) (local.get $i)))))\n"
 "\n"
+"  (func $args_slice (param $a (ref $ArgArr)) (param $from i32) (result (ref $ArgArr))\n"
+"    (local $n i32) (local $out (ref $ArgArr))\n"
+"    (local.set $n (array.len (local.get $a)))\n"
+"    (if (i32.ge_s (local.get $from) (local.get $n))\n"
+"      (then (return (global.get $g_empty_args))))\n"
+"    (local.set $out (array.new $ArgArr (ref.null any)\n"
+"                       (i32.sub (local.get $n) (local.get $from))))\n"
+"    (array.copy $ArgArr $ArgArr\n"
+"      (local.get $out) (i32.const 0)\n"
+"      (local.get $a)   (local.get $from)\n"
+"      (i32.sub (local.get $n) (local.get $from)))\n"
+"    (local.get $out))\n"
+"\n"
+"  ;; tab_append_args(t, pos, args): t[pos+i] = args[i] for i in 0..#args-1.\n"
+"  (func $tab_append_args (param $t (ref $LuaTable)) (param $pos i32) (param $args (ref $ArgArr))\n"
+"    (local $i i32) (local $n i32)\n"
+"    (local.set $n (array.len (local.get $args)))\n"
+"    (block $done (loop $lp\n"
+"      (br_if $done (i32.ge_s (local.get $i) (local.get $n)))\n"
+"      (call $tab_set (local.get $t)\n"
+"        (ref.i31 (i32.add (local.get $pos) (local.get $i)))\n"
+"        (array.get $ArgArr (local.get $args) (local.get $i)))\n"
+"      (local.set $i (i32.add (local.get $i) (i32.const 1)))\n"
+"      (br $lp))))\n"
+"\n"
 "  (func $merge_args (param $a (ref $ArgArr)) (param $b (ref $ArgArr)) (result (ref $ArgArr))\n"
 "    (local $na i32) (local $nb i32) (local $out (ref $ArgArr))\n"
 "    (local.set $na (array.len (local.get $a)))\n"
@@ -1474,6 +1551,33 @@ static const char *PRELUDE_HELPERS =
 "    ;; failed: throw the message (args[1]) or a default\n"
 "    (throw $LuaError (call $args_at (local.get $args) (i32.const 1)))\n"
 "    (global.get $g_empty_args))\n"
+"\n"
+"  ;; select(n, ...): if n is the string \"#\", returns the count of extras.\n"
+"  ;; Otherwise n is an integer index (1-based); returns args from that index on.\n"
+"  (func $builtin_select (type $LuaFn)\n"
+"    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))\n"
+"    (local $sel anyref) (local $bytes (ref $LuaArr)) (local $n i32) (local $idx i32)\n"
+"    (local.set $n (array.len (local.get $args)))\n"
+"    (if (i32.eqz (local.get $n)) (then (throw $LuaError (ref.null any))))\n"
+"    (local.set $sel (call $args_at (local.get $args) (i32.const 0)))\n"
+"    (if (ref.test (ref $LuaString) (local.get $sel))\n"
+"      (then\n"
+"        (local.set $bytes (struct.get $LuaString $bytes\n"
+"                            (ref.cast (ref $LuaString) (local.get $sel))))\n"
+"        (if (i32.and (i32.eq (array.len (local.get $bytes)) (i32.const 1))\n"
+"                     (i32.eq (array.get_u $LuaArr (local.get $bytes) (i32.const 0))\n"
+"                             (i32.const 35)))   ;; '#'\n"
+"          (then (return (array.new_fixed $ArgArr 1\n"
+"                  (call $make_int (i64.extend_i32_s\n"
+"                    (i32.sub (local.get $n) (i32.const 1))))))))))\n"
+"    ;; numeric index. Negative means count from the end.\n"
+"    (local.set $idx (i32.wrap_i64 (call $as_int (local.get $sel))))\n"
+"    (if (i32.lt_s (local.get $idx) (i32.const 0))\n"
+"      (then (local.set $idx (i32.add (i32.sub (local.get $n) (i32.const 1))\n"
+"                                      (i32.add (local.get $idx) (i32.const 1))))))\n"
+"    (if (i32.lt_s (local.get $idx) (i32.const 1))\n"
+"      (then (throw $LuaError (ref.null any))))\n"
+"    (call $args_slice (local.get $args) (local.get $idx)))\n"
 "\n"
 "  ;; io.write — like print but no trailing newline, no tab between args\n"
 "  (func $builtin_io_write (type $LuaFn)\n"
@@ -2050,12 +2154,20 @@ static void emit_user_function(CG *c, const LuaFunc *fn) {
     wat_append(w, "    (local $for_iter_any anyref)\n");
     wat_append(w, "    (local $for_state anyref)\n");
     wat_append(w, "    (local $for_k anyref)\n");
+    if (fn->is_vararg) {
+        wat_append(w, "    (local $varargs (ref null $ArgArr))\n");
+    }
 
     /* Param extraction: each declared parameter takes args[i] (nil if missing). */
     for (int i = 0; i < fn->n_params; i++) {
         wat_appendf(w,
             "    (local.set $L%d (struct.new $Box "
             "(call $args_at (local.get $args) (i32.const %d))))\n", i, i);
+    }
+    if (fn->is_vararg) {
+        wat_appendf(w,
+            "    (local.set $varargs (call $args_slice "
+            "(local.get $args) (i32.const %d)))\n", fn->n_params);
     }
 
     int was_in_main = c->in_main;

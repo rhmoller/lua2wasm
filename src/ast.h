@@ -51,6 +51,7 @@ typedef enum {
     EXPR_INDEX,         /* t[k]  (t.name is sugar lowered to INDEX with string key) */
     EXPR_TABLE,         /* { ... } table constructor */
     EXPR_METHOD_CALL,   /* recv:name(args) — evaluates recv once */
+    EXPR_VARARG,        /* `...` inside a vararg function */
 } ExprKind;
 
 typedef enum {
@@ -253,6 +254,7 @@ struct LuaFunc {
     int n_upvalues;
     Block body;
     int line;
+    int is_vararg;              /* `function f(...)` or `function f(a, ...)` */
 };
 
 /* ---------- node pool ----------

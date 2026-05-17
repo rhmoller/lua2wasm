@@ -39,6 +39,7 @@ typedef struct {
     int next_slot;         /* monotonic: never reused */
     UpvalueRef upvalues[MAX_UPVALS_PER_FN];
     int n_upvalues;
+    int is_vararg;         /* `...` is bound in this frame's scope */
 } FuncFrame;
 
 typedef struct {
@@ -108,6 +109,7 @@ static void frame_init(FuncFrame *f) {
     f->local_count = 0;
     f->next_slot = 0;
     f->n_upvalues = 0;
+    f->is_vararg = 0;
 }
 
 static int frame_mark(FuncFrame *f) { return f->local_count; }
@@ -321,6 +323,14 @@ static Expr *parse_primary(Parser *p) {
             Expr *inner = parse_expr(p);
             expect(p, TOK_RPAREN, ")");
             return inner;
+        }
+        case TOK_ELLIPSIS: {
+            advance(p);
+            if (!cur_frame(p)->is_vararg) {
+                set_error(p, "cannot use `...` outside a vararg function");
+                return NULL;
+            }
+            return expr_new(p->pool, EXPR_VARARG, line);
         }
         case TOK_KW_FUNCTION: {
             advance(p);
@@ -1069,6 +1079,11 @@ static LuaFunc *parse_function_body_ex(Parser *p, int line, int with_self) {
     expect(p, TOK_LPAREN, "( in function declaration");
     if (peek(p)->kind != TOK_RPAREN) {
         do {
+            if (peek(p)->kind == TOK_ELLIPSIS) {
+                advance(p);
+                cur_frame(p)->is_vararg = 1;
+                break;
+            }
             if (peek(p)->kind != TOK_IDENT) { set_error(p, "expected parameter name"); break; }
             const Token *pn = advance(p);
             if (frame_declare(cur_frame(p), pn->start, pn->len) < 0) {
@@ -1086,6 +1101,7 @@ static LuaFunc *parse_function_body_ex(Parser *p, int line, int with_self) {
     fn->n_params = n_params;
     fn->n_locals = cur_frame(p)->next_slot;
     fn->body = body;
+    fn->is_vararg = cur_frame(p)->is_vararg;
     fn->n_upvalues = cur_frame(p)->n_upvalues;
     if (fn->n_upvalues) {
         fn->upvalues = node_pool_alloc(p->pool, sizeof(UpvalueRef) * fn->n_upvalues);

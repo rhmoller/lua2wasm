@@ -95,10 +95,10 @@ instructions. Anything not in this table is a compile-time error.
 | **Globals**       | Lua-traditional implicit globals — `num = 42` at top level just works; reading an undeclared name yields `nil`. Explicit `global x` declarations also supported and recommended for clarity                                                                                                                     | strict mode (`global <const> *` opt-in), implicit `_G` table     |
 | **Statements**    | `local`, `local function`, **top-level `function f() end`** incl. dotted (`function T.x.y() end`) and method (`function T:m() end`) forms, multi-assign, `if/elseif/else`, `while`, `for i = a,b[,c]`, generic `for k[,v,…] in …`, `repeat ... until`, `break`, bare `do`, expression-statement, `return e1, …` | `goto / ::label::`                                               |
 | **Operators**     | `+ - * / // % ^`, `== ~= < <= > >=`, `and or not`, `..`, `#`                                                                                                                                                                                                                                                    | bitwise                                                          |
-| **Functions**     | N-ary arguments, multiple return values (`return a, b, c`), upvalue capture (mutable shared boxes), transitive captures, **method-call sugar `obj:m(args)`**, **paren-less single-arg call `f"x"` / `f{k=1}`**, proper tail calls (`return f(...)` → `return_call_ref`, doesn't grow the stack)                  | varargs `...`                                                    |
+| **Functions**     | N-ary arguments, multiple return values (`return a, b, c`), upvalue capture (mutable shared boxes), transitive captures, **method-call sugar `obj:m(args)`**, **paren-less single-arg call `f"x"` / `f{k=1}`**, **varargs `function f(...)` / `function f(a, ...)` with `...` spliced into call args, returns, table constructors, and multi-assign**, proper tail calls (`return f(...)` → `return_call_ref`, doesn't grow the stack)                  | —                                                                |
 | **Errors**        | `error(v)` / `pcall(f, …)` / `assert(v[, msg])` lowered to WASM exception handling (`throw $LuaError` + `try_table`)                                                                                                                                                                                            | error message annotations, tracebacks                            |
 | **Metatables**    | `setmetatable` / `getmetatable`, `__index` (table chain *and* function form, with cycle limit), `__add`, `__eq`                                                                                                                                                                                                 | `__newindex`, `__call`, `__tostring`, `__lt`, `__le`, other arithmetic metamethods |
-| **Standard lib**  | `print`, `error`, `pcall`, `assert`, `type`, `tostring`, `tonumber`, `ipairs`, `pairs`, `next`, `setmetatable`, `getmetatable`; `io.{write, read}`; `_VERSION`; `math.{floor, ceil, abs, sqrt, min, max, sin, cos, tan, asin, acos, atan, exp, log, pi, huge}`; `string.{len, sub, format}` (`%s %d %x %g %f %e %%`, optional `.N` precision); `table.{insert, remove, concat}` | `_G`, `select`, more of `string` (`upper, lower, rep, byte, char, find, gmatch, gsub`), `table.sort`/`unpack`, format flags/width, `os.*`, `io.open` |
+| **Standard lib**  | `print`, `error`, `pcall`, `assert`, `select`, `type`, `tostring`, `tonumber`, `ipairs`, `pairs`, `next`, `setmetatable`, `getmetatable`; `io.{write, read}`; `_VERSION`; `math.{floor, ceil, abs, sqrt, min, max, sin, cos, tan, asin, acos, atan, exp, log, pi, huge}`; `string.{len, sub, format}` (`%s %d %x %g %f %e %%`, optional `.N` precision); `table.{insert, remove, concat}` | `_G`, more of `string` (`upper, lower, rep, byte, char, find, gmatch, gsub`), `table.sort`/`unpack`, format flags/width, `os.*`, `io.open` |
 | **Coroutines**    | —                                                                                                                                                                                                                                                                                                               | blocked on the WASM stack-switching proposal shipping in browsers |
 
 Browse [`tests/fixtures/`](tests/fixtures/) to see what valid programs look
@@ -247,20 +247,19 @@ flowchart LR
 Cards in roughly priority order. Open a discussion before tackling
 anything large.
 
-1. Varargs (`function f(...) end` and `...` in expression position) — and `select(n, ...)` once they land.
-2. More metamethods: `__newindex`, `__call`, `__tostring`, `__lt`, `__le`, `__sub` / `__mul` / `__div` / `__mod` / `__pow` / `__unm` / `__concat` / `__len`.
-3. Wider `string` library: `upper`, `lower`, `rep`, `byte`, `char`, plus the pattern functions `find` / `match` / `gmatch` / `gsub` (these are the big-ticket items — Lua's pattern language is a small parser of its own).
-4. `string.format` flags and width (currently only `.N` precision is honoured).
-5. `table.sort` (needs a comparator callback) and `table.unpack`.
-6. `_G` — a real global env table aliasing all module globals; would also let strict mode honour `global <const> *` as an opt-in.
-7. Bitwise operators (`& | ~ << >>`) — lexer already recognises them.
-8. Float `%` and a non-`<float>`-placeholder path for `..` of floats inside the wasm-side concat (the `print` and `string.format` paths already format correctly via the JS host).
-9. `goto / ::label::`.
-10. `os.{date, time, getenv}`, `io.open` / `io.lines` / file handles.
-11. Long-bracket level-N variants `[=[ ... ]=]`; `\xHH` and `\u{…}` string escapes; hex / binary integer literals (`0x…`, `0b…`).
-12. Coroutines — blocked on the WASM stack-switching proposal landing in browsers.
-13. Source maps so DevTools can step from compiled WASM back into Lua.
-14. `wasm-opt` step in the build pipeline (size + speed wins for the shipped `.wasm`).
+1. More metamethods: `__newindex`, `__call`, `__tostring`, `__lt`, `__le`, `__sub` / `__mul` / `__div` / `__mod` / `__pow` / `__unm` / `__concat` / `__len`.
+2. Wider `string` library: `upper`, `lower`, `rep`, `byte`, `char`, plus the pattern functions `find` / `match` / `gmatch` / `gsub` (these are the big-ticket items — Lua's pattern language is a small parser of its own).
+3. `string.format` flags and width (currently only `.N` precision is honoured).
+4. `table.sort` (needs a comparator callback) and `table.unpack`.
+5. `_G` — a real global env table aliasing all module globals; would also let strict mode honour `global <const> *` as an opt-in.
+6. Bitwise operators (`& | ~ << >>`) — lexer already recognises them.
+7. Float `%` and a non-`<float>`-placeholder path for `..` of floats inside the wasm-side concat (the `print` and `string.format` paths already format correctly via the JS host).
+8. `goto / ::label::`.
+9. `os.{date, time, getenv}`, `io.open` / `io.lines` / file handles.
+10. Long-bracket level-N variants `[=[ ... ]=]`; `\xHH` and `\u{…}` string escapes; hex / binary integer literals (`0x…`, `0b…`).
+11. Coroutines — blocked on the WASM stack-switching proposal landing in browsers.
+12. Source maps so DevTools can step from compiled WASM back into Lua.
+13. `wasm-opt` step in the build pipeline (size + speed wins for the shipped `.wasm`).
 
 ## Contributing
 

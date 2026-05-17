@@ -20,4 +20,4 @@ end
 local g = numberGenerator(10, 12)
 print(g())   -- 11
 print(g())   -- 12
-print(g())   -- nil (terminates the iteration)
+print(g())   -- (no values; print emits a blank line — Lua splices call returns)
