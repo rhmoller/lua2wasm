@@ -1,6 +1,7 @@
 // Host runner for lua2wasm modules.
 // Usage: node runtime/host.mjs <module.wasm>
 import { readFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 
 const wasmPath = process.argv[2];
 if (!wasmPath) {
@@ -58,12 +59,35 @@ function formatScalar(kind, i, f, prec) {
     }
 }
 
+const MATH_FNS = [Math.sin, Math.cos, Math.tan, Math.asin, Math.acos, Math.atan, Math.exp, Math.log];
+
+// io.read backing: read all of stdin synchronously at first call, hand out one
+// line per io.read(). EOF → length -1.
+let stdinLines = null;
+function readNextLine() {
+    if (stdinLines === null) {
+        try {
+            const data = readFileSync(0, "utf8");
+            stdinLines = data.split("\n");
+            if (stdinLines.length && stdinLines[stdinLines.length - 1] === "") stdinLines.pop();
+        } catch { stdinLines = []; }
+    }
+    return stdinLines.length ? stdinLines.shift() : null;
+}
+
 ({ instance } = await WebAssembly.instantiate(bytes, {
     host: {
         print:     (v) => { process.stdout.write(luaToString(v) + "\n"); },
         write_raw: (v) => { process.stdout.write(luaToString(v)); },
         fmt:       (kind, i, f, prec) => {
             const s = formatScalar(kind, i, f, prec);
+            for (let j = 0; j < s.length; j++) instance.exports.fmt_buf_set(j, s.charCodeAt(j));
+            return s.length;
+        },
+        math:      (kind, x) => MATH_FNS[kind](x),
+        read:      () => {
+            const s = readNextLine();
+            if (s === null) return -1;
             for (let j = 0; j < s.length; j++) instance.exports.fmt_buf_set(j, s.charCodeAt(j));
             return s.length;
         },

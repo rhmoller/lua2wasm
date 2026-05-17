@@ -79,6 +79,7 @@ function formatScalar(kind, i, f, prec) {
     default: return "";
   }
 }
+const MATH_FNS = [Math.sin, Math.cos, Math.tan, Math.asin, Math.acos, Math.atan, Math.exp, Math.log];
 ({ instance } = await WebAssembly.instantiate(wbuf, {
   host: {
     print:     v => { out.textContent += luaToString(v) + "\\n"; },
@@ -88,6 +89,8 @@ function formatScalar(kind, i, f, prec) {
       for (let j = 0; j < s.length; j++) instance.exports.fmt_buf_set(j, s.charCodeAt(j));
       return s.length;
     },
+    math: (kind, x) => MATH_FNS[kind](x),
+    read: () => -1,
   },
 }));
 try { instance.exports.main(); }

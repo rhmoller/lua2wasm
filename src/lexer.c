@@ -195,7 +195,30 @@ TokenList lex(const char *source) {
             case ')': ONE(TOK_RPAREN); break;
             case '{': ONE(TOK_LBRACE); break;
             case '}': ONE(TOK_RBRACE); break;
-            case '[': ONE(TOK_LBRACKET); break;
+            case '[':
+                if (L.p[1] == '[') {
+                    /* Long-bracket string [[ ... ]] (level 0 only; no [=[…]=]) */
+                    L.p += 2; /* skip [[ */
+                    /* Per Lua: a leading newline immediately after the open
+                     * bracket is stripped. */
+                    if (*L.p == '\n') { L.line++; L.p++; }
+                    const char *start = L.p;
+                    while (*L.p && !(L.p[0] == ']' && L.p[1] == ']')) {
+                        if (*L.p == '\n') L.line++;
+                        L.p++;
+                    }
+                    if (!*L.p) { lex_error(&L, "unterminated long string"); t.kind = TOK_ERROR; t.len = 0; break; }
+                    size_t len = (size_t)(L.p - start);
+                    t.kind = TOK_STRING;
+                    t.str_buf = malloc(len ? len : 1);
+                    if (len) memcpy(t.str_buf, start, len);
+                    t.str_len = len;
+                    L.p += 2; /* skip ]] */
+                    t.len = (size_t)(L.p - t.start);
+                } else {
+                    ONE(TOK_LBRACKET);
+                }
+                break;
             case ']': ONE(TOK_RBRACKET); break;
             case ',': ONE(TOK_COMMA); break;
             case ';': ONE(TOK_SEMI); break;

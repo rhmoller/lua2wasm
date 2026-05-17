@@ -890,6 +890,12 @@ static const char *PRELUDE_TYPES =
 "  ;;         2 = %g (f_val + prec)   3 = %f   4 = %e   5 = %x (i_val)\n"
 "  ;; Returns the number of bytes written.\n"
 "  (import \"host\" \"fmt\" (func $host_fmt (param i32) (param i64) (param f64) (param i32) (result i32)))\n"
+"  ;; host_math: dispatch transcendental functions to the JS Math API.\n"
+"  ;;   0 sin  1 cos  2 tan  3 asin  4 acos  5 atan  6 exp  7 log\n"
+"  (import \"host\" \"math\" (func $host_math (param i32) (param f64) (result f64)))\n"
+"  ;; host_read: read next line from stdin into $fmt_buf and return the\n"
+"  ;; length; returns -1 on EOF.\n"
+"  (import \"host\" \"read\" (func $host_read (result i32)))\n"
 "\n"
 "  ;; --- singletons ---\n"
 "  (global $g_true  (ref $LuaBool) (struct.new $LuaBool (i32.const 1)))\n"
@@ -1078,15 +1084,22 @@ static const char *PRELUDE_HELPERS =
 "    (if (i32.and (ref.test (ref $LuaString) (local.get $a))\n"
 "                 (ref.test (ref $LuaString) (local.get $b)))\n"
 "      (then (return (call $str_eq (local.get $a) (local.get $b)))))\n"
-"    ;; __eq metamethod (only consulted when both are tables)\n"
+"    ;; Two tables: consult __eq if present, otherwise compare by identity.\n"
 "    (if (i32.and (ref.test (ref $LuaTable) (local.get $a))\n"
 "                 (ref.test (ref $LuaTable) (local.get $b)))\n"
 "      (then\n"
 "        (local.set $mm (call $get_metamethod (local.get $a) (ref.as_non_null (global.get $g_mkey_eq))))\n"
-"        (if (ref.is_null (local.get $mm)) (then (return (i32.const 0))))\n"
+"        (if (ref.is_null (local.get $mm))\n"
+"          (then (return (ref.eq (ref.cast (ref null eq) (local.get $a))\n"
+"                                 (ref.cast (ref null eq) (local.get $b))))))\n"
 "        (return (call $lua_truthy (call $args_first (call $lua_call\n"
 "          (ref.cast (ref $LuaClosure) (local.get $mm))\n"
 "          (array.new_fixed $ArgArr 2 (local.get $a) (local.get $b))))))))\n"
+"    ;; Any other matched ref types (closures, etc.): identity via ref.eq.\n"
+"    (if (i32.and (ref.test (ref eq) (local.get $a))\n"
+"                 (ref.test (ref eq) (local.get $b)))\n"
+"      (then (return (ref.eq (ref.cast (ref null eq) (local.get $a))\n"
+"                             (ref.cast (ref null eq) (local.get $b))))))\n"
 "    (i32.const 0))\n"
 "\n"
 "  (func $lua_eq  (param $a anyref) (param $b anyref) (result anyref)\n"
@@ -1483,6 +1496,16 @@ static const char *PRELUDE_HELPERS =
 "    (call $host_write_raw (call $lua_tostring (local.get $acc)))\n"
 "    (global.get $g_empty_args))\n"
 "\n"
+"  ;; io.read — single-line reader. Host writes the line into $fmt_buf and\n"
+"  ;; returns its length; -1 means EOF, in which case we return nil.\n"
+"  (func $builtin_io_read (type $LuaFn)\n"
+"    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))\n"
+"    (local $n i32)\n"
+"    (local.set $n (call $host_read))\n"
+"    (if (i32.lt_s (local.get $n) (i32.const 0))\n"
+"      (then (return (array.new_fixed $ArgArr 1 (ref.null any)))))\n"
+"    (array.new_fixed $ArgArr 1 (call $fmt_buf_to_str (local.get $n))))\n"
+"\n"
 "  (func $builtin_type (type $LuaFn)\n"
 "    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))\n"
 "    (local $v anyref) (local $bytes (ref null $LuaArr)) (local $b (ref null $LuaString))\n"
@@ -1641,6 +1664,28 @@ static const char *PRELUDE_HELPERS =
 "    (array.new_fixed $ArgArr 1\n"
 "      (call $make_float (f64.sqrt (call $as_float\n"
 "        (call $args_at (local.get $args) (i32.const 0)))))))\n"
+"\n"
+"  ;; Transcendentals all route through host_math with a kind index.\n"
+"  (func $math_via_host (param $kind i32) (param $args (ref $ArgArr)) (result (ref $ArgArr))\n"
+"    (array.new_fixed $ArgArr 1\n"
+"      (call $make_float (call $host_math (local.get $kind)\n"
+"        (call $as_float (call $args_at (local.get $args) (i32.const 0)))))))\n"
+"  (func $builtin_math_sin  (type $LuaFn) (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))\n"
+"    (call $math_via_host (i32.const 0) (local.get $args)))\n"
+"  (func $builtin_math_cos  (type $LuaFn) (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))\n"
+"    (call $math_via_host (i32.const 1) (local.get $args)))\n"
+"  (func $builtin_math_tan  (type $LuaFn) (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))\n"
+"    (call $math_via_host (i32.const 2) (local.get $args)))\n"
+"  (func $builtin_math_asin (type $LuaFn) (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))\n"
+"    (call $math_via_host (i32.const 3) (local.get $args)))\n"
+"  (func $builtin_math_acos (type $LuaFn) (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))\n"
+"    (call $math_via_host (i32.const 4) (local.get $args)))\n"
+"  (func $builtin_math_atan (type $LuaFn) (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))\n"
+"    (call $math_via_host (i32.const 5) (local.get $args)))\n"
+"  (func $builtin_math_exp  (type $LuaFn) (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))\n"
+"    (call $math_via_host (i32.const 6) (local.get $args)))\n"
+"  (func $builtin_math_log  (type $LuaFn) (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))\n"
+"    (call $math_via_host (i32.const 7) (local.get $args)))\n"
 "\n"
 "  (func $builtin_math_ceil (type $LuaFn)\n"
 "    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))\n"
@@ -2110,6 +2155,23 @@ int codegen_module(const ParseResult *pr, WatBuilder *out,
                 "        (i32.const %zu) (i32.const %zu)))\n"
                 "      (global.get $g_builtin_%s))\n",
                 sr.offset, sr.len, builtin_name(bi));
+        }
+        /* Plain-value constants for the math library. */
+        if (cls == BLT_LIB_MATH) {
+            StrRef pi_key = strpool_add(&c.strs, "pi", 2);
+            wat_appendf(out,
+                "    (call $tab_set (local.get $tab)\n"
+                "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
+                "        (i32.const %zu) (i32.const %zu)))\n"
+                "      (struct.new $LuaFloat (f64.const 3.141592653589793)))\n",
+                pi_key.offset, pi_key.len);
+            StrRef huge_key = strpool_add(&c.strs, "huge", 4);
+            wat_appendf(out,
+                "    (call $tab_set (local.get $tab)\n"
+                "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
+                "        (i32.const %zu) (i32.const %zu)))\n"
+                "      (struct.new $LuaFloat (f64.const inf)))\n",
+                huge_key.offset, huge_key.len);
         }
         wat_appendf(out, "    (global.set $g_user_%zu (local.get $tab))\n", gi);
     }

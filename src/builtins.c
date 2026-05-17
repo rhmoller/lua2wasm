@@ -29,12 +29,21 @@ static const struct {
     { "ceil",  4, "$builtin_math_ceil",  BLT_LIB_MATH },
     { "min",   3, "$builtin_math_min",   BLT_LIB_MATH },
     { "max",   3, "$builtin_math_max",   BLT_LIB_MATH },
+    { "sin",   3, "$builtin_math_sin",   BLT_LIB_MATH },
+    { "cos",   3, "$builtin_math_cos",   BLT_LIB_MATH },
+    { "tan",   3, "$builtin_math_tan",   BLT_LIB_MATH },
+    { "asin",  4, "$builtin_math_asin",  BLT_LIB_MATH },
+    { "acos",  4, "$builtin_math_acos",  BLT_LIB_MATH },
+    { "atan",  4, "$builtin_math_atan",  BLT_LIB_MATH },
+    { "exp",   3, "$builtin_math_exp",   BLT_LIB_MATH },
+    { "log",   3, "$builtin_math_log",   BLT_LIB_MATH },
     /* string library */
     { "len",    3, "$builtin_string_len",    BLT_LIB_STRING },
     { "sub",    3, "$builtin_string_sub",    BLT_LIB_STRING },
     { "format", 6, "$builtin_string_format", BLT_LIB_STRING },
     /* io library */
     { "write", 5, "$builtin_io_write", BLT_LIB_IO },
+    { "read",  4, "$builtin_io_read",  BLT_LIB_IO },
     /* table library */
     { "insert", 6, "$builtin_table_insert", BLT_LIB_TABLE },
     { "remove", 6, "$builtin_table_remove", BLT_LIB_TABLE },

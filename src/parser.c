@@ -427,6 +427,27 @@ static Expr *parse_prefix_chain(Parser *p) {
             idx->as.index.table = e;
             idx->as.index.key = key;
             e = idx;
+        } else if (k == TOK_STRING || k == TOK_LBRACE) {
+            /* Paren-less single-arg call: `f "x"` or `f{k=1}` — only one
+             * argument. The arg is either the immediate string literal or a
+             * table constructor parsed as a primary. */
+            int call_line = peek(p)->line;
+            Expr *arg;
+            if (k == TOK_STRING) {
+                const Token *t = advance(p);
+                arg = expr_new(p->pool, EXPR_STRING, t->line);
+                arg->as.s.bytes = t->str_buf;
+                arg->as.s.len = t->str_len;
+            } else {
+                arg = parse_primary(p);
+                if (!p->ok) return NULL;
+            }
+            Expr *call = expr_new(p->pool, EXPR_CALL, call_line);
+            call->as.call.callee = e;
+            call->as.call.nargs = 1;
+            call->as.call.args = node_pool_alloc(p->pool, sizeof(Expr *));
+            call->as.call.args[0] = arg;
+            e = call;
         } else if (k == TOK_COLON) {
             /* method call: recv:name(args) */
             int line = peek(p)->line;

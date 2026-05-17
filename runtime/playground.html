@@ -370,6 +370,7 @@ async function run() {
         default: return "";
       }
     }
+    const MATH_FNS = [Math.sin, Math.cos, Math.tan, Math.asin, Math.acos, Math.atan, Math.exp, Math.log];
     ({ instance } = await WebAssembly.instantiate(bytes, {
       host: {
         print:     v => logLine(luaToString(v)),
@@ -379,6 +380,8 @@ async function run() {
           for (let j = 0; j < s.length; j++) instance.exports.fmt_buf_set(j, s.charCodeAt(j));
           return s.length;
         },
+        math: (kind, x) => MATH_FNS[kind](x),
+        read: () => -1,
       },
     }));
     curInstance = instance;
