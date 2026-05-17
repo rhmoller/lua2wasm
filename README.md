@@ -30,21 +30,25 @@ concerns.
 
 ## Status
 
-**Milestone 3a (current) — first-class functions and closures.**
+**Phases 1–8 + 10 complete.** A practical Lua 5.5 subset compiles and runs.
 
-| Area | Supported now | Deferred |
+| Area | Supported | Deferred / known limits |
 |---|---|---|
-| Lexer | All keywords, operators, single/double-quoted strings with escapes, integer + float literals, `--[[ ]]` long comments | Long string literals `[[ ]]`, `\xHH`/`\u{…}` escapes, hex/binary number literals |
-| Values | `nil`, booleans, integers (i31ref or `$LuaInt` box), floats (`$LuaFloat`), strings (`$LuaString`), **closures (`$LuaClosure`)** | Tables, userdata, threads |
-| Statements | `local x = e`, **`local function f(...) end`**, assignment to locals and upvalues, `if/elseif/else`, `while`, bare `do`, expression-statement (call), **`return [expr]`** | `for`, `repeat/until`, `goto/::label::`, top-level `function f() end` (needs globals), multi-assign, multi-return |
-| Expressions | All literals, `function(...) ... end`, variable refs (local/upvalue/`print`), N-arg calls, all operators below | Multiple return values, varargs `...` |
-| Operators | `+ - * / // % ^`, `== ~= < <= > >=`, `and or not`, `..`, `#` | Bitwise `& \| ~ << >>` (lexed but not codegen'd) |
-| Builtins | `print(x)` — now a real `$LuaClosure` stored in a wasm global | The rest of the standard library |
-| Runtime | Mixed int/float promotion, short-circuit and/or, string concat (strings only), **uniform calling convention `(closure, args) → anyref`**, **upvalue capture via shared `$Box`** | Proper tail calls (`return_call_ref`), float `%`, float side of `..`, error/pcall |
+| Lexer | all keywords / operators / single+double-quoted strings with escapes / int + float literals / `--[[ ]]` long comments | long-string brackets `[[ ]]`, `\xHH`/`\u{…}` escapes, hex/binary literals |
+| Values | `nil`, booleans, integers (i31ref / boxed `$LuaInt`), floats, strings, tables, closures | userdata, threads |
+| Statements | `local`, `local function`, multi-name `local`, single/multi assign (to vars or `t[k]` / `t.x`), `if/elseif/else`, `while`, `repeat ... until`, bare `do`, `break`, expression-statement, **`return e1, …`**, `for i = a, b [, c]`, `for k[,v,…] in …`, `global x [= e]` | `goto / ::label::`, top-level `function f() end` sugar |
+| Expressions | all literals, anonymous `function`, variable refs (local/upvalue/builtin/global), N-arg calls, **multiple return values**, table constructors (positional / named / `[expr]=` keys), `t.x` / `t[k]`, all operators below | varargs `...`, method-call sugar `obj:m()` |
+| Operators | `+ - * / // % ^`, `== ~= < <= > >=`, `and or not`, `..`, `#` (strings + tables) | bitwise `& \| ~ << >>` (lexed only), float `%` |
+| Calling | uniform `(closure, args) → results-array`, **proper tail calls via `return_call_ref`** | varargs in function defs |
+| Metatables | `setmetatable` / `getmetatable`, `__index` (table chain or function), `__add`, `__eq` | `__newindex`, `__call`, `__tostring`, other arithmetic metamethods |
+| Errors | `error(v)` / `pcall(f, …)` via WASM exception handling (`throw $LuaError` + `try_table`) | error message annotations, traceback |
+| Stdlib | `print`, `error`, `pcall`, `type`, `tostring`, `tonumber`, `ipairs`, `pairs`, `next`, `setmetatable`, `getmetatable`, `math.{floor,abs,sqrt}`, `string.{len,sub}` | the rest of `string`, `table`, `math`, `io`, `os` |
+| Coroutines | — | blocked on the WASM stack-switching proposal shipping in browsers |
 
-See [`tests/fixtures/milestone3.lua`](tests/fixtures/milestone3.lua) for what
-a working program looks like today — recursion, closures with mutable
-captures, transitive upvalue chains.
+Browse [`tests/fixtures/`](tests/fixtures/) for what a working program looks like
+at each phase. The most exercised, end-to-end fixture is
+[`milestone8.lua`](tests/fixtures/milestone8.lua) (metatables, inheritance, custom
+`__add` and `__eq`).
 
 ## Value representation
 
@@ -127,11 +131,23 @@ node runtime/host.mjs /tmp/m2.wasm
 
 ```sh
 ( cd build && python3 -m http.server 8000 )
-# then open http://localhost:8000/../runtime/index.html?mod=milestone2.wasm
+# then open http://localhost:8000/../runtime/index.html?mod=milestone8.wasm
 ```
 
 `runtime/host.mjs` does not use any Node-specific WASM features; the same
 module loads in any GC-capable browser via `runtime/index.html`.
+
+## Ship a script as one HTML file
+
+`scripts/package-html.sh` base64-embeds a `.wasm` and a tiny loader into a
+single self-contained HTML page (no external assets):
+
+```sh
+./build/lua2wasm my-script.lua -o my-script.wat
+wasm-as --all-features -o my-script.wasm my-script.wat
+./scripts/package-html.sh my-script.wasm -o my-script.html
+# open my-script.html in Chrome/Firefox — output appears inline
+```
 
 ## Roadmap
 

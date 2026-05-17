@@ -84,7 +84,7 @@ Goal: turn the compiler into something you could plausibly write a fizzbuzz in.
 - Mixed int/float arithmetic with Lua promotion rules.
 - Fixture: `tests/fixtures/milestone2.lua` exercising the above.
 
-### Phase 3 — Functions and closures
+### Phase 3 — Functions and closures ✓ **done** (3a + 3b)
 
 Goal: first-class functions with proper Lua semantics. Unlocks recursion,
 real `return` values, and most of the standard library.
@@ -101,7 +101,7 @@ real `return` values, and most of the standard library.
 Acceptance: every fixture from phase 2 still passes; the `print` builtin
 becomes a normal `$LuaClosure` instead of a hardcoded codegen path.
 
-### Phase 4 — Tables
+### Phase 4 — Tables ✓ **done**
 
 Goal: the keystone of Lua. Once tables work, most idiomatic Lua compiles.
 
@@ -113,7 +113,7 @@ Goal: the keystone of Lua. Once tables work, most idiomatic Lua compiles.
 - Fixture: a hand-coded linked list, a small key-value lookup, iteration via
   manual index walk (no `pairs` yet).
 
-### Phase 5 — Control flow, globals, `for`
+### Phase 5 — Control flow, globals, `for` ✓ **done** (modulo `goto`)
 
 Goal: the rest of the grammar. After this, the only language gaps are error
 handling, metatables, and coroutines.
@@ -126,7 +126,7 @@ handling, metatables, and coroutines.
   is a compile-time error.
 - Fixture: a self-contained "data crunch" script using all of the above.
 
-### Phase 6 — Errors
+### Phase 6 — Errors ✓ **done**
 
 Goal: `error` and `pcall` mapped onto WASM exception handling.
 
@@ -136,7 +136,7 @@ Goal: `error` and `pcall` mapped onto WASM exception handling.
 - Fixture: an arithmetic-on-nil case wrapped in `pcall`, plus deliberate
   `error("...")` propagation.
 
-### Phase 7 — Minimal stdlib
+### Phase 7 — Minimal stdlib ✓ **done** (subset: tostring/tonumber/type/ipairs/pairs/next/setmetatable/getmetatable + math.{floor,abs,sqrt} + string.{len,sub})
 
 Goal: enough of the standard library that interesting scripts run unmodified.
 
@@ -150,7 +150,7 @@ Goal: enough of the standard library that interesting scripts run unmodified.
   `char`.
 - Fixture: a small benchmark suite ported from upstream Lua's own tests.
 
-### Phase 8 — Metatables
+### Phase 8 — Metatables ✓ **done** (subset: `__index` table/func chain, `__add`, `__eq`)
 
 Goal: `setmetatable`, `getmetatable`, and the core metamethods.
 
@@ -170,7 +170,7 @@ Blocked on: WASM **stack-switching proposal** shipping in browsers
   (a) Stub coroutines with a JS-side trampoline that emulates them, or
   (b) Mark phase 9 as "blocked, target Wasmtime first."
 
-### Phase 10 — Polish, packaging, perf
+### Phase 10 — Polish, packaging, perf  ✓ **done** (subset: single-file HTML packager + README)
 
 - `wasm-opt` integration in the build pipeline.
 - A web playground (Monaco editor + live compile + run) under `runtime/web/`.
