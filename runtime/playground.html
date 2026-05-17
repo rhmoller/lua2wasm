@@ -119,6 +119,7 @@
       <option value="oo">OOP via metatables</option>
       <option value="pcall">pcall</option>
       <option value="forloop">for + ipairs</option>
+      <option value="iter">iterator (closure)</option>
       <option value="stdin">interactive (io.read)</option>
     </optgroup>
     <optgroup label="from lua.org/extras">
@@ -273,6 +274,26 @@ end
 print(pcall(safediv, 10, 2))   -- true 5.0
 print(pcall(safediv, 1, 0))    -- false "division by zero"
 `,
+  iter: `-- A stateful closure used as a generic-for iterator.
+local function numberGenerator(start, stop)
+  return function()
+    start = start + 1
+    if start <= stop then return start end
+  end
+end
+
+-- prints 2, 3, 4, 5
+for num in numberGenerator(1, 5) do
+  print(num)
+end
+
+-- Each call returns a fresh closure with its own captured \`start\`.
+local g = numberGenerator(10, 12)
+print(g())   -- 11
+print(g())   -- 12
+print(g())   -- nil (terminates a generic-for)
+`,
+
   stdin: `-- Reads two lines of input interactively from the output pane.
 io.write("Name? ")
 local name = io.read()
