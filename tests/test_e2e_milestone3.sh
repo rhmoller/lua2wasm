@@ -22,7 +22,7 @@ EXPECTED="720
 101
 102"
 
-OUT="$(node "$SRC_DIR/runtime/host.mjs" "$WASM")"
+OUT="$(node --experimental-wasm-exnref "$SRC_DIR/runtime/host.mjs" "$WASM")"
 if [[ "$OUT" != "$EXPECTED" ]]; then
     echo "FAIL: output mismatch" >&2
     diff <(echo "$EXPECTED") <(echo "$OUT") >&2 || true

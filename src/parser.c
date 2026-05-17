@@ -1,4 +1,5 @@
 #include "parser.h"
+#include "builtins.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -143,7 +144,7 @@ static int frame_add_upvalue(FuncFrame *f, UpvalSource src, int idx) {
  * Returns:
  *   kind = VAR_LOCAL with out_idx = slot in innermost frame
  *   kind = VAR_UPVAL with out_idx = upvalue index in innermost frame
- *   kind = VAR_BUILTIN_PRINT
+ *   kind = VAR_BUILTIN
  * or returns 0 (NOT_FOUND) on failure.
  *
  * Side effect: adds upvalues to intermediate frames as needed.
@@ -158,12 +159,9 @@ static int resolve_in_frame(Parser *p, int frame_idx, const char *name, size_t n
         return 1;
     }
     if (frame_idx == 0) {
-        /* top-level: try magic builtins, then globals */
-        if (name_len == 5 && memcmp(name, "print", 5) == 0) {
-            *out_kind = VAR_BUILTIN_PRINT;
-            *out_idx = 0;
-            return 1;
-        }
+        /* top-level: builtins (must match codegen's BUILTIN_NAMES table), then globals */
+        int b = lookup_builtin(name, name_len);
+        if (b >= 0) { *out_kind = VAR_BUILTIN; *out_idx = b; return 1; }
         int g = globals_lookup(p, name, name_len);
         if (g >= 0) { *out_kind = VAR_GLOBAL; *out_idx = g; return 1; }
         return 0;
@@ -174,9 +172,9 @@ static int resolve_in_frame(Parser *p, int frame_idx, const char *name, size_t n
     if (!resolve_in_frame(p, frame_idx - 1, name, name_len, &parent_kind, &parent_idx)) {
         return 0;
     }
-    if (parent_kind == VAR_BUILTIN_PRINT) {
-        *out_kind = VAR_BUILTIN_PRINT;
-        *out_idx = 0;
+    if (parent_kind == VAR_BUILTIN) {
+        *out_kind = VAR_BUILTIN;
+        *out_idx = parent_idx;
         return 1;
     }
     if (parent_kind == VAR_GLOBAL) {
@@ -670,7 +668,7 @@ static Stmt *parse_ident_stmt(Parser *p) {
         set_error(p, "expression statement must be a call or assignment");
         return NULL;
     }
-    if (first->kind == EXPR_VAR && first->as.var.kind == VAR_BUILTIN_PRINT) {
+    if (first->kind == EXPR_VAR && first->as.var.kind == VAR_BUILTIN) {
         set_error(p, "cannot reassign builtin `print`");
         return NULL;
     }
@@ -685,7 +683,7 @@ static Stmt *parse_ident_stmt(Parser *p) {
         if (t->kind != EXPR_VAR && t->kind != EXPR_INDEX) {
             set_error(p, "invalid assignment target"); return NULL;
         }
-        if (t->kind == EXPR_VAR && t->as.var.kind == VAR_BUILTIN_PRINT) {
+        if (t->kind == EXPR_VAR && t->as.var.kind == VAR_BUILTIN) {
             set_error(p, "cannot reassign builtin `print`"); return NULL;
         }
         targets[n_targets++] = expr_to_target(t);

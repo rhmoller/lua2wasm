@@ -1,4 +1,5 @@
 #include "codegen.h"
+#include "builtins.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -128,8 +129,8 @@ static void emit_var_read(CG *c, VarKind kind, int idx, int depth) {
                 "(struct.get $LuaClosure $upvals (local.get $closure)) "
                 "(i32.const %d)))\n", idx);
             break;
-        case VAR_BUILTIN_PRINT:
-            wat_append(c->w, "(global.get $g_print)\n");
+        case VAR_BUILTIN:
+            wat_appendf(c->w, "(global.get $g_builtin_%d)\n", idx);
             break;
         case VAR_GLOBAL:
             wat_appendf(c->w, "(global.get $g_user_%d)\n", idx);
@@ -152,7 +153,7 @@ static void emit_box_ref(CG *c, VarKind kind, int idx, int depth) {
                 "(struct.get $LuaClosure $upvals (local.get $closure)) "
                 "(i32.const %d))\n", idx);
             break;
-        case VAR_BUILTIN_PRINT:
+        case VAR_BUILTIN:
         case VAR_GLOBAL:
             cg_error(c, "cannot take a box reference to a builtin/global");
             break;
@@ -173,7 +174,7 @@ static void emit_target_open(CG *c, const AssignTarget *t, int depth) {
                 emit_indent(c, depth);
                 wat_appendf(c->w, "(global.set $g_user_%d\n", t->as.var.idx);
                 break;
-            case VAR_BUILTIN_PRINT:
+            case VAR_BUILTIN:
                 cg_error(c, "cannot assign to builtin print");
                 break;
         }
@@ -1248,17 +1249,65 @@ static const char *PRELUDE_HELPERS =
 "      (local.get $b)   (i32.const 0) (local.get $nb))\n"
 "    (local.get $out))\n"
 "\n"
+"  (tag $LuaError (param anyref))\n"
+"\n"
 "  (func $builtin_print (type $LuaFn)\n"
 "    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))\n"
 "    (if (i32.gt_u (array.len (local.get $args)) (i32.const 0))\n"
 "      (then (call $host_print (array.get $ArgArr (local.get $args) (i32.const 0)))))\n"
 "    (global.get $g_empty_args))\n"
 "\n"
-"  (elem declare func $builtin_print)\n"
-"  (global $g_print (ref $LuaClosure)\n"
-"    (struct.new $LuaClosure\n"
-"      (ref.func $builtin_print)\n"
-"      (global.get $g_empty_upvals)))\n"
+"  (func $builtin_error (type $LuaFn)\n"
+"    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))\n"
+"    (throw $LuaError (call $args_at (local.get $args) (i32.const 0)))\n"
+"    ;; unreachable, but typechecker needs a tail expression:\n"
+"    (global.get $g_empty_args))\n"
+"\n"
+"  ;; pcall(f, ...): calls f with the remaining args. Returns (true, results...)\n"
+"  ;; on success; (false, err) on caught $LuaError.\n"
+"  (func $builtin_pcall (type $LuaFn)\n"
+"    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))\n"
+"    (local $callee (ref $LuaClosure))\n"
+"    (local $f_args (ref $ArgArr))\n"
+"    (local $n_total i32) (local $n_fargs i32) (local $i i32)\n"
+"    (local $err anyref) (local $results (ref $ArgArr)) (local $r2 (ref $ArgArr))\n"
+"    (local.set $n_total (array.len (local.get $args)))\n"
+"    (if (i32.eqz (local.get $n_total))\n"
+"      (then (throw $LuaError (ref.null any))))\n"
+"    (local.set $callee\n"
+"      (ref.cast (ref $LuaClosure) (array.get $ArgArr (local.get $args) (i32.const 0))))\n"
+"    (local.set $n_fargs (i32.sub (local.get $n_total) (i32.const 1)))\n"
+"    (local.set $f_args (array.new $ArgArr (ref.null any) (local.get $n_fargs)))\n"
+"    (block $copied (loop $cp\n"
+"      (br_if $copied (i32.ge_s (local.get $i) (local.get $n_fargs)))\n"
+"      (array.set $ArgArr (local.get $f_args) (local.get $i)\n"
+"        (array.get $ArgArr (local.get $args)\n"
+"          (i32.add (local.get $i) (i32.const 1))))\n"
+"      (local.set $i (i32.add (local.get $i) (i32.const 1)))\n"
+"      (br $cp)))\n"
+"    (block $catch_err (result anyref)\n"
+"      ;; success path: build (true, results...) and return.\n"
+"      (local.set $results\n"
+"        (try_table (result (ref $ArgArr)) (catch $LuaError $catch_err)\n"
+"          (call $lua_call (local.get $callee) (local.get $f_args))))\n"
+"      ;; prepend true\n"
+"      (local.set $r2 (array.new $ArgArr (ref.null any)\n"
+"        (i32.add (array.len (local.get $results)) (i32.const 1))))\n"
+"      (array.set $ArgArr (local.get $r2) (i32.const 0) (global.get $g_true))\n"
+"      (array.copy $ArgArr $ArgArr (local.get $r2) (i32.const 1)\n"
+"        (local.get $results) (i32.const 0) (array.len (local.get $results)))\n"
+"      (return (local.get $r2)))\n"
+"    ;; catch path: stack has the error anyref\n"
+"    (local.set $err)\n"
+"    (array.new_fixed $ArgArr 2 (global.get $g_false) (local.get $err)))\n"
+"\n"
+"  (elem declare func $builtin_print $builtin_error $builtin_pcall)\n"
+"  (global $g_builtin_0 (ref $LuaClosure)\n"
+"    (struct.new $LuaClosure (ref.func $builtin_print) (global.get $g_empty_upvals)))\n"
+"  (global $g_builtin_1 (ref $LuaClosure)\n"
+"    (struct.new $LuaClosure (ref.func $builtin_error) (global.get $g_empty_upvals)))\n"
+"  (global $g_builtin_2 (ref $LuaClosure)\n"
+"    (struct.new $LuaClosure (ref.func $builtin_pcall) (global.get $g_empty_upvals)))\n"
 "\n"
 "  ;; --- exported decoders for the JS host ---\n"
 "  (func (export \"lua_tag\") (param $v anyref) (result i32)\n"

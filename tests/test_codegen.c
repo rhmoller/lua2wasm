@@ -25,7 +25,7 @@ static MunitResult test_emits_expected(const MunitParameter params[], void *fixt
     munit_assert_not_null(strstr(s, "(call $lua_add)"));
     /* No more direct $host_print call from user code; goes through $lua_call. */
     munit_assert_not_null(strstr(s, "(call $lua_call"));
-    munit_assert_not_null(strstr(s, "(global.get $g_print)"));
+    munit_assert_not_null(strstr(s, "(global.get $g_builtin_0)"));
     munit_assert_not_null(strstr(s, "(func $main (export \"main\")"));
     munit_assert_not_null(strstr(s, "(type $LuaClosure"));
 

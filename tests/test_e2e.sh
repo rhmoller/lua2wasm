@@ -16,7 +16,7 @@ WASM="$BUILD_DIR/print_sum.wasm"
 # Arch (1.0.39) still rejects `anyref` and recursive `(ref null $t)` refs.
 wasm-as --all-features -o "$WASM" "$WAT"
 
-OUT="$(node "$SRC_DIR/runtime/host.mjs" "$WASM")"
+OUT="$(node --experimental-wasm-exnref "$SRC_DIR/runtime/host.mjs" "$WASM")"
 if [[ "$OUT" != "3" ]]; then
     echo "FAIL: expected '3', got '$OUT'" >&2
     exit 1

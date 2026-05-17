@@ -31,7 +31,7 @@ typedef struct {
 typedef enum {
     VAR_LOCAL,          /* a local in the current function */
     VAR_UPVAL,          /* captured upvalue of the current function */
-    VAR_BUILTIN_PRINT,  /* the magic `print` builtin (phase 3a) */
+    VAR_BUILTIN,        /* a predeclared builtin, idx = builtin id */
     VAR_GLOBAL,         /* a module-level global declared with `global x` */
 } VarKind;
 
