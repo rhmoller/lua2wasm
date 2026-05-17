@@ -4,6 +4,36 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* ---------- forward decls ---------- */
+typedef struct Expr Expr;
+typedef struct Stmt Stmt;
+typedef struct LuaFunc LuaFunc;
+typedef struct Block Block;
+
+/* ---------- upvalue references ----------
+ * Each LuaFunc has a list of upvalues it captures from its enclosing function.
+ * Each upvalue is sourced either from the enclosing function's locals or from
+ * the enclosing function's own upvalues (transitively).
+ */
+typedef enum {
+    UPVAL_FROM_LOCAL,
+    UPVAL_FROM_UPVAL,
+} UpvalSource;
+
+typedef struct {
+    UpvalSource src;
+    int idx;            /* parent's local-slot or upvalue-slot */
+} UpvalueRef;
+
+/* ---------- variable references ----------
+ * Resolved at parse time to one of these three kinds.
+ */
+typedef enum {
+    VAR_LOCAL,          /* a local in the current function */
+    VAR_UPVAL,          /* captured upvalue of the current function */
+    VAR_BUILTIN_PRINT,  /* the magic `print` builtin (phase 3a) */
+} VarKind;
+
 /* ---------- expressions ---------- */
 typedef enum {
     EXPR_NIL,
@@ -12,10 +42,11 @@ typedef enum {
     EXPR_INT,
     EXPR_FLOAT,
     EXPR_STRING,
-    EXPR_VAR,           /* local var reference; resolved to local_idx */
+    EXPR_VAR,
     EXPR_CALL,
     EXPR_BINOP,
     EXPR_UNOP,
+    EXPR_FUNCTION,      /* anonymous function expression */
 } ExprKind;
 
 typedef enum {
@@ -26,65 +57,59 @@ typedef enum {
 } BinOp;
 
 typedef enum {
-    UN_NEG,     /* -x */
-    UN_NOT,     /* not x */
-    UN_LEN,     /* #x */
+    UN_NEG, UN_NOT, UN_LEN,
 } UnOp;
-
-typedef struct Expr Expr;
 
 struct Expr {
     ExprKind kind;
     int line;
     union {
-        int64_t i_val;                  /* EXPR_INT */
-        double f_val;                   /* EXPR_FLOAT */
-        struct {                        /* EXPR_STRING */
-            const char *bytes;          /* owned by lexer; valid for lifetime of token list */
-            size_t len;
-        } s;
-        struct {                        /* EXPR_VAR */
+        int64_t i_val;
+        double f_val;
+        struct { const char *bytes; size_t len; } s;
+        struct {
             const char *name;
             size_t name_len;
-            int local_idx;              /* -1 until resolved; -2 = builtin (print) */
+            VarKind kind;
+            int idx;        /* local slot or upvalue index, depending on kind */
         } var;
-        struct {                        /* EXPR_CALL */
+        struct {
             Expr *callee;
             Expr **args;
             size_t nargs;
         } call;
-        struct {                        /* EXPR_BINOP */
+        struct {
             BinOp op;
             Expr *lhs;
             Expr *rhs;
         } binop;
-        struct {                        /* EXPR_UNOP */
+        struct {
             UnOp op;
             Expr *operand;
         } unop;
+        struct {
+            LuaFunc *func;
+        } func_expr;
     } as;
 };
 
 /* ---------- statements ---------- */
 typedef enum {
-    STMT_LOCAL,         /* local name = expr (single binding for v2) */
-    STMT_ASSIGN,        /* name = expr (target must be a local) */
-    STMT_EXPR,          /* expression statement (call) */
-    STMT_IF,            /* if cond then ... [elseif ...] [else ...] end */
-    STMT_WHILE,         /* while cond do ... end */
-    STMT_DO,            /* do ... end */
-    STMT_RETURN,        /* return [exprs] -- v2 supports return with no value */
+    STMT_LOCAL,         /* local name = expr */
+    STMT_ASSIGN,        /* name = expr (local or upvalue target) */
+    STMT_EXPR,          /* call as statement */
+    STMT_IF,
+    STMT_WHILE,
+    STMT_DO,
+    STMT_RETURN,        /* return [expr] */
+    STMT_LOCAL_FUNC,    /* local function name(...) ... end */
 } StmtKind;
-
-typedef struct Stmt Stmt;
-typedef struct Block Block;
 
 struct Block {
     Stmt **items;
     size_t count;
 };
 
-/* if/elseif chain: array of (cond, body) plus optional else body. */
 typedef struct {
     Expr *cond;
     Block body;
@@ -94,35 +119,59 @@ struct Stmt {
     StmtKind kind;
     int line;
     union {
-        struct {                        /* STMT_LOCAL */
+        struct {
             const char *name;
             size_t name_len;
-            Expr *init;                 /* may be NULL */
-            int local_idx;              /* filled in during scope resolve */
+            Expr *init;
+            int local_idx;
         } local;
-        struct {                        /* STMT_ASSIGN */
+        struct {
             const char *name;
             size_t name_len;
             Expr *value;
-            int local_idx;              /* resolved */
+            VarKind kind;
+            int idx;
         } assign;
-        struct {                        /* STMT_EXPR */
+        struct {
             Expr *expr;
         } expr_stmt;
-        struct {                        /* STMT_IF */
-            IfArm *arms;                /* arms[0] is `if`, rest are `elseif` */
+        struct {
+            IfArm *arms;
             size_t narms;
             int has_else;
             Block else_body;
         } if_stmt;
-        struct {                        /* STMT_WHILE */
+        struct {
             Expr *cond;
             Block body;
         } while_stmt;
-        struct {                        /* STMT_DO */
+        struct {
             Block body;
         } do_stmt;
+        struct {
+            Expr *value;            /* may be NULL for bare `return` */
+        } return_stmt;
+        struct {
+            const char *name;
+            size_t name_len;
+            int local_idx;
+            LuaFunc *func;
+        } local_func;
     } as;
+};
+
+/* ---------- a Lua function ----------
+ * Each function definition gets one LuaFunc node, collected into a flat list
+ * (`ParseResult.funcs`) so codegen can emit each as a top-level wasm function.
+ */
+struct LuaFunc {
+    int func_idx;               /* unique id; used to name `$user_N` */
+    int n_params;
+    int n_locals;               /* total locals, including params */
+    UpvalueRef *upvalues;
+    int n_upvalues;
+    Block body;
+    int line;
 };
 
 /* ---------- node pool ---------- */
@@ -138,5 +187,6 @@ void *node_pool_alloc(NodePool *p, size_t bytes);
 
 Expr *expr_new(NodePool *p, ExprKind k, int line);
 Stmt *stmt_new(NodePool *p, StmtKind k, int line);
+LuaFunc *func_new(NodePool *p, int func_idx, int line);
 
 #endif

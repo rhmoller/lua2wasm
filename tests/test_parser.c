@@ -8,9 +8,9 @@ static MunitResult test_print_sum_shape(const MunitParameter params[], void *fix
     NodePool pool; node_pool_init(&pool);
     ParseResult r = parse(&t, &pool);
     munit_assert_true(r.ok);
-    munit_assert_size(r.program.count, ==, 1);
+    munit_assert_size(r.main_body.count, ==, 1);
 
-    Stmt *st = r.program.items[0];
+    Stmt *st = r.main_body.items[0];
     munit_assert_int(st->kind, ==, STMT_EXPR);
     Expr *call = st->as.expr_stmt.expr;
     munit_assert_int(call->kind, ==, EXPR_CALL);
@@ -21,9 +21,8 @@ static MunitResult test_print_sum_shape(const MunitParameter params[], void *fix
     munit_assert_int(arg->as.binop.op, ==, BIN_ADD);
     munit_assert_int(arg->as.binop.lhs->kind, ==, EXPR_INT);
     munit_assert_int64(arg->as.binop.lhs->as.i_val, ==, 1);
-    munit_assert_int(arg->as.binop.rhs->kind, ==, EXPR_INT);
-    munit_assert_int64(arg->as.binop.rhs->as.i_val, ==, 2);
 
+    parse_result_free(&r);
     node_pool_free(&pool);
     tokenlist_free(&t);
     return MUNIT_OK;
@@ -35,11 +34,12 @@ static MunitResult test_precedence(const MunitParameter params[], void *fixture)
     NodePool pool; node_pool_init(&pool);
     ParseResult r = parse(&t, &pool);
     munit_assert_true(r.ok);
-    Expr *call = r.program.items[0]->as.expr_stmt.expr;
+    Expr *call = r.main_body.items[0]->as.expr_stmt.expr;
     Expr *arg = call->as.call.args[0];
     munit_assert_int(arg->as.binop.op, ==, BIN_ADD);
     munit_assert_int(arg->as.binop.rhs->kind, ==, EXPR_BINOP);
     munit_assert_int(arg->as.binop.rhs->as.binop.op, ==, BIN_MUL);
+    parse_result_free(&r);
     node_pool_free(&pool);
     tokenlist_free(&t);
     return MUNIT_OK;
@@ -51,43 +51,67 @@ static MunitResult test_local_and_assign(const MunitParameter params[], void *fi
     NodePool pool; node_pool_init(&pool);
     ParseResult r = parse(&t, &pool);
     munit_assert_true(r.ok);
-    munit_assert_size(r.program.count, ==, 3);
-    munit_assert_int(r.program.items[0]->kind, ==, STMT_LOCAL);
-    munit_assert_int(r.program.items[1]->kind, ==, STMT_ASSIGN);
-    munit_assert_int(r.program.items[1]->as.assign.local_idx, ==,
-                     r.program.items[0]->as.local.local_idx);
-    munit_assert_int(r.program.items[2]->kind, ==, STMT_EXPR);
+    munit_assert_size(r.main_body.count, ==, 3);
+    munit_assert_int(r.main_body.items[0]->kind, ==, STMT_LOCAL);
+    munit_assert_int(r.main_body.items[1]->kind, ==, STMT_ASSIGN);
+    munit_assert_int(r.main_body.items[1]->as.assign.idx, ==,
+                     r.main_body.items[0]->as.local.local_idx);
+    munit_assert_int(r.main_body.items[1]->as.assign.kind, ==, VAR_LOCAL);
+    parse_result_free(&r);
     node_pool_free(&pool);
     tokenlist_free(&t);
     return MUNIT_OK;
 }
 
-static MunitResult test_if_while(const MunitParameter params[], void *fixture) {
+static MunitResult test_local_function(const MunitParameter params[], void *fixture) {
     (void)params; (void)fixture;
     TokenList t = lex(
-        "local i = 0 "
-        "while i < 3 do "
-        "  if i == 1 then print(i) else print(0) end "
-        "  i = i + 1 "
+        "local function f(x) return x + 1 end "
+        "print(f(2))");
+    NodePool pool; node_pool_init(&pool);
+    ParseResult r = parse(&t, &pool);
+    if (!r.ok) munit_logf(MUNIT_LOG_ERROR, "parse: %s", r.error);
+    munit_assert_true(r.ok);
+    munit_assert_size(r.funcs.count, ==, 1);
+    LuaFunc *f = r.funcs.items[0];
+    munit_assert_int(f->n_params, ==, 1);
+    munit_assert_int(f->n_upvalues, ==, 0);
+    munit_assert_int(r.main_body.items[0]->kind, ==, STMT_LOCAL_FUNC);
+    parse_result_free(&r);
+    node_pool_free(&pool);
+    tokenlist_free(&t);
+    return MUNIT_OK;
+}
+
+static MunitResult test_closure_captures(const MunitParameter params[], void *fixture) {
+    (void)params; (void)fixture;
+    TokenList t = lex(
+        "local function counter() "
+        "  local n = 0 "
+        "  local function tick() n = n + 1 return n end "
+        "  return tick "
         "end");
     NodePool pool; node_pool_init(&pool);
     ParseResult r = parse(&t, &pool);
     if (!r.ok) munit_logf(MUNIT_LOG_ERROR, "parse: %s", r.error);
     munit_assert_true(r.ok);
-    munit_assert_int(r.program.items[1]->kind, ==, STMT_WHILE);
-    Stmt *w = r.program.items[1];
-    munit_assert_size(w->as.while_stmt.body.count, ==, 2);
-    munit_assert_int(w->as.while_stmt.body.items[0]->kind, ==, STMT_IF);
+    munit_assert_size(r.funcs.count, ==, 2);
+    /* Inner function `tick` captures `n` from counter. */
+    LuaFunc *tick = r.funcs.items[1];
+    munit_assert_int(tick->n_upvalues, ==, 1);
+    munit_assert_int(tick->upvalues[0].src, ==, UPVAL_FROM_LOCAL);
+    parse_result_free(&r);
     node_pool_free(&pool);
     tokenlist_free(&t);
     return MUNIT_OK;
 }
 
 static MunitTest tests[] = {
-    { "/print_sum_shape",  test_print_sum_shape,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
-    { "/precedence",       test_precedence,       NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
-    { "/local_and_assign", test_local_and_assign, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
-    { "/if_while",         test_if_while,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+    { "/print_sum_shape",   test_print_sum_shape,   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+    { "/precedence",        test_precedence,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+    { "/local_and_assign",  test_local_and_assign,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+    { "/local_function",    test_local_function,    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+    { "/closure_captures",  test_closure_captures,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
     { NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 };
 

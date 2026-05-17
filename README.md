@@ -30,21 +30,21 @@ concerns.
 
 ## Status
 
-**Milestone 2 (current) — an imperative subset.** Both 5.4 and 5.5 share
-identical semantics for everything currently implemented, so nothing here
-is version-specific yet.
+**Milestone 3a (current) — first-class functions and closures.**
 
 | Area | Supported now | Deferred |
 |---|---|---|
 | Lexer | All keywords, operators, single/double-quoted strings with escapes, integer + float literals, `--[[ ]]` long comments | Long string literals `[[ ]]`, `\xHH`/`\u{…}` escapes, hex/binary number literals |
-| Values | `nil`, booleans, integers (i31ref or `$LuaInt` box), floats (`$LuaFloat`), strings (`$LuaString`) | Tables, functions, userdata, threads |
-| Statements | `local x = e`, assignment to existing locals, `if/elseif/else`, `while`, bare `do`, expression-statement (call), `return` (parsed, no-op) | `for` (numeric & generic), `repeat/until`, `goto/::label::`, function decls, `global` decls, multi-assign |
-| Operators | `+ - * / // % ^`, `== ~= < <= > >=`, `and or not`, `..`, `#` | Bitwise `& | ~ << >>` (lexed but not codegen'd) |
-| Builtins | `print(x)` | The rest of the standard library |
-| Runtime | Mixed int/float promotion, short-circuit and/or, string concat (of two strings) | Float `%`, float side of `..`, error/pcall, metatables, coroutines |
+| Values | `nil`, booleans, integers (i31ref or `$LuaInt` box), floats (`$LuaFloat`), strings (`$LuaString`), **closures (`$LuaClosure`)** | Tables, userdata, threads |
+| Statements | `local x = e`, **`local function f(...) end`**, assignment to locals and upvalues, `if/elseif/else`, `while`, bare `do`, expression-statement (call), **`return [expr]`** | `for`, `repeat/until`, `goto/::label::`, top-level `function f() end` (needs globals), multi-assign, multi-return |
+| Expressions | All literals, `function(...) ... end`, variable refs (local/upvalue/`print`), N-arg calls, all operators below | Multiple return values, varargs `...` |
+| Operators | `+ - * / // % ^`, `== ~= < <= > >=`, `and or not`, `..`, `#` | Bitwise `& \| ~ << >>` (lexed but not codegen'd) |
+| Builtins | `print(x)` — now a real `$LuaClosure` stored in a wasm global | The rest of the standard library |
+| Runtime | Mixed int/float promotion, short-circuit and/or, string concat (strings only), **uniform calling convention `(closure, args) → anyref`**, **upvalue capture via shared `$Box`** | Proper tail calls (`return_call_ref`), float `%`, float side of `..`, error/pcall |
 
-See [`tests/fixtures/milestone2.lua`](tests/fixtures/milestone2.lua) for what
-a working program looks like today.
+See [`tests/fixtures/milestone3.lua`](tests/fixtures/milestone3.lua) for what
+a working program looks like today — recursion, closures with mutable
+captures, transitive upvalue chains.
 
 ## Value representation
 
@@ -59,7 +59,7 @@ Every Lua value is uniformly an `anyref`. Decoding:
 | float          | `(ref $LuaFloat)` boxing `f64`                           |
 | string         | `(ref $LuaString)` wrapping `(array (mut i8))` (UTF-8)   |
 | table*         | `(ref $LuaTable)` — *milestone 3*                        |
-| function*      | `(ref $LuaClosure)` = code `funcref` + upvalue array — *milestone 3* |
+| function       | `(ref $LuaClosure)` = `(ref $LuaFn)` code + `(ref $UpvalArr)` upvalues |
 | userdata*      | `externref` slot for opaque JS values — *later*          |
 
 The browser's GC owns lifetime for all of these.

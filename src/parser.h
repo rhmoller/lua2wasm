@@ -5,12 +5,19 @@
 #include "lexer.h"
 
 typedef struct {
-    Block program;          /* top-level block of statements */
-    int max_locals;         /* total wasm locals needed for the chunk */
+    LuaFunc **items;        /* all user-defined functions, in declaration order */
+    size_t count;
+} FuncTable;
+
+typedef struct {
+    Block main_body;
+    int main_n_locals;
+    FuncTable funcs;
     char error[256];
     int ok;
 } ParseResult;
 
 ParseResult parse(const TokenList *tokens, NodePool *pool);
+void parse_result_free(ParseResult *r);
 
 #endif

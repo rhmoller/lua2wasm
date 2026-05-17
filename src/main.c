@@ -65,6 +65,7 @@ int main(int argc, char **argv) {
     fclose(of);
 
     wat_free(&w);
+    parse_result_free(&pr);
     node_pool_free(&pool);
     tokenlist_free(&toks);
     free(src);

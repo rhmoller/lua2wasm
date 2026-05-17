@@ -4,24 +4,32 @@
 #include <string.h>
 
 /* ============================================================
- * Codegen v2.
+ * Codegen v3a.
  *
- * Value representation (all Lua values are `anyref`):
+ * Value representation: every Lua value is `anyref`.
  *   nil      -> (ref.null any)
  *   false    -> global $g_false   : (ref $LuaBool) struct{ i32 0 }
  *   true     -> global $g_true    : (ref $LuaBool) struct{ i32 1 }
- *   int      -> i31ref if value fits in i31 (signed 30-bit-ish range),
- *               else (struct.new $LuaInt (i64 value))
- *   float    -> (struct.new $LuaFloat (f64 value))
- *   string   -> (struct.new $LuaString (array of bytes))
+ *   int      -> i31ref (small) | (struct.new $LuaInt i64) (overflow)
+ *   float    -> (struct.new $LuaFloat f64)
+ *   string   -> (struct.new $LuaString (array i8))
+ *   function -> (ref $LuaClosure)
  *
- * String literals are concatenated into a single data segment; each
- * literal produces an (array.new_data $LuaArr $str_data offset len) call.
+ * Closure runtime:
+ *   $Box       = struct { mut anyref v }     -- shared mutable cell
+ *   $ArgArr    = array (mut anyref)
+ *   $UpvalArr  = array (mut (ref $Box))
+ *   $LuaFn     = func ((ref $LuaClosure) (ref $ArgArr)) -> anyref
+ *   $LuaClosure = struct { (ref $LuaFn) code, (ref $UpvalArr) upvals }
  *
- * JS-side `print` decodes values via exported helpers:
- *   lua_tag(v) -> 0=nil 1=bool 2=int 3=float 4=string
- *   lua_get_bool(v), lua_get_int(v), lua_get_float(v)
- *   lua_str_len(v), lua_str_byte(v, i)
+ * All locals (and parameters) are stored in $Box cells so they can be
+ * captured by inner closures and remain mutable. Boxing is uniform; we
+ * leave any "is this local actually captured?" escape analysis as a
+ * later optimization.
+ *
+ * Each Lua function in source becomes a top-level wasm function named
+ * `$user_N` (N = LuaFunc.func_idx). The implicit chunk becomes `$main`,
+ * which has no closure/args parameters and no return value.
  * ============================================================ */
 
 /* ----- string-literal pool ----- */
@@ -54,6 +62,7 @@ typedef struct {
     WatBuilder *w;
     StrPool strs;
     int next_label;
+    int in_main;            /* 1 while emitting $main body, 0 inside user fn */
     char err[256];
     int ok;
 } CG;
@@ -64,22 +73,20 @@ static void cg_error(CG *c, const char *msg) {
     snprintf(c->err, sizeof(c->err), "codegen: %s", msg);
 }
 
-/* ----- emission helpers ----- */
 static void emit_indent(CG *c, int depth) {
     for (int i = 0; i < depth; i++) wat_append(c->w, "  ");
 }
 
-/* Fits in signed i31 range? */
 static int i31_fits(int64_t v) {
     return v >= -(int64_t)0x40000000 && v < (int64_t)0x40000000;
 }
 
-/* ----- expression emission -----
- * Every expression leaves one `anyref` on the stack.
- */
+/* ----- forward decls ----- */
 static void emit_expr(CG *c, const Expr *e, int depth);
 static void emit_block(CG *c, const Block *b, int depth);
+static void emit_stmt(CG *c, const Stmt *s, int depth);
 
+/* ----- literal emission ----- */
 static void emit_int_literal(CG *c, int64_t v, int depth) {
     emit_indent(c, depth);
     if (i31_fits(v)) {
@@ -91,7 +98,6 @@ static void emit_int_literal(CG *c, int64_t v, int depth) {
 
 static void emit_float_literal(CG *c, double v, int depth) {
     emit_indent(c, depth);
-    /* %a is hex-float: lossless. */
     wat_appendf(c->w, "(struct.new $LuaFloat (f64.const %.17g))\n", v);
 }
 
@@ -104,6 +110,50 @@ static void emit_string_literal(CG *c, const char *bytes, size_t len, int depth)
         r.offset, r.len);
 }
 
+/* ----- variable read / write -----
+ * VAR_UPVAL is only emitted inside user functions (parser guarantees this:
+ * main has no upvalues to capture).
+ */
+static void emit_var_read(CG *c, VarKind kind, int idx, int depth) {
+    emit_indent(c, depth);
+    switch (kind) {
+        case VAR_LOCAL:
+            wat_appendf(c->w, "(struct.get $Box $v (local.get $L%d))\n", idx);
+            break;
+        case VAR_UPVAL:
+            wat_appendf(c->w,
+                "(struct.get $Box $v (array.get $UpvalArr "
+                "(struct.get $LuaClosure $upvals (local.get $closure)) "
+                "(i32.const %d)))\n", idx);
+            break;
+        case VAR_BUILTIN_PRINT:
+            wat_append(c->w, "(global.get $g_print)\n");
+            break;
+    }
+}
+
+/* Emit code that pushes the (ref $Box) for the named binding (not its value).
+ * Used to: (a) write to it via struct.set, or (b) capture it into an upvalue
+ * array of a child closure. */
+static void emit_box_ref(CG *c, VarKind kind, int idx, int depth) {
+    emit_indent(c, depth);
+    switch (kind) {
+        case VAR_LOCAL:
+            wat_appendf(c->w, "(local.get $L%d)\n", idx);
+            break;
+        case VAR_UPVAL:
+            wat_appendf(c->w,
+                "(array.get $UpvalArr "
+                "(struct.get $LuaClosure $upvals (local.get $closure)) "
+                "(i32.const %d))\n", idx);
+            break;
+        case VAR_BUILTIN_PRINT:
+            cg_error(c, "cannot take a box reference to a builtin");
+            break;
+    }
+}
+
+/* ----- binary / unary ops ----- */
 static const char *binop_helper(BinOp op) {
     switch (op) {
         case BIN_ADD:    return "$lua_add";
@@ -120,18 +170,13 @@ static const char *binop_helper(BinOp op) {
         case BIN_LE:     return "$lua_le";
         case BIN_GT:     return "$lua_gt";
         case BIN_GE:     return "$lua_ge";
-        default:         return "$lua_add"; /* and/or handled separately */
+        default:         return "$lua_add";
     }
 }
 
 static void emit_binop(CG *c, const Expr *e, int depth) {
     BinOp op = e->as.binop.op;
     if (op == BIN_AND || op == BIN_OR) {
-        /* Short-circuit, Lua semantics:
-         *   a and b -> if truthy(a) then b else a
-         *   a or  b -> if truthy(a) then a else b
-         * Store lhs in $tmp_any, then branch on its truthiness.
-         */
         int label = c->next_label++;
         emit_indent(c, depth);
         wat_appendf(c->w, "(block $sc_%d (result anyref)\n", label);
@@ -141,18 +186,14 @@ static void emit_binop(CG *c, const Expr *e, int depth) {
         emit_indent(c, depth + 1); wat_append(c->w, "(call $lua_truthy (local.get $tmp_any))\n");
         emit_indent(c, depth + 1); wat_append(c->w, "(if (then\n");
         if (op == BIN_AND) {
-            /* truthy -> evaluate rhs, that's the result */
             emit_expr(c, e->as.binop.rhs, depth + 2);
             emit_indent(c, depth + 2); wat_appendf(c->w, "br $sc_%d\n", label);
             emit_indent(c, depth + 1); wat_append(c->w, "))\n");
-            /* falsy fallthrough: push tmp_any */
             emit_indent(c, depth + 1); wat_append(c->w, "local.get $tmp_any\n");
         } else {
-            /* OR: truthy -> push tmp_any */
             emit_indent(c, depth + 2); wat_append(c->w, "local.get $tmp_any\n");
             emit_indent(c, depth + 2); wat_appendf(c->w, "br $sc_%d\n", label);
             emit_indent(c, depth + 1); wat_append(c->w, "))\n");
-            /* falsy fallthrough: evaluate rhs */
             emit_expr(c, e->as.binop.rhs, depth + 1);
         }
         emit_indent(c, depth); wat_append(c->w, ")\n");
@@ -174,27 +215,53 @@ static void emit_unop(CG *c, const Expr *e, int depth) {
     }
 }
 
-static void emit_call(CG *c, const Expr *e, int produces_value, int depth) {
-    const Expr *callee = e->as.call.callee;
-    if (callee->kind != EXPR_VAR || callee->as.var.local_idx != -2) {
-        cg_error(c, "v2 only supports calling the builtin `print`");
-        return;
+/* ----- function call (uniform; no special-casing of print) ----- */
+static void emit_call(CG *c, const Expr *e, int depth) {
+    emit_indent(c, depth); wat_append(c->w, "(call $lua_call\n");
+    /* callee: any anyref, but $lua_call expects (ref $LuaClosure). */
+    emit_indent(c, depth + 1); wat_append(c->w, "(ref.cast (ref $LuaClosure)\n");
+    emit_expr(c, e->as.call.callee, depth + 2);
+    emit_indent(c, depth + 1); wat_append(c->w, ")\n");
+    /* args array */
+    emit_indent(c, depth + 1);
+    if (e->as.call.nargs == 0) {
+        wat_append(c->w, "(array.new_fixed $ArgArr 0)\n");
+    } else {
+        wat_appendf(c->w, "(array.new_fixed $ArgArr %zu\n", e->as.call.nargs);
+        for (size_t i = 0; i < e->as.call.nargs; i++) {
+            emit_expr(c, e->as.call.args[i], depth + 2);
+        }
+        emit_indent(c, depth + 1); wat_append(c->w, ")\n");
     }
-    if (e->as.call.nargs != 1) {
-        cg_error(c, "v2 print takes exactly 1 argument");
-        return;
-    }
-    emit_expr(c, e->as.call.args[0], depth);
-    emit_indent(c, depth);
-    wat_append(c->w, "(call $host_print)\n");
-    /* host_print returns no value. If the call was used as an expression,
-     * push nil so the value rep is consistent. */
-    if (produces_value) {
-        emit_indent(c, depth);
-        wat_append(c->w, "(ref.null any)\n");
-    }
+    emit_indent(c, depth); wat_append(c->w, ")\n");
 }
 
+/* ----- function expression: build a closure -----
+ * The upvalue array collects the parent's boxes per the function's
+ * upvalue table.
+ */
+static void emit_function_expr(CG *c, const LuaFunc *fn, int depth) {
+    emit_indent(c, depth);
+    wat_append(c->w, "(struct.new $LuaClosure\n");
+    emit_indent(c, depth + 1);
+    wat_appendf(c->w, "(ref.func $user_%d)\n", fn->func_idx);
+    if (fn->n_upvalues == 0) {
+        emit_indent(c, depth + 1);
+        wat_append(c->w, "(global.get $g_empty_upvals)\n");
+    } else {
+        emit_indent(c, depth + 1);
+        wat_appendf(c->w, "(array.new_fixed $UpvalArr %d\n", fn->n_upvalues);
+        for (int i = 0; i < fn->n_upvalues; i++) {
+            UpvalueRef *u = &fn->upvalues[i];
+            VarKind k = (u->src == UPVAL_FROM_LOCAL) ? VAR_LOCAL : VAR_UPVAL;
+            emit_box_ref(c, k, u->idx, depth + 2);
+        }
+        emit_indent(c, depth + 1); wat_append(c->w, ")\n");
+    }
+    emit_indent(c, depth); wat_append(c->w, ")\n");
+}
+
+/* ----- main expression dispatch ----- */
 static void emit_expr(CG *c, const Expr *e, int depth) {
     if (!c->ok) return;
     switch (e->kind) {
@@ -207,13 +274,11 @@ static void emit_expr(CG *c, const Expr *e, int depth) {
         case EXPR_INT:    emit_int_literal(c, e->as.i_val, depth); break;
         case EXPR_FLOAT:  emit_float_literal(c, e->as.f_val, depth); break;
         case EXPR_STRING: emit_string_literal(c, e->as.s.bytes, e->as.s.len, depth); break;
-        case EXPR_VAR:
-            emit_indent(c, depth);
-            wat_appendf(c->w, "(local.get $L%d)\n", e->as.var.local_idx);
-            break;
-        case EXPR_CALL:   emit_call(c, e, /*produces_value*/1, depth); break;
+        case EXPR_VAR:    emit_var_read(c, e->as.var.kind, e->as.var.idx, depth); break;
+        case EXPR_CALL:   emit_call(c, e, depth); break;
         case EXPR_BINOP:  emit_binop(c, e, depth); break;
         case EXPR_UNOP:   emit_unop(c, e, depth); break;
+        case EXPR_FUNCTION: emit_function_expr(c, e->as.func_expr.func, depth); break;
     }
 }
 
@@ -222,53 +287,58 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
     if (!c->ok) return;
     switch (s->kind) {
         case STMT_LOCAL:
-            if (s->as.local.init) emit_expr(c, s->as.local.init, depth);
-            else { emit_indent(c, depth); wat_append(c->w, "(ref.null any)\n"); }
             emit_indent(c, depth);
-            wat_appendf(c->w, "(local.set $L%d)\n", s->as.local.local_idx);
+            wat_appendf(c->w, "(local.set $L%d (struct.new $Box\n", s->as.local.local_idx);
+            if (s->as.local.init) emit_expr(c, s->as.local.init, depth + 1);
+            else { emit_indent(c, depth + 1); wat_append(c->w, "(ref.null any)\n"); }
+            emit_indent(c, depth); wat_append(c->w, "))\n");
             break;
+
         case STMT_ASSIGN:
-            emit_expr(c, s->as.assign.value, depth);
-            emit_indent(c, depth);
-            wat_appendf(c->w, "(local.set $L%d)\n", s->as.assign.local_idx);
+            /* (struct.set $Box $v <boxref> <value>) */
+            emit_indent(c, depth); wat_append(c->w, "(struct.set $Box $v\n");
+            emit_box_ref(c, s->as.assign.kind, s->as.assign.idx, depth + 1);
+            emit_expr(c, s->as.assign.value, depth + 1);
+            emit_indent(c, depth); wat_append(c->w, ")\n");
             break;
+
         case STMT_EXPR:
-            /* Must be a call. Bare call as statement produces no value. */
-            if (s->as.expr_stmt.expr->kind == EXPR_CALL) {
-                emit_call(c, s->as.expr_stmt.expr, /*produces_value*/0, depth);
-            } else {
-                emit_expr(c, s->as.expr_stmt.expr, depth);
-                emit_indent(c, depth); wat_append(c->w, "drop\n");
-            }
+            /* Expression-statement is always a call. Discard result. */
+            emit_call(c, s->as.expr_stmt.expr, depth);
+            emit_indent(c, depth); wat_append(c->w, "drop\n");
             break;
+
         case STMT_DO:
             emit_block(c, &s->as.do_stmt.body, depth);
             break;
+
         case STMT_RETURN:
-            emit_indent(c, depth); wat_append(c->w, "return\n");
+            if (c->in_main) {
+                /* main has no return value; ignore any expression. */
+                emit_indent(c, depth); wat_append(c->w, "return\n");
+            } else {
+                if (s->as.return_stmt.value) emit_expr(c, s->as.return_stmt.value, depth);
+                else { emit_indent(c, depth); wat_append(c->w, "(ref.null any)\n"); }
+                emit_indent(c, depth); wat_append(c->w, "return\n");
+            }
             break;
+
         case STMT_WHILE: {
             int label = c->next_label++;
-            emit_indent(c, depth);
-            wat_appendf(c->w, "(block $while_break_%d\n", label);
-            emit_indent(c, depth + 1);
-            wat_appendf(c->w, "(loop $while_cont_%d\n", label);
+            emit_indent(c, depth); wat_appendf(c->w, "(block $while_break_%d\n", label);
+            emit_indent(c, depth + 1); wat_appendf(c->w, "(loop $while_cont_%d\n", label);
             emit_expr(c, s->as.while_stmt.cond, depth + 2);
-            emit_indent(c, depth + 2);
-            wat_append(c->w, "(call $lua_truthy)\n");
-            emit_indent(c, depth + 2);
-            wat_append(c->w, "i32.eqz\n");
-            emit_indent(c, depth + 2);
-            wat_appendf(c->w, "br_if $while_break_%d\n", label);
+            emit_indent(c, depth + 2); wat_append(c->w, "(call $lua_truthy)\n");
+            emit_indent(c, depth + 2); wat_append(c->w, "i32.eqz\n");
+            emit_indent(c, depth + 2); wat_appendf(c->w, "br_if $while_break_%d\n", label);
             emit_block(c, &s->as.while_stmt.body, depth + 2);
-            emit_indent(c, depth + 2);
-            wat_appendf(c->w, "br $while_cont_%d\n", label);
+            emit_indent(c, depth + 2); wat_appendf(c->w, "br $while_cont_%d\n", label);
             emit_indent(c, depth + 1); wat_append(c->w, ")\n");
             emit_indent(c, depth);     wat_append(c->w, ")\n");
             break;
         }
+
         case STMT_IF: {
-            /* Emit nested if/else chain. */
             int label = c->next_label++;
             emit_indent(c, depth);
             wat_appendf(c->w, "(block $if_end_%d\n", label);
@@ -276,18 +346,32 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
                 IfArm *a = &s->as.if_stmt.arms[i];
                 emit_expr(c, a->cond, depth + 1);
                 emit_indent(c, depth + 1); wat_append(c->w, "(call $lua_truthy)\n");
-                emit_indent(c, depth + 1);
-                wat_append(c->w, "(if (then\n");
+                emit_indent(c, depth + 1); wat_append(c->w, "(if (then\n");
                 emit_block(c, &a->body, depth + 2);
-                emit_indent(c, depth + 2);
-                wat_appendf(c->w, "br $if_end_%d\n", label);
+                emit_indent(c, depth + 2); wat_appendf(c->w, "br $if_end_%d\n", label);
                 emit_indent(c, depth + 1); wat_append(c->w, "))\n");
             }
             if (s->as.if_stmt.has_else) {
                 emit_block(c, &s->as.if_stmt.else_body, depth + 1);
             }
+            emit_indent(c, depth); wat_append(c->w, ")\n");
+            break;
+        }
+
+        case STMT_LOCAL_FUNC: {
+            /* Pre-allocate the box with nil so the function body can capture
+             * its own slot (recursion). Then build the closure (which may
+             * capture this very slot via UPVAL_FROM_LOCAL). Finally store
+             * the closure into the box. */
             emit_indent(c, depth);
-            wat_append(c->w, ")\n");
+            wat_appendf(c->w,
+                "(local.set $L%d (struct.new $Box (ref.null any)))\n",
+                s->as.local_func.local_idx);
+            emit_indent(c, depth); wat_append(c->w, "(struct.set $Box $v\n");
+            emit_indent(c, depth + 1);
+            wat_appendf(c->w, "(local.get $L%d)\n", s->as.local_func.local_idx);
+            emit_function_expr(c, s->as.local_func.func, depth + 1);
+            emit_indent(c, depth); wat_append(c->w, ")\n");
             break;
         }
     }
@@ -298,21 +382,33 @@ static void emit_block(CG *c, const Block *b, int depth) {
 }
 
 /* ============================================================
- * Static prelude: type definitions, runtime helpers, globals.
+ * Static prelude
  * ============================================================ */
+
 static const char *PRELUDE_TYPES =
-"  ;; --- type definitions ---\n"
+"  ;; --- value-rep types ---\n"
 "  (type $LuaArr    (array (mut i8)))\n"
 "  (type $LuaString (sub (struct (field $bytes (ref $LuaArr)))))\n"
 "  (type $LuaFloat  (sub (struct (field $v f64))))\n"
 "  (type $LuaInt    (sub (struct (field $v i64))))\n"
 "  (type $LuaBool   (sub (struct (field $b i32))))\n"
+"  ;; --- closure / function types (mutually recursive) ---\n"
+"  (type $Box       (sub (struct (field $v (mut anyref)))))\n"
+"  (type $ArgArr    (array (mut anyref)))\n"
+"  (type $UpvalArr  (array (mut (ref $Box))))\n"
+"  (rec\n"
+"    (type $LuaClosure (sub (struct (field $code (ref $LuaFn))\n"
+"                                   (field $upvals (ref $UpvalArr)))))\n"
+"    (type $LuaFn (func (param (ref $LuaClosure))\n"
+"                       (param (ref $ArgArr))\n"
+"                       (result anyref))))\n"
 "\n"
 "  (import \"host\" \"print\" (func $host_print (param anyref)))\n"
 "\n"
-"  ;; --- global singletons for booleans ---\n"
+"  ;; --- singletons ---\n"
 "  (global $g_true  (ref $LuaBool) (struct.new $LuaBool (i32.const 1)))\n"
-"  (global $g_false (ref $LuaBool) (struct.new $LuaBool (i32.const 0)))\n";
+"  (global $g_false (ref $LuaBool) (struct.new $LuaBool (i32.const 0)))\n"
+"  (global $g_empty_upvals (ref $UpvalArr) (array.new_fixed $UpvalArr 0))\n";
 
 static const char *PRELUDE_HELPERS =
 "  ;; --- truthiness: only nil and false are falsy ---\n"
@@ -361,7 +457,7 @@ static const char *PRELUDE_HELPERS =
 "  (func $make_float (param $v f64) (result anyref)\n"
 "    (struct.new $LuaFloat (local.get $v)))\n"
 "\n"
-"  ;; --- arithmetic: if both operands int -> int; else float ---\n"
+"  ;; --- arithmetic: int+int -> int; else promote to float ---\n"
 "  (func $lua_add (param $a anyref) (param $b anyref) (result anyref)\n"
 "    (if (result anyref)\n"
 "      (i32.and (call $is_int (local.get $a)) (call $is_int (local.get $b)))\n"
@@ -391,7 +487,6 @@ static const char *PRELUDE_HELPERS =
 "    (call $make_float (f64.div (call $as_float (local.get $a))\n"
 "                               (call $as_float (local.get $b)))))\n"
 "\n"
-"  ;; // floor division: int if both ints, else floor of float\n"
 "  (func $lua_fdiv (param $a anyref) (param $b anyref) (result anyref)\n"
 "    (if (result anyref)\n"
 "      (i32.and (call $is_int (local.get $a)) (call $is_int (local.get $b)))\n"
@@ -408,10 +503,8 @@ static const char *PRELUDE_HELPERS =
 "                                       (call $as_int (local.get $b)))))\n"
 "      (else (call $make_float (f64.const 0)))))   ;; v2 stub: float % returns 0\n"
 "\n"
-"  ;; ^ always returns float\n"
 "  (func $lua_pow (param $a anyref) (param $b anyref) (result anyref)\n"
 "    (local $base f64) (local $exp f64) (local $r f64) (local $i i32)\n"
-"    ;; Crude integer-exponent fast path; otherwise return 0.0 (v2 stub).\n"
 "    (local.set $base (call $as_float (local.get $a)))\n"
 "    (local.set $exp  (call $as_float (local.get $b)))\n"
 "    (local.set $r (f64.const 1))\n"
@@ -432,7 +525,6 @@ static const char *PRELUDE_HELPERS =
 "    (call $lua_bool_to_ref (i32.eqz (call $lua_truthy (local.get $a)))))\n"
 "\n"
 "  (func $lua_len (param $a anyref) (result anyref)\n"
-"    ;; v2: only strings supported (tables in v3)\n"
 "    (call $make_int\n"
 "      (i64.extend_i32_u\n"
 "        (array.len (struct.get $LuaString $bytes\n"
@@ -463,27 +555,22 @@ static const char *PRELUDE_HELPERS =
 "    (i32.const 1))\n"
 "\n"
 "  (func $lua_eq_raw (param $a anyref) (param $b anyref) (result i32)\n"
-"    ;; nil == nil\n"
 "    (if (i32.and (ref.is_null (local.get $a)) (ref.is_null (local.get $b)))\n"
 "      (then (return (i32.const 1))))\n"
 "    (if (i32.or  (ref.is_null (local.get $a)) (ref.is_null (local.get $b)))\n"
 "      (then (return (i32.const 0))))\n"
-"    ;; booleans\n"
 "    (if (i32.and (ref.test (ref $LuaBool) (local.get $a))\n"
 "                 (ref.test (ref $LuaBool) (local.get $b)))\n"
 "      (then (return (i32.eq\n"
 "        (struct.get $LuaBool $b (ref.cast (ref $LuaBool) (local.get $a)))\n"
 "        (struct.get $LuaBool $b (ref.cast (ref $LuaBool) (local.get $b)))))))\n"
-"    ;; numbers (int or float, freely mixing)\n"
 "    (if (i32.and\n"
 "          (i32.or (call $is_int (local.get $a)) (call $is_float (local.get $a)))\n"
 "          (i32.or (call $is_int (local.get $b)) (call $is_float (local.get $b))))\n"
 "      (then (return (call $num_eq (local.get $a) (local.get $b)))))\n"
-"    ;; strings\n"
 "    (if (i32.and (ref.test (ref $LuaString) (local.get $a))\n"
 "                 (ref.test (ref $LuaString) (local.get $b)))\n"
 "      (then (return (call $str_eq (local.get $a) (local.get $b)))))\n"
-"    ;; otherwise: identity (ref.eq) - but anyref doesn't directly support; default false\n"
 "    (i32.const 0))\n"
 "\n"
 "  (func $lua_eq  (param $a anyref) (param $b anyref) (result anyref)\n"
@@ -513,7 +600,6 @@ static const char *PRELUDE_HELPERS =
 "    (call $lua_bool_to_ref (call $num_le (local.get $b) (local.get $a))))\n"
 "\n"
 "  ;; --- string conversion + concat ---\n"
-"  ;; int-to-bytes implemented in WASM (no host callback needed).\n"
 "  (func $int_to_bytes (param $v i64) (result (ref $LuaArr))\n"
 "    (local $neg i32)\n"
 "    (local $tmp (ref $LuaArr)) (local $n i32)\n"
@@ -523,7 +609,6 @@ static const char *PRELUDE_HELPERS =
 "      (then\n"
 "        (local.set $neg (i32.const 1))\n"
 "        (local.set $v (i64.sub (i64.const 0) (local.get $v)))))\n"
-"    ;; up to 20 decimal digits for i64; allocate scratch of 21\n"
 "    (local.set $tmp (array.new $LuaArr (i32.const 0) (i32.const 21)))\n"
 "    (loop $lp\n"
 "      (local.set $d (i32.wrap_i64 (i64.rem_u (local.get $v) (i64.const 10))))\n"
@@ -550,21 +635,20 @@ static const char *PRELUDE_HELPERS =
 "      (br $cp)))\n"
 "    (local.get $out))\n"
 "\n"
-"  ;; Float-to-bytes is non-trivial; v2 stub returns \"<float>\".\n"
 "  (func $float_stub_bytes (result (ref $LuaArr))\n"
 "    (array.new_data $LuaArr $str_data (i32.const 12) (i32.const 7)))\n"
 "\n"
 "  (func $lua_tostring (param $v anyref) (result (ref $LuaString))\n"
 "    (if (result (ref $LuaString)) (ref.is_null (local.get $v))\n"
 "      (then (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
-"               (i32.const 0) (i32.const 3))))   ;; \"nil\" lives at offset 0\n"
+"               (i32.const 0) (i32.const 3))))\n"
 "      (else (if (result (ref $LuaString)) (ref.test (ref $LuaBool) (local.get $v))\n"
 "        (then (if (result (ref $LuaString))\n"
 "                  (struct.get $LuaBool $b (ref.cast (ref $LuaBool) (local.get $v)))\n"
 "          (then (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
-"                  (i32.const 3) (i32.const 4))))   ;; \"true\"\n"
+"                  (i32.const 3) (i32.const 4))))\n"
 "          (else (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
-"                  (i32.const 7) (i32.const 5)))))) ;; \"false\"\n"
+"                  (i32.const 7) (i32.const 5))))))\n"
 "        (else (if (result (ref $LuaString)) (ref.test (ref $LuaString) (local.get $v))\n"
 "          (then (ref.cast (ref $LuaString) (local.get $v)))\n"
 "          (else (if (result (ref $LuaString)) (call $is_int (local.get $v))\n"
@@ -573,7 +657,7 @@ static const char *PRELUDE_HELPERS =
 "\n"
 "  (func $lua_concat (param $a anyref) (param $b anyref) (result anyref)\n"
 "    (local $sa (ref $LuaArr)) (local $sb (ref $LuaArr)) (local $out (ref $LuaArr))\n"
-"    (local $na i32) (local $nb i32) (local $i i32)\n"
+"    (local $na i32) (local $nb i32)\n"
 "    (local.set $sa (struct.get $LuaString $bytes (call $lua_tostring (local.get $a))))\n"
 "    (local.set $sb (struct.get $LuaString $bytes (call $lua_tostring (local.get $b))))\n"
 "    (local.set $na (array.len (local.get $sa)))\n"
@@ -588,6 +672,24 @@ static const char *PRELUDE_HELPERS =
 "      (local.get $sb)  (i32.const 0) (local.get $nb))\n"
 "    (struct.new $LuaString (local.get $out)))\n"
 "\n"
+"  ;; --- closure dispatch + print builtin ---\n"
+"  (func $lua_call (param $closure (ref $LuaClosure)) (param $args (ref $ArgArr)) (result anyref)\n"
+"    (call_ref $LuaFn\n"
+"      (local.get $closure)\n"
+"      (local.get $args)\n"
+"      (struct.get $LuaClosure $code (local.get $closure))))\n"
+"\n"
+"  (func $builtin_print (type $LuaFn)\n"
+"    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result anyref)\n"
+"    (call $host_print (array.get $ArgArr (local.get $args) (i32.const 0)))\n"
+"    (ref.null any))\n"
+"\n"
+"  (elem declare func $builtin_print)\n"
+"  (global $g_print (ref $LuaClosure)\n"
+"    (struct.new $LuaClosure\n"
+"      (ref.func $builtin_print)\n"
+"      (global.get $g_empty_upvals)))\n"
+"\n"
 "  ;; --- exported decoders for the JS host ---\n"
 "  (func (export \"lua_tag\") (param $v anyref) (result i32)\n"
 "    (if (ref.is_null (local.get $v)) (then (return (i32.const 0))))\n"
@@ -595,6 +697,7 @@ static const char *PRELUDE_HELPERS =
 "    (if (call $is_int  (local.get $v))             (then (return (i32.const 2))))\n"
 "    (if (call $is_float (local.get $v))            (then (return (i32.const 3))))\n"
 "    (if (ref.test (ref $LuaString) (local.get $v)) (then (return (i32.const 4))))\n"
+"    (if (ref.test (ref $LuaClosure) (local.get $v)) (then (return (i32.const 5))))\n"
 "    (i32.const 99))\n"
 "  (func (export \"lua_get_bool\") (param $v anyref) (result i32)\n"
 "    (struct.get $LuaBool $b (ref.cast (ref $LuaBool) (local.get $v))))\n"
@@ -609,41 +712,73 @@ static const char *PRELUDE_HELPERS =
 "      (struct.get $LuaString $bytes (ref.cast (ref $LuaString) (local.get $v)))\n"
 "      (local.get $i)))\n";
 
-/* The first bytes of the data segment are reserved for built-in literals
- * used by $lua_tostring:
- *   offset  0  len 3   "nil"
- *   offset  3  len 4   "true"
- *   offset  7  len 5   "false"
- *   offset 12  len 7   "<float>"  (v2 placeholder for float-to-string) */
 #define LITERAL_PREFIX "niltruefalse<float>"
 #define LITERAL_PREFIX_LEN 19
 
+/* Emit the body of one user function. */
+static void emit_user_function(CG *c, const LuaFunc *fn) {
+    WatBuilder *w = c->w;
+    wat_appendf(w,
+        "  (func $user_%d (type $LuaFn) "
+        "(param $closure (ref $LuaClosure)) "
+        "(param $args (ref $ArgArr)) (result anyref)\n",
+        fn->func_idx);
+
+    for (int i = 0; i < fn->n_locals; i++) {
+        wat_appendf(w, "    (local $L%d (ref $Box))\n", i);
+    }
+    wat_append(w, "    (local $tmp_any anyref)\n");
+
+    /* Param extraction: box each arg into its local slot. */
+    for (int i = 0; i < fn->n_params; i++) {
+        wat_appendf(w,
+            "    (local.set $L%d (struct.new $Box "
+            "(array.get $ArgArr (local.get $args) (i32.const %d))))\n", i, i);
+    }
+
+    int was_in_main = c->in_main;
+    c->in_main = 0;
+    emit_block(c, &fn->body, 2);
+    c->in_main = was_in_main;
+
+    /* Default trailing return (nil) so the function is well-typed even if
+     * the body has no explicit return on every path. */
+    wat_append(w, "    (ref.null any)\n");
+    wat_append(w, "  )\n");
+
+    /* Declare so the funcref is usable in const init / closures. */
+    wat_appendf(w, "  (elem declare func $user_%d)\n", fn->func_idx);
+}
+
 int codegen_module(const ParseResult *pr, WatBuilder *out,
                    char *err, size_t errlen) {
-    CG c = { .w = out, .ok = 1 };
-
-    /* Reserve "niltruefalse" at offsets 0..11 for $lua_tostring. */
+    CG c = { .w = out, .ok = 1, .in_main = 1 };
     strpool_add(&c.strs, LITERAL_PREFIX, LITERAL_PREFIX_LEN);
 
     wat_append(out, "(module\n");
     wat_append(out, PRELUDE_TYPES);
     wat_append(out, PRELUDE_HELPERS);
-    wat_append(out, "\n  ;; --- main ---\n");
-    wat_append(out, "  (func $main (export \"main\")\n");
-    /* declare locals */
-    for (int i = 0; i < pr->max_locals; i++) {
-        wat_appendf(out, "    (local $L%d anyref)\n", i);
+    wat_append(out, "\n  ;; --- user functions ---\n");
+
+    for (size_t i = 0; i < pr->funcs.count; i++) {
+        emit_user_function(&c, pr->funcs.items[i]);
+        if (!c.ok) break;
     }
-    wat_append(out, "    (local $tmp_any anyref)\n");
 
-    emit_block(&c, &pr->program, 2);
+    if (c.ok) {
+        wat_append(out, "\n  ;; --- main (top-level chunk) ---\n");
+        wat_append(out, "  (func $main (export \"main\")\n");
+        for (int i = 0; i < pr->main_n_locals; i++) {
+            wat_appendf(out, "    (local $L%d (ref $Box))\n", i);
+        }
+        wat_append(out, "    (local $tmp_any anyref)\n");
 
-    wat_append(out, "  )\n");
-    /* Note: we deliberately do NOT use `(start)`. The host calls `main`
-     * after instantiation so that wasm exports are visible to JS imports
-     * (which is critical for `print`'s value-decoding callbacks). */
+        emit_block(&c, &pr->main_body, 2);
 
-    /* Data segment with collected string bytes. */
+        wat_append(out, "  )\n");
+    }
+
+    /* Data segment */
     wat_append(out, "  (data $str_data \"");
     for (size_t i = 0; i < c.strs.used; i++) {
         unsigned char b = (unsigned char)c.strs.bytes[i];

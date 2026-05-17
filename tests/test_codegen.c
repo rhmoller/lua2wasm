@@ -23,12 +23,14 @@ static MunitResult test_emits_expected(const MunitParameter params[], void *fixt
     munit_assert_not_null(strstr(s, "(ref.i31 (i32.const 1))"));
     munit_assert_not_null(strstr(s, "(ref.i31 (i32.const 2))"));
     munit_assert_not_null(strstr(s, "(call $lua_add)"));
-    munit_assert_not_null(strstr(s, "(call $host_print)"));
+    /* No more direct $host_print call from user code; goes through $lua_call. */
+    munit_assert_not_null(strstr(s, "(call $lua_call"));
+    munit_assert_not_null(strstr(s, "(global.get $g_print)"));
     munit_assert_not_null(strstr(s, "(func $main (export \"main\")"));
-    munit_assert_not_null(strstr(s, "(type $LuaString"));
-    munit_assert_not_null(strstr(s, "$str_data"));
+    munit_assert_not_null(strstr(s, "(type $LuaClosure"));
 
     wat_free(&w);
+    parse_result_free(&r);
     node_pool_free(&pool);
     tokenlist_free(&t);
     return MUNIT_OK;
@@ -46,18 +48,42 @@ static MunitResult test_string_in_data_segment(const MunitParameter params[], vo
     int ok = codegen_module(&r, &w, err, sizeof(err));
     munit_assert_true(ok);
     const char *s = wat_cstr(&w);
-    /* Built-in literal prefix is "niltruefalse<float>" (19 bytes); "hello" follows. */
     munit_assert_not_null(strstr(s, "(i32.const 19) (i32.const 5)"));
     munit_assert_not_null(strstr(s, "niltruefalse<float>hello"));
     wat_free(&w);
+    parse_result_free(&r);
+    node_pool_free(&pool);
+    tokenlist_free(&t);
+    return MUNIT_OK;
+}
+
+static MunitResult test_user_function_emitted(const MunitParameter params[], void *fixture) {
+    (void)params; (void)fixture;
+    TokenList t = lex("local function f(x) return x end print(f(7))");
+    NodePool pool; node_pool_init(&pool);
+    ParseResult r = parse(&t, &pool);
+    munit_assert_true(r.ok);
+
+    WatBuilder w; wat_init(&w);
+    char err[256] = {0};
+    int ok = codegen_module(&r, &w, err, sizeof(err));
+    if (!ok) munit_logf(MUNIT_LOG_ERROR, "codegen: %s", err);
+    munit_assert_true(ok);
+    const char *s = wat_cstr(&w);
+    munit_assert_not_null(strstr(s, "(func $user_0"));
+    munit_assert_not_null(strstr(s, "(elem declare func $user_0)"));
+    munit_assert_not_null(strstr(s, "(ref.func $user_0)"));
+    wat_free(&w);
+    parse_result_free(&r);
     node_pool_free(&pool);
     tokenlist_free(&t);
     return MUNIT_OK;
 }
 
 static MunitTest tests[] = {
-    { "/emits_expected", test_emits_expected,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
-    { "/string_data",    test_string_in_data_segment, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+    { "/emits_expected",     test_emits_expected,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+    { "/string_data",        test_string_in_data_segment, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+    { "/user_function",      test_user_function_emitted,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
     { NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 };
 

@@ -41,3 +41,10 @@ Stmt *stmt_new(NodePool *p, StmtKind k, int line) {
     s->line = line;
     return s;
 }
+
+LuaFunc *func_new(NodePool *p, int func_idx, int line) {
+    LuaFunc *f = node_pool_alloc(p, sizeof(LuaFunc));
+    f->func_idx = func_idx;
+    f->line = line;
+    return f;
+}
