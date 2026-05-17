@@ -76,13 +76,12 @@
 </footer>
 
 <script type="module">
-import { EditorView, basicSetup } from "https://esm.sh/codemirror@6";
-import { StreamLanguage }       from "https://esm.sh/@codemirror/language@6";
-import { lua as luaMode }       from "https://esm.sh/@codemirror/legacy-modes@6/mode/lua";
-import { oneDark }              from "https://esm.sh/@codemirror/theme-one-dark@6";
-import createLua2WasmModule     from "../build-em/lua2wasm.js";
-// Binaryen ships its own .wasm; esm.sh inlines it.
-import binaryen                 from "https://esm.sh/binaryen@123.0.0";
+import { basicSetup, EditorView } from "https://esm.sh/codemirror@6.0.2";
+import { StreamLanguage }         from "https://esm.sh/@codemirror/language@6.10.2";
+import { lua as luaMode }         from "https://esm.sh/@codemirror/legacy-modes@6.4.0/mode/lua";
+import { oneDark }                from "https://esm.sh/@codemirror/theme-one-dark@6.1.2";
+import createLua2WasmModule       from "../build-em/lua2wasm.js";
+import binaryen                   from "https://cdn.jsdelivr.net/npm/binaryen@121.0.0/index.js";
 
 /* ----- fixture presets ----- */
 const PRESETS = {
@@ -180,7 +179,7 @@ function luaToWat(source) {
 
 /* ----- binaryen wat -> wasm ----- */
 status.textContent = "loading binaryen…";
-const bin = await binaryen.ready ? await binaryen.ready : binaryen;
+const bin = binaryen;     /* default export is the ready API */
 function watToWasm(wat) {
   const mod = bin.parseText(wat);
   mod.setFeatures(bin.Features.All);

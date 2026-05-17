@@ -25,8 +25,15 @@ SRC=(
 # -O2 keeps the output small (~100 KB) without taking forever to link.
 # MODULARIZE=1 + EXPORT_ES6=1 gives us a clean `import createModule from './lua2wasm.js'`.
 # EXPORTED_RUNTIME_METHODS exposes the helpers JS needs to call into C.
+DEBUG="${DEBUG:-0}"
+if [[ "$DEBUG" == 1 ]]; then
+    OPT="-O0 -g3 -s ASSERTIONS=1 -s SAFE_HEAP=1 -s STACK_OVERFLOW_CHECK=2"
+else
+    OPT="-O2"
+fi
+
 emcc "${SRC[@]}" \
-    -O2 \
+    $OPT \
     -std=c2x \
     -Isrc \
     -s MODULARIZE=1 \
@@ -35,6 +42,8 @@ emcc "${SRC[@]}" \
     -s ENVIRONMENT=web \
     -s SINGLE_FILE=0 \
     -s ALLOW_MEMORY_GROWTH=1 \
+    -s INITIAL_MEMORY=16777216 \
+    -s STACK_SIZE=5242880 \
     -s EXPORTED_FUNCTIONS='["_lua2wasm_compile","_lua2wasm_free","_malloc","_free"]' \
     -s EXPORTED_RUNTIME_METHODS='["cwrap","UTF8ToString","stringToUTF8","lengthBytesUTF8","HEAPU8"]' \
     -o build-em/lua2wasm.js

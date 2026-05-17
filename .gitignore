@@ -3,3 +3,4 @@ build-em/
 *.wasm
 *.wat
 .botface/
+.playwright-mcp/
