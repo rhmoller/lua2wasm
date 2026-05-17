@@ -128,6 +128,9 @@
       <option value="s_bisect">bisect.lua</option>
       <option value="s_globals">globals.lua</option>
     </optgroup>
+    <optgroup label="tutorials">
+      <option value="tjdevries">TJ DeVries: Everything You Need To Start Writing Lua</option>
+    </optgroup>
   </select>
   <button id="run" disabled>Run ▶</button>
   <button id="showwat">Show WAT</button>
@@ -410,6 +413,166 @@ local sample = {
   gamma = true,
 }
 dump(sample, "")
+`,
+
+  tjdevries: `--[[
+  Examples from TJ Devries: "Everything You Need To Start Writing Lua"
+  https://www.youtube.com/watch?v=CuWfgiwI73Q
+--]]
+
+-- This is a comment, It starts with two dashes
+
+--[[ This is also
+     a comment.
+
+     But it spans multiple lines!
+--]]
+
+local number = 5
+
+local string = "hello, world"
+local single = "also works"
+local crazy = [[ This
+ is multie line and literal ]]
+
+local truth, lies = true, false
+
+local nothing = nil
+
+local function hello(name)
+	print("Hello!", name)
+end
+
+local greet = function(name)
+	-- .. is string concatenation
+	print("Greetings, " .. name .. "!")
+end
+
+local higher_order = function(value)
+	return function(another)
+		return value + another
+	end
+end
+
+local add_one = higher_order(1)
+print("add_one(2) -> ", add_one(2))
+
+local list = {
+	"first",
+	2,
+	false,
+	function()
+		print("Fourth!")
+	end,
+}
+print("Yup, 1-indexed", list[1])
+print("Fourth is 4 ... :", list[4]())
+
+local t = {
+	literal_key = "a string",
+	["an expression"] = "also works",
+	[function() end] = true,
+}
+
+print("literal_key   : ", t.literal_key)
+print("an expression : ", t["an expression"])
+print("function() end: ", t[function() end]) -- this print nil, but should print nothing
+
+local favorite_accounts = { "teej_dv", "ThePrimeagen", "terminaldotshop" }
+for index = 1, #favorite_accounts do
+	print(index, favorite_accounts[index])
+end
+
+for index, value in ipairs(favorite_accounts) do
+	print(index, value)
+end
+
+local reading_scores = { teej_dv = 9.5, ThePrimeagen = "N/A" }
+for index = 1, #reading_scores do
+	print(reading_scores[index])
+end
+
+for key, value in pairs(reading_scores) do
+	print(key, value)
+end
+
+local function action(loves_coffee)
+	if loves_coffee then
+		print("Check out \`ssh terminal.shop\` - it's cool!")
+	else
+		print("Check out \`ssh terminal.shop\` - it's still cool!")
+	end
+end
+
+-- "falsey": nil, false
+action()
+action(false)
+
+-- Everything else is "truthy"
+action(true)
+action(0)
+action({})
+
+--[[ these are wonky since we don't support multiple files in this playground
+
+-- foo.lua
+local M = {}
+M.cool_function = function() end
+return M
+
+-- bar.lua
+local foo = require('foo')
+foo.cool_function()
+
+--]]
+
+local returns_four_values = function()
+	return 1, 2, 3, 4
+end
+
+first, second, last = returns_four_values()
+
+print("first: ", first)
+print("second:", second)
+print("last:", last)
+-- the \`4\` is discarded :'(
+
+local variable_arguments = function(...)
+	local arguments = { ... }
+	for i, v in ipairs({ ... }) do
+		print(i, v)
+	end
+	--  return unpack(arguments)
+end
+
+print("===================")
+print("1:", variable_arguments("hello", "world", "!"))
+print("===================")
+print("2:", variable_arguments("hello", "world", "!"), "<lost>")
+
+local single_string = function(s)
+	return s .. " - WOW!"
+end
+
+local x = single_string("hi")
+local y = single_string("hi")
+print(x, y)
+
+local setup = function(opts)
+	if opts.default == nil then
+		opts.default = 17
+	end
+
+	print(opts.default, opts.other)
+end
+
+setup({ default = 12, other = false })
+setup({ other = true })
+
+local MyTable = {}
+
+function MyTable.something(self, ...) end
+function MyTable:something(...) end
 `,
 };
 
