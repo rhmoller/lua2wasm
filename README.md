@@ -123,6 +123,7 @@ managed runtime that already has most of what a dynamic language needs.
 | **`array.copy` between GC arrays**            | String concat and table-array resizing copy ranges between GC-managed `(array …)` instances directly — no manual loop, no memcpy, no linear-memory staging. |
 | **`anyref` + null tracking in the type system** | Lua values flow as `anyref`. Non-nullable refs (`(ref $X)` vs `(ref null $X)`) are tracked separately so the validator catches whole classes of NPE-style bugs in our generated code at module-instantiation time. |
 | **`(start)` *not* used**                      | We *deliberately don't* run code at instantiation time, so the JS host can wire up its decoder helpers before `main()` is called — otherwise imports couldn't see the module's own exports. |
+| **JS Promise Integration** (`WebAssembly.Suspending` / `WebAssembly.promising`) | *Playground only.* `io.read` is wrapped as a suspending import and `main` as a promising export, so a Lua program that calls `io.read()` synchronously transparently awaits a typed line in the output pane. No change to the compiled `.wasm`; pure host-side. Falls back to EOF when the host lacks JSPI. |
 
 The practical consequence: a typical compiled module is **a few KB**. The
 host has zero Lua-specific runtime; everything that *is* the Lua VM lives in
@@ -131,8 +132,8 @@ fits in 5 KB; the full milestone-8 OO demo fits in 5.5 KB.
 
 ## Targets
 
-Anything with a current WASM-GC + reference-types + exception-handling
-implementation:
+Anything with current WASM-GC + reference-types + exception-handling
+support runs every compiled module:
 
 - **Chrome / Edge** ≥ 137 — works out of the box, no flags
 - **Firefox** ≥ 131 — works out of the box, no flags
@@ -140,9 +141,25 @@ implementation:
 - **Node** ≥ 22 — needs `--experimental-wasm-exnref` (still gated as of Node 24); future Node releases are expected to default it on
 
 The new exception-handling proposal (with `exnref` / `try_table`) is the
-only opcode family in our output that's still flag-gated *anywhere*. It's
-shipped in every modern browser by default; the Node holdout is a runtime
-config detail, not a missing implementation.
+only opcode family in our compiled output that's still flag-gated
+*anywhere*. It's shipped in every current browser by default; the Node
+holdout is a runtime config detail, not a missing implementation.
+
+### Optional: JSPI for interactive `io.read` in the playground
+
+[`runtime/playground.html`](runtime/playground.html) uses **JavaScript
+Promise Integration** (`WebAssembly.Suspending` + `WebAssembly.promising`)
+to let `io.read` suspend the running wasm while it awaits a typed line in
+the output pane. Status is the same as exnref:
+
+- Chrome / Edge ≥ 137 — default-on
+- Firefox / Safari recent — default-on (track the [JSPI proposal](https://github.com/WebAssembly/js-promise-integration) for the latest)
+- Node — behind `--experimental-wasm-jspi` (not used by our CLI host)
+
+When JSPI is unavailable the playground silently falls back to returning
+EOF from `io.read` — every other feature keeps working. Nothing in the
+compiled `.wasm` itself depends on JSPI; it's purely a host-side feature
+that lets a synchronous-looking wasm import resolve a promise.
 
 Compiled modules need no other runtime files. They `import "host"` for `print`
 only — and even that can be replaced with whatever host imports your
