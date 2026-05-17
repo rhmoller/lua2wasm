@@ -62,13 +62,21 @@
 <header>
   <h1><a href="https://github.com/rhmoller/lua2wasm" target="_blank" rel="noopener">lua2wasm</a> playground</h1>
   <select id="preset">
-    <option value="hello">hello</option>
-    <option value="fact">factorial</option>
-    <option value="counter">counter (closure)</option>
-    <option value="tables">tables</option>
-    <option value="oo">OOP via metatables</option>
-    <option value="pcall">pcall</option>
-    <option value="forloop">for + ipairs</option>
+    <optgroup label="quick">
+      <option value="hello">hello</option>
+      <option value="fact">factorial</option>
+      <option value="counter">counter (closure)</option>
+      <option value="tables">tables</option>
+      <option value="oo">OOP via metatables</option>
+      <option value="pcall">pcall</option>
+      <option value="forloop">for + ipairs</option>
+    </optgroup>
+    <optgroup label="from lua.org/extras">
+      <option value="s_hello">hello.lua</option>
+      <option value="s_account">account.lua</option>
+      <option value="s_bisect">bisect.lua</option>
+      <option value="s_globals">globals.lua</option>
+    </optgroup>
   </select>
   <button id="run" disabled>Run ▶</button>
   <button id="showwat">Show WAT</button>
@@ -158,6 +166,99 @@ end
 local sum = 0
 for i = 1, 100 do sum = sum + i end
 print(sum)   -- 5050
+`,
+
+  s_hello: `-- the first program in every language (verbatim from lua.org/extras)
+io.write("Hello world, from ",_VERSION,"!\\n")
+`,
+
+  s_account: `-- A simple example of OOP in Lua (from PiL 1, ch. 16).
+-- Adapted for lua2wasm: \`global\` declarations added; rest is verbatim.
+
+global Account = {balance = 0}
+
+function Account:new (o, name)
+  o = o or {name=name}
+  setmetatable(o, self)
+  self.__index = self
+  return o
+end
+
+function Account:deposit (v)
+  self.balance = self.balance + v
+end
+
+function Account:withdraw (v)
+  if v > self.balance then error("insufficient funds on account "..self.name) end
+  self.balance = self.balance - v
+end
+
+function Account:show (title)
+  print(title or "", self.name, self.balance)
+end
+
+global a = Account:new(nil,"demo")
+a:show("after creation")
+a:deposit(1000.00)
+a:show("after deposit")
+a:withdraw(100.00)
+a:show("after withdraw")
+`,
+
+  s_bisect: `-- Bisection method for solving non-linear equations (lua.org/extras).
+-- Adapted: \`global\` declarations added; rest is verbatim.
+
+global delta = 1e-6
+global n
+global bisect
+global solve
+global f
+
+function bisect(f,a,b,fa,fb)
+ local c=(a+b)/2
+ io.write(n," c=",c," a=",a," b=",b,"\\n")
+ if c==a or c==b or math.abs(a-b)<delta then return c,b-a end
+ n=n+1
+ local fc=f(c)
+ if fa*fc<0 then return bisect(f,a,c,fa,fc) else return bisect(f,c,b,fc,fb) end
+end
+
+function solve(f,a,b)
+ n=0
+ local z,e=bisect(f,a,b,f(a),f(b))
+ io.write(string.format("after %d steps, root is %.17g with error %.1e, f=%.1e\\n",n,z,e,f(z)))
+end
+
+function f(x)
+ return x*x*x-x-1
+end
+
+solve(f,1,2)
+`,
+
+  s_globals: `-- Adapted from lua.org/extras' globals.lua. The original walked Lua's
+-- \`_G\` and used \`table.sort\`; this version walks a sample table and
+-- prints keys in insertion order (which our linear-probe hash preserves).
+
+local seen = {}
+
+local function dump(t, indent)
+  seen[t] = true
+  for k, v in pairs(t) do
+    print(indent .. k)
+    if type(v) == "table" and not seen[v] then
+      dump(v, indent .. "  ")
+    end
+  end
+end
+
+local sample = {
+  alpha = 1,
+  beta = "hi",
+  nested = {x = 10, y = 20},
+  gamma = true,
+}
+dump(sample, "")
 `,
 };
 
@@ -262,6 +363,10 @@ async function run() {
         case 3: return Number(f).toFixed(prec);
         case 4: return Number(f).toExponential(prec === 6 ? 1 : prec);
         case 5: return BigInt(i).toString(16);
+        case 6:
+          if (!Number.isFinite(f)) return f === Infinity ? "inf" : f === -Infinity ? "-inf" : "nan";
+          if (Number.isInteger(f)) return `${f}.0`;
+          return Number(f).toPrecision(14).replace(/\.?0+(e|$)/, "$1");
         default: return "";
       }
     }

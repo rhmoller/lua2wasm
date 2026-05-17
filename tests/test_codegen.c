@@ -81,10 +81,35 @@ static MunitResult test_user_function_emitted(const MunitParameter params[], voi
     return MUNIT_OK;
 }
 
+static MunitResult test_pool_pointer_stability(const MunitParameter params[], void *fixture) {
+    (void)params; (void)fixture;
+    /* NodePool must hand out pointers that stay valid as more allocations are
+     * made. Earlier implementations grew via realloc, which silently
+     * invalidated previously-returned pointers when the kernel had to relocate
+     * the buffer. The bug went unnoticed on x86_64 (glibc realloc rarely
+     * moves small blocks) but surfaced as out-of-memory + segfault when the
+     * compiler ran inside Emscripten's smaller heap. */
+    NodePool pool; node_pool_init(&pool);
+    int *ptrs[2048];
+    for (int i = 0; i < 2048; i++) {
+        ptrs[i] = node_pool_alloc(&pool, sizeof(int));
+        *ptrs[i] = i ^ 0x5a5a5a5a;
+    }
+    /* Allocate a lot more (well past the original 4 KB pool size) — guaranteed
+     * to grow the pool and, if it ever moves, invalidate ptrs[*]. */
+    for (int i = 0; i < 4096; i++) (void)node_pool_alloc(&pool, 64);
+    for (int i = 0; i < 2048; i++) {
+        munit_assert_int(*ptrs[i], ==, (i ^ 0x5a5a5a5a));
+    }
+    node_pool_free(&pool);
+    return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
-    { "/emits_expected",     test_emits_expected,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
-    { "/string_data",        test_string_in_data_segment, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
-    { "/user_function",      test_user_function_emitted,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+    { "/emits_expected",       test_emits_expected,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+    { "/string_data",          test_string_in_data_segment, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+    { "/user_function",        test_user_function_emitted,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+    { "/pool_pointer_stability", test_pool_pointer_stability, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
     { NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 };
 

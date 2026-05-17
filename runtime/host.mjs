@@ -50,6 +50,10 @@ function formatScalar(kind, i, f, prec) {
         case 3: return Number(f).toFixed(prec);                                     // %f
         case 4: return Number(f).toExponential(prec === 6 ? 1 : prec);              // %e
         case 5: return BigInt(i).toString(16);                                       // %x
+        case 6:                                                                       // Lua tostring(float)
+            if (!Number.isFinite(f)) return f === Infinity ? "inf" : f === -Infinity ? "-inf" : "nan";
+            if (Number.isInteger(f)) return `${f}.0`;
+            return Number(f).toPrecision(14).replace(/\.?0+(e|$)/, "$1");
         default: return "";
     }
 }

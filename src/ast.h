@@ -255,11 +255,15 @@ struct LuaFunc {
     int line;
 };
 
-/* ---------- node pool ---------- */
+/* ---------- node pool ----------
+ * Chunked bump allocator. Each chunk is a stable malloc'd block; once a
+ * pointer is handed out, it remains valid until the entire pool is freed.
+ * (Earlier realloc-based implementation silently invalidated previously-
+ * returned pointers when the kernel had to relocate the buffer — see
+ * test_pool_pointer_stability.) */
+typedef struct PoolChunk PoolChunk;
 typedef struct {
-    char *buf;
-    size_t used;
-    size_t cap;
+    PoolChunk *chunks;      /* singly-linked list, most-recent first */
 } NodePool;
 
 void node_pool_init(NodePool *p);
