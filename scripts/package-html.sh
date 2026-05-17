@@ -64,10 +64,26 @@ function luaToString(v) {
   }
 }
 
+function formatScalar(kind, i, f, prec) {
+  if (prec < 0) prec = 6;
+  switch (kind) {
+    case 0: return String(i);
+    case 2: return Number(f).toPrecision(prec === 6 ? 14 : prec).replace(/\\.?0+(e|\$)/, "\$1");
+    case 3: return Number(f).toFixed(prec);
+    case 4: return Number(f).toExponential(prec === 6 ? 1 : prec);
+    case 5: return BigInt(i).toString(16);
+    default: return "";
+  }
+}
 ({ instance } = await WebAssembly.instantiate(wbuf, {
   host: {
     print:     v => { out.textContent += luaToString(v) + "\\n"; },
     write_raw: v => { out.textContent += luaToString(v); },
+    fmt: (kind, i, f, prec) => {
+      const s = formatScalar(kind, i, f, prec);
+      for (let j = 0; j < s.length; j++) instance.exports.fmt_buf_set(j, s.charCodeAt(j));
+      return s.length;
+    },
   },
 }));
 try { instance.exports.main(); }

@@ -30,8 +30,9 @@ static const struct {
     { "min",   3, "$builtin_math_min",   BLT_LIB_MATH },
     { "max",   3, "$builtin_math_max",   BLT_LIB_MATH },
     /* string library */
-    { "len", 3, "$builtin_string_len", BLT_LIB_STRING },
-    { "sub", 3, "$builtin_string_sub", BLT_LIB_STRING },
+    { "len",    3, "$builtin_string_len",    BLT_LIB_STRING },
+    { "sub",    3, "$builtin_string_sub",    BLT_LIB_STRING },
+    { "format", 6, "$builtin_string_format", BLT_LIB_STRING },
     /* io library */
     { "write", 5, "$builtin_io_write", BLT_LIB_IO },
     /* table library */
