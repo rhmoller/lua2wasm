@@ -35,6 +35,8 @@ function luaToString(v) {
         case 2: return String(instance.exports.lua_get_int(v));
         case 3: return formatFloat(instance.exports.lua_get_float(v));
         case 4: return readLuaString(v);
+        case 5: return "function";
+        case 6: return "table";
         default: return `<lua value tag=${tag}>`;
     }
 }

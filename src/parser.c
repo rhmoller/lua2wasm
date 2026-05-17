@@ -296,31 +296,71 @@ static Expr *parse_primary(Parser *p) {
             e->as.func_expr.func = fn;
             return e;
         }
+        case TOK_LBRACE: {
+            advance(p); /* { */
+            TableEntry buf[64];
+            int n = 0;
+            while (peek(p)->kind != TOK_RBRACE && peek(p)->kind != TOK_EOF) {
+                if (n >= 64) { set_error(p, "too many entries in constructor"); return NULL; }
+                TableEntry *ent = &buf[n];
+                if (peek(p)->kind == TOK_LBRACKET) {
+                    advance(p);
+                    Expr *k = parse_expr(p);
+                    if (!p->ok) return NULL;
+                    expect(p, TOK_RBRACKET, "]");
+                    expect(p, TOK_ASSIGN, "=");
+                    Expr *v = parse_expr(p);
+                    if (!p->ok) return NULL;
+                    ent->kind = TENT_KEY_EXPR;
+                    ent->key = k; ent->value = v;
+                } else if (peek(p)->kind == TOK_IDENT &&
+                           peek_at(p, 1)->kind == TOK_ASSIGN) {
+                    const Token *nm = advance(p);
+                    advance(p); /* = */
+                    Expr *v = parse_expr(p);
+                    if (!p->ok) return NULL;
+                    Expr *k = expr_new(p->pool, EXPR_STRING, nm->line);
+                    k->as.s.bytes = nm->start;
+                    k->as.s.len = nm->len;
+                    ent->kind = TENT_KEY_EXPR;
+                    ent->key = k; ent->value = v;
+                } else {
+                    Expr *v = parse_expr(p);
+                    if (!p->ok) return NULL;
+                    ent->kind = TENT_POSITIONAL;
+                    ent->key = NULL; ent->value = v;
+                }
+                n++;
+                if (!match(p, TOK_COMMA) && !match(p, TOK_SEMI)) break;
+            }
+            expect(p, TOK_RBRACE, "}");
+            Expr *e = expr_new(p->pool, EXPR_TABLE, line);
+            e->as.table_ctor.n_entries = n;
+            e->as.table_ctor.entries = node_pool_alloc(p->pool, sizeof(TableEntry) * (n ? n : 1));
+            for (int i = 0; i < n; i++) e->as.table_ctor.entries[i] = buf[i];
+            return e;
+        }
         default:
             set_error(p, "expected expression");
             return NULL;
     }
 }
 
-static Expr *parse_unary(Parser *p) {
-    const Token *t = peek(p);
-    int line = t->line;
-    UnOp op;
-    if (t->kind == TOK_MINUS)        op = UN_NEG;
-    else if (t->kind == TOK_KW_NOT)  op = UN_NOT;
-    else if (t->kind == TOK_HASH)    op = UN_LEN;
-    else {
-        Expr *e = parse_primary(p);
-        if (!p->ok) return NULL;
-        /* postfix: call suffix. The callee can now be ANY expression. */
-        while (peek(p)->kind == TOK_LPAREN) {
+/* primary + postfix (call/dot/bracket) chain — used in expressions AND
+ * for assignment-target parsing. */
+static Expr *parse_prefix_chain(Parser *p) {
+    Expr *e = parse_primary(p);
+    if (!p->ok) return NULL;
+    while (1) {
+        TokKind k = peek(p)->kind;
+        if (k == TOK_LPAREN) {
             int call_line = peek(p)->line;
             advance(p);
             Expr *args_buf[16];
             size_t nargs = 0;
             if (peek(p)->kind != TOK_RPAREN) {
                 do {
-                    if (nargs >= 16) { set_error(p, "too many args (>16)"); return NULL; }
+                    if (nargs >= 16) { set_error(p, "too many args"); return NULL; }
                     args_buf[nargs++] = parse_expr(p);
                     if (!p->ok) return NULL;
                 } while (match(p, TOK_COMMA));
@@ -332,9 +372,40 @@ static Expr *parse_unary(Parser *p) {
             call->as.call.args = node_pool_alloc(p->pool, sizeof(Expr *) * (nargs ? nargs : 1));
             for (size_t i = 0; i < nargs; i++) call->as.call.args[i] = args_buf[i];
             e = call;
-        }
-        return e;
+        } else if (k == TOK_DOT) {
+            advance(p);
+            if (peek(p)->kind != TOK_IDENT) { set_error(p, "expected field name after '.'"); return NULL; }
+            const Token *nm = advance(p);
+            Expr *key = expr_new(p->pool, EXPR_STRING, nm->line);
+            key->as.s.bytes = nm->start;
+            key->as.s.len = nm->len;
+            Expr *idx = expr_new(p->pool, EXPR_INDEX, nm->line);
+            idx->as.index.table = e;
+            idx->as.index.key = key;
+            e = idx;
+        } else if (k == TOK_LBRACKET) {
+            int line = peek(p)->line;
+            advance(p);
+            Expr *key = parse_expr(p);
+            if (!p->ok) return NULL;
+            expect(p, TOK_RBRACKET, "]");
+            Expr *idx = expr_new(p->pool, EXPR_INDEX, line);
+            idx->as.index.table = e;
+            idx->as.index.key = key;
+            e = idx;
+        } else break;
     }
+    return e;
+}
+
+static Expr *parse_unary(Parser *p) {
+    const Token *t = peek(p);
+    int line = t->line;
+    UnOp op;
+    if (t->kind == TOK_MINUS)        op = UN_NEG;
+    else if (t->kind == TOK_KW_NOT)  op = UN_NOT;
+    else if (t->kind == TOK_HASH)    op = UN_LEN;
+    else return parse_prefix_chain(p);
     advance(p);
     Expr *operand = parse_prec(p, PREC_UNARY);
     if (!p->ok) return NULL;
@@ -544,121 +615,70 @@ static Stmt *parse_return(Parser *p) {
     return s;
 }
 
+static AssignTarget expr_to_target(Expr *e) {
+    AssignTarget t = {0};
+    if (e->kind == EXPR_VAR) {
+        t.kind = TGT_VAR;
+        t.as.var.kind = e->as.var.kind;
+        t.as.var.idx = e->as.var.idx;
+    } else {
+        t.kind = TGT_INDEX;
+        t.as.index.table = e->as.index.table;
+        t.as.index.key = e->as.index.key;
+    }
+    return t;
+}
+
 static Stmt *parse_ident_stmt(Parser *p) {
     int line = peek(p)->line;
-    /* Detect multi-target assignment: IDENT (',' IDENT)* '=' */
-    if (peek_at(p, 1)->kind == TOK_ASSIGN || peek_at(p, 1)->kind == TOK_COMMA) {
-        /* Could be multi-assign. Collect identifier targets. */
-        const Token *names_buf[16];
-        int n_targets = 0;
-        names_buf[n_targets++] = advance(p);
-        int could_be_assign = 1;
-        while (peek(p)->kind == TOK_COMMA) {
-            advance(p);
-            if (peek(p)->kind != TOK_IDENT) { could_be_assign = 0; break; }
-            if (n_targets >= 16) { set_error(p, "too many assignment targets"); return NULL; }
-            names_buf[n_targets++] = advance(p);
-        }
-        if (could_be_assign && peek(p)->kind == TOK_ASSIGN) {
-            advance(p);
-            /* Resolve all targets. */
-            VarRef *targets = node_pool_alloc(p->pool, sizeof(VarRef) * n_targets);
-            for (int i = 0; i < n_targets; i++) {
-                VarKind kind;
-                int idx;
-                if (!resolve_name(p, names_buf[i]->start, names_buf[i]->len, &kind, &idx)) {
-                    char buf[160];
-                    snprintf(buf, sizeof(buf),
-                        "assigning to undefined variable `%.*s`",
-                        (int)names_buf[i]->len, names_buf[i]->start);
-                    set_error(p, buf);
-                    return NULL;
-                }
-                if (kind == VAR_BUILTIN_PRINT) {
-                    set_error(p, "cannot reassign builtin `print`");
-                    return NULL;
-                }
-                targets[i].kind = kind;
-                targets[i].idx = idx;
-            }
-            /* Parse value list. */
-            Expr *vals_buf[16];
-            int n_values = 0;
-            do {
-                if (n_values >= 16) { set_error(p, "too many values"); return NULL; }
-                vals_buf[n_values++] = parse_expr(p);
-                if (!p->ok) return NULL;
-            } while (match(p, TOK_COMMA));
-            Stmt *s = stmt_new(p->pool, STMT_ASSIGN, line);
-            s->as.assign.n_targets = n_targets;
-            s->as.assign.targets = targets;
-            s->as.assign.n_values = n_values;
-            s->as.assign.values = node_pool_alloc(p->pool, sizeof(Expr *) * n_values);
-            for (int i = 0; i < n_values; i++) s->as.assign.values[i] = vals_buf[i];
-            return s;
-        }
-        /* Single identifier that turned out not to be an assignment -> bail
-         * to expression-statement path. But we've already consumed the
-         * identifier(s). For single-ident case we can reconstruct via
-         * looking at the first name. This is a parse-failure case
-         * anyway if `a, b` doesn't lead to `=`. */
-        if (n_targets > 1) {
-            set_error(p, "expected `=` after assignment target list");
-            return NULL;
-        }
-        /* Single identifier, not followed by `=`: treat as start of expression. */
-        Expr *first = expr_new(p->pool, EXPR_VAR, line);
-        first->as.var.name = names_buf[0]->start;
-        first->as.var.name_len = names_buf[0]->len;
-        VarKind kind; int idx;
-        if (!resolve_name(p, names_buf[0]->start, names_buf[0]->len, &kind, &idx)) {
-            char buf[160];
-            snprintf(buf, sizeof(buf),
-                "undefined variable `%.*s`",
-                (int)names_buf[0]->len, names_buf[0]->start);
-            set_error(p, buf);
-            return NULL;
-        }
-        first->as.var.kind = kind;
-        first->as.var.idx = idx;
-        /* Allow trailing call suffix. */
-        while (peek(p)->kind == TOK_LPAREN) {
-            int call_line = peek(p)->line;
-            advance(p);
-            Expr *args_buf[16];
-            size_t nargs = 0;
-            if (peek(p)->kind != TOK_RPAREN) {
-                do {
-                    if (nargs >= 16) { set_error(p, "too many args"); return NULL; }
-                    args_buf[nargs++] = parse_expr(p);
-                    if (!p->ok) return NULL;
-                } while (match(p, TOK_COMMA));
-            }
-            expect(p, TOK_RPAREN, ")");
-            Expr *call = expr_new(p->pool, EXPR_CALL, call_line);
-            call->as.call.callee = first;
-            call->as.call.nargs = nargs;
-            call->as.call.args = node_pool_alloc(p->pool, sizeof(Expr *) * (nargs ? nargs : 1));
-            for (size_t i = 0; i < nargs; i++) call->as.call.args[i] = args_buf[i];
-            first = call;
-        }
-        if (first->kind != EXPR_CALL) {
-            set_error(p, "expression statement must be a function call");
-            return NULL;
-        }
+    Expr *first = parse_prefix_chain(p);
+    if (!p->ok) return NULL;
+
+    if (first->kind == EXPR_CALL) {
         Stmt *s = stmt_new(p->pool, STMT_EXPR, line);
         s->as.expr_stmt.expr = first;
         return s;
     }
-    /* No assign / comma after first IDENT — pure expression statement. */
-    Expr *e = parse_expr(p);
-    if (!p->ok) return NULL;
-    if (e->kind != EXPR_CALL) {
-        set_error(p, "expression statement must be a function call");
+    if (first->kind != EXPR_VAR && first->kind != EXPR_INDEX) {
+        set_error(p, "expression statement must be a call or assignment");
         return NULL;
     }
-    Stmt *s = stmt_new(p->pool, STMT_EXPR, line);
-    s->as.expr_stmt.expr = e;
+    if (first->kind == EXPR_VAR && first->as.var.kind == VAR_BUILTIN_PRINT) {
+        set_error(p, "cannot reassign builtin `print`");
+        return NULL;
+    }
+
+    AssignTarget targets[16];
+    int n_targets = 0;
+    targets[n_targets++] = expr_to_target(first);
+    while (match(p, TOK_COMMA)) {
+        if (n_targets >= 16) { set_error(p, "too many assignment targets"); return NULL; }
+        Expr *t = parse_prefix_chain(p);
+        if (!p->ok) return NULL;
+        if (t->kind != EXPR_VAR && t->kind != EXPR_INDEX) {
+            set_error(p, "invalid assignment target"); return NULL;
+        }
+        if (t->kind == EXPR_VAR && t->as.var.kind == VAR_BUILTIN_PRINT) {
+            set_error(p, "cannot reassign builtin `print`"); return NULL;
+        }
+        targets[n_targets++] = expr_to_target(t);
+    }
+    expect(p, TOK_ASSIGN, "= (assignment)");
+    if (!p->ok) return NULL;
+    Expr *vals_buf[16];
+    int n_values = 0;
+    do {
+        if (n_values >= 16) { set_error(p, "too many values"); return NULL; }
+        vals_buf[n_values++] = parse_expr(p);
+        if (!p->ok) return NULL;
+    } while (match(p, TOK_COMMA));
+    Stmt *s = stmt_new(p->pool, STMT_ASSIGN, line);
+    s->as.assign.n_targets = n_targets;
+    s->as.assign.targets = node_pool_alloc(p->pool, sizeof(AssignTarget) * n_targets);
+    for (int i = 0; i < n_targets; i++) s->as.assign.targets[i] = targets[i];
+    s->as.assign.n_values = n_values;
+    s->as.assign.values = node_pool_alloc(p->pool, sizeof(Expr *) * n_values);
+    for (int i = 0; i < n_values; i++) s->as.assign.values[i] = vals_buf[i];
     return s;
 }
 

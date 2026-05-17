@@ -55,9 +55,10 @@ static MunitResult test_local_and_assign(const MunitParameter params[], void *fi
     munit_assert_int(r.main_body.items[0]->kind, ==, STMT_LOCAL);
     munit_assert_int(r.main_body.items[1]->kind, ==, STMT_ASSIGN);
     munit_assert_int(r.main_body.items[1]->as.assign.n_targets, ==, 1);
-    munit_assert_int(r.main_body.items[1]->as.assign.targets[0].idx, ==,
+    munit_assert_int(r.main_body.items[1]->as.assign.targets[0].kind, ==, TGT_VAR);
+    munit_assert_int(r.main_body.items[1]->as.assign.targets[0].as.var.idx, ==,
                      r.main_body.items[0]->as.local.local_idxs[0]);
-    munit_assert_int(r.main_body.items[1]->as.assign.targets[0].kind, ==, VAR_LOCAL);
+    munit_assert_int(r.main_body.items[1]->as.assign.targets[0].as.var.kind, ==, VAR_LOCAL);
     parse_result_free(&r);
     node_pool_free(&pool);
     tokenlist_free(&t);

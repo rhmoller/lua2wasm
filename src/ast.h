@@ -47,7 +47,20 @@ typedef enum {
     EXPR_BINOP,
     EXPR_UNOP,
     EXPR_FUNCTION,      /* anonymous function expression */
+    EXPR_INDEX,         /* t[k]  (t.name is sugar lowered to INDEX with string key) */
+    EXPR_TABLE,         /* { ... } table constructor */
 } ExprKind;
+
+typedef enum {
+    TENT_POSITIONAL,    /* value at next implicit positive integer index */
+    TENT_KEY_EXPR,      /* [k] = v  -- and also t.name lowered as KEY_EXPR with string lit */
+} TableEntryKind;
+
+typedef struct {
+    TableEntryKind kind;
+    Expr *key;          /* NULL for POSITIONAL */
+    Expr *value;
+} TableEntry;
 
 typedef enum {
     BIN_ADD, BIN_SUB, BIN_MUL, BIN_DIV, BIN_FDIV, BIN_MOD, BIN_POW,
@@ -90,6 +103,14 @@ struct Expr {
         struct {
             LuaFunc *func;
         } func_expr;
+        struct {
+            Expr *table;
+            Expr *key;
+        } index;
+        struct {
+            TableEntry *entries;
+            int n_entries;
+        } table_ctor;
     } as;
 };
 
@@ -120,6 +141,19 @@ typedef struct {
     int idx;
 } VarRef;
 
+typedef enum {
+    TGT_VAR,
+    TGT_INDEX,
+} TargetKind;
+
+typedef struct {
+    TargetKind kind;
+    union {
+        VarRef var;
+        struct { Expr *table; Expr *key; } index;
+    } as;
+} AssignTarget;
+
 struct Stmt {
     StmtKind kind;
     int line;
@@ -132,7 +166,7 @@ struct Stmt {
         } local;
         struct {                    /* a [, b, c] = e1 [, e2, ...] */
             int n_targets;
-            VarRef *targets;
+            AssignTarget *targets;
             int n_values;
             Expr **values;
         } assign;

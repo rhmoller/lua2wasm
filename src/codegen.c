@@ -297,6 +297,41 @@ static void emit_function_expr(CG *c, const LuaFunc *fn, int depth) {
     emit_indent(c, depth); wat_append(c->w, ")\n");
 }
 
+/* ----- table operations ----- */
+static void emit_index_expr(CG *c, const Expr *e, int depth) {
+    emit_indent(c, depth); wat_append(c->w, "(call $tab_get\n");
+    emit_indent(c, depth + 1); wat_append(c->w, "(ref.cast (ref $LuaTable)\n");
+    emit_expr(c, e->as.index.table, depth + 2);
+    emit_indent(c, depth + 1); wat_append(c->w, ")\n");
+    emit_expr(c, e->as.index.key, depth + 1);
+    emit_indent(c, depth); wat_append(c->w, ")\n");
+}
+
+static void emit_table_ctor(CG *c, const Expr *e, int depth) {
+    int n = e->as.table_ctor.n_entries;
+    /* Wrap in a block so the constructor appears as a single folded
+     * expression from outside (works inside array.new_fixed arg lists,
+     * function calls, etc.) but uses stack-form internally to keep the
+     * in-progress table on the operand stack across entries. */
+    emit_indent(c, depth); wat_append(c->w, "(block (result anyref)\n");
+    emit_indent(c, depth + 1); wat_append(c->w, "(call $tab_new)\n");
+    int pos_idx = 1;
+    for (int i = 0; i < n; i++) {
+        TableEntry *ent = &e->as.table_ctor.entries[i];
+        emit_indent(c, depth + 1); wat_append(c->w, "local.tee $tmp_tab\n");
+        emit_indent(c, depth + 1); wat_append(c->w, "(ref.as_non_null (local.get $tmp_tab))\n");
+        if (ent->kind == TENT_POSITIONAL) {
+            emit_indent(c, depth + 1);
+            wat_appendf(c->w, "(ref.i31 (i32.const %d))\n", pos_idx++);
+        } else {
+            emit_expr(c, ent->key, depth + 1);
+        }
+        emit_expr(c, ent->value, depth + 1);
+        emit_indent(c, depth + 1); wat_append(c->w, "call $tab_set\n");
+    }
+    emit_indent(c, depth); wat_append(c->w, ")\n");
+}
+
 /* ----- main expression dispatch ----- */
 static void emit_expr(CG *c, const Expr *e, int depth) {
     if (!c->ok) return;
@@ -315,6 +350,8 @@ static void emit_expr(CG *c, const Expr *e, int depth) {
         case EXPR_BINOP:  emit_binop(c, e, depth); break;
         case EXPR_UNOP:   emit_unop(c, e, depth); break;
         case EXPR_FUNCTION: emit_function_expr(c, e->as.func_expr.func, depth); break;
+        case EXPR_INDEX:  emit_index_expr(c, e, depth); break;
+        case EXPR_TABLE:  emit_table_ctor(c, e, depth); break;
     }
 }
 
@@ -392,18 +429,35 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
             int last_call = (n_values > 0 &&
                              s->as.assign.values[n_values - 1]->kind == EXPR_CALL);
             if (n_targets == 1) {
-                /* Direct single-target path; no aliasing concern. */
-                emit_indent(c, depth); wat_append(c->w, "(struct.set $Box $v\n");
-                emit_box_ref(c, s->as.assign.targets[0].kind,
-                             s->as.assign.targets[0].idx, depth + 1);
-                if (last_call) {
-                    emit_indent(c, depth + 1); wat_append(c->w, "(call $args_first\n");
-                    emit_call_array(c, s->as.assign.values[0], depth + 2);
-                    emit_indent(c, depth + 1); wat_append(c->w, ")\n");
+                AssignTarget *t = &s->as.assign.targets[0];
+                /* Build the value expression first. */
+                if (t->kind == TGT_VAR) {
+                    emit_indent(c, depth); wat_append(c->w, "(struct.set $Box $v\n");
+                    emit_box_ref(c, t->as.var.kind, t->as.var.idx, depth + 1);
+                    if (last_call) {
+                        emit_indent(c, depth + 1); wat_append(c->w, "(call $args_first\n");
+                        emit_call_array(c, s->as.assign.values[0], depth + 2);
+                        emit_indent(c, depth + 1); wat_append(c->w, ")\n");
+                    } else {
+                        emit_expr(c, s->as.assign.values[0], depth + 1);
+                    }
+                    emit_indent(c, depth); wat_append(c->w, ")\n");
                 } else {
-                    emit_expr(c, s->as.assign.values[0], depth + 1);
+                    /* TGT_INDEX: table[key] = value */
+                    emit_indent(c, depth); wat_append(c->w, "(call $tab_set\n");
+                    emit_indent(c, depth + 1); wat_append(c->w, "(ref.cast (ref $LuaTable)\n");
+                    emit_expr(c, t->as.index.table, depth + 2);
+                    emit_indent(c, depth + 1); wat_append(c->w, ")\n");
+                    emit_expr(c, t->as.index.key, depth + 1);
+                    if (last_call) {
+                        emit_indent(c, depth + 1); wat_append(c->w, "(call $args_first\n");
+                        emit_call_array(c, s->as.assign.values[0], depth + 2);
+                        emit_indent(c, depth + 1); wat_append(c->w, ")\n");
+                    } else {
+                        emit_expr(c, s->as.assign.values[0], depth + 1);
+                    }
+                    emit_indent(c, depth); wat_append(c->w, ")\n");
                 }
-                emit_indent(c, depth); wat_append(c->w, ")\n");
                 break;
             }
             /* Multi-target: must evaluate ALL RHS before assigning (Lua spec).
@@ -438,14 +492,27 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
             emit_indent(c, depth); wat_append(c->w, ")\n");
             /* Distribute. */
             for (int i = 0; i < n_targets; i++) {
-                emit_indent(c, depth); wat_append(c->w, "(struct.set $Box $v\n");
-                emit_box_ref(c, s->as.assign.targets[i].kind,
-                             s->as.assign.targets[i].idx, depth + 1);
-                emit_indent(c, depth + 1);
-                wat_appendf(c->w,
-                    "(call $args_at (ref.as_non_null (local.get $tmp_args)) "
-                    "(i32.const %d))\n", i);
-                emit_indent(c, depth); wat_append(c->w, ")\n");
+                AssignTarget *t = &s->as.assign.targets[i];
+                if (t->kind == TGT_VAR) {
+                    emit_indent(c, depth); wat_append(c->w, "(struct.set $Box $v\n");
+                    emit_box_ref(c, t->as.var.kind, t->as.var.idx, depth + 1);
+                    emit_indent(c, depth + 1);
+                    wat_appendf(c->w,
+                        "(call $args_at (ref.as_non_null (local.get $tmp_args)) "
+                        "(i32.const %d))\n", i);
+                    emit_indent(c, depth); wat_append(c->w, ")\n");
+                } else {
+                    emit_indent(c, depth); wat_append(c->w, "(call $tab_set\n");
+                    emit_indent(c, depth + 1); wat_append(c->w, "(ref.cast (ref $LuaTable)\n");
+                    emit_expr(c, t->as.index.table, depth + 2);
+                    emit_indent(c, depth + 1); wat_append(c->w, ")\n");
+                    emit_expr(c, t->as.index.key, depth + 1);
+                    emit_indent(c, depth + 1);
+                    wat_appendf(c->w,
+                        "(call $args_at (ref.as_non_null (local.get $tmp_args)) "
+                        "(i32.const %d))\n", i);
+                    emit_indent(c, depth); wat_append(c->w, ")\n");
+                }
             }
             break;
         }
@@ -566,6 +633,13 @@ static const char *PRELUDE_TYPES =
 "    (type $LuaFn (func (param (ref $LuaClosure))\n"
 "                       (param (ref $ArgArr))\n"
 "                       (result (ref $ArgArr)))))\n"
+"  ;; --- table type ---\n"
+"  (type $TArr (array (mut anyref)))\n"
+"  (type $LuaTable (sub (struct\n"
+"    (field $keys (mut (ref null $TArr)))\n"
+"    (field $vals (mut (ref null $TArr)))\n"
+"    (field $n    (mut i32))\n"
+"    (field $cap  (mut i32)))))\n"
 "\n"
 "  (import \"host\" \"print\" (func $host_print (param anyref)))\n"
 "\n"
@@ -690,10 +764,12 @@ static const char *PRELUDE_HELPERS =
 "    (call $lua_bool_to_ref (i32.eqz (call $lua_truthy (local.get $a)))))\n"
 "\n"
 "  (func $lua_len (param $a anyref) (result anyref)\n"
-"    (call $make_int\n"
-"      (i64.extend_i32_u\n"
+"    (if (result anyref) (ref.test (ref $LuaTable) (local.get $a))\n"
+"      (then (call $make_int (i64.extend_i32_s\n"
+"              (call $tab_len (ref.cast (ref $LuaTable) (local.get $a))))))\n"
+"      (else (call $make_int (i64.extend_i32_u\n"
 "        (array.len (struct.get $LuaString $bytes\n"
-"          (ref.cast (ref $LuaString) (local.get $a)))))))\n"
+"          (ref.cast (ref $LuaString) (local.get $a)))))))))\n"
 "\n"
 "  ;; --- comparison ---\n"
 "  (func $num_eq (param $a anyref) (param $b anyref) (result i32)\n"
@@ -837,6 +913,104 @@ static const char *PRELUDE_HELPERS =
 "      (local.get $sb)  (i32.const 0) (local.get $nb))\n"
 "    (struct.new $LuaString (local.get $out)))\n"
 "\n"
+"  ;; --- tables (linear-search hash; perf is a phase-7 concern) ---\n"
+"  (func $tab_new (result (ref $LuaTable))\n"
+"    (struct.new $LuaTable (ref.null $TArr) (ref.null $TArr) (i32.const 0) (i32.const 0)))\n"
+"\n"
+"  ;; Grow keys/vals arrays to at least new_cap; copies old contents.\n"
+"  (func $tab_grow (param $t (ref $LuaTable)) (param $new_cap i32)\n"
+"    (local $nk (ref $TArr)) (local $nv (ref $TArr))\n"
+"    (local $oldk (ref null $TArr)) (local $oldv (ref null $TArr))\n"
+"    (local $n i32)\n"
+"    (local.set $nk (array.new $TArr (ref.null any) (local.get $new_cap)))\n"
+"    (local.set $nv (array.new $TArr (ref.null any) (local.get $new_cap)))\n"
+"    (local.set $oldk (struct.get $LuaTable $keys (local.get $t)))\n"
+"    (local.set $oldv (struct.get $LuaTable $vals (local.get $t)))\n"
+"    (local.set $n    (struct.get $LuaTable $n    (local.get $t)))\n"
+"    (if (ref.is_null (local.get $oldk))\n"
+"      (then)\n"
+"      (else\n"
+"        (array.copy $TArr $TArr (local.get $nk) (i32.const 0)\n"
+"          (ref.as_non_null (local.get $oldk)) (i32.const 0) (local.get $n))\n"
+"        (array.copy $TArr $TArr (local.get $nv) (i32.const 0)\n"
+"          (ref.as_non_null (local.get $oldv)) (i32.const 0) (local.get $n))))\n"
+"    (struct.set $LuaTable $keys (local.get $t) (local.get $nk))\n"
+"    (struct.set $LuaTable $vals (local.get $t) (local.get $nv))\n"
+"    (struct.set $LuaTable $cap  (local.get $t) (local.get $new_cap)))\n"
+"\n"
+"  ;; Linear scan; returns index in 0..n-1 or -1 if not present.\n"
+"  (func $tab_find (param $t (ref $LuaTable)) (param $k anyref) (result i32)\n"
+"    (local $keys (ref null $TArr)) (local $n i32) (local $i i32)\n"
+"    (local.set $keys (struct.get $LuaTable $keys (local.get $t)))\n"
+"    (local.set $n (struct.get $LuaTable $n (local.get $t)))\n"
+"    (if (ref.is_null (local.get $keys)) (then (return (i32.const -1))))\n"
+"    (block $done (loop $lp\n"
+"      (br_if $done (i32.ge_s (local.get $i) (local.get $n)))\n"
+"      (if (call $lua_eq_raw\n"
+"            (array.get $TArr (ref.as_non_null (local.get $keys)) (local.get $i))\n"
+"            (local.get $k))\n"
+"        (then (return (local.get $i))))\n"
+"      (local.set $i (i32.add (local.get $i) (i32.const 1)))\n"
+"      (br $lp)))\n"
+"    (i32.const -1))\n"
+"\n"
+"  (func $tab_get (param $t (ref $LuaTable)) (param $k anyref) (result anyref)\n"
+"    (local $i i32) (local $vals (ref null $TArr))\n"
+"    (local.set $i (call $tab_find (local.get $t) (local.get $k)))\n"
+"    (if (i32.lt_s (local.get $i) (i32.const 0)) (then (return (ref.null any))))\n"
+"    (local.set $vals (struct.get $LuaTable $vals (local.get $t)))\n"
+"    (array.get $TArr (ref.as_non_null (local.get $vals)) (local.get $i)))\n"
+"\n"
+"  (func $tab_set (param $t (ref $LuaTable)) (param $k anyref) (param $v anyref)\n"
+"    (local $i i32) (local $n i32) (local $cap i32)\n"
+"    (local $keys (ref null $TArr)) (local $vals (ref null $TArr))\n"
+"    (local.set $i (call $tab_find (local.get $t) (local.get $k)))\n"
+"    (if (i32.ge_s (local.get $i) (i32.const 0))\n"
+"      (then\n"
+"        ;; existing key: update or delete\n"
+"        (local.set $vals (struct.get $LuaTable $vals (local.get $t)))\n"
+"        (if (ref.is_null (local.get $v))\n"
+"          (then\n"
+"            ;; delete: swap with last and shrink\n"
+"            (local.set $n (i32.sub (struct.get $LuaTable $n (local.get $t)) (i32.const 1)))\n"
+"            (local.set $keys (struct.get $LuaTable $keys (local.get $t)))\n"
+"            (array.set $TArr (ref.as_non_null (local.get $keys)) (local.get $i)\n"
+"              (array.get $TArr (ref.as_non_null (local.get $keys)) (local.get $n)))\n"
+"            (array.set $TArr (ref.as_non_null (local.get $vals)) (local.get $i)\n"
+"              (array.get $TArr (ref.as_non_null (local.get $vals)) (local.get $n)))\n"
+"            (array.set $TArr (ref.as_non_null (local.get $keys)) (local.get $n) (ref.null any))\n"
+"            (array.set $TArr (ref.as_non_null (local.get $vals)) (local.get $n) (ref.null any))\n"
+"            (struct.set $LuaTable $n (local.get $t) (local.get $n)))\n"
+"          (else\n"
+"            (array.set $TArr (ref.as_non_null (local.get $vals)) (local.get $i) (local.get $v))))\n"
+"        (return)))\n"
+"    ;; not found: if value is nil, no-op; else append\n"
+"    (if (ref.is_null (local.get $v)) (then (return)))\n"
+"    (local.set $n (struct.get $LuaTable $n (local.get $t)))\n"
+"    (local.set $cap (struct.get $LuaTable $cap (local.get $t)))\n"
+"    (if (i32.ge_s (local.get $n) (local.get $cap))\n"
+"      (then\n"
+"        (call $tab_grow (local.get $t)\n"
+"          (if (result i32) (i32.eqz (local.get $cap))\n"
+"            (then (i32.const 4))\n"
+"            (else (i32.mul (local.get $cap) (i32.const 2)))))))\n"
+"    (local.set $keys (struct.get $LuaTable $keys (local.get $t)))\n"
+"    (local.set $vals (struct.get $LuaTable $vals (local.get $t)))\n"
+"    (array.set $TArr (ref.as_non_null (local.get $keys)) (local.get $n) (local.get $k))\n"
+"    (array.set $TArr (ref.as_non_null (local.get $vals)) (local.get $n) (local.get $v))\n"
+"    (struct.set $LuaTable $n (local.get $t) (i32.add (local.get $n) (i32.const 1))))\n"
+"\n"
+"  ;; Length via array-border rule: count k=1,2,3,... while t[k] is non-nil.\n"
+"  (func $tab_len (param $t (ref $LuaTable)) (result i32)\n"
+"    (local $i i32) (local $k anyref)\n"
+"    (local.set $i (i32.const 1))\n"
+"    (block $done (loop $lp\n"
+"      (local.set $k (call $tab_get (local.get $t) (ref.i31 (local.get $i))))\n"
+"      (br_if $done (ref.is_null (local.get $k)))\n"
+"      (local.set $i (i32.add (local.get $i) (i32.const 1)))\n"
+"      (br $lp)))\n"
+"    (i32.sub (local.get $i) (i32.const 1)))\n"
+"\n"
 "  ;; --- closure dispatch + multi-value helpers + print builtin ---\n"
 "  (func $lua_call (param $closure (ref $LuaClosure)) (param $args (ref $ArgArr))\n"
 "                  (result (ref $ArgArr))\n"
@@ -889,6 +1063,7 @@ static const char *PRELUDE_HELPERS =
 "    (if (call $is_float (local.get $v))            (then (return (i32.const 3))))\n"
 "    (if (ref.test (ref $LuaString) (local.get $v)) (then (return (i32.const 4))))\n"
 "    (if (ref.test (ref $LuaClosure) (local.get $v)) (then (return (i32.const 5))))\n"
+"    (if (ref.test (ref $LuaTable) (local.get $v)) (then (return (i32.const 6))))\n"
 "    (i32.const 99))\n"
 "  (func (export \"lua_get_bool\") (param $v anyref) (result i32)\n"
 "    (struct.get $LuaBool $b (ref.cast (ref $LuaBool) (local.get $v))))\n"
@@ -921,6 +1096,7 @@ static void emit_user_function(CG *c, const LuaFunc *fn) {
     wat_append(w, "    (local $tmp_any anyref)\n");
     wat_append(w, "    (local $tmp_args (ref null $ArgArr))\n");
     wat_append(w, "    (local $tmp_clo (ref null $LuaClosure))\n");
+    wat_append(w, "    (local $tmp_tab (ref null $LuaTable))\n");
 
     /* Param extraction: each declared parameter takes args[i] (nil if missing). */
     for (int i = 0; i < fn->n_params; i++) {
@@ -966,6 +1142,7 @@ int codegen_module(const ParseResult *pr, WatBuilder *out,
         wat_append(out, "    (local $tmp_any anyref)\n");
         wat_append(out, "    (local $tmp_args (ref null $ArgArr))\n");
         wat_append(out, "    (local $tmp_clo (ref null $LuaClosure))\n");
+        wat_append(out, "    (local $tmp_tab (ref null $LuaTable))\n");
 
         emit_block(&c, &pr->main_body, 2);
 
