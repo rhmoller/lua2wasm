@@ -65,7 +65,10 @@ function luaToString(v) {
 }
 
 ({ instance } = await WebAssembly.instantiate(wbuf, {
-  host: { print: v => { out.textContent += luaToString(v) + "\\n"; } },
+  host: {
+    print:     v => { out.textContent += luaToString(v) + "\\n"; },
+    write_raw: v => { out.textContent += luaToString(v); },
+  },
 }));
 try { instance.exports.main(); }
 catch (e) { out.textContent += "ERROR: " + e + "\\n"; }

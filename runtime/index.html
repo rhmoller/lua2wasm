@@ -53,7 +53,10 @@ try {
     if (!resp.ok) throw new Error(`fetch ${url}: ${resp.status} ${resp.statusText}`);
     const bytes = await resp.arrayBuffer();
     ({ instance } = await WebAssembly.instantiate(bytes, {
-        host: { print: (v) => log(luaToString(v)) },
+        host: {
+            print:     (v) => log(luaToString(v)),
+            write_raw: (v) => { out.appendChild(document.createTextNode(luaToString(v))); },
+        },
     }));
     instance.exports.main();
 } catch (e) {

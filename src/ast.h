@@ -50,6 +50,7 @@ typedef enum {
     EXPR_FUNCTION,      /* anonymous function expression */
     EXPR_INDEX,         /* t[k]  (t.name is sugar lowered to INDEX with string key) */
     EXPR_TABLE,         /* { ... } table constructor */
+    EXPR_METHOD_CALL,   /* recv:name(args) — evaluates recv once */
 } ExprKind;
 
 typedef enum {
@@ -112,6 +113,13 @@ struct Expr {
             TableEntry *entries;
             int n_entries;
         } table_ctor;
+        struct {
+            Expr *recv;
+            const char *method;
+            size_t method_len;
+            Expr **args;
+            size_t nargs;
+        } method_call;
     } as;
 };
 

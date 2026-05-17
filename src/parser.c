@@ -261,6 +261,7 @@ static BinOp binop_of(TokKind k) {
 static Expr *parse_expr(Parser *p);
 static Expr *parse_prec(Parser *p, int min_prec);
 static LuaFunc *parse_function_body(Parser *p, int line);
+static LuaFunc *parse_function_body_ex(Parser *p, int line, int with_self);
 
 static Expr *parse_primary(Parser *p) {
     const Token *t = peek(p);
@@ -418,6 +419,31 @@ static Expr *parse_prefix_chain(Parser *p) {
             idx->as.index.table = e;
             idx->as.index.key = key;
             e = idx;
+        } else if (k == TOK_COLON) {
+            /* method call: recv:name(args) */
+            int line = peek(p)->line;
+            advance(p); /* : */
+            if (peek(p)->kind != TOK_IDENT) { set_error(p, "expected method name after ':'"); return NULL; }
+            const Token *nm = advance(p);
+            expect(p, TOK_LPAREN, "(");
+            Expr *args_buf[16];
+            size_t nargs = 0;
+            if (peek(p)->kind != TOK_RPAREN) {
+                do {
+                    if (nargs >= 16) { set_error(p, "too many args"); return NULL; }
+                    args_buf[nargs++] = parse_expr(p);
+                    if (!p->ok) return NULL;
+                } while (match(p, TOK_COMMA));
+            }
+            expect(p, TOK_RPAREN, ")");
+            Expr *mc = expr_new(p->pool, EXPR_METHOD_CALL, line);
+            mc->as.method_call.recv = e;
+            mc->as.method_call.method = nm->start;
+            mc->as.method_call.method_len = nm->len;
+            mc->as.method_call.nargs = nargs;
+            mc->as.method_call.args = node_pool_alloc(p->pool, sizeof(Expr *) * (nargs ? nargs : 1));
+            for (size_t i = 0; i < nargs; i++) mc->as.method_call.args[i] = args_buf[i];
+            e = mc;
         } else break;
     }
     return e;
@@ -659,7 +685,7 @@ static Stmt *parse_ident_stmt(Parser *p) {
     Expr *first = parse_prefix_chain(p);
     if (!p->ok) return NULL;
 
-    if (first->kind == EXPR_CALL) {
+    if (first->kind == EXPR_CALL || first->kind == EXPR_METHOD_CALL) {
         Stmt *s = stmt_new(p->pool, STMT_EXPR, line);
         s->as.expr_stmt.expr = first;
         return s;
@@ -853,10 +879,93 @@ static Stmt *parse_global(Parser *p) {
     return s;
 }
 
+/* `function NAME (.NAME)* (:NAME)? (params) body end` — top-level form.
+ * Lowers to an assignment whose target is built from the dotted path and
+ * whose value is an EXPR_FUNCTION. The `:` variant prepends an implicit
+ * `self` parameter to the function. */
+static Stmt *parse_function_stmt(Parser *p) {
+    int line = peek(p)->line;
+    advance(p); /* function */
+    if (peek(p)->kind != TOK_IDENT) { set_error(p, "expected function name"); return NULL; }
+    const Token *first = advance(p);
+    VarKind kind;
+    int idx;
+    if (!resolve_name(p, first->start, first->len, &kind, &idx)) {
+        char buf[160];
+        snprintf(buf, sizeof(buf),
+            "function `%.*s` is not declared (add `global %.*s` first or use `local function`)",
+            (int)first->len, first->start, (int)first->len, first->start);
+        set_error(p, buf);
+        return NULL;
+    }
+    if (kind == VAR_BUILTIN) { set_error(p, "cannot redefine a builtin"); return NULL; }
+    /* Build the base expression for the path. */
+    Expr *base = expr_new(p->pool, EXPR_VAR, line);
+    base->as.var.name = first->start;
+    base->as.var.name_len = first->len;
+    base->as.var.kind = kind;
+    base->as.var.idx = idx;
+
+    /* Walk .NAME chain (intermediate field access). */
+    while (peek(p)->kind == TOK_DOT) {
+        advance(p);
+        if (peek(p)->kind != TOK_IDENT) { set_error(p, "expected name after '.'"); return NULL; }
+        const Token *nm = advance(p);
+        Expr *key = expr_new(p->pool, EXPR_STRING, nm->line);
+        key->as.s.bytes = nm->start;
+        key->as.s.len = nm->len;
+        Expr *idxe = expr_new(p->pool, EXPR_INDEX, nm->line);
+        idxe->as.index.table = base;
+        idxe->as.index.key = key;
+        base = idxe;
+    }
+    /* Optional :METHOD suffix. */
+    int with_self = 0;
+    if (peek(p)->kind == TOK_COLON) {
+        advance(p);
+        if (peek(p)->kind != TOK_IDENT) { set_error(p, "expected name after ':'"); return NULL; }
+        const Token *nm = advance(p);
+        Expr *key = expr_new(p->pool, EXPR_STRING, nm->line);
+        key->as.s.bytes = nm->start;
+        key->as.s.len = nm->len;
+        Expr *idxe = expr_new(p->pool, EXPR_INDEX, nm->line);
+        idxe->as.index.table = base;
+        idxe->as.index.key = key;
+        base = idxe;
+        with_self = 1;
+    }
+    /* base is now the assignment target. */
+    AssignTarget target;
+    if (base->kind == EXPR_VAR) {
+        target.kind = TGT_VAR;
+        target.as.var.kind = base->as.var.kind;
+        target.as.var.idx = base->as.var.idx;
+    } else {
+        target.kind = TGT_INDEX;
+        target.as.index.table = base->as.index.table;
+        target.as.index.key = base->as.index.key;
+    }
+
+    LuaFunc *fn = parse_function_body_ex(p, line, with_self);
+    if (!p->ok) return NULL;
+    Expr *func_expr = expr_new(p->pool, EXPR_FUNCTION, line);
+    func_expr->as.func_expr.func = fn;
+
+    Stmt *s = stmt_new(p->pool, STMT_ASSIGN, line);
+    s->as.assign.n_targets = 1;
+    s->as.assign.targets = node_pool_alloc(p->pool, sizeof(AssignTarget));
+    s->as.assign.targets[0] = target;
+    s->as.assign.n_values = 1;
+    s->as.assign.values = node_pool_alloc(p->pool, sizeof(Expr *));
+    s->as.assign.values[0] = func_expr;
+    return s;
+}
+
 static Stmt *parse_stmt(Parser *p) {
     switch (peek(p)->kind) {
         case TOK_SEMI: advance(p); return NULL;
-        case TOK_KW_LOCAL:  return parse_local(p);
+        case TOK_KW_LOCAL:    return parse_local(p);
+        case TOK_KW_FUNCTION: return parse_function_stmt(p);
         case TOK_KW_IF:     return parse_if(p);
         case TOK_KW_WHILE:  return parse_while(p);
         case TOK_KW_DO:     return parse_do(p);
@@ -900,8 +1009,16 @@ static void parse_block(Parser *p, Block *out, TokKind s1, TokKind s2, TokKind s
     free(vec);
 }
 
-/* Parse `(params) body end` after a `function` keyword. Pushes/pops a frame. */
+/* Parse `(params) body end` after a `function` keyword. Pushes/pops a frame.
+ * If `with_self`, an implicit "self" parameter is declared first (for the
+ * `:` method-definition sugar). */
+static LuaFunc *parse_function_body_ex(Parser *p, int line, int with_self);
+
 static LuaFunc *parse_function_body(Parser *p, int line) {
+    return parse_function_body_ex(p, line, /*with_self*/0);
+}
+
+static LuaFunc *parse_function_body_ex(Parser *p, int line, int with_self) {
     if (p->n_funcs >= MAX_FUNCS) { set_error(p, "too many functions"); return NULL; }
     int func_idx = p->n_funcs;
     LuaFunc *fn = func_new(p->pool, func_idx, line);
@@ -914,8 +1031,13 @@ static LuaFunc *parse_function_body(Parser *p, int line) {
     p->frame_depth++;
     frame_init(cur_frame(p));
 
-    expect(p, TOK_LPAREN, "( in function declaration");
     int n_params = 0;
+    if (with_self) {
+        /* implicit `self` for : method definitions */
+        frame_declare(cur_frame(p), "self", 4);
+        n_params++;
+    }
+    expect(p, TOK_LPAREN, "( in function declaration");
     if (peek(p)->kind != TOK_RPAREN) {
         do {
             if (peek(p)->kind != TOK_IDENT) { set_error(p, "expected parameter name"); break; }
@@ -950,9 +1072,11 @@ static LuaFunc *parse_function_body(Parser *p, int line) {
 ParseResult parse(const TokenList *tokens, NodePool *pool) {
     Parser p = { .toks = tokens, .pool = pool, .ok = 1, .frame_depth = 0 };
     frame_init(&p.frames[0]);
-    /* Pre-declare stdlib library tables as globals so user code can name them. */
-    globals_declare(&p, "math",   4);
-    globals_declare(&p, "string", 6);
+    /* Pre-declare stdlib library tables and well-known globals so user code can name them. */
+    globals_declare(&p, "math",     4);
+    globals_declare(&p, "string",   6);
+    globals_declare(&p, "io",       2);
+    globals_declare(&p, "_VERSION", 8);
 
     Block main = {0};
     parse_block(&p, &main, TOK_EOF, TOK_EOF, TOK_EOF);

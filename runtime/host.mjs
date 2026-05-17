@@ -45,6 +45,7 @@ const bytes = await readFile(wasmPath);
 ({ instance } = await WebAssembly.instantiate(bytes, {
     host: {
         print: (v) => { process.stdout.write(luaToString(v) + "\n"); },
+        write_raw: (v) => { process.stdout.write(luaToString(v)); },
     },
 }));
 instance.exports.main();

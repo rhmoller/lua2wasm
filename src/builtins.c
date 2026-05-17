@@ -19,6 +19,7 @@ static const struct {
     { "next",         4,  "$builtin_next",         BLT_TOPLEVEL },
     { "setmetatable", 12, "$builtin_setmetatable", BLT_TOPLEVEL },
     { "getmetatable", 12, "$builtin_getmetatable", BLT_TOPLEVEL },
+    { "assert",       6,  "$builtin_assert",       BLT_TOPLEVEL },
     /* iterators for ipairs/pairs (not user-visible by name) */
     { "_ipairs_iter", 12, "$builtin_ipairs_iter", BLT_TOPLEVEL },
     /* math library (installed into the `math` table) */
@@ -28,6 +29,8 @@ static const struct {
     /* string library */
     { "len", 3, "$builtin_string_len", BLT_LIB_STRING },
     { "sub", 3, "$builtin_string_sub", BLT_LIB_STRING },
+    /* io library */
+    { "write", 5, "$builtin_io_write", BLT_LIB_IO },
 };
 
 #define N (sizeof(BUILTINS)/sizeof(BUILTINS[0]))

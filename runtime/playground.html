@@ -254,7 +254,10 @@ async function run() {
 
   try {
     const { instance } = await WebAssembly.instantiate(bytes, {
-      host: { print: v => logLine(luaToString(v)) },
+      host: {
+        print:     v => logLine(luaToString(v)),
+        write_raw: v => { out.appendChild(document.createTextNode(luaToString(v))); },
+      },
     });
     curInstance = instance;
     instance.exports.main();

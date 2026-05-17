@@ -255,6 +255,33 @@ static void emit_unop(CG *c, const Expr *e, int depth) {
 
 /* Emit a call returning (ref $ArgArr) — the full multi-value result. */
 static void emit_call_array(CG *c, const Expr *e, int depth) {
+    if (e->kind == EXPR_METHOD_CALL) {
+        /* obj:m(args). Evaluate receiver once into $tmp_any, look up the
+         * method via tab_get, then call with receiver prepended. */
+        StrRef sr = strpool_add(&c->strs, e->as.method_call.method, e->as.method_call.method_len);
+        emit_indent(c, depth); wat_append(c->w, "(local.set $tmp_any\n");
+        emit_expr(c, e->as.method_call.recv, depth + 1);
+        emit_indent(c, depth); wat_append(c->w, ")\n");
+        emit_indent(c, depth); wat_append(c->w, "(call $lua_call\n");
+        emit_indent(c, depth + 1); wat_append(c->w, "(ref.cast (ref $LuaClosure)\n");
+        emit_indent(c, depth + 2); wat_append(c->w, "(call $tab_get\n");
+        emit_indent(c, depth + 3); wat_append(c->w, "(ref.cast (ref $LuaTable) (local.get $tmp_any))\n");
+        emit_indent(c, depth + 3);
+        wat_appendf(c->w,
+            "(struct.new $LuaString (array.new_data $LuaArr $str_data "
+            "(i32.const %zu) (i32.const %zu)))\n", sr.offset, sr.len);
+        emit_indent(c, depth + 2); wat_append(c->w, ")\n");
+        emit_indent(c, depth + 1); wat_append(c->w, ")\n");
+        emit_indent(c, depth + 1);
+        wat_appendf(c->w, "(array.new_fixed $ArgArr %zu\n", e->as.method_call.nargs + 1);
+        emit_indent(c, depth + 2); wat_append(c->w, "(local.get $tmp_any)\n");
+        for (size_t i = 0; i < e->as.method_call.nargs; i++) {
+            emit_expr(c, e->as.method_call.args[i], depth + 2);
+        }
+        emit_indent(c, depth + 1); wat_append(c->w, ")\n");
+        emit_indent(c, depth); wat_append(c->w, ")\n");
+        return;
+    }
     emit_indent(c, depth); wat_append(c->w, "(call $lua_call\n");
     emit_indent(c, depth + 1); wat_append(c->w, "(ref.cast (ref $LuaClosure)\n");
     emit_expr(c, e->as.call.callee, depth + 2);
@@ -390,6 +417,13 @@ static void emit_expr(CG *c, const Expr *e, int depth) {
         case EXPR_FUNCTION: emit_function_expr(c, e->as.func_expr.func, depth); break;
         case EXPR_INDEX:  emit_index_expr(c, e, depth); break;
         case EXPR_TABLE:  emit_table_ctor(c, e, depth); break;
+        case EXPR_METHOD_CALL: {
+            /* Single-value context: wrap in $args_first. */
+            emit_indent(c, depth); wat_append(c->w, "(call $args_first\n");
+            emit_call_array(c, e, depth + 1);
+            emit_indent(c, depth); wat_append(c->w, ")\n");
+            break;
+        }
     }
 }
 
@@ -439,7 +473,8 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
             int n_names = s->as.local.n_names;
             int n_values = s->as.local.n_values;
             int last_call = (n_values > 0 &&
-                             s->as.local.values[n_values - 1]->kind == EXPR_CALL);
+                             (s->as.local.values[n_values - 1]->kind == EXPR_CALL ||
+                              s->as.local.values[n_values - 1]->kind == EXPR_METHOD_CALL));
             if (last_call) {
                 emit_indent(c, depth); wat_append(c->w, "(local.set $tmp_args\n");
                 emit_call_array(c, s->as.local.values[n_values - 1], depth + 1);
@@ -465,7 +500,8 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
             int n_targets = s->as.assign.n_targets;
             int n_values = s->as.assign.n_values;
             int last_call = (n_values > 0 &&
-                             s->as.assign.values[n_values - 1]->kind == EXPR_CALL);
+                             (s->as.assign.values[n_values - 1]->kind == EXPR_CALL ||
+                              s->as.assign.values[n_values - 1]->kind == EXPR_METHOD_CALL));
             if (n_targets == 1) {
                 AssignTarget *t = &s->as.assign.targets[0];
                 emit_target_open(c, t, depth);
@@ -538,7 +574,9 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
                 emit_indent(c, depth); wat_append(c->w, "return\n");
                 break;
             }
-            /* Tail-call optimization: exactly `return <call_expr>`. */
+            /* Tail-call optimization: exactly `return <call_expr>` (regular
+             * or method form — method calls just need their args array set up
+             * via emit_call_array equivalent; here we only TCO the regular form). */
             if (n_values == 1 && s->as.return_stmt.values[0]->kind == EXPR_CALL) {
                 emit_tail_call(c, s->as.return_stmt.values[0], depth);
                 break;
@@ -664,7 +702,8 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
             c->break_labels[c->break_depth++] = label;
             int n_exprs = s->as.for_gen.n_exprs;
             int last_call = (n_exprs > 0 &&
-                             s->as.for_gen.exprs[n_exprs - 1]->kind == EXPR_CALL);
+                             (s->as.for_gen.exprs[n_exprs - 1]->kind == EXPR_CALL ||
+                              s->as.for_gen.exprs[n_exprs - 1]->kind == EXPR_METHOD_CALL));
             /* Compute the full args array via the same singles+merge pattern. */
             int singles = n_exprs - (last_call ? 1 : 0);
             emit_indent(c, depth); wat_append(c->w, "(local.set $tmp_args\n");
@@ -749,7 +788,8 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
             int n_values = s->as.global_decl.n_values;
             if (n_values == 0) break;
             int last_call = (n_values > 0 &&
-                             s->as.global_decl.values[n_values - 1]->kind == EXPR_CALL);
+                             (s->as.global_decl.values[n_values - 1]->kind == EXPR_CALL ||
+                              s->as.global_decl.values[n_values - 1]->kind == EXPR_METHOD_CALL));
             if (last_call) {
                 emit_indent(c, depth); wat_append(c->w, "(local.set $tmp_args\n");
                 emit_call_array(c, s->as.global_decl.values[n_values - 1], depth + 1);
@@ -844,6 +884,7 @@ static const char *PRELUDE_TYPES =
 "      (field $meta (mut (ref null $LuaTable)))))))\n"
 "\n"
 "  (import \"host\" \"print\" (func $host_print (param anyref)))\n"
+"  (import \"host\" \"write_raw\" (func $host_write_raw (param anyref)))\n"
 "\n"
 "  ;; --- singletons ---\n"
 "  (global $g_true  (ref $LuaBool) (struct.new $LuaBool (i32.const 1)))\n"
@@ -1398,6 +1439,35 @@ static const char *PRELUDE_HELPERS =
 "    (array.new_fixed $ArgArr 2 (global.get $g_false) (local.get $err)))\n"
 "\n"
 "  ;; --- additional top-level builtins ---\n"
+"  (func $builtin_assert (type $LuaFn)\n"
+"    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))\n"
+"    (if (call $lua_truthy (call $args_at (local.get $args) (i32.const 0)))\n"
+"      (then (return (local.get $args))))\n"
+"    ;; failed: throw the message (args[1]) or a default\n"
+"    (throw $LuaError (call $args_at (local.get $args) (i32.const 1)))\n"
+"    (global.get $g_empty_args))\n"
+"\n"
+"  ;; io.write — like print but no trailing newline, no tab between args\n"
+"  (func $builtin_io_write (type $LuaFn)\n"
+"    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))\n"
+"    (local $n i32) (local $i i32) (local $acc anyref)\n"
+"    (local.set $n (array.len (local.get $args)))\n"
+"    (if (i32.eqz (local.get $n)) (then (return (global.get $g_empty_args))))\n"
+"    (if (i32.eq (local.get $n) (i32.const 1))\n"
+"      (then\n"
+"        (call $host_write_raw (call $args_at (local.get $args) (i32.const 0)))\n"
+"        (return (global.get $g_empty_args))))\n"
+"    (local.set $acc (call $args_at (local.get $args) (i32.const 0)))\n"
+"    (local.set $i (i32.const 1))\n"
+"    (block $done (loop $lp\n"
+"      (br_if $done (i32.ge_s (local.get $i) (local.get $n)))\n"
+"      (local.set $acc (call $lua_concat (local.get $acc)\n"
+"                       (call $args_at (local.get $args) (local.get $i))))\n"
+"      (local.set $i (i32.add (local.get $i) (i32.const 1)))\n"
+"      (br $lp)))\n"
+"    (call $host_write_raw (call $lua_tostring (local.get $acc)))\n"
+"    (global.get $g_empty_args))\n"
+"\n"
 "  (func $builtin_type (type $LuaFn)\n"
 "    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))\n"
 "    (local $v anyref) (local $bytes (ref null $LuaArr)) (local $b (ref null $LuaString))\n"
@@ -1647,9 +1717,9 @@ static const char *PRELUDE_HELPERS =
 /* Reserved bytes of $str_data:
  *   0  nil(3)  3  true(4)  7  false(5)  12 <float>(7)
  *   19 number(6)  25 string(6)  31 table(5)  36 function(8)  44 boolean(7)
- *   51 __index(7)  58 __add(5)  63 __eq(4)  67 \t(1) */
-#define LITERAL_PREFIX "niltruefalse<float>numberstringtablefunctionboolean__index__add__eq\t"
-#define LITERAL_PREFIX_LEN 68
+ *   51 __index(7)  58 __add(5)  63 __eq(4)  67 \t(1)  68 Lua 5.5(7) */
+#define LITERAL_PREFIX "niltruefalse<float>numberstringtablefunctionboolean__index__add__eq\tLua 5.5"
+#define LITERAL_PREFIX_LEN 75
 
 /* Emit the body of one user function. */
 static void emit_user_function(CG *c, const LuaFunc *fn) {
@@ -1745,13 +1815,23 @@ int codegen_module(const ParseResult *pr, WatBuilder *out,
         "        (i32.const 67) (i32.const 1))))\n"
         "    (global.set $g_empty_str\n"
         "      (struct.new $LuaString (array.new $LuaArr (i32.const 0) (i32.const 0))))\n");
-    /* For each global named "math"/"string", emit table init. */
+    /* Library-table globals + the _VERSION constant. */
     for (size_t gi = 0; gi < pr->globals.count; gi++) {
         const char *gname = pr->globals.items[gi].name;
         size_t glen = pr->globals.items[gi].name_len;
+        /* _VERSION is a plain string global, not a library table. */
+        if (glen == 8 && memcmp(gname, "_VERSION", 8) == 0) {
+            wat_appendf(out,
+                "    (global.set $g_user_%zu\n"
+                "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
+                "        (i32.const 68) (i32.const 7))))\n", gi);
+            continue;
+        }
         BuiltinClass cls;
-        if (glen == 4 && memcmp(gname, "math", 4) == 0) cls = BLT_LIB_MATH;
+        if      (glen == 4 && memcmp(gname, "math",   4) == 0) cls = BLT_LIB_MATH;
         else if (glen == 6 && memcmp(gname, "string", 6) == 0) cls = BLT_LIB_STRING;
+        else if (glen == 2 && memcmp(gname, "io",     2) == 0) cls = BLT_LIB_IO;
+        else if (glen == 5 && memcmp(gname, "table",  5) == 0) cls = BLT_LIB_TABLE;
         else continue;
         wat_append(out, "    (local.set $tab (call $tab_new))\n");
         for (int bi = 0; bi < nb; bi++) {
