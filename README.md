@@ -148,6 +148,13 @@ module loads in any GC-capable browser via `runtime/index.html`.
 8. **Metatables** and `__index` chains.
 9. **Coroutines** once the stack-switching proposal ships in browsers.
 
+## Contributing
+
+Commits follow the [Conventional Commits](https://www.conventionalcommits.org/)
+format. Common types in this repo: `feat:`, `fix:`, `refactor:`, `test:`,
+`docs:`, `chore:`, `build:`. Use a scope when it's useful, e.g.
+`feat(parser): handle long-string literals`.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
