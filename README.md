@@ -137,6 +137,29 @@ node runtime/host.mjs /tmp/m2.wasm
 `runtime/host.mjs` does not use any Node-specific WASM features; the same
 module loads in any GC-capable browser via `runtime/index.html`.
 
+## Playground (in-browser compile)
+
+The compiler itself can be cross-compiled to WebAssembly with Emscripten
+and dropped into a web page alongside a CodeMirror editor and Binaryen.js.
+The pipeline runs entirely client-side:
+
+```
+Lua source → lua2wasm.wasm (compiler) → WAT → binaryen.js → WASM-GC → execute
+```
+
+Build the compiler-as-wasm and serve:
+
+```sh
+. ~/code/3rdparty/emsdk/emsdk_env.sh    # adjust path to your emsdk
+./scripts/build-wasm.sh                 # produces build-em/lua2wasm.{js,wasm}
+python3 -m http.server 8000
+# open http://localhost:8000/runtime/playground.html
+```
+
+There's a preset dropdown (factorial, counter, tables, OO via metatables,
+pcall, for + ipairs). The **Show WAT** button is handy for seeing what the
+compiler emits for any snippet.
+
 ## Ship a script as one HTML file
 
 `scripts/package-html.sh` base64-embeds a `.wasm` and a tiny loader into a

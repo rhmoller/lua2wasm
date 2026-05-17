@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>lua2wasm playground</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    display: grid;
+    grid-template-rows: auto 1fr auto;
+    font: 14px/1.4 system-ui, sans-serif;
+    background: #1b1b1f;
+    color: #eaeaea;
+  }
+  header {
+    display: flex; align-items: center; gap: 1em;
+    padding: .6em 1em;
+    background: #15151a;
+    border-bottom: 1px solid #303038;
+  }
+  header h1 { font-size: 1em; margin: 0; color: #9aa; }
+  header h1 a { color: inherit; text-decoration: none; }
+  button, select {
+    background: #2a2a32; color: #eee; border: 1px solid #444;
+    padding: .4em .9em; border-radius: 4px; font: inherit; cursor: pointer;
+  }
+  button:hover { background: #353541; }
+  button[disabled] { opacity: .5; cursor: default; }
+  main {
+    display: grid; grid-template-columns: 1fr 1fr; min-height: 0;
+    border-bottom: 1px solid #303038;
+  }
+  #editor-host { overflow: auto; border-right: 1px solid #303038; }
+  .cm-editor   { height: 100%; }
+  .cm-scroller { font: 13px/1.5 "JetBrains Mono", ui-monospace, monospace; }
+  #out {
+    margin: 0; padding: 1em; overflow: auto;
+    font: 13px/1.5 ui-monospace, monospace;
+    background: #0d0d11; color: #d8d8d8;
+    white-space: pre-wrap;
+  }
+  .err { color: #f88; }
+  .info { color: #6cf; }
+  footer {
+    padding: .4em 1em; font-size: 12px; color: #888;
+    background: #15151a; border-top: 1px solid #303038;
+  }
+  footer code { background: #2a2a32; padding: 1px 4px; border-radius: 3px; }
+</style>
+
+<header>
+  <h1><a href="https://github.com/" target="_blank">lua2wasm</a> playground</h1>
+  <select id="preset">
+    <option value="hello">hello</option>
+    <option value="fact">factorial</option>
+    <option value="counter">counter (closure)</option>
+    <option value="tables">tables</option>
+    <option value="oo">OOP via metatables</option>
+    <option value="pcall">pcall</option>
+    <option value="forloop">for + ipairs</option>
+  </select>
+  <button id="run" disabled>Run ▶</button>
+  <button id="showwat">Show WAT</button>
+  <span id="status" style="color:#888"></span>
+</header>
+
+<main>
+  <div id="editor-host"></div>
+  <pre id="out"></pre>
+</main>
+
+<footer>
+  Pipeline: <code>Lua → lua2wasm (in WASM) → WAT → Binaryen → WASM-GC → execute</code>
+  · Needs a browser with WasmGC + exnref (recent Chrome/Firefox).
+</footer>
+
+<script type="module">
+import { EditorView, basicSetup } from "https://esm.sh/codemirror@6";
+import { StreamLanguage }       from "https://esm.sh/@codemirror/language@6";
+import { lua as luaMode }       from "https://esm.sh/@codemirror/legacy-modes@6/mode/lua";
+import { oneDark }              from "https://esm.sh/@codemirror/theme-one-dark@6";
+import createLua2WasmModule     from "../build-em/lua2wasm.js";
+// Binaryen ships its own .wasm; esm.sh inlines it.
+import binaryen                 from "https://esm.sh/binaryen@123.0.0";
+
+/* ----- fixture presets ----- */
+const PRESETS = {
+  hello: `print("hello from lua2wasm!")\nprint(1 + 2)\n`,
+  fact: `local function fact(n)
+  if n <= 1 then return 1 end
+  return n * fact(n - 1)
+end
+print(fact(10))    -- 3628800
+`,
+  counter: `local function counter()
+  local n = 0
+  local function tick() n = n + 1; return n end
+  return tick
+end
+local c = counter()
+print(c())  -- 1
+print(c())  -- 2
+print(c())  -- 3
+`,
+  tables: `local t = {10, 20, 30, name = "alice"}
+print(t[1])
+print(t.name)
+print(#t)
+
+local nested = {inner = {x = 1, y = 2}}
+print(nested.inner.x + nested.inner.y)
+`,
+  oo: `local Animal = {kind = "animal"}
+Animal.speak = function(self) return self.kind .. " speaks" end
+
+local Dog = setmetatable({kind = "dog"}, {__index = Animal})
+print(Dog.speak(Dog))
+
+-- vector with __add
+local Vec = {}
+Vec.__add = function(a, b)
+  return setmetatable({x = a.x + b.x, y = a.y + b.y}, Vec)
+end
+local v = setmetatable({x = 1, y = 2}, Vec) + setmetatable({x = 10, y = 20}, Vec)
+print(v.x); print(v.y)
+`,
+  pcall: `local function safediv(a, b)
+  if b == 0 then error("division by zero") end
+  return a / b
+end
+print(pcall(safediv, 10, 2))   -- true 5.0
+print(pcall(safediv, 1, 0))    -- false "division by zero"
+`,
+  forloop: `local list = {"apple", "banana", "cherry"}
+for i, v in ipairs(list) do
+  print(i)
+  print(v)
+end
+
+local sum = 0
+for i = 1, 100 do sum = sum + i end
+print(sum)   -- 5050
+`,
+};
+
+/* ----- editor ----- */
+const editor = new EditorView({
+  doc: PRESETS.hello,
+  parent: document.getElementById("editor-host"),
+  extensions: [basicSetup, StreamLanguage.define(luaMode), oneDark],
+});
+
+document.getElementById("preset").onchange = e => {
+  const text = PRESETS[e.target.value];
+  editor.dispatch({ changes: { from: 0, to: editor.state.doc.length, insert: text } });
+};
+
+/* ----- output helpers ----- */
+const out = document.getElementById("out");
+const status = document.getElementById("status");
+function clearOut() { out.textContent = ""; }
+function logLine(s, cls) {
+  const node = cls ? document.createElement("span") : document.createTextNode(s + "\n");
+  if (cls) { node.className = cls; node.textContent = s + "\n"; }
+  out.appendChild(node);
+}
+
+/* ----- lua2wasm compiler (in-browser) ----- */
+status.textContent = "loading compiler…";
+const Mod = await createLua2WasmModule({});
+const compileFn = Mod.cwrap("lua2wasm_compile", "number", ["string"]);
+const freeFn    = Mod.cwrap("lua2wasm_free",    null,     ["number"]);
+function luaToWat(source) {
+  const ptr = compileFn(source);
+  const text = Mod.UTF8ToString(ptr);
+  freeFn(ptr);
+  return text;
+}
+
+/* ----- binaryen wat -> wasm ----- */
+status.textContent = "loading binaryen…";
+const bin = await binaryen.ready ? await binaryen.ready : binaryen;
+function watToWasm(wat) {
+  const mod = bin.parseText(wat);
+  mod.setFeatures(bin.Features.All);
+  if (!mod.validate()) throw new Error("Binaryen validation failed");
+  const bytes = mod.emitBinary();
+  mod.dispose();
+  return bytes;
+}
+
+/* ----- runtime host (mirrors runtime/host.mjs) ----- */
+let curInstance;
+function readLuaString(v) {
+  const n = curInstance.exports.lua_str_len(v);
+  const b = new Uint8Array(n);
+  for (let i = 0; i < n; i++) b[i] = curInstance.exports.lua_str_byte(v, i);
+  return new TextDecoder().decode(b);
+}
+function formatFloat(f) {
+  if (!Number.isFinite(f)) return f === Infinity ? "inf" : f === -Infinity ? "-inf" : "nan";
+  if (Number.isInteger(f)) return `${f}.0`;
+  return f.toPrecision(14).replace(/\.?0+(e|$)/, "$1");
+}
+function luaToString(v) {
+  if (v === null || v === undefined) return "nil";
+  const t = curInstance.exports.lua_tag(v);
+  switch (t) {
+    case 0: return "nil";
+    case 1: return curInstance.exports.lua_get_bool(v) ? "true" : "false";
+    case 2: return String(curInstance.exports.lua_get_int(v));
+    case 3: return formatFloat(curInstance.exports.lua_get_float(v));
+    case 4: return readLuaString(v);
+    case 5: return "function";
+    case 6: return "table";
+    default: return `<tag=${t}>`;
+  }
+}
+
+/* ----- the run pipeline ----- */
+async function run() {
+  clearOut();
+  const t0 = performance.now();
+  const src = editor.state.doc.toString();
+  let wat;
+  try {
+    wat = luaToWat(src);
+  } catch (e) { logLine("ERROR (compile): " + e, "err"); return; }
+  if (wat.startsWith("ERROR")) { logLine(wat, "err"); return; }
+  const t1 = performance.now();
+
+  let bytes;
+  try { bytes = watToWasm(wat); }
+  catch (e) { logLine("ERROR (assemble): " + e.message, "err"); return; }
+  const t2 = performance.now();
+
+  try {
+    const { instance } = await WebAssembly.instantiate(bytes, {
+      host: { print: v => logLine(luaToString(v)) },
+    });
+    curInstance = instance;
+    instance.exports.main();
+  } catch (e) {
+    logLine("ERROR (run): " + (e && e.message ? e.message : e), "err");
+    console.error(e); return;
+  }
+  const t3 = performance.now();
+  logLine(`\n— compiled in ${(t1-t0).toFixed(1)} ms · assembled ${(t2-t1).toFixed(1)} ms · ran ${(t3-t2).toFixed(1)} ms · ${bytes.byteLength} B`, "info");
+}
+
+async function showWat() {
+  clearOut();
+  try {
+    const wat = luaToWat(editor.state.doc.toString());
+    logLine(wat);
+  } catch (e) { logLine("ERROR: " + e, "err"); }
+}
+
+document.getElementById("run").onclick = run;
+document.getElementById("showwat").onclick = showWat;
+document.getElementById("run").disabled = false;
+status.textContent = "ready";
+</script>
+</html>
