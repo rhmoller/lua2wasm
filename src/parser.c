@@ -1076,6 +1076,7 @@ ParseResult parse(const TokenList *tokens, NodePool *pool) {
     globals_declare(&p, "math",     4);
     globals_declare(&p, "string",   6);
     globals_declare(&p, "io",       2);
+    globals_declare(&p, "table",    5);
     globals_declare(&p, "_VERSION", 8);
 
     Block main = {0};

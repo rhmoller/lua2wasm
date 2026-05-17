@@ -26,11 +26,18 @@ static const struct {
     { "floor", 5, "$builtin_math_floor", BLT_LIB_MATH },
     { "abs",   3, "$builtin_math_abs",   BLT_LIB_MATH },
     { "sqrt",  4, "$builtin_math_sqrt",  BLT_LIB_MATH },
+    { "ceil",  4, "$builtin_math_ceil",  BLT_LIB_MATH },
+    { "min",   3, "$builtin_math_min",   BLT_LIB_MATH },
+    { "max",   3, "$builtin_math_max",   BLT_LIB_MATH },
     /* string library */
     { "len", 3, "$builtin_string_len", BLT_LIB_STRING },
     { "sub", 3, "$builtin_string_sub", BLT_LIB_STRING },
     /* io library */
     { "write", 5, "$builtin_io_write", BLT_LIB_IO },
+    /* table library */
+    { "insert", 6, "$builtin_table_insert", BLT_LIB_TABLE },
+    { "remove", 6, "$builtin_table_remove", BLT_LIB_TABLE },
+    { "concat", 6, "$builtin_table_concat", BLT_LIB_TABLE },
 };
 
 #define N (sizeof(BUILTINS)/sizeof(BUILTINS[0]))
