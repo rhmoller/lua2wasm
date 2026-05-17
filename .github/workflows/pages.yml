@@ -1,0 +1,72 @@
+# Publishes the in-browser playground to GitHub Pages.
+# After merging this workflow once, enable Pages in the repo settings:
+#   Settings → Pages → Build and deployment → Source: GitHub Actions
+name: pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Only allow one concurrent deployment; queue new pushes rather than cancel.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache emsdk
+        id: emsdk-cache
+        uses: actions/cache@v4
+        with:
+          path: emsdk
+          key: emsdk-${{ runner.os }}-latest-v2
+
+      - name: Install emsdk
+        if: steps.emsdk-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 https://github.com/emscripten-core/emsdk.git
+          ./emsdk/emsdk install latest
+          ./emsdk/emsdk activate latest
+
+      - name: Build compiler-as-wasm
+        run: |
+          source ./emsdk/emsdk_env.sh
+          ./scripts/build-wasm.sh
+
+      - name: Stage Pages bundle
+        run: |
+          mkdir -p dist
+          cp build-em/lua2wasm.js   dist/lua2wasm.js
+          cp build-em/lua2wasm.wasm dist/lua2wasm.wasm
+          # Rewrite relative import so dist is flat:
+          #   "../build-em/lua2wasm.js" → "./lua2wasm.js"
+          sed 's|\.\./build-em/lua2wasm\.js|./lua2wasm.js|' \
+            runtime/playground.html > dist/index.html
+          # Disable Jekyll processing on a static site.
+          touch dist/.nojekyll
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

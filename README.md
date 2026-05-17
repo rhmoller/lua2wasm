@@ -14,8 +14,12 @@ browser.
 
 ## Try it now
 
-The default flow needs **no Emscripten** — just `clang`, `cmake`, Binaryen's
-`wasm-as`, and Node ≥ 22.
+**Live playground:** <https://rhmoller.github.io/lua2wasm/> — opens an
+in-browser editor that compiles and runs your Lua right on the page. No
+install needed.
+
+For local development the default flow needs **no Emscripten** — just
+`clang`, `cmake`, Binaryen's `wasm-as`, and Node ≥ 22.
 
 ```sh
 # 1. Build the compiler (a native binary)

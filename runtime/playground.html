@@ -8,11 +8,18 @@
   html, body { height: 100%; margin: 0; }
   body {
     display: grid;
-    grid-template-rows: auto 1fr auto;
+    grid-template-rows: auto auto 1fr auto;
     font: 14px/1.4 system-ui, sans-serif;
     background: #1b1b1f;
     color: #eaeaea;
   }
+  #intro {
+    padding: .55em 1em; font-size: 13px; line-height: 1.5; color: #cdd;
+    background: #181820; border-bottom: 1px solid #303038;
+  }
+  #intro strong { color: #fff; }
+  #intro a { color: #6cf; text-decoration: none; }
+  #intro a:hover { text-decoration: underline; }
   header {
     display: flex; align-items: center; gap: 1em;
     padding: .6em 1em;
@@ -50,7 +57,7 @@
 </style>
 
 <header>
-  <h1><a href="https://github.com/" target="_blank">lua2wasm</a> playground</h1>
+  <h1><a href="https://github.com/rhmoller/lua2wasm" target="_blank" rel="noopener">lua2wasm</a> playground</h1>
   <select id="preset">
     <option value="hello">hello</option>
     <option value="fact">factorial</option>
@@ -64,6 +71,14 @@
   <button id="showwat">Show WAT</button>
   <span id="status" style="color:#888"></span>
 </header>
+
+<aside id="intro">
+  <strong>lua2wasm</strong> is an ahead-of-time compiler that turns Lua 5.5
+  source into standalone WebAssembly modules using the WASM-GC,
+  typed-references, and exception-handling proposals. The compiler itself
+  runs <em>in this page</em> — your Lua source never leaves the browser.
+  <a href="https://github.com/rhmoller/lua2wasm" target="_blank" rel="noopener">Source on GitHub →</a>
+</aside>
 
 <main>
   <div id="editor-host"></div>
