@@ -398,21 +398,41 @@ static Stmt *parse_local(Parser *p) {
         return s;
     }
 
-    /* local name [= expr] */
+    /* local name [, name, ...] [= expr [, expr, ...]] */
     if (peek(p)->kind != TOK_IDENT) { set_error(p, "expected identifier after `local`"); return NULL; }
-    const Token *name = advance(p);
-    Expr *init = NULL;
-    if (match(p, TOK_ASSIGN)) {
-        init = parse_expr(p);
-        if (!p->ok) return NULL;
+    const Token *names_buf[16];
+    int n_names = 0;
+    names_buf[n_names++] = advance(p);
+    while (match(p, TOK_COMMA)) {
+        if (peek(p)->kind != TOK_IDENT) { set_error(p, "expected identifier"); return NULL; }
+        if (n_names >= 16) { set_error(p, "too many names in local"); return NULL; }
+        names_buf[n_names++] = advance(p);
     }
-    int slot = frame_declare(cur_frame(p), name->start, name->len);
-    if (slot < 0) { set_error(p, "too many locals"); return NULL; }
+    /* Parse RHS values BEFORE declaring locals — Lua scoping rule. */
+    Expr *vals_buf[16];
+    int n_values = 0;
+    if (match(p, TOK_ASSIGN)) {
+        do {
+            if (n_values >= 16) { set_error(p, "too many values in local"); return NULL; }
+            vals_buf[n_values++] = parse_expr(p);
+            if (!p->ok) return NULL;
+        } while (match(p, TOK_COMMA));
+    }
+    /* Now declare locals. */
+    int *local_idxs = node_pool_alloc(p->pool, sizeof(int) * n_names);
+    for (int i = 0; i < n_names; i++) {
+        int slot = frame_declare(cur_frame(p), names_buf[i]->start, names_buf[i]->len);
+        if (slot < 0) { set_error(p, "too many locals"); return NULL; }
+        local_idxs[i] = slot;
+    }
     Stmt *s = stmt_new(p->pool, STMT_LOCAL, line);
-    s->as.local.name = name->start;
-    s->as.local.name_len = name->len;
-    s->as.local.init = init;
-    s->as.local.local_idx = slot;
+    s->as.local.n_names = n_names;
+    s->as.local.local_idxs = local_idxs;
+    s->as.local.n_values = n_values;
+    if (n_values) {
+        s->as.local.values = node_pool_alloc(p->pool, sizeof(Expr *) * n_values);
+        for (int i = 0; i < n_values; i++) s->as.local.values[i] = vals_buf[i];
+    }
     return s;
 }
 
@@ -505,46 +525,132 @@ static int looks_like_block_end(TokKind k) {
 static Stmt *parse_return(Parser *p) {
     int line = peek(p)->line;
     advance(p);
-    Expr *value = NULL;
+    Expr *vals_buf[16];
+    int n_values = 0;
     if (!looks_like_block_end(peek(p)->kind)) {
-        value = parse_expr(p);
-        if (!p->ok) return NULL;
+        do {
+            if (n_values >= 16) { set_error(p, "too many return values"); return NULL; }
+            vals_buf[n_values++] = parse_expr(p);
+            if (!p->ok) return NULL;
+        } while (match(p, TOK_COMMA));
     }
     match(p, TOK_SEMI);
     Stmt *s = stmt_new(p->pool, STMT_RETURN, line);
-    s->as.return_stmt.value = value;
+    s->as.return_stmt.n_values = n_values;
+    if (n_values) {
+        s->as.return_stmt.values = node_pool_alloc(p->pool, sizeof(Expr *) * n_values);
+        for (int i = 0; i < n_values; i++) s->as.return_stmt.values[i] = vals_buf[i];
+    }
     return s;
 }
 
 static Stmt *parse_ident_stmt(Parser *p) {
     int line = peek(p)->line;
-    if (peek_at(p, 1)->kind == TOK_ASSIGN) {
-        const Token *name = advance(p);
-        advance(p);
-        VarKind kind;
-        int idx;
-        if (!resolve_name(p, name->start, name->len, &kind, &idx)) {
+    /* Detect multi-target assignment: IDENT (',' IDENT)* '=' */
+    if (peek_at(p, 1)->kind == TOK_ASSIGN || peek_at(p, 1)->kind == TOK_COMMA) {
+        /* Could be multi-assign. Collect identifier targets. */
+        const Token *names_buf[16];
+        int n_targets = 0;
+        names_buf[n_targets++] = advance(p);
+        int could_be_assign = 1;
+        while (peek(p)->kind == TOK_COMMA) {
+            advance(p);
+            if (peek(p)->kind != TOK_IDENT) { could_be_assign = 0; break; }
+            if (n_targets >= 16) { set_error(p, "too many assignment targets"); return NULL; }
+            names_buf[n_targets++] = advance(p);
+        }
+        if (could_be_assign && peek(p)->kind == TOK_ASSIGN) {
+            advance(p);
+            /* Resolve all targets. */
+            VarRef *targets = node_pool_alloc(p->pool, sizeof(VarRef) * n_targets);
+            for (int i = 0; i < n_targets; i++) {
+                VarKind kind;
+                int idx;
+                if (!resolve_name(p, names_buf[i]->start, names_buf[i]->len, &kind, &idx)) {
+                    char buf[160];
+                    snprintf(buf, sizeof(buf),
+                        "assigning to undefined variable `%.*s`",
+                        (int)names_buf[i]->len, names_buf[i]->start);
+                    set_error(p, buf);
+                    return NULL;
+                }
+                if (kind == VAR_BUILTIN_PRINT) {
+                    set_error(p, "cannot reassign builtin `print`");
+                    return NULL;
+                }
+                targets[i].kind = kind;
+                targets[i].idx = idx;
+            }
+            /* Parse value list. */
+            Expr *vals_buf[16];
+            int n_values = 0;
+            do {
+                if (n_values >= 16) { set_error(p, "too many values"); return NULL; }
+                vals_buf[n_values++] = parse_expr(p);
+                if (!p->ok) return NULL;
+            } while (match(p, TOK_COMMA));
+            Stmt *s = stmt_new(p->pool, STMT_ASSIGN, line);
+            s->as.assign.n_targets = n_targets;
+            s->as.assign.targets = targets;
+            s->as.assign.n_values = n_values;
+            s->as.assign.values = node_pool_alloc(p->pool, sizeof(Expr *) * n_values);
+            for (int i = 0; i < n_values; i++) s->as.assign.values[i] = vals_buf[i];
+            return s;
+        }
+        /* Single identifier that turned out not to be an assignment -> bail
+         * to expression-statement path. But we've already consumed the
+         * identifier(s). For single-ident case we can reconstruct via
+         * looking at the first name. This is a parse-failure case
+         * anyway if `a, b` doesn't lead to `=`. */
+        if (n_targets > 1) {
+            set_error(p, "expected `=` after assignment target list");
+            return NULL;
+        }
+        /* Single identifier, not followed by `=`: treat as start of expression. */
+        Expr *first = expr_new(p->pool, EXPR_VAR, line);
+        first->as.var.name = names_buf[0]->start;
+        first->as.var.name_len = names_buf[0]->len;
+        VarKind kind; int idx;
+        if (!resolve_name(p, names_buf[0]->start, names_buf[0]->len, &kind, &idx)) {
             char buf[160];
             snprintf(buf, sizeof(buf),
-                "assigning to undefined variable `%.*s`",
-                (int)name->len, name->start);
+                "undefined variable `%.*s`",
+                (int)names_buf[0]->len, names_buf[0]->start);
             set_error(p, buf);
             return NULL;
         }
-        if (kind == VAR_BUILTIN_PRINT) {
-            set_error(p, "cannot reassign builtin `print` (phase 3a)");
+        first->as.var.kind = kind;
+        first->as.var.idx = idx;
+        /* Allow trailing call suffix. */
+        while (peek(p)->kind == TOK_LPAREN) {
+            int call_line = peek(p)->line;
+            advance(p);
+            Expr *args_buf[16];
+            size_t nargs = 0;
+            if (peek(p)->kind != TOK_RPAREN) {
+                do {
+                    if (nargs >= 16) { set_error(p, "too many args"); return NULL; }
+                    args_buf[nargs++] = parse_expr(p);
+                    if (!p->ok) return NULL;
+                } while (match(p, TOK_COMMA));
+            }
+            expect(p, TOK_RPAREN, ")");
+            Expr *call = expr_new(p->pool, EXPR_CALL, call_line);
+            call->as.call.callee = first;
+            call->as.call.nargs = nargs;
+            call->as.call.args = node_pool_alloc(p->pool, sizeof(Expr *) * (nargs ? nargs : 1));
+            for (size_t i = 0; i < nargs; i++) call->as.call.args[i] = args_buf[i];
+            first = call;
+        }
+        if (first->kind != EXPR_CALL) {
+            set_error(p, "expression statement must be a function call");
             return NULL;
         }
-        Expr *value = parse_expr(p);
-        if (!p->ok) return NULL;
-        Stmt *s = stmt_new(p->pool, STMT_ASSIGN, line);
-        s->as.assign.name = name->start;
-        s->as.assign.name_len = name->len;
-        s->as.assign.value = value;
-        s->as.assign.kind = kind;
-        s->as.assign.idx = idx;
+        Stmt *s = stmt_new(p->pool, STMT_EXPR, line);
+        s->as.expr_stmt.expr = first;
         return s;
     }
+    /* No assign / comma after first IDENT — pure expression statement. */
     Expr *e = parse_expr(p);
     if (!p->ok) return NULL;
     if (e->kind != EXPR_CALL) {

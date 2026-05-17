@@ -115,22 +115,26 @@ typedef struct {
     Block body;
 } IfArm;
 
+typedef struct {
+    VarKind kind;
+    int idx;
+} VarRef;
+
 struct Stmt {
     StmtKind kind;
     int line;
     union {
-        struct {
-            const char *name;
-            size_t name_len;
-            Expr *init;
-            int local_idx;
+        struct {                    /* local a [, b, c] [= e1 [, e2, ...]] */
+            int n_names;
+            int *local_idxs;        /* one per name */
+            int n_values;
+            Expr **values;          /* may be 0 if no init */
         } local;
-        struct {
-            const char *name;
-            size_t name_len;
-            Expr *value;
-            VarKind kind;
-            int idx;
+        struct {                    /* a [, b, c] = e1 [, e2, ...] */
+            int n_targets;
+            VarRef *targets;
+            int n_values;
+            Expr **values;
         } assign;
         struct {
             Expr *expr;
@@ -148,8 +152,9 @@ struct Stmt {
         struct {
             Block body;
         } do_stmt;
-        struct {
-            Expr *value;            /* may be NULL for bare `return` */
+        struct {                    /* return [e1 [, e2, ...]] */
+            int n_values;
+            Expr **values;
         } return_stmt;
         struct {
             const char *name;

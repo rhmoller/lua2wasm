@@ -215,14 +215,12 @@ static void emit_unop(CG *c, const Expr *e, int depth) {
     }
 }
 
-/* ----- function call (uniform; no special-casing of print) ----- */
-static void emit_call(CG *c, const Expr *e, int depth) {
+/* Emit a call returning (ref $ArgArr) — the full multi-value result. */
+static void emit_call_array(CG *c, const Expr *e, int depth) {
     emit_indent(c, depth); wat_append(c->w, "(call $lua_call\n");
-    /* callee: any anyref, but $lua_call expects (ref $LuaClosure). */
     emit_indent(c, depth + 1); wat_append(c->w, "(ref.cast (ref $LuaClosure)\n");
     emit_expr(c, e->as.call.callee, depth + 2);
     emit_indent(c, depth + 1); wat_append(c->w, ")\n");
-    /* args array */
     emit_indent(c, depth + 1);
     if (e->as.call.nargs == 0) {
         wat_append(c->w, "(array.new_fixed $ArgArr 0)\n");
@@ -233,6 +231,44 @@ static void emit_call(CG *c, const Expr *e, int depth) {
         }
         emit_indent(c, depth + 1); wat_append(c->w, ")\n");
     }
+    emit_indent(c, depth); wat_append(c->w, ")\n");
+}
+
+/* In expression context we want a single anyref; wrap with $args_first. */
+static void emit_call(CG *c, const Expr *e, int depth) {
+    emit_indent(c, depth); wat_append(c->w, "(call $args_first\n");
+    emit_call_array(c, e, depth + 1);
+    emit_indent(c, depth); wat_append(c->w, ")\n");
+}
+
+/* Tail call: `return f(args)` lowers to a return_call_ref so deep
+ * recursion doesn't grow the wasm call stack. We store the casted
+ * closure in $tmp_clo so its funcref and the closure itself can both
+ * be supplied without re-evaluating the callee expression. */
+static void emit_tail_call(CG *c, const Expr *e, int depth) {
+    /* Eval callee once → $tmp_clo. */
+    emit_expr(c, e->as.call.callee, depth);
+    emit_indent(c, depth); wat_append(c->w, "(ref.cast (ref $LuaClosure))\n");
+    emit_indent(c, depth); wat_append(c->w, "local.set $tmp_clo\n");
+    /* return_call_ref $LuaFn closure args funcref */
+    emit_indent(c, depth); wat_append(c->w, "(return_call_ref $LuaFn\n");
+    emit_indent(c, depth + 1);
+    wat_append(c->w, "(ref.as_non_null (local.get $tmp_clo))\n");
+    /* args */
+    emit_indent(c, depth + 1);
+    if (e->as.call.nargs == 0) {
+        wat_append(c->w, "(global.get $g_empty_args)\n");
+    } else {
+        wat_appendf(c->w, "(array.new_fixed $ArgArr %zu\n", e->as.call.nargs);
+        for (size_t i = 0; i < e->as.call.nargs; i++) {
+            emit_expr(c, e->as.call.args[i], depth + 2);
+        }
+        emit_indent(c, depth + 1); wat_append(c->w, ")\n");
+    }
+    /* funcref */
+    emit_indent(c, depth + 1);
+    wat_append(c->w, "(struct.get $LuaClosure $code "
+                     "(ref.as_non_null (local.get $tmp_clo)))\n");
     emit_indent(c, depth); wat_append(c->w, ")\n");
 }
 
@@ -282,29 +318,141 @@ static void emit_expr(CG *c, const Expr *e, int depth) {
     }
 }
 
+/* Helper: emit code that pushes the i-th distributed value of a multi-value
+ * binding/assignment.
+ *
+ *   n_values  = number of source expressions
+ *   values    = those expressions
+ *   last_call = nonzero iff values[n_values-1] is a CALL whose array result
+ *               we want to splice in. The array is already in $tmp_args.
+ *   i         = which target index we're filling (0-based)
+ */
+static void emit_distributed_value(CG *c, int i, int n_values, Expr **values,
+                                   int last_call, int depth) {
+    if (i < n_values - 1) {
+        /* Plain expression at position i (single value). */
+        emit_expr(c, values[i], depth);
+        return;
+    }
+    if (i == n_values - 1) {
+        if (last_call) {
+            /* The trailing call. Take its first result. */
+            emit_indent(c, depth);
+            wat_append(c->w,
+                "(call $args_at (ref.as_non_null (local.get $tmp_args)) (i32.const 0))\n");
+        } else {
+            emit_expr(c, values[i], depth);
+        }
+        return;
+    }
+    /* i > n_values - 1: only reachable if last_call (extra values from call) */
+    if (last_call) {
+        emit_indent(c, depth);
+        wat_appendf(c->w,
+            "(call $args_at (ref.as_non_null (local.get $tmp_args)) (i32.const %d))\n",
+            i - (n_values - 1));
+    } else {
+        emit_indent(c, depth); wat_append(c->w, "(ref.null any)\n");
+    }
+}
+
 /* ----- statements ----- */
 static void emit_stmt(CG *c, const Stmt *s, int depth) {
     if (!c->ok) return;
     switch (s->kind) {
-        case STMT_LOCAL:
-            emit_indent(c, depth);
-            wat_appendf(c->w, "(local.set $L%d (struct.new $Box\n", s->as.local.local_idx);
-            if (s->as.local.init) emit_expr(c, s->as.local.init, depth + 1);
-            else { emit_indent(c, depth + 1); wat_append(c->w, "(ref.null any)\n"); }
-            emit_indent(c, depth); wat_append(c->w, "))\n");
+        case STMT_LOCAL: {
+            int n_names = s->as.local.n_names;
+            int n_values = s->as.local.n_values;
+            int last_call = (n_values > 0 &&
+                             s->as.local.values[n_values - 1]->kind == EXPR_CALL);
+            if (last_call) {
+                emit_indent(c, depth); wat_append(c->w, "(local.set $tmp_args\n");
+                emit_call_array(c, s->as.local.values[n_values - 1], depth + 1);
+                emit_indent(c, depth); wat_append(c->w, ")\n");
+            }
+            for (int i = 0; i < n_names; i++) {
+                emit_indent(c, depth);
+                wat_appendf(c->w,
+                    "(local.set $L%d (struct.new $Box\n",
+                    s->as.local.local_idxs[i]);
+                if (n_values == 0) {
+                    emit_indent(c, depth + 1); wat_append(c->w, "(ref.null any)\n");
+                } else {
+                    emit_distributed_value(c, i, n_values, s->as.local.values,
+                                           last_call, depth + 1);
+                }
+                emit_indent(c, depth); wat_append(c->w, "))\n");
+            }
             break;
+        }
 
-        case STMT_ASSIGN:
-            /* (struct.set $Box $v <boxref> <value>) */
-            emit_indent(c, depth); wat_append(c->w, "(struct.set $Box $v\n");
-            emit_box_ref(c, s->as.assign.kind, s->as.assign.idx, depth + 1);
-            emit_expr(c, s->as.assign.value, depth + 1);
+        case STMT_ASSIGN: {
+            int n_targets = s->as.assign.n_targets;
+            int n_values = s->as.assign.n_values;
+            int last_call = (n_values > 0 &&
+                             s->as.assign.values[n_values - 1]->kind == EXPR_CALL);
+            if (n_targets == 1) {
+                /* Direct single-target path; no aliasing concern. */
+                emit_indent(c, depth); wat_append(c->w, "(struct.set $Box $v\n");
+                emit_box_ref(c, s->as.assign.targets[0].kind,
+                             s->as.assign.targets[0].idx, depth + 1);
+                if (last_call) {
+                    emit_indent(c, depth + 1); wat_append(c->w, "(call $args_first\n");
+                    emit_call_array(c, s->as.assign.values[0], depth + 2);
+                    emit_indent(c, depth + 1); wat_append(c->w, ")\n");
+                } else {
+                    emit_expr(c, s->as.assign.values[0], depth + 1);
+                }
+                emit_indent(c, depth); wat_append(c->w, ")\n");
+                break;
+            }
+            /* Multi-target: must evaluate ALL RHS before assigning (Lua spec).
+             * Build $tmp_args from singles (and merge with trailing call's
+             * results if applicable). */
+            int singles_count = n_values - (last_call ? 1 : 0);
+            emit_indent(c, depth); wat_append(c->w, "(local.set $tmp_args\n");
+            if (last_call) {
+                emit_indent(c, depth + 1); wat_append(c->w, "(call $merge_args\n");
+                emit_indent(c, depth + 2);
+                wat_appendf(c->w, "(array.new_fixed $ArgArr %d\n", singles_count);
+                for (int i = 0; i < singles_count; i++) {
+                    emit_expr(c, s->as.assign.values[i], depth + 3);
+                }
+                if (singles_count == 0) {
+                    /* Avoid empty array.new_fixed inside the helper call. */
+                    emit_indent(c, depth + 2); wat_append(c->w, ")\n");
+                    /* Replace with empty global to be safe. */
+                } else {
+                    emit_indent(c, depth + 2); wat_append(c->w, ")\n");
+                }
+                emit_call_array(c, s->as.assign.values[n_values - 1], depth + 2);
+                emit_indent(c, depth + 1); wat_append(c->w, ")\n");
+            } else {
+                emit_indent(c, depth + 1);
+                wat_appendf(c->w, "(array.new_fixed $ArgArr %d\n", n_values);
+                for (int i = 0; i < n_values; i++) {
+                    emit_expr(c, s->as.assign.values[i], depth + 2);
+                }
+                emit_indent(c, depth + 1); wat_append(c->w, ")\n");
+            }
             emit_indent(c, depth); wat_append(c->w, ")\n");
+            /* Distribute. */
+            for (int i = 0; i < n_targets; i++) {
+                emit_indent(c, depth); wat_append(c->w, "(struct.set $Box $v\n");
+                emit_box_ref(c, s->as.assign.targets[i].kind,
+                             s->as.assign.targets[i].idx, depth + 1);
+                emit_indent(c, depth + 1);
+                wat_appendf(c->w,
+                    "(call $args_at (ref.as_non_null (local.get $tmp_args)) "
+                    "(i32.const %d))\n", i);
+                emit_indent(c, depth); wat_append(c->w, ")\n");
+            }
             break;
+        }
 
         case STMT_EXPR:
-            /* Expression-statement is always a call. Discard result. */
-            emit_call(c, s->as.expr_stmt.expr, depth);
+            /* Call as statement: get array, drop it. */
+            emit_call_array(c, s->as.expr_stmt.expr, depth);
             emit_indent(c, depth); wat_append(c->w, "drop\n");
             break;
 
@@ -312,16 +460,32 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
             emit_block(c, &s->as.do_stmt.body, depth);
             break;
 
-        case STMT_RETURN:
+        case STMT_RETURN: {
+            int n_values = s->as.return_stmt.n_values;
             if (c->in_main) {
-                /* main has no return value; ignore any expression. */
+                /* main: chunk-return value ignored, no return type. */
                 emit_indent(c, depth); wat_append(c->w, "return\n");
-            } else {
-                if (s->as.return_stmt.value) emit_expr(c, s->as.return_stmt.value, depth);
-                else { emit_indent(c, depth); wat_append(c->w, "(ref.null any)\n"); }
-                emit_indent(c, depth); wat_append(c->w, "return\n");
+                break;
             }
+            /* Tail-call optimization: exactly `return <call_expr>`. */
+            if (n_values == 1 && s->as.return_stmt.values[0]->kind == EXPR_CALL) {
+                emit_tail_call(c, s->as.return_stmt.values[0], depth);
+                break;
+            }
+            /* Otherwise build the result array and return it. */
+            if (n_values == 0) {
+                emit_indent(c, depth); wat_append(c->w, "(global.get $g_empty_args)\n");
+            } else {
+                emit_indent(c, depth);
+                wat_appendf(c->w, "(array.new_fixed $ArgArr %d\n", n_values);
+                for (int i = 0; i < n_values; i++) {
+                    emit_expr(c, s->as.return_stmt.values[i], depth + 1);
+                }
+                emit_indent(c, depth); wat_append(c->w, ")\n");
+            }
+            emit_indent(c, depth); wat_append(c->w, "return\n");
             break;
+        }
 
         case STMT_WHILE: {
             int label = c->next_label++;
@@ -401,14 +565,15 @@ static const char *PRELUDE_TYPES =
 "                                   (field $upvals (ref $UpvalArr)))))\n"
 "    (type $LuaFn (func (param (ref $LuaClosure))\n"
 "                       (param (ref $ArgArr))\n"
-"                       (result anyref))))\n"
+"                       (result (ref $ArgArr)))))\n"
 "\n"
 "  (import \"host\" \"print\" (func $host_print (param anyref)))\n"
 "\n"
 "  ;; --- singletons ---\n"
 "  (global $g_true  (ref $LuaBool) (struct.new $LuaBool (i32.const 1)))\n"
 "  (global $g_false (ref $LuaBool) (struct.new $LuaBool (i32.const 0)))\n"
-"  (global $g_empty_upvals (ref $UpvalArr) (array.new_fixed $UpvalArr 0))\n";
+"  (global $g_empty_upvals (ref $UpvalArr) (array.new_fixed $UpvalArr 0))\n"
+"  (global $g_empty_args   (ref $ArgArr)   (array.new_fixed $ArgArr 0))\n";
 
 static const char *PRELUDE_HELPERS =
 "  ;; --- truthiness: only nil and false are falsy ---\n"
@@ -672,17 +837,43 @@ static const char *PRELUDE_HELPERS =
 "      (local.get $sb)  (i32.const 0) (local.get $nb))\n"
 "    (struct.new $LuaString (local.get $out)))\n"
 "\n"
-"  ;; --- closure dispatch + print builtin ---\n"
-"  (func $lua_call (param $closure (ref $LuaClosure)) (param $args (ref $ArgArr)) (result anyref)\n"
+"  ;; --- closure dispatch + multi-value helpers + print builtin ---\n"
+"  (func $lua_call (param $closure (ref $LuaClosure)) (param $args (ref $ArgArr))\n"
+"                  (result (ref $ArgArr))\n"
 "    (call_ref $LuaFn\n"
 "      (local.get $closure)\n"
 "      (local.get $args)\n"
 "      (struct.get $LuaClosure $code (local.get $closure))))\n"
 "\n"
+"  (func $args_first (param $args (ref $ArgArr)) (result anyref)\n"
+"    (if (result anyref) (i32.eqz (array.len (local.get $args)))\n"
+"      (then (ref.null any))\n"
+"      (else (array.get $ArgArr (local.get $args) (i32.const 0)))))\n"
+"\n"
+"  (func $args_at (param $args (ref $ArgArr)) (param $i i32) (result anyref)\n"
+"    (if (result anyref) (i32.ge_u (local.get $i) (array.len (local.get $args)))\n"
+"      (then (ref.null any))\n"
+"      (else (array.get $ArgArr (local.get $args) (local.get $i)))))\n"
+"\n"
+"  (func $merge_args (param $a (ref $ArgArr)) (param $b (ref $ArgArr)) (result (ref $ArgArr))\n"
+"    (local $na i32) (local $nb i32) (local $out (ref $ArgArr))\n"
+"    (local.set $na (array.len (local.get $a)))\n"
+"    (local.set $nb (array.len (local.get $b)))\n"
+"    (local.set $out (array.new $ArgArr (ref.null any)\n"
+"                       (i32.add (local.get $na) (local.get $nb))))\n"
+"    (array.copy $ArgArr $ArgArr\n"
+"      (local.get $out) (i32.const 0)\n"
+"      (local.get $a)   (i32.const 0) (local.get $na))\n"
+"    (array.copy $ArgArr $ArgArr\n"
+"      (local.get $out) (local.get $na)\n"
+"      (local.get $b)   (i32.const 0) (local.get $nb))\n"
+"    (local.get $out))\n"
+"\n"
 "  (func $builtin_print (type $LuaFn)\n"
-"    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result anyref)\n"
-"    (call $host_print (array.get $ArgArr (local.get $args) (i32.const 0)))\n"
-"    (ref.null any))\n"
+"    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))\n"
+"    (if (i32.gt_u (array.len (local.get $args)) (i32.const 0))\n"
+"      (then (call $host_print (array.get $ArgArr (local.get $args) (i32.const 0)))))\n"
+"    (global.get $g_empty_args))\n"
 "\n"
 "  (elem declare func $builtin_print)\n"
 "  (global $g_print (ref $LuaClosure)\n"
@@ -721,19 +912,21 @@ static void emit_user_function(CG *c, const LuaFunc *fn) {
     wat_appendf(w,
         "  (func $user_%d (type $LuaFn) "
         "(param $closure (ref $LuaClosure)) "
-        "(param $args (ref $ArgArr)) (result anyref)\n",
+        "(param $args (ref $ArgArr)) (result (ref $ArgArr))\n",
         fn->func_idx);
 
     for (int i = 0; i < fn->n_locals; i++) {
         wat_appendf(w, "    (local $L%d (ref $Box))\n", i);
     }
     wat_append(w, "    (local $tmp_any anyref)\n");
+    wat_append(w, "    (local $tmp_args (ref null $ArgArr))\n");
+    wat_append(w, "    (local $tmp_clo (ref null $LuaClosure))\n");
 
-    /* Param extraction: box each arg into its local slot. */
+    /* Param extraction: each declared parameter takes args[i] (nil if missing). */
     for (int i = 0; i < fn->n_params; i++) {
         wat_appendf(w,
             "    (local.set $L%d (struct.new $Box "
-            "(array.get $ArgArr (local.get $args) (i32.const %d))))\n", i, i);
+            "(call $args_at (local.get $args) (i32.const %d))))\n", i, i);
     }
 
     int was_in_main = c->in_main;
@@ -741,9 +934,8 @@ static void emit_user_function(CG *c, const LuaFunc *fn) {
     emit_block(c, &fn->body, 2);
     c->in_main = was_in_main;
 
-    /* Default trailing return (nil) so the function is well-typed even if
-     * the body has no explicit return on every path. */
-    wat_append(w, "    (ref.null any)\n");
+    /* Default trailing return — empty results array. */
+    wat_append(w, "    (global.get $g_empty_args)\n");
     wat_append(w, "  )\n");
 
     /* Declare so the funcref is usable in const init / closures. */
@@ -772,6 +964,8 @@ int codegen_module(const ParseResult *pr, WatBuilder *out,
             wat_appendf(out, "    (local $L%d (ref $Box))\n", i);
         }
         wat_append(out, "    (local $tmp_any anyref)\n");
+        wat_append(out, "    (local $tmp_args (ref null $ArgArr))\n");
+        wat_append(out, "    (local $tmp_clo (ref null $LuaClosure))\n");
 
         emit_block(&c, &pr->main_body, 2);
 
