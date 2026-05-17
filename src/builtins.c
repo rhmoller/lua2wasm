@@ -49,6 +49,7 @@ static const struct {
     { "insert", 6, "$builtin_table_insert", BLT_LIB_TABLE },
     { "remove", 6, "$builtin_table_remove", BLT_LIB_TABLE },
     { "concat", 6, "$builtin_table_concat", BLT_LIB_TABLE },
+    { "unpack", 6, "$builtin_table_unpack", BLT_LIB_TABLE },
 };
 
 #define N (sizeof(BUILTINS)/sizeof(BUILTINS[0]))

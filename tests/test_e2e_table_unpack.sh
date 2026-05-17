@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# E2E test for table.unpack.
+set -euo pipefail
+
+BIN="$1"; SRC_DIR="$2"; BUILD_DIR="$3"
+FIXTURE="$SRC_DIR/tests/fixtures/table_unpack.lua"
+WAT="$BUILD_DIR/table_unpack.wat"
+WASM="$BUILD_DIR/table_unpack.wasm"
+
+"$BIN" "$FIXTURE" -o "$WAT"
+wasm-as --all-features -o "$WASM" "$WAT"
+
+EXPECTED=$'10\t20\t30\t40\n20\t30\t40\n20\t30\n6\nx\ty\tz\n[\tnil\t]'
+
+OUT="$(node --experimental-wasm-exnref "$SRC_DIR/runtime/host.mjs" "$WASM")"
+if [[ "$OUT" != "$EXPECTED" ]]; then
+    echo "FAIL: output mismatch" >&2
+    diff <(printf '%s\n' "$EXPECTED") <(printf '%s\n' "$OUT") >&2 || true
+    exit 1
+fi
+echo "ok: table_unpack fixture matches"
