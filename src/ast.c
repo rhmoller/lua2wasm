@@ -28,8 +28,16 @@ void *node_pool_alloc(NodePool *p, size_t bytes) {
     return ptr;
 }
 
-LuaNode *node_new(NodePool *p, LuaNodeKind k) {
-    LuaNode *n = node_pool_alloc(p, sizeof(LuaNode));
-    n->kind = k;
-    return n;
+Expr *expr_new(NodePool *p, ExprKind k, int line) {
+    Expr *e = node_pool_alloc(p, sizeof(Expr));
+    e->kind = k;
+    e->line = line;
+    return e;
+}
+
+Stmt *stmt_new(NodePool *p, StmtKind k, int line) {
+    Stmt *s = node_pool_alloc(p, sizeof(Stmt));
+    s->kind = k;
+    s->line = line;
+    return s;
 }

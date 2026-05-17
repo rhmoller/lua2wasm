@@ -1,4 +1,3 @@
-#include "ast.h"
 #include "codegen.h"
 #include "lexer.h"
 #include "parser.h"
@@ -39,6 +38,11 @@ int main(int argc, char **argv) {
     if (!src) return 1;
 
     TokenList toks = lex(src);
+    if (!toks.ok) {
+        fprintf(stderr, "lex error: %s\n", toks.err);
+        return 1;
+    }
+
     NodePool pool;
     node_pool_init(&pool);
     ParseResult pr = parse(&toks, &pool);
@@ -50,7 +54,7 @@ int main(int argc, char **argv) {
     WatBuilder w;
     wat_init(&w);
     char err[256] = {0};
-    if (!codegen_module(&pr.program, &w, err, sizeof(err))) {
+    if (!codegen_module(&pr, &w, err, sizeof(err))) {
         fprintf(stderr, "%s\n", err);
         return 1;
     }
@@ -61,7 +65,6 @@ int main(int argc, char **argv) {
     fclose(of);
 
     wat_free(&w);
-    program_free(&pr.program);
     node_pool_free(&pool);
     tokenlist_free(&toks);
     free(src);

@@ -8,21 +8,41 @@ if (!wasmPath) {
     process.exit(2);
 }
 
-function formatLuaValue(v) {
+let instance;
+
+function readLuaString(v) {
+    const n = instance.exports.lua_str_len(v);
+    const out = new Uint8Array(n);
+    for (let i = 0; i < n; i++) out[i] = instance.exports.lua_str_byte(v, i);
+    return new TextDecoder().decode(out);
+}
+
+function formatFloat(f) {
+    if (!Number.isFinite(f)) {
+        return f === Infinity ? "inf" : f === -Infinity ? "-inf" : "nan";
+    }
+    if (Number.isInteger(f)) return `${f}.0`;
+    // Lua's default is %.14g; mimic crudely.
+    return f.toPrecision(14).replace(/\.?0+(e|$)/, "$1");
+}
+
+function luaToString(v) {
     if (v === null || v === undefined) return "nil";
-    // i31ref values surface as plain JS numbers via JS API.
-    if (typeof v === "number") return String(v);
-    if (typeof v === "boolean") return v ? "true" : "false";
-    if (typeof v === "string") return v;
-    return String(v);
+    const tag = instance.exports.lua_tag(v);
+    switch (tag) {
+        case 0: return "nil";
+        case 1: return instance.exports.lua_get_bool(v) ? "true" : "false";
+        case 2: return String(instance.exports.lua_get_int(v));
+        case 3: return formatFloat(instance.exports.lua_get_float(v));
+        case 4: return readLuaString(v);
+        default: return `<lua value tag=${tag}>`;
+    }
 }
 
 const bytes = await readFile(wasmPath);
-const { instance } = await WebAssembly.instantiate(bytes, {
+({ instance } = await WebAssembly.instantiate(bytes, {
     host: {
-        print: (v) => { process.stdout.write(formatLuaValue(v) + "\n"); },
+        print: (v) => { process.stdout.write(luaToString(v) + "\n"); },
     },
-});
-
-// `main` is the start function and runs on instantiate. Nothing else to do.
-void instance;
+}));
+instance.exports.main();
