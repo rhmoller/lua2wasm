@@ -591,9 +591,28 @@ async function showWat() {
   } catch (e) { logLine("ERROR: " + e, "err"); }
 }
 
-document.getElementById("run").onclick = run;
+/* Re-entrancy guard so two near-simultaneous triggers (e.g. clicking Run
+ * just as Ctrl+Enter fires) don't kick off two parallel runs. */
+let running = false;
+const triggerRun = async () => {
+  if (running || runBtn.disabled) return;
+  running = true;
+  try { await run(); } finally { running = false; }
+};
+const runBtn = document.getElementById("run");
+runBtn.onclick = triggerRun;
 document.getElementById("showwat").onclick = showWat;
-document.getElementById("run").disabled = false;
-status.textContent = "ready";
+runBtn.disabled = false;
+status.textContent = "ready (Ctrl/Cmd+Enter to run)";
+
+/* Global Ctrl/Cmd+Enter → Run, regardless of which pane has focus.
+ * Capture phase + preventDefault so CodeMirror doesn't insert a newline. */
+window.addEventListener("keydown", e => {
+  if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey) {
+    e.preventDefault();
+    e.stopPropagation();
+    triggerRun();
+  }
+}, true);
 </script>
 </html>
