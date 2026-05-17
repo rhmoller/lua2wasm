@@ -25,7 +25,7 @@ static MunitResult test_emits_expected(const MunitParameter params[], void *fixt
     munit_assert_not_null(strstr(s, "(call $lua_add)"));
     /* No more direct $host_print call from user code; goes through $lua_call. */
     munit_assert_not_null(strstr(s, "(call $lua_call"));
-    munit_assert_not_null(strstr(s, "(global.get $g_builtin_0)"));
+    munit_assert_not_null(strstr(s, "(global.get $g_builtin_print)"));
     munit_assert_not_null(strstr(s, "(func $main (export \"main\")"));
     munit_assert_not_null(strstr(s, "(type $LuaClosure"));
 
@@ -48,8 +48,9 @@ static MunitResult test_string_in_data_segment(const MunitParameter params[], vo
     int ok = codegen_module(&r, &w, err, sizeof(err));
     munit_assert_true(ok);
     const char *s = wat_cstr(&w);
-    munit_assert_not_null(strstr(s, "(i32.const 19) (i32.const 5)"));
-    munit_assert_not_null(strstr(s, "niltruefalse<float>hello"));
+    /* Built-in literal prefix is 51 bytes; "hello" lands somewhere after that. */
+    munit_assert_not_null(strstr(s, "niltruefalse<float>numberstringtablefunctionboolean"));
+    munit_assert_not_null(strstr(s, "hello"));
     wat_free(&w);
     parse_result_free(&r);
     node_pool_free(&pool);

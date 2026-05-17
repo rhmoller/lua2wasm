@@ -130,7 +130,7 @@ static void emit_var_read(CG *c, VarKind kind, int idx, int depth) {
                 "(i32.const %d)))\n", idx);
             break;
         case VAR_BUILTIN:
-            wat_appendf(c->w, "(global.get $g_builtin_%d)\n", idx);
+            wat_appendf(c->w, "(global.get $g_builtin_%s)\n", builtin_name(idx));
             break;
         case VAR_GLOBAL:
             wat_appendf(c->w, "(global.get $g_user_%d)\n", idx);
@@ -1301,13 +1301,209 @@ static const char *PRELUDE_HELPERS =
 "    (local.set $err)\n"
 "    (array.new_fixed $ArgArr 2 (global.get $g_false) (local.get $err)))\n"
 "\n"
-"  (elem declare func $builtin_print $builtin_error $builtin_pcall)\n"
-"  (global $g_builtin_0 (ref $LuaClosure)\n"
-"    (struct.new $LuaClosure (ref.func $builtin_print) (global.get $g_empty_upvals)))\n"
-"  (global $g_builtin_1 (ref $LuaClosure)\n"
-"    (struct.new $LuaClosure (ref.func $builtin_error) (global.get $g_empty_upvals)))\n"
-"  (global $g_builtin_2 (ref $LuaClosure)\n"
-"    (struct.new $LuaClosure (ref.func $builtin_pcall) (global.get $g_empty_upvals)))\n"
+"  ;; --- additional top-level builtins ---\n"
+"  (func $builtin_type (type $LuaFn)\n"
+"    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))\n"
+"    (local $v anyref) (local $bytes (ref null $LuaArr)) (local $b (ref null $LuaString))\n"
+"    (local.set $v (call $args_at (local.get $args) (i32.const 0)))\n"
+"    ;; pick canonical type-name bytes via existing $str_data offsets if any;\n"
+"    ;; otherwise materialize on the fly. We just store the names inline.\n"
+"    (if (ref.is_null (local.get $v))\n"
+"      (then (local.set $bytes (call $bytes_of_lit (i32.const 19))))\n"     /* "nil" */
+"      (else (if (ref.test (ref $LuaBool) (local.get $v))\n"
+"        (then (local.set $bytes (call $bytes_of_lit (i32.const 7))))\n"   /* "boolean" */
+"        (else (if (i32.or (call $is_int (local.get $v)) (call $is_float (local.get $v)))\n"
+"          (then (local.set $bytes (call $bytes_of_lit (i32.const 0))))\n"  /* "number" */
+"          (else (if (ref.test (ref $LuaString) (local.get $v))\n"
+"            (then (local.set $bytes (call $bytes_of_lit (i32.const 1))))\n"  /* "string" */
+"            (else (if (ref.test (ref $LuaTable) (local.get $v))\n"
+"              (then (local.set $bytes (call $bytes_of_lit (i32.const 2))))\n"  /* "table" */
+"              (else (local.set $bytes (call $bytes_of_lit (i32.const 3)))))))))))))\n"  /* "function" */
+"    (local.set $b (struct.new $LuaString (ref.as_non_null (local.get $bytes))))\n"
+"    (array.new_fixed $ArgArr 1 (ref.as_non_null (local.get $b))))\n"
+"\n"
+"  (func $builtin_tostring (type $LuaFn)\n"
+"    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))\n"
+"    (array.new_fixed $ArgArr 1\n"
+"      (call $lua_tostring (call $args_at (local.get $args) (i32.const 0)))))\n"
+"\n"
+"  ;; tonumber: numbers passthrough, strings parsed as ints (simple form),\n"
+"  ;; everything else returns nil. (Phase-7 limitation.)\n"
+"  (func $builtin_tonumber (type $LuaFn)\n"
+"    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))\n"
+"    (local $v anyref) (local $bytes (ref $LuaArr))\n"
+"    (local $n i32) (local $i i32) (local $acc i64) (local $neg i32) (local $b i32)\n"
+"    (local.set $v (call $args_at (local.get $args) (i32.const 0)))\n"
+"    (if (i32.or (call $is_int (local.get $v)) (call $is_float (local.get $v)))\n"
+"      (then (return (array.new_fixed $ArgArr 1 (local.get $v)))))\n"
+"    (if (i32.eqz (ref.test (ref $LuaString) (local.get $v)))\n"
+"      (then (return (array.new_fixed $ArgArr 1 (ref.null any)))))\n"
+"    (local.set $bytes (struct.get $LuaString $bytes\n"
+"                        (ref.cast (ref $LuaString) (local.get $v))))\n"
+"    (local.set $n (array.len (local.get $bytes)))\n"
+"    (if (i32.eqz (local.get $n))\n"
+"      (then (return (array.new_fixed $ArgArr 1 (ref.null any)))))\n"
+"    (if (i32.eq (array.get_u $LuaArr (local.get $bytes) (i32.const 0)) (i32.const 45))\n"
+"      (then (local.set $neg (i32.const 1)) (local.set $i (i32.const 1))))\n"
+"    (if (i32.ge_s (local.get $i) (local.get $n))\n"
+"      (then (return (array.new_fixed $ArgArr 1 (ref.null any)))))\n"
+"    (block $done (loop $lp\n"
+"      (br_if $done (i32.ge_s (local.get $i) (local.get $n)))\n"
+"      (local.set $b (array.get_u $LuaArr (local.get $bytes) (local.get $i)))\n"
+"      (if (i32.or (i32.lt_s (local.get $b) (i32.const 48))\n"
+"                  (i32.gt_s (local.get $b) (i32.const 57)))\n"
+"        (then (return (array.new_fixed $ArgArr 1 (ref.null any)))))\n"
+"      (local.set $acc (i64.add (i64.mul (local.get $acc) (i64.const 10))\n"
+"                                (i64.extend_i32_u\n"
+"                                  (i32.sub (local.get $b) (i32.const 48)))))\n"
+"      (local.set $i (i32.add (local.get $i) (i32.const 1)))\n"
+"      (br $lp)))\n"
+"    (if (local.get $neg)\n"
+"      (then (local.set $acc (i64.sub (i64.const 0) (local.get $acc)))))\n"
+"    (array.new_fixed $ArgArr 1 (call $make_int (local.get $acc))))\n"
+"\n"
+"  ;; next(t, k): returns next key/value pair, or nothing when exhausted.\n"
+"  (func $builtin_next (type $LuaFn)\n"
+"    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))\n"
+"    (local $t (ref $LuaTable)) (local $k anyref)\n"
+"    (local $idx i32) (local $n i32)\n"
+"    (local.set $t (ref.cast (ref $LuaTable) (call $args_at (local.get $args) (i32.const 0))))\n"
+"    (local.set $k (call $args_at (local.get $args) (i32.const 1)))\n"
+"    (if (ref.is_null (local.get $k))\n"
+"      (then (local.set $idx (i32.const 0)))\n"
+"      (else\n"
+"        (local.set $idx (i32.add (call $tab_find (local.get $t) (local.get $k))\n"
+"                                  (i32.const 1)))))\n"
+"    (local.set $n (struct.get $LuaTable $n (local.get $t)))\n"
+"    (if (i32.ge_s (local.get $idx) (local.get $n))\n"
+"      (then (return (global.get $g_empty_args))))\n"
+"    (array.new_fixed $ArgArr 2\n"
+"      (array.get $TArr (ref.as_non_null (struct.get $LuaTable $keys (local.get $t)))\n"
+"                       (local.get $idx))\n"
+"      (array.get $TArr (ref.as_non_null (struct.get $LuaTable $vals (local.get $t)))\n"
+"                       (local.get $idx))))\n"
+"\n"
+"  (func $builtin_pairs (type $LuaFn)\n"
+"    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))\n"
+"    (array.new_fixed $ArgArr 3\n"
+"      (global.get $g_builtin_next)\n"
+"      (call $args_at (local.get $args) (i32.const 0))\n"
+"      (ref.null any)))\n"
+"\n"
+"  ;; ipairs_iter: takes (t, prev_k) where prev_k is an int. Returns next int\n"
+"  ;; key and t[next_k], or empty when t[next_k] is nil.\n"
+"  (func $builtin_ipairs_iter (type $LuaFn)\n"
+"    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))\n"
+"    (local $t (ref $LuaTable)) (local $k i32) (local $v anyref) (local $kref anyref)\n"
+"    (local.set $t (ref.cast (ref $LuaTable) (call $args_at (local.get $args) (i32.const 0))))\n"
+"    (local.set $k (i32.add\n"
+"      (i31.get_s (ref.cast (ref i31) (call $args_at (local.get $args) (i32.const 1))))\n"
+"      (i32.const 1)))\n"
+"    (local.set $kref (ref.i31 (local.get $k)))\n"
+"    (local.set $v (call $tab_get (local.get $t) (local.get $kref)))\n"
+"    (if (ref.is_null (local.get $v))\n"
+"      (then (return (global.get $g_empty_args))))\n"
+"    (array.new_fixed $ArgArr 2 (local.get $kref) (local.get $v)))\n"
+"\n"
+"  (func $builtin_ipairs (type $LuaFn)\n"
+"    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))\n"
+"    (array.new_fixed $ArgArr 3\n"
+"      (global.get $g_builtin__ipairs_iter)\n"
+"      (call $args_at (local.get $args) (i32.const 0))\n"
+"      (ref.i31 (i32.const 0))))\n"
+"\n"
+"  ;; --- math library ---\n"
+"  (func $builtin_math_floor (type $LuaFn)\n"
+"    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))\n"
+"    (local $v anyref)\n"
+"    (local.set $v (call $args_at (local.get $args) (i32.const 0)))\n"
+"    (if (call $is_int (local.get $v))\n"
+"      (then (return (array.new_fixed $ArgArr 1 (local.get $v)))))\n"
+"    (array.new_fixed $ArgArr 1\n"
+"      (call $make_int (i64.trunc_f64_s (f64.floor (call $as_float (local.get $v)))))))\n"
+"\n"
+"  (func $builtin_math_abs (type $LuaFn)\n"
+"    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))\n"
+"    (local $v anyref) (local $i i64)\n"
+"    (local.set $v (call $args_at (local.get $args) (i32.const 0)))\n"
+"    (if (call $is_int (local.get $v))\n"
+"      (then\n"
+"        (local.set $i (call $as_int (local.get $v)))\n"
+"        (if (i64.lt_s (local.get $i) (i64.const 0))\n"
+"          (then (local.set $i (i64.sub (i64.const 0) (local.get $i)))))\n"
+"        (return (array.new_fixed $ArgArr 1 (call $make_int (local.get $i))))))\n"
+"    (array.new_fixed $ArgArr 1\n"
+"      (call $make_float (f64.abs (call $as_float (local.get $v))))))\n"
+"\n"
+"  (func $builtin_math_sqrt (type $LuaFn)\n"
+"    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))\n"
+"    (array.new_fixed $ArgArr 1\n"
+"      (call $make_float (f64.sqrt (call $as_float\n"
+"        (call $args_at (local.get $args) (i32.const 0)))))))\n"
+"\n"
+"  ;; --- string library ---\n"
+"  (func $builtin_string_len (type $LuaFn)\n"
+"    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))\n"
+"    (array.new_fixed $ArgArr 1 (call $lua_len\n"
+"      (call $args_at (local.get $args) (i32.const 0)))))\n"
+"\n"
+"  ;; string.sub(s, i, [j])\n"
+"  (func $builtin_string_sub (type $LuaFn)\n"
+"    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))\n"
+"    (local $s (ref $LuaString)) (local $bytes (ref $LuaArr))\n"
+"    (local $n i32) (local $i i32) (local $j i32) (local $len i32)\n"
+"    (local $out (ref $LuaArr))\n"
+"    (local.set $s (ref.cast (ref $LuaString) (call $args_at (local.get $args) (i32.const 0))))\n"
+"    (local.set $bytes (struct.get $LuaString $bytes (local.get $s)))\n"
+"    (local.set $n (array.len (local.get $bytes)))\n"
+"    (local.set $i (i32.wrap_i64 (call $as_int (call $args_at (local.get $args) (i32.const 1)))))\n"
+"    (local.set $j (local.get $n))\n"
+"    (if (i32.gt_u (array.len (local.get $args)) (i32.const 2))\n"
+"      (then\n"
+"        (local.set $j (i32.wrap_i64\n"
+"          (call $as_int (call $args_at (local.get $args) (i32.const 2)))))))\n"
+"    (if (i32.lt_s (local.get $i) (i32.const 0))\n"
+"      (then (local.set $i (i32.add (local.get $n) (i32.add (local.get $i) (i32.const 1))))))\n"
+"    (if (i32.lt_s (local.get $j) (i32.const 0))\n"
+"      (then (local.set $j (i32.add (local.get $n) (i32.add (local.get $j) (i32.const 1))))))\n"
+"    (if (i32.lt_s (local.get $i) (i32.const 1)) (then (local.set $i (i32.const 1))))\n"
+"    (if (i32.gt_s (local.get $j) (local.get $n)) (then (local.set $j (local.get $n))))\n"
+"    (if (i32.gt_s (local.get $i) (local.get $j))\n"
+"      (then (return (array.new_fixed $ArgArr 1\n"
+"        (struct.new $LuaString (array.new $LuaArr (i32.const 0) (i32.const 0)))))))\n"
+"    (local.set $len (i32.add (i32.sub (local.get $j) (local.get $i)) (i32.const 1)))\n"
+"    (local.set $out (array.new $LuaArr (i32.const 0) (local.get $len)))\n"
+"    (array.copy $LuaArr $LuaArr\n"
+"      (local.get $out)   (i32.const 0)\n"
+"      (local.get $bytes) (i32.sub (local.get $i) (i32.const 1))\n"
+"      (local.get $len))\n"
+"    (array.new_fixed $ArgArr 1 (struct.new $LuaString (local.get $out))))\n"
+"\n"
+"  ;; bytes_of_lit: looks up a built-in literal name (`number`, `string`, etc.)\n"
+"  ;; by index into the type-name slab. Indices into the slab:\n"
+"  ;;   0  \"number\"     (6 bytes)\n"
+"  ;;   1  \"string\"     (6 bytes)\n"
+"  ;;   2  \"table\"      (5 bytes)\n"
+"  ;;   3  \"function\"   (8 bytes)\n"
+"  ;;   7  \"boolean\"    (7 bytes, overlaps the prefix region)\n"
+"  ;;   19 \"nil\"        (3 bytes)\n"
+"  ;;\n"
+"  ;; The slab is the same `$str_data` segment used by $lua_tostring. We\n"
+"  ;; carefully reserve names at known offsets in codegen_module.\n"
+"  (func $bytes_of_lit (param $idx i32) (result (ref $LuaArr))\n"
+"    (block $r (result (ref $LuaArr))\n"
+"      (if (i32.eq (local.get $idx) (i32.const 0))\n"
+"        (then (br $r (array.new_data $LuaArr $str_data (i32.const 19) (i32.const 6)))))\n"
+"      (if (i32.eq (local.get $idx) (i32.const 1))\n"
+"        (then (br $r (array.new_data $LuaArr $str_data (i32.const 25) (i32.const 6)))))\n"
+"      (if (i32.eq (local.get $idx) (i32.const 2))\n"
+"        (then (br $r (array.new_data $LuaArr $str_data (i32.const 31) (i32.const 5)))))\n"
+"      (if (i32.eq (local.get $idx) (i32.const 3))\n"
+"        (then (br $r (array.new_data $LuaArr $str_data (i32.const 36) (i32.const 8)))))\n"
+"      (if (i32.eq (local.get $idx) (i32.const 7))\n"
+"        (then (br $r (array.new_data $LuaArr $str_data (i32.const 44) (i32.const 7)))))\n"
+"      (array.new_data $LuaArr $str_data (i32.const 0) (i32.const 3))))\n"
+"\n"
 "\n"
 "  ;; --- exported decoders for the JS host ---\n"
 "  (func (export \"lua_tag\") (param $v anyref) (result i32)\n"
@@ -1332,8 +1528,11 @@ static const char *PRELUDE_HELPERS =
 "      (struct.get $LuaString $bytes (ref.cast (ref $LuaString) (local.get $v)))\n"
 "      (local.get $i)))\n";
 
-#define LITERAL_PREFIX "niltruefalse<float>"
-#define LITERAL_PREFIX_LEN 19
+/* Reserved bytes of $str_data:
+ *   0  nil(3)  3  true(4)  7  false(5)  12 <float>(7)
+ *   19 number(6)  25 string(6)  31 table(5)  36 function(8)  44 boolean(7) */
+#define LITERAL_PREFIX "niltruefalse<float>numberstringtablefunctionboolean"
+#define LITERAL_PREFIX_LEN 51
 
 /* Emit the body of one user function. */
 static void emit_user_function(CG *c, const LuaFunc *fn) {
@@ -1386,6 +1585,22 @@ int codegen_module(const ParseResult *pr, WatBuilder *out,
     wat_append(out, PRELUDE_TYPES);
     wat_append(out, PRELUDE_HELPERS);
 
+    /* elem declare for every builtin func, so ref.func works in const init. */
+    wat_append(out, "\n  (elem declare func");
+    int nb = builtin_count();
+    for (int i = 0; i < nb; i++) {
+        wat_appendf(out, " %s", builtin_func_name(i));
+    }
+    wat_append(out, ")\n");
+
+    /* One $g_builtin_NAME wasm global per builtin, pre-wrapping a closure. */
+    for (int i = 0; i < nb; i++) {
+        wat_appendf(out,
+            "  (global $g_builtin_%s (ref $LuaClosure)\n"
+            "    (struct.new $LuaClosure (ref.func %s) (global.get $g_empty_upvals)))\n",
+            builtin_name(i), builtin_func_name(i));
+    }
+
     /* User-declared globals: one mutable anyref wasm global each. */
     if (pr->globals.count) {
         wat_append(out, "\n  ;; --- user globals ---\n");
@@ -1393,6 +1608,35 @@ int codegen_module(const ParseResult *pr, WatBuilder *out,
             wat_appendf(out, "  (global $g_user_%zu (mut anyref) (ref.null any))\n", i);
         }
     }
+
+    /* $stdlib_init: builds math/string tables from the library builtins
+     * and assigns them to the corresponding $g_user_N slots. */
+    wat_append(out, "\n  (func $stdlib_init (local $tab (ref $LuaTable))\n");
+    /* For each global named "math"/"string", emit table init. */
+    for (size_t gi = 0; gi < pr->globals.count; gi++) {
+        const char *gname = pr->globals.items[gi].name;
+        size_t glen = pr->globals.items[gi].name_len;
+        BuiltinClass cls;
+        if (glen == 4 && memcmp(gname, "math", 4) == 0) cls = BLT_LIB_MATH;
+        else if (glen == 6 && memcmp(gname, "string", 6) == 0) cls = BLT_LIB_STRING;
+        else continue;
+        wat_append(out, "    (local.set $tab (call $tab_new))\n");
+        for (int bi = 0; bi < nb; bi++) {
+            if (builtin_class(bi) != cls) continue;
+            const char *key = builtin_lib_key(bi);
+            size_t key_len = strlen(key);
+            StrRef sr = strpool_add(&c.strs, key, key_len);
+            wat_appendf(out,
+                "    (call $tab_set (local.get $tab)\n"
+                "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
+                "        (i32.const %zu) (i32.const %zu)))\n"
+                "      (global.get $g_builtin_%s))\n",
+                sr.offset, sr.len, builtin_name(bi));
+        }
+        wat_appendf(out, "    (global.set $g_user_%zu (local.get $tab))\n", gi);
+    }
+    wat_append(out, "  )\n");
+
     wat_append(out, "\n  ;; --- user functions ---\n");
 
     for (size_t i = 0; i < pr->funcs.count; i++) {
@@ -1415,6 +1659,7 @@ int codegen_module(const ParseResult *pr, WatBuilder *out,
         wat_append(out, "    (local $for_iter_any anyref)\n");
         wat_append(out, "    (local $for_state anyref)\n");
         wat_append(out, "    (local $for_k anyref)\n");
+        wat_append(out, "    (call $stdlib_init)\n");
 
         emit_block(&c, &pr->main_body, 2);
 

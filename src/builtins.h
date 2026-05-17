@@ -3,16 +3,21 @@
 
 #include <stddef.h>
 
-/* Returns the builtin index for `name`, or -1 if not a builtin.
- * Indices correspond to $g_builtin_N globals emitted by codegen. */
+typedef enum {
+    BLT_TOPLEVEL,       /* visible as a top-level name (print, type, ...) */
+    BLT_LIB_MATH,       /* installed into the `math` global table */
+    BLT_LIB_STRING,     /* installed into the `string` global table */
+} BuiltinClass;
+
+/* Lookup a top-level builtin by name. Returns builtin idx or -1. */
 int lookup_builtin(const char *name, size_t name_len);
 
-/* Number of builtins. */
 int builtin_count(void);
-
-/* Builtin name and the C-symbol-safe stub name (e.g. "print" / "$builtin_print").
- * The codegen emits the dispatch globals using these. */
 const char *builtin_name(int idx);
 const char *builtin_func_name(int idx);
+BuiltinClass builtin_class(int idx);
+/* For library entries, the table key under which the function is exposed.
+ * (Same as builtin_name for now.) */
+const char *builtin_lib_key(int idx);
 
 #endif

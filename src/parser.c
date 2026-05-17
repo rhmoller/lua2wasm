@@ -950,6 +950,9 @@ static LuaFunc *parse_function_body(Parser *p, int line) {
 ParseResult parse(const TokenList *tokens, NodePool *pool) {
     Parser p = { .toks = tokens, .pool = pool, .ok = 1, .frame_depth = 0 };
     frame_init(&p.frames[0]);
+    /* Pre-declare stdlib library tables as globals so user code can name them. */
+    globals_declare(&p, "math",   4);
+    globals_declare(&p, "string", 6);
 
     Block main = {0};
     parse_block(&p, &main, TOK_EOF, TOK_EOF, TOK_EOF);
