@@ -210,19 +210,23 @@ files.
 
 ## Architecture (in 30 seconds)
 
-```
-              ┌─────────┐   ┌──────────┐   ┌──────────┐   ┌──────────┐
-  Lua source ─▶  lexer  ├──▶│  parser  ├──▶│ codegen  ├──▶│ wasm-as  │──▶ .wasm
-              └─────────┘   └──────────┘   └──────────┘   └──────────┘
-                                  │              │
-                                  │              └─ static WAT prelude
-                                  │                 (~30 runtime helpers,
-                                  │                  type defs, builtin
-                                  │                  closures, stdlib init)
-                                  │
-                                  └─ scope analysis: function-frame stack
-                                     resolves identifiers to local / upvalue
-                                     / global / builtin slots
+```mermaid
+flowchart LR
+  src["Lua source"] --> lex[lexer]
+  lex --> par[parser]
+  par --> cg[codegen]
+  cg --> wa["wasm-as<br/>(Binaryen)"]
+  wa --> out[".wasm"]
+
+  prelude[("static WAT prelude<br/>type defs · runtime<br/>helpers · builtin<br/>closures · stdlib init")] -.embedded.-> cg
+  scope[("scope analysis<br/>function-frame stack →<br/>local / upvalue /<br/>global / builtin slots")] -.feeds.-> par
+
+  classDef stage   fill:#1e1e2e,stroke:#cba6f7,stroke-width:1.5px,color:#cdd6f4
+  classDef ioNode  fill:#11111b,stroke:#89b4fa,stroke-width:1.5px,color:#cdd6f4
+  classDef helper  fill:#181825,stroke:#7f849c,stroke-dasharray:3 3,color:#bac2de
+  class lex,par,cg,wa stage
+  class src,out ioNode
+  class prelude,scope helper
 ```
 
 | Source file              | Job                                                                                              |
