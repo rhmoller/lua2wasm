@@ -1228,6 +1228,8 @@ static const char *PRELUDE_HELPERS =
 "  (global $g_mkey_index (mut (ref null $LuaString)) (ref.null $LuaString))\n"
 "  (global $g_mkey_add   (mut (ref null $LuaString)) (ref.null $LuaString))\n"
 "  (global $g_mkey_eq    (mut (ref null $LuaString)) (ref.null $LuaString))\n"
+"  (global $g_tab_str    (mut (ref null $LuaString)) (ref.null $LuaString))\n"
+"  (global $g_empty_str  (mut (ref null $LuaString)) (ref.null $LuaString))\n"
 "\n"
 "  (func $tab_set (param $t (ref $LuaTable)) (param $k anyref) (param $v anyref)\n"
 "    (local $i i32) (local $n i32) (local $cap i32)\n"
@@ -1319,10 +1321,36 @@ static const char *PRELUDE_HELPERS =
 "\n"
 "  (tag $LuaError (param anyref))\n"
 "\n"
+"  ;; Real-Lua print: tostring each arg, join with TAB, host prints with a\n"
+"  ;; trailing newline. Zero args -> just a newline.\n"
 "  (func $builtin_print (type $LuaFn)\n"
 "    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))\n"
-"    (if (i32.gt_u (array.len (local.get $args)) (i32.const 0))\n"
-"      (then (call $host_print (array.get $ArgArr (local.get $args) (i32.const 0)))))\n"
+"    (local $n i32) (local $i i32) (local $acc anyref)\n"
+"    (local.set $n (array.len (local.get $args)))\n"
+"    (if (i32.eqz (local.get $n))\n"
+"      (then\n"
+"        (call $host_print (ref.as_non_null (global.get $g_empty_str)))\n"
+"        (return (global.get $g_empty_args))))\n"
+"    ;; Single arg: pass the raw value through so the host's value formatter\n"
+"    ;; can render floats etc. without going through wasm-side tostring (which\n"
+"    ;; currently returns the \"<float>\" placeholder for floats).\n"
+"    (if (i32.eq (local.get $n) (i32.const 1))\n"
+"      (then\n"
+"        (call $host_print (call $args_at (local.get $args) (i32.const 0)))\n"
+"        (return (global.get $g_empty_args))))\n"
+"    ;; Multi-arg: stringify and join with TAB on the wasm side, then print.\n"
+"    (local.set $acc (call $args_at (local.get $args) (i32.const 0)))\n"
+"    (local.set $i (i32.const 1))\n"
+"    (block $done (loop $lp\n"
+"      (br_if $done (i32.ge_s (local.get $i) (local.get $n)))\n"
+"      (local.set $acc\n"
+"        (call $lua_concat\n"
+"          (call $lua_concat (local.get $acc)\n"
+"                            (ref.as_non_null (global.get $g_tab_str)))\n"
+"          (call $args_at (local.get $args) (local.get $i))))\n"
+"      (local.set $i (i32.add (local.get $i) (i32.const 1)))\n"
+"      (br $lp)))\n"
+"    (call $host_print (call $lua_tostring (local.get $acc)))\n"
 "    (global.get $g_empty_args))\n"
 "\n"
 "  (func $builtin_error (type $LuaFn)\n"
@@ -1619,9 +1647,9 @@ static const char *PRELUDE_HELPERS =
 /* Reserved bytes of $str_data:
  *   0  nil(3)  3  true(4)  7  false(5)  12 <float>(7)
  *   19 number(6)  25 string(6)  31 table(5)  36 function(8)  44 boolean(7)
- *   51 __index(7)  58 __add(5)  63 __eq(4) */
-#define LITERAL_PREFIX "niltruefalse<float>numberstringtablefunctionboolean__index__add__eq"
-#define LITERAL_PREFIX_LEN 67
+ *   51 __index(7)  58 __add(5)  63 __eq(4)  67 \t(1) */
+#define LITERAL_PREFIX "niltruefalse<float>numberstringtablefunctionboolean__index__add__eq\t"
+#define LITERAL_PREFIX_LEN 68
 
 /* Emit the body of one user function. */
 static void emit_user_function(CG *c, const LuaFunc *fn) {
@@ -1701,7 +1729,7 @@ int codegen_module(const ParseResult *pr, WatBuilder *out,
     /* $stdlib_init: builds math/string tables from the library builtins
      * and assigns them to the corresponding $g_user_N slots. */
     wat_append(out, "\n  (func $stdlib_init (local $tab (ref $LuaTable))\n");
-    /* Initialize metamethod-name globals. */
+    /* Initialize metamethod-name globals + the tab and empty-string statics. */
     wat_append(out,
         "    (global.set $g_mkey_index\n"
         "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
@@ -1711,7 +1739,12 @@ int codegen_module(const ParseResult *pr, WatBuilder *out,
         "        (i32.const 58) (i32.const 5))))\n"
         "    (global.set $g_mkey_eq\n"
         "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
-        "        (i32.const 63) (i32.const 4))))\n");
+        "        (i32.const 63) (i32.const 4))))\n"
+        "    (global.set $g_tab_str\n"
+        "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
+        "        (i32.const 67) (i32.const 1))))\n"
+        "    (global.set $g_empty_str\n"
+        "      (struct.new $LuaString (array.new $LuaArr (i32.const 0) (i32.const 0))))\n");
     /* For each global named "math"/"string", emit table init. */
     for (size_t gi = 0; gi < pr->globals.count; gi++) {
         const char *gname = pr->globals.items[gi].name;
