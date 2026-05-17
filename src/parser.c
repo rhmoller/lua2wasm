@@ -159,12 +159,20 @@ static int resolve_in_frame(Parser *p, int frame_idx, const char *name, size_t n
         return 1;
     }
     if (frame_idx == 0) {
-        /* top-level: builtins (must match codegen's BUILTIN_NAMES table), then globals */
+        /* top-level: builtins first, then declared globals, then — matching
+         * stock Lua's traditional behaviour — auto-declare any other name as
+         * a fresh global. Read of an undeclared name therefore yields the
+         * global's nil initialiser, and a bare `x = 42` works without a
+         * `global x` prefix. Strict mode (compile error on undeclared) is a
+         * future opt-in. */
         int b = lookup_builtin(name, name_len);
         if (b >= 0) { *out_kind = VAR_BUILTIN; *out_idx = b; return 1; }
         int g = globals_lookup(p, name, name_len);
-        if (g >= 0) { *out_kind = VAR_GLOBAL; *out_idx = g; return 1; }
-        return 0;
+        if (g < 0) g = globals_declare(p, name, name_len);
+        if (g < 0) { set_error(p, "too many globals"); return 0; }
+        *out_kind = VAR_GLOBAL;
+        *out_idx = g;
+        return 1;
     }
     /* recurse into parent */
     VarKind parent_kind;
