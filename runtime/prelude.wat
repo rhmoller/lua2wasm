@@ -1412,6 +1412,24 @@
       (br $lp)))
     (local.get $out))
 
+  ;; string.reverse(s) — byte-reversed string.
+  (func $builtin_string_reverse (type $LuaFn)
+    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
+    (local $bytes (ref $LuaArr)) (local $out (ref $LuaArr))
+    (local $n i32) (local $i i32)
+    (local.set $bytes (struct.get $LuaString $bytes
+      (ref.cast (ref $LuaString) (call $args_at (local.get $args) (i32.const 0)))))
+    (local.set $n (array.len (local.get $bytes)))
+    (local.set $out (array.new $LuaArr (i32.const 0) (local.get $n)))
+    (block $done (loop $lp
+      (br_if $done (i32.ge_s (local.get $i) (local.get $n)))
+      (array.set $LuaArr (local.get $out) (local.get $i)
+        (array.get_u $LuaArr (local.get $bytes)
+          (i32.sub (i32.sub (local.get $n) (i32.const 1)) (local.get $i))))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br $lp)))
+    (array.new_fixed $ArgArr 1 (struct.new $LuaString (local.get $out))))
+
   ;; string.upper(s) — ASCII a-z -> A-Z, other bytes unchanged.
   (func $builtin_string_upper (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
