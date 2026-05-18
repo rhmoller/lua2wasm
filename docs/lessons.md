@@ -259,6 +259,45 @@ a design pass that names both the invariant and its replacement is
 high value. When the change is purely additive (new builtin, new
 operator), the preflight checklist is sufficient.
 
+### When the design doc held up (milestone 20, patterns)
+
+`docs/design/20-lua-patterns.md` proposed a 9-step plan with a per-
+step fixture. All 9 steps landed in 9 commits matching the plan;
+step 7 caught the cross-cutting bug I'd already paid for once in
+step 2 (the `i32.and`-is-not-short-circuit gotcha), exactly because
+the fixture-per-step discipline surfaced it instead of letting it
+cascade into step 8.
+
+Cost: ~3 hours of writing the design before any code. Saved at
+least that much by:
+
+- Locking in the `(end_spos_or_-1, ncaps_out)` multi-value return
+  shape upfront — the alternative (pack into i64, or smuggle ncaps
+  via a side global) would have churned every call site.
+- Knowing that captures NEST and the close-then-revert pattern was
+  needed (the `saved = -1; recurse; if fail, restore` trick in the
+  `)` case). Caught during design; would have been a confusing
+  multi-hour bug otherwise.
+- Knowing that quantifiers apply ONLY to a single char-class —
+  ruled out a whole class of "capture-with-quantifier" backtracking
+  complexity that doesn't exist in Lua.
+- The risk register's "first-time-closure-with-upvalues-from-a-
+  builtin" call-out made step 6 a smooth one-shot — the existing
+  `$LuaClosure` + `$UpvalArr` shape handled it without any new types.
+
+Surprises during implementation (additions to the lessons later):
+1. `i32.and`-is-not-short-circuit bit me TWICE: once in step 2's
+   set-range guard, once in step 7's `?`-quantifier sub-read.
+   Each cost ~10 minutes — would have been more without the
+   "look here first" instinct now baked in.
+2. The `%b''` (same open/close) edge case isn't well-defined in
+   Lua's spec ("x and y are two distinct characters"). My
+   implementation silently fails to match; tests now skip the case
+   entirely.
+3. gsub with function repl + method-call syntax (`c:upper()`)
+   doesn't work because we don't set up a metatable for strings
+   yet. Documented as a separate gap, not a pattern bug.
+
 ## When to write a full design doc
 
 Most milestones (raw* primitives, table fillers, math fillers, utf8
@@ -266,10 +305,8 @@ ops, metamethods) are well-covered by the manual + a preflight.
 A dedicated `docs/design/<milestone>.md` *before* coding is needed
 for:
 
-- **Milestone 20 — Lua patterns.** ~400 reference lines; class
-  matching, captures, anchors, back-references, balanced match,
-  frontier match, gsub replacement modes (string/table/function).
-  Without a design, expect 2x effort and rework.
+- ~~**Milestone 20 — Lua patterns.**~~ Shipped. The design doc held
+  up; retro is above.
 
 - **Milestone 21 — string.pack/unpack/packsize.** ~500 reference
   lines. Format directives, alignment, endianness, length-prefixed
