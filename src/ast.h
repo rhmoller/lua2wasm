@@ -179,6 +179,7 @@ struct Stmt {
         struct {                    /* local a [, b, c] [= e1 [, e2, ...]] */
             int n_names;
             int *local_idxs;        /* one per name */
+            int *attribs;           /* one per name: 0 = none, 1 = const, 2 = close (m23). NULL if none have any. */
             int n_values;
             Expr **values;          /* may be 0 if no init */
         } local;

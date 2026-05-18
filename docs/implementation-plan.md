@@ -412,7 +412,7 @@ other string ops.
 
 ---
 
-## Milestone 23 — `<const>` and `<close>` attributes (M) — ⏳ pending
+## Milestone 23 — `<const>` and `<close>` attributes (M) — ✅ done (partial: close fires on natural exit only)
 
 **Goal:** modern Lua local-attribute syntax.
 
@@ -517,7 +517,7 @@ position pending; Chrome flag-gated). When it ships:
 ```
 Quick wins:        9 → 10 → 11 → 12 → 16    ✅ done
 Polish / sharpen:  13 → 14 → 15 → 19        ✅ done
-Big language gaps: 17 → 18 → 23             ✅ 17, 18 done · ⏳ 23 pending
+Big language gaps: 17 → 18 → 23             ✅ done (23 partial: see m23 note)
 Heavy stdlib:      20 → 21                  ✅ done
 Host integration:  22 → 24 → 25 → 26        ✅ 22 done · ⏳ 24, 25, 26 pending
 Blocked:           27 (coroutines)          ⛔ awaiting stack switching

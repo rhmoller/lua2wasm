@@ -38,6 +38,7 @@ typedef struct {
     const char *name;
     size_t name_len;
     int slot;       /* wasm local index inside this function */
+    int attrib;     /* 0 = none, 1 = <const>, 2 = <close> (milestone 23) */
 } LocalSlot;
 
 typedef struct {
@@ -130,8 +131,18 @@ static void frame_rewind(FuncFrame *f, int mark) { f->local_count = mark; }
 static int frame_declare(FuncFrame *f, const char *name, size_t name_len) {
     if (f->local_count >= MAX_LOCALS_PER_FN) return -1;
     int slot = f->next_slot++;
-    f->locals[f->local_count++] = (LocalSlot){ .name = name, .name_len = name_len, .slot = slot };
+    f->locals[f->local_count++] = (LocalSlot){
+        .name = name, .name_len = name_len, .slot = slot, .attrib = 0 };
     return slot;
+}
+
+/* Look up the most recent local declaration by slot index, returning its
+ * attribute (0 = none, 1 = const, 2 = close). Returns -1 if not found. */
+static int frame_local_attrib_by_slot(const FuncFrame *f, int slot) {
+    for (int i = f->local_count - 1; i >= 0; i--) {
+        if (f->locals[i].slot == slot) return f->locals[i].attrib;
+    }
+    return -1;
 }
 
 static int frame_lookup_local(const FuncFrame *f, const char *name, size_t name_len) {
@@ -595,15 +606,45 @@ static Stmt *parse_local(Parser *p) {
         return s;
     }
 
-    /* local name [, name, ...] [= expr [, expr, ...]] */
+    /* local name[<attr>] [, name[<attr>], ...] [= expr [, expr, ...]]
+     * Attributes (Lua 5.4+): <const> rejects later assignment at compile
+     * time; <close> registers the value for __close on scope exit. */
     if (peek(p)->kind != TOK_IDENT) { set_error(p, "expected identifier after `local`"); return NULL; }
     const Token *names_buf[MAX_LIST];
+    int attribs_buf[MAX_LIST] = {0};
     int n_names = 0;
     names_buf[n_names++] = advance(p);
+    /* Optional <attrib> immediately after the name. */
+    if (peek(p)->kind == TOK_LT) {
+        advance(p);
+        if (peek(p)->kind != TOK_IDENT) {
+            set_error(p, "expected attribute name after '<'"); return NULL;
+        }
+        const Token *a = advance(p);
+        if (a->len == 5 && memcmp(a->start, "const", 5) == 0)
+            attribs_buf[n_names - 1] = 1;
+        else if (a->len == 5 && memcmp(a->start, "close", 5) == 0)
+            attribs_buf[n_names - 1] = 2;
+        else { set_error(p, "unknown local attribute"); return NULL; }
+        if (!match(p, TOK_GT)) { set_error(p, "expected '>' after attribute"); return NULL; }
+    }
     while (match(p, TOK_COMMA)) {
         if (peek(p)->kind != TOK_IDENT) { set_error(p, "expected identifier"); return NULL; }
         if (n_names >= MAX_LIST) { set_error(p, "too many names in local"); return NULL; }
         names_buf[n_names++] = advance(p);
+        if (peek(p)->kind == TOK_LT) {
+            advance(p);
+            if (peek(p)->kind != TOK_IDENT) {
+                set_error(p, "expected attribute name after '<'"); return NULL;
+            }
+            const Token *a = advance(p);
+            if (a->len == 5 && memcmp(a->start, "const", 5) == 0)
+                attribs_buf[n_names - 1] = 1;
+            else if (a->len == 5 && memcmp(a->start, "close", 5) == 0)
+                attribs_buf[n_names - 1] = 2;
+            else { set_error(p, "unknown local attribute"); return NULL; }
+            if (!match(p, TOK_GT)) { set_error(p, "expected '>' after attribute"); return NULL; }
+        }
     }
     /* Parse RHS values BEFORE declaring locals — Lua scoping rule. */
     Expr *vals_buf[MAX_LIST];
@@ -617,14 +658,26 @@ static Stmt *parse_local(Parser *p) {
     }
     /* Now declare locals. */
     int *local_idxs = node_pool_alloc(p->pool, sizeof(int) * n_names);
+    int any_attrib = 0;
     for (int i = 0; i < n_names; i++) {
         int slot = frame_declare(cur_frame(p), names_buf[i]->start, names_buf[i]->len);
         if (slot < 0) { set_error(p, "too many locals"); return NULL; }
         local_idxs[i] = slot;
+        if (attribs_buf[i]) {
+            FuncFrame *f = cur_frame(p);
+            f->locals[f->local_count - 1].attrib = attribs_buf[i];
+            any_attrib = 1;
+        }
+    }
+    int *attribs = NULL;
+    if (any_attrib) {
+        attribs = node_pool_alloc(p->pool, sizeof(int) * n_names);
+        for (int i = 0; i < n_names; i++) attribs[i] = attribs_buf[i];
     }
     Stmt *s = stmt_new(p->pool, STMT_LOCAL, line);
     s->as.local.n_names = n_names;
     s->as.local.local_idxs = local_idxs;
+    s->as.local.attribs = attribs;
     s->as.local.n_values = n_values;
     if (n_values) {
         s->as.local.values = node_pool_alloc(p->pool, sizeof(Expr *) * n_values);
@@ -787,6 +840,19 @@ static Stmt *parse_ident_stmt(Parser *p) {
     }
     expect(p, TOK_ASSIGN, "= (assignment)");
     if (!p->ok) return NULL;
+    /* <const> enforcement: reject assignment to const locals.
+     * Only checks the current frame; reassignment via upvalue is rare
+     * and we don't track attribs through the upvalue table yet. */
+    for (int i = 0; i < n_targets; i++) {
+        if (targets[i].kind == TGT_VAR &&
+            targets[i].as.var.kind == VAR_LOCAL) {
+            int a = frame_local_attrib_by_slot(cur_frame(p),
+                                               targets[i].as.var.idx);
+            if (a == 1) {
+                set_error(p, "attempt to assign to <const> local"); return NULL;
+            }
+        }
+    }
     Expr *vals_buf[MAX_LIST];
     int n_values = 0;
     do {

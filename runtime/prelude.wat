@@ -1108,6 +1108,25 @@
           (then (throw $LuaError (struct.new $LuaString
             (array.new_data $LuaArr $str_data (i32.const 75) (i32.const 18)))))))))
 
+  ;; Close a <close> local at end of scope (milestone 23, minimal).
+  ;; Skips nil/false; otherwise looks up __close on the value and
+  ;; calls it with (value, err). err is currently always nil — the
+  ;; error path is not yet plumbed through.
+  (global $g_mkey_close (mut (ref null $LuaString)) (ref.null $LuaString))
+
+  (func $do_close (param $v anyref) (param $err anyref)
+    (local $mm anyref)
+    ;; Skip nil/false.
+    (if (ref.is_null (local.get $v)) (then (return)))
+    (if (i32.eqz (call $lua_truthy (local.get $v))) (then (return)))
+    (local.set $mm (call $get_metamethod (local.get $v)
+                     (ref.as_non_null (global.get $g_mkey_close))))
+    (if (ref.is_null (local.get $mm))
+      (then (throw $LuaError (ref.null any))))
+    (drop (call $lua_call_any (local.get $mm)
+            (array.new_fixed $ArgArr 2 (local.get $v) (local.get $err))
+            (i32.const 0))))
+
   ;; Frame-stack helpers (milestone 22).
   ;;
   ;; $push_call_frame writes $line at index $call_depth and increments

@@ -1161,14 +1161,54 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
     }
 }
 
+/* Collect <close> local slots declared at this block level (not in
+ * nested blocks). Slots are returned in declaration order — caller
+ * closes them in REVERSE order at scope exit. Returns count.
+ * Caps at 32 close locals per block; that's more than realistic. */
+static int collect_close_slots(const Block *b, int *out_slots, int cap) {
+    int n = 0;
+    for (size_t i = 0; i < b->count; i++) {
+        const Stmt *s = b->items[i];
+        if (s->kind != STMT_LOCAL) continue;
+        if (!s->as.local.attribs) continue;
+        for (int j = 0; j < s->as.local.n_names; j++) {
+            if (s->as.local.attribs[j] == 2 && n < cap) {
+                out_slots[n++] = s->as.local.local_idxs[j];
+            }
+        }
+    }
+    return n;
+}
+
+/* Emit close calls in REVERSE declaration order. Milestone-23 minimal:
+ * called only on natural block exit. Return/break/error in the block
+ * skip the close — a documented limitation. */
+static void emit_close_calls(CG *c, const int *slots, int n, int depth) {
+    for (int i = n - 1; i >= 0; i--) {
+        int slot = slots[i];
+        emit_indent(c, depth);
+        if (slot_is_boxed(c, slot)) {
+            wat_appendf(c->w,
+                "(call $do_close (struct.get $Box $v (local.get $L%d)) "
+                "(ref.null any))\n", slot);
+        } else {
+            wat_appendf(c->w,
+                "(call $do_close (local.get $L%d) (ref.null any))\n", slot);
+        }
+    }
+}
+
 static void emit_block(CG *c, const Block *b, int depth) {
     /* Fast path: no labels in this block, no wrappers needed. */
     int has_labels = 0;
     for (size_t i = 0; i < b->count; i++) {
         if (b->items[i]->kind == STMT_LABEL) { has_labels = 1; break; }
     }
+    int close_slots[32];
+    int n_close = collect_close_slots(b, close_slots, 32);
     if (!has_labels) {
         for (size_t i = 0; i < b->count; i++) emit_stmt(c, b->items[i], depth);
+        emit_close_calls(c, close_slots, n_close, depth);
         return;
     }
 
@@ -1243,6 +1283,7 @@ static void emit_block(CG *c, const Block *b, int depth) {
         emit_indent(c, depth + extra_depth);
         wat_append(c->w, ")\n");
     }
+    emit_close_calls(c, close_slots, n_close, depth);
 }
 
 /* ============================================================
@@ -1407,6 +1448,7 @@ int codegen_module(const ParseResult *pr, const char *src_name,
         { "$g_mkey_lt",         "__lt"        },
         { "$g_mkey_le",         "__le"        },
         { "$g_mkey_call",       "__call"      },
+        { "$g_mkey_close",      "__close"     },
         { "$g_mkey_tostring",   "__tostring"  },
         { "$g_mkey_metatable",  "__metatable" },
     };
