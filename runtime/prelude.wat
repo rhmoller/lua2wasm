@@ -1869,6 +1869,91 @@
       (br $lp)))
     (i32.add (local.get $cont) (i32.const 1)))
 
+  ;; Given a known-valid UTF-8 sequence of $width bytes at position $p,
+  ;; assemble and return the codepoint. Width 1..6.
+  (func $utf8_assemble (param $bytes (ref $LuaArr)) (param $p i32)
+                       (param $width i32) (result i32)
+    (local $cp i32) (local $i i32)
+    (if (i32.eq (local.get $width) (i32.const 1))
+      (then (return (array.get_u $LuaArr (local.get $bytes) (local.get $p)))))
+    ;; lead-byte payload mask: first byte holds (7 - width) data bits
+    ;; for width 2..6 (5/4/3/2/1/0 bits respectively). 0x7F >> (width-1)
+    ;; gives the right mask.
+    (local.set $cp (i32.and
+      (array.get_u $LuaArr (local.get $bytes) (local.get $p))
+      (i32.shr_u (i32.const 0x7F) (i32.sub (local.get $width) (i32.const 1)))))
+    (local.set $i (i32.const 1))
+    (block $done (loop $lp
+      (br_if $done (i32.ge_s (local.get $i) (local.get $width)))
+      (local.set $cp (i32.or
+        (i32.shl (local.get $cp) (i32.const 6))
+        (i32.and (array.get_u $LuaArr (local.get $bytes)
+                  (i32.add (local.get $p) (local.get $i)))
+                 (i32.const 0x3F))))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br $lp)))
+    (local.get $cp))
+
+  ;; utf8.codepoint(s [, i [, j [, lax]]]) — codepoints (as multi-return)
+  ;; of each character starting in byte range [i, j]. Default j = i.
+  ;; Raises on any invalid byte sequence (strict mode is the default).
+  (func $builtin_utf8_codepoint (type $LuaFn)
+    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
+    (local $bytes (ref $LuaArr)) (local $n i32) (local $nargs i32)
+    (local $i i32) (local $j i32) (local $lax i32)
+    (local $p i32) (local $w i32)
+    ;; two-pass: first count, then allocate the ArgArr and fill.
+    (local $count i32) (local $idx i32)
+    (local $out (ref $ArgArr))
+    (local.set $bytes (struct.get $LuaString $bytes
+      (ref.cast (ref $LuaString) (call $args_at (local.get $args) (i32.const 0)))))
+    (local.set $n (array.len (local.get $bytes)))
+    (local.set $nargs (array.len (local.get $args)))
+    (local.set $i (i32.const 1))
+    (if (i32.gt_u (local.get $nargs) (i32.const 1))
+      (then (local.set $i (i32.wrap_i64
+              (call $as_int (call $args_at (local.get $args) (i32.const 1)))))))
+    (local.set $j (local.get $i))
+    (if (i32.gt_u (local.get $nargs) (i32.const 2))
+      (then (local.set $j (i32.wrap_i64
+              (call $as_int (call $args_at (local.get $args) (i32.const 2)))))))
+    (if (i32.gt_u (local.get $nargs) (i32.const 3))
+      (then (local.set $lax (call $lua_truthy
+              (call $args_at (local.get $args) (i32.const 3))))))
+    (if (i32.lt_s (local.get $i) (i32.const 0))
+      (then (local.set $i (i32.add (local.get $n) (i32.add (local.get $i) (i32.const 1))))))
+    (if (i32.lt_s (local.get $j) (i32.const 0))
+      (then (local.set $j (i32.add (local.get $n) (i32.add (local.get $j) (i32.const 1))))))
+    (if (i32.lt_s (local.get $i) (i32.const 1)) (then (local.set $i (i32.const 1))))
+    (if (i32.gt_s (local.get $j) (local.get $n)) (then (local.set $j (local.get $n))))
+    (if (i32.gt_s (local.get $i) (local.get $j))
+      (then (return (global.get $g_empty_args))))
+    ;; pass 1: count + validate
+    (local.set $p (i32.sub (local.get $i) (i32.const 1)))
+    (block $done1 (loop $lp1
+      (br_if $done1 (i32.gt_s (i32.add (local.get $p) (i32.const 1)) (local.get $j)))
+      (local.set $w (call $utf8_decode_step
+        (local.get $bytes) (local.get $p) (local.get $lax)))
+      (if (i32.eqz (local.get $w)) (then (throw $LuaError (ref.null any))))
+      (local.set $p (i32.add (local.get $p) (local.get $w)))
+      (local.set $count (i32.add (local.get $count) (i32.const 1)))
+      (br $lp1)))
+    ;; pass 2: assemble each codepoint into the result array
+    (local.set $out (array.new $ArgArr (ref.null any) (local.get $count)))
+    (local.set $p (i32.sub (local.get $i) (i32.const 1)))
+    (local.set $idx (i32.const 0))
+    (block $done2 (loop $lp2
+      (br_if $done2 (i32.ge_s (local.get $idx) (local.get $count)))
+      (local.set $w (call $utf8_decode_step
+        (local.get $bytes) (local.get $p) (local.get $lax)))
+      (array.set $ArgArr (local.get $out) (local.get $idx)
+        (call $make_int (i64.extend_i32_u
+          (call $utf8_assemble (local.get $bytes) (local.get $p) (local.get $w)))))
+      (local.set $p (i32.add (local.get $p) (local.get $w)))
+      (local.set $idx (i32.add (local.get $idx) (i32.const 1)))
+      (br $lp2)))
+    (local.get $out))
+
   ;; utf8.len(s [, i [, j [, lax]]]) — count codepoints starting in [i, j].
   ;; Returns the count, OR (nil, errpos) on the first invalid byte.
   (func $builtin_utf8_len (type $LuaFn)
