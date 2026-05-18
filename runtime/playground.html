@@ -134,6 +134,11 @@
   </select>
   <button id="run" disabled>Run ▶</button>
   <button id="showwat">Show WAT</button>
+  <label style="margin-left:.5em;font-size:.85em;color:#888;cursor:pointer"
+         title="Drop builtin closures the program doesn't reference. Smaller .wasm; breaks _G introspection for un-named names.">
+    <input type="checkbox" id="treeshake" style="vertical-align:middle">
+    tree-shake
+  </label>
   <span id="status" style="color:#888"></span>
 </header>
 
@@ -648,10 +653,14 @@ function logLine(s, cls) {
 /* ----- lua2wasm compiler (in-browser) ----- */
 status.textContent = "loading compiler…";
 const Mod = await createLua2WasmModule({});
-const compileFn = Mod.cwrap("lua2wasm_compile", "number", ["string"]);
-const freeFn    = Mod.cwrap("lua2wasm_free",    null,     ["number"]);
+const compileFn   = Mod.cwrap("lua2wasm_compile",    "number", ["string"]);
+const compileExFn = Mod.cwrap("lua2wasm_compile_ex", "number", ["string", "number"]);
+const freeFn      = Mod.cwrap("lua2wasm_free",       null,     ["number"]);
+const treeShakeCB = document.getElementById("treeshake");
 function luaToWat(source) {
-  const ptr = compileFn(source);
+  const ptr = treeShakeCB && treeShakeCB.checked
+    ? compileExFn(source, 1)
+    : compileFn(source);
   const text = Mod.UTF8ToString(ptr);
   freeFn(ptr);
   return text;

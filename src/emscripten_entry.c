@@ -25,8 +25,20 @@ static char *make_err(const char *prefix, const char *msg) {
  * to the caller (the returned WAT string). Single-exit via goto keeps
  * the cleanup obviously paired with the setup, regardless of which stage
  * failed. */
+EMSCRIPTEN_KEEPALIVE char *lua2wasm_compile_ex(const char *source, int tree_shake);
+
 EMSCRIPTEN_KEEPALIVE
 char *lua2wasm_compile(const char *source) {
+    return lua2wasm_compile_ex(source, 0);
+}
+
+/* As above, with explicit options:
+ *   tree_shake — when nonzero, prune unused builtin closures + _G entries
+ *   so wasm-opt can DCE the function bodies. Off by default for the
+ *   playground because `_G.foo` introspection breaks for builtins the
+ *   program doesn't name. */
+EMSCRIPTEN_KEEPALIVE
+char *lua2wasm_compile_ex(const char *source, int tree_shake) {
     char *result = NULL;
     int have_pool = 0, have_parse = 0, have_wat = 0;
     NodePool pool;
@@ -43,9 +55,8 @@ char *lua2wasm_compile(const char *source) {
     wat_init(&w); have_wat = 1;
     char errbuf[256] = {0};
     /* Playground compiles the inline buffer with no filename; use "input".
-     * Tree-shaking stays off for the playground — users expect _G to hold
-     * every builtin for introspection. */
-    if (!codegen_module(&pr, "input", 0, &w, errbuf, sizeof(errbuf))) {
+     * Tree-shake is opt-in via the UI toggle (passed in tree_shake). */
+    if (!codegen_module(&pr, "input", tree_shake, &w, errbuf, sizeof(errbuf))) {
         result = make_err("ERROR(codegen): ", errbuf);
         goto cleanup;
     }

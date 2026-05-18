@@ -46,7 +46,7 @@ emcc "${SRC[@]}" \
     -s ALLOW_MEMORY_GROWTH=1 \
     -s INITIAL_MEMORY=16777216 \
     -s STACK_SIZE=5242880 \
-    -s EXPORTED_FUNCTIONS='["_lua2wasm_compile","_lua2wasm_free","_malloc","_free"]' \
+    -s EXPORTED_FUNCTIONS='["_lua2wasm_compile","_lua2wasm_compile_ex","_lua2wasm_free","_malloc","_free"]' \
     -s EXPORTED_RUNTIME_METHODS='["cwrap","UTF8ToString","stringToUTF8","lengthBytesUTF8","HEAPU8"]' \
     -o build-em/lua2wasm.js
 
