@@ -4503,6 +4503,7 @@
     (local $arg_idx i32) (local $val i64) (local $pad i32)
     (local $b (ref $Builder)) (local $bbuf (ref $LuaArr)) (local $blen i32)
     (local $fval f64)
+    (local $str_bytes (ref $LuaArr)) (local $str_len i32)
     (local.set $endian_le (i32.const 1))
     (local.set $max_align (i32.const 1))
     (local.set $arg_idx (i32.const 1))
@@ -4567,8 +4568,29 @@
       (if (i32.or (i32.eq (local.get $c) (i32.const 115))        ;; 's'
                   (i32.eq (local.get $c) (i32.const 122)))       ;; 'z'
         (then (throw $LuaError (ref.null any))))
+      ;; 'c' [N] — fixed-size string. Not aligned (manual §6.5.2).
       (if (i32.eq (local.get $c) (i32.const 99))                 ;; 'c'
-        (then (throw $LuaError (ref.null any))))
+        (then
+          (call $pack_opt_size (local.get $c) (local.get $bytes)
+                               (local.get $ppos))
+          (local.set $newpp) (local.set $sz)
+          (local.set $ppos (local.get $newpp))
+          (local.set $str_bytes (struct.get $LuaString $bytes
+            (ref.cast (ref $LuaString)
+              (call $args_at (local.get $args) (local.get $arg_idx)))))
+          (local.set $arg_idx (i32.add (local.get $arg_idx) (i32.const 1)))
+          (local.set $str_len (array.len (local.get $str_bytes)))
+          (if (i32.gt_s (local.get $str_len) (local.get $sz))
+            (then (throw $LuaError (ref.null any))))
+          (call $builder_append (local.get $b) (local.get $str_bytes)
+                                (i32.const 0) (local.get $str_len))
+          (local.set $pad (i32.sub (local.get $sz) (local.get $str_len)))
+          (block $pad_done_c (loop $pad_lp_c
+            (br_if $pad_done_c (i32.le_s (local.get $pad) (i32.const 0)))
+            (call $builder_append_byte (local.get $b) (i32.const 0))
+            (local.set $pad (i32.sub (local.get $pad) (i32.const 1)))
+            (br $pad_lp_c)))
+          (br $lp)))
       ;; Float options f/d/n. Pack via i32/i64 bit pattern.
       (if (i32.or (i32.eq (local.get $c) (i32.const 102))        ;; 'f'
                   (i32.or (i32.eq (local.get $c) (i32.const 100))   ;; 'd'
@@ -4657,6 +4679,7 @@
     (local $subj (ref $LuaArr)) (local $subj_len i32) (local $offset i32)
     (local $out (ref $ArgArr)) (local $out_idx i32) (local $nval i32)
     (local $val i64) (local $fval f64)
+    (local $str_bytes (ref $LuaArr))
     (local.set $endian_le (i32.const 1))
     (local.set $max_align (i32.const 1))
     (local.set $bytes (struct.get $LuaString $bytes
@@ -4725,8 +4748,26 @@
       (if (i32.or (i32.eq (local.get $c) (i32.const 115))
                   (i32.eq (local.get $c) (i32.const 122)))
         (then (throw $LuaError (ref.null any))))
+      ;; 'c' [N] — fixed-size string, not aligned.
       (if (i32.eq (local.get $c) (i32.const 99))
-        (then (throw $LuaError (ref.null any))))
+        (then
+          (call $pack_opt_size (local.get $c) (local.get $bytes)
+                               (local.get $ppos))
+          (local.set $newpp) (local.set $sz)
+          (local.set $ppos (local.get $newpp))
+          (if (i32.gt_u (i32.add (local.get $offset) (local.get $sz))
+                        (local.get $subj_len))
+            (then (throw $LuaError (ref.null any))))
+          (local.set $str_bytes
+            (array.new $LuaArr (i32.const 0) (local.get $sz)))
+          (array.copy $LuaArr $LuaArr
+            (local.get $str_bytes) (i32.const 0)
+            (local.get $subj) (local.get $offset) (local.get $sz))
+          (local.set $offset (i32.add (local.get $offset) (local.get $sz)))
+          (array.set $ArgArr (local.get $out) (local.get $out_idx)
+            (struct.new $LuaString (local.get $str_bytes)))
+          (local.set $out_idx (i32.add (local.get $out_idx) (i32.const 1)))
+          (br $lp)))
       ;; Float read f/d/n.
       (if (i32.or (i32.eq (local.get $c) (i32.const 102))
                   (i32.or (i32.eq (local.get $c) (i32.const 100))
