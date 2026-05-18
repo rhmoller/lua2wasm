@@ -1156,6 +1156,23 @@ int codegen_module(const ParseResult *pr, WatBuilder *out,
                 "      (call $make_int (i64.const -9223372036854775808)))\n",
                 mini_key.offset, mini_key.len);
         }
+        /* utf8.charpattern: the Lua-pattern string that matches one
+         * UTF-8 codepoint. Binary content; strpool_add and data-segment
+         * escaping handle the non-printable bytes. */
+        if (cls == BLT_LIB_UTF8) {
+            StrRef cp_key = strpool_add(&c.strs, "charpattern", 11);
+            static const char CHARPAT[] =
+                "[\x00-\x7F\xC2-\xFD][\x80-\xBF]*";
+            StrRef cp_val = strpool_add(&c.strs, CHARPAT, sizeof(CHARPAT) - 1);
+            wat_appendf(out,
+                "    (call $tab_set (local.get $tab)\n"
+                "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
+                "        (i32.const %zu) (i32.const %zu)))\n"
+                "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
+                "        (i32.const %zu) (i32.const %zu))))\n",
+                cp_key.offset, cp_key.len,
+                cp_val.offset, cp_val.len);
+        }
         wat_appendf(out, "    (global.set $g_user_%zu (local.get $tab))\n", gi);
     }
     wat_append(out, "  )\n");
