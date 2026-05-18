@@ -1412,6 +1412,51 @@
       (br $lp)))
     (local.get $out))
 
+  ;; string.rep(s, n [, sep]) — n copies of s, joined by sep.
+  ;; n <= 0 returns "". sep defaults to "". Result length is
+  ;; n*len(s) + max(0, n-1)*len(sep), allocated once.
+  (func $builtin_string_rep (type $LuaFn)
+    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
+    (local $sb (ref $LuaArr)) (local $pb (ref $LuaArr))
+    (local $n i32) (local $slen i32) (local $plen i32)
+    (local $total i32) (local $i i32) (local $pos i32)
+    (local $out (ref $LuaArr))
+    (local.set $sb (struct.get $LuaString $bytes
+      (ref.cast (ref $LuaString) (call $args_at (local.get $args) (i32.const 0)))))
+    (local.set $n (i32.wrap_i64 (call $as_int (call $args_at (local.get $args) (i32.const 1)))))
+    ;; optional sep (default empty)
+    (local.set $pb (array.new $LuaArr (i32.const 0) (i32.const 0)))
+    (if (i32.gt_u (array.len (local.get $args)) (i32.const 2))
+      (then (local.set $pb (struct.get $LuaString $bytes
+              (ref.cast (ref $LuaString) (call $args_at (local.get $args) (i32.const 2)))))))
+    (local.set $slen (array.len (local.get $sb)))
+    (local.set $plen (array.len (local.get $pb)))
+    (if (i32.le_s (local.get $n) (i32.const 0))
+      (then (return (array.new_fixed $ArgArr 1
+              (struct.new $LuaString (array.new $LuaArr (i32.const 0) (i32.const 0)))))))
+    (local.set $total
+      (i32.add
+        (i32.mul (local.get $n) (local.get $slen))
+        (i32.mul (i32.sub (local.get $n) (i32.const 1)) (local.get $plen))))
+    (local.set $out (array.new $LuaArr (i32.const 0) (local.get $total)))
+    (block $done (loop $lp
+      (br_if $done (i32.ge_s (local.get $i) (local.get $n)))
+      (array.copy $LuaArr $LuaArr
+        (local.get $out) (local.get $pos)
+        (local.get $sb)  (i32.const 0) (local.get $slen))
+      (local.set $pos (i32.add (local.get $pos) (local.get $slen)))
+      ;; sep, unless this is the last copy
+      (if (i32.and (i32.gt_s (local.get $plen) (i32.const 0))
+                   (i32.lt_s (local.get $i) (i32.sub (local.get $n) (i32.const 1))))
+        (then
+          (array.copy $LuaArr $LuaArr
+            (local.get $out) (local.get $pos)
+            (local.get $pb)  (i32.const 0) (local.get $plen))
+          (local.set $pos (i32.add (local.get $pos) (local.get $plen)))))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br $lp)))
+    (array.new_fixed $ArgArr 1 (struct.new $LuaString (local.get $out))))
+
   ;; string.reverse(s) — byte-reversed string.
   (func $builtin_string_reverse (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
