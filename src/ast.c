@@ -1,4 +1,5 @@
 #include "ast.h"
+#include "xalloc.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -34,7 +35,7 @@ void *node_pool_alloc(NodePool *p, size_t bytes) {
          * request fits. Chunks are never realloc'd, so returned pointers
          * remain stable for the lifetime of the pool. */
         size_t cap = aligned > POOL_CHUNK_BYTES ? aligned : POOL_CHUNK_BYTES;
-        c = malloc(sizeof(PoolChunk) + cap);
+        c = xmalloc(sizeof(PoolChunk) + cap);
         c->next = p->chunks;
         c->used = 0;
         c->cap = cap;

@@ -96,6 +96,62 @@ static MunitResult test_unknown_escape_reports_char(const MunitParameter params[
     return MUNIT_OK;
 }
 
+static MunitResult test_hex_escape(const MunitParameter params[], void *fixture) {
+    (void)params; (void)fixture;
+    TokenList t = lex("\"\\x41\\x7a\"");
+    munit_assert_true(t.ok);
+    munit_assert_int(t.items[0].kind, ==, TOK_STRING);
+    munit_assert_size(t.items[0].str_len, ==, 2);
+    munit_assert_memory_equal(2, t.items[0].str_buf, "Az");
+    tokenlist_free(&t);
+    return MUNIT_OK;
+}
+
+static MunitResult test_decimal_escape(const MunitParameter params[], void *fixture) {
+    (void)params; (void)fixture;
+    TokenList t = lex("\"\\65\\90\\255\"");
+    munit_assert_true(t.ok);
+    munit_assert_int(t.items[0].kind, ==, TOK_STRING);
+    munit_assert_size(t.items[0].str_len, ==, 3);
+    munit_assert_uint8(((unsigned char *)t.items[0].str_buf)[0], ==, 65);
+    munit_assert_uint8(((unsigned char *)t.items[0].str_buf)[1], ==, 90);
+    munit_assert_uint8(((unsigned char *)t.items[0].str_buf)[2], ==, 255);
+    tokenlist_free(&t);
+    return MUNIT_OK;
+}
+
+static MunitResult test_decimal_escape_out_of_range(const MunitParameter params[], void *fixture) {
+    (void)params; (void)fixture;
+    TokenList t = lex("\"\\256\"");
+    munit_assert_false(t.ok);
+    munit_assert_not_null(strstr(t.err, "out of range"));
+    tokenlist_free(&t);
+    return MUNIT_OK;
+}
+
+static MunitResult test_unicode_escape(const MunitParameter params[], void *fixture) {
+    (void)params; (void)fixture;
+    /* U+00E9 (é)  -> 2 bytes: c3 a9. U+20AC (€) -> 3 bytes: e2 82 ac. */
+    TokenList t = lex("\"\\u{e9}\\u{20ac}\"");
+    munit_assert_true(t.ok);
+    munit_assert_size(t.items[0].str_len, ==, 5);
+    munit_assert_memory_equal(5, t.items[0].str_buf, "\xc3\xa9\xe2\x82\xac");
+    tokenlist_free(&t);
+    return MUNIT_OK;
+}
+
+static MunitResult test_z_escape_skips_whitespace(const MunitParameter params[], void *fixture) {
+    (void)params; (void)fixture;
+    /* `\z` swallows ALL subsequent whitespace in the source, including the
+     * real newline that would otherwise be illegal inside a short string. */
+    TokenList t = lex("\"a\\z   \n\t  b\"");
+    munit_assert_true(t.ok);
+    munit_assert_size(t.items[0].str_len, ==, 2);
+    munit_assert_memory_equal(2, t.items[0].str_buf, "ab");
+    tokenlist_free(&t);
+    return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
     { "/print_sum",     test_print_sum,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
     { "/keywords_ops",  test_keywords_and_ops, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -104,6 +160,11 @@ static MunitTest tests[] = {
     { "/long_comment",  test_long_comment,     NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
     { "/unterminated_string",      test_unterminated_string,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
     { "/unknown_escape_named",     test_unknown_escape_reports_char,NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+    { "/escape_hex",               test_hex_escape,                 NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+    { "/escape_decimal",           test_decimal_escape,             NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+    { "/escape_decimal_oor",       test_decimal_escape_out_of_range,NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+    { "/escape_unicode",           test_unicode_escape,             NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+    { "/escape_z_skips_ws",        test_z_escape_skips_whitespace,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
     { NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 };
 

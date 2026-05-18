@@ -1,5 +1,6 @@
 #include "parser.h"
 #include "builtins.h"
+#include "xalloc.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1052,7 +1053,7 @@ static void parse_block(Parser *p, Block *out, TokKind s1, TokKind s2, TokKind s
         Stmt *st = parse_stmt(p);
         if (!p->ok) break;
         if (!st) continue;
-        if (count == cap) { cap = cap ? cap * 2 : 8; vec = realloc(vec, cap * sizeof(Stmt *)); }
+        if (count == cap) { cap = cap ? cap * 2 : 8; vec = xrealloc(vec, cap * sizeof(Stmt *)); }
         vec[count++] = st;
     }
     out->count = count;
@@ -1160,12 +1161,12 @@ ParseResult parse(const TokenList *tokens, NodePool *pool) {
     }
     r.funcs.count = (size_t)p.n_funcs;
     if (p.n_funcs) {
-        r.funcs.items = malloc(sizeof(LuaFunc *) * p.n_funcs);
+        r.funcs.items = xmalloc(sizeof(LuaFunc *) * p.n_funcs);
         memcpy(r.funcs.items, p.funcs, sizeof(LuaFunc *) * p.n_funcs);
     }
     r.globals.count = (size_t)p.n_globals;
     if (p.n_globals) {
-        r.globals.items = malloc(sizeof(GlobalDecl) * p.n_globals);
+        r.globals.items = xmalloc(sizeof(GlobalDecl) * p.n_globals);
         memcpy(r.globals.items, p.globals, sizeof(GlobalDecl) * p.n_globals);
     }
     if (!p.ok) memcpy(r.error, p.error, sizeof(r.error));

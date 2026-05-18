@@ -18,6 +18,7 @@ set(COMPILER_SOURCES
     src/wat_builder.c
     src/codegen.c
     src/builtins.c
+    src/xalloc.c
 )
 
 add_library(lua2wasm_core STATIC ${COMPILER_SOURCES})

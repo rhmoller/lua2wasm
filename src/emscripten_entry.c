@@ -6,6 +6,7 @@
 #include "lexer.h"
 #include "parser.h"
 #include "wat_builder.h"
+#include "xalloc.h"
 
 #include <emscripten.h>
 #include <stdio.h>
@@ -14,47 +15,49 @@
 
 static char *make_err(const char *prefix, const char *msg) {
     size_t n = strlen(prefix) + strlen(msg) + 8;
-    char *buf = malloc(n);
+    char *buf = xmalloc(n);
     snprintf(buf, n, "%s%s", prefix, msg);
     return buf;
 }
 
+/* Browser compile entry. Called once per keystroke from the playground,
+ * so every allocation path must be either freed before return or handed
+ * to the caller (the returned WAT string). Single-exit via goto keeps
+ * the cleanup obviously paired with the setup, regardless of which stage
+ * failed. */
 EMSCRIPTEN_KEEPALIVE
 char *lua2wasm_compile(const char *source) {
-    TokenList toks = lex(source);
-    if (!toks.ok) {
-        char *e = make_err("ERROR(lex): ", toks.err);
-        tokenlist_free(&toks);
-        return e;
-    }
+    char *result = NULL;
+    int have_pool = 0, have_parse = 0, have_wat = 0;
     NodePool pool;
-    node_pool_init(&pool);
-    ParseResult pr = parse(&toks, &pool);
-    if (!pr.ok) {
-        char *e = make_err("ERROR(parse): ", pr.error);
-        parse_result_free(&pr);
-        node_pool_free(&pool);
-        tokenlist_free(&toks);
-        return e;
-    }
-    WatBuilder w;
-    wat_init(&w);
+    ParseResult pr = {0};
+    WatBuilder w = {0};
+
+    TokenList toks = lex(source);
+    if (!toks.ok) { result = make_err("ERROR(lex): ", toks.err); goto cleanup; }
+
+    node_pool_init(&pool); have_pool = 1;
+    pr = parse(&toks, &pool); have_parse = 1;
+    if (!pr.ok) { result = make_err("ERROR(parse): ", pr.error); goto cleanup; }
+
+    wat_init(&w); have_wat = 1;
     char errbuf[256] = {0};
     if (!codegen_module(&pr, &w, errbuf, sizeof(errbuf))) {
-        char *e = make_err("ERROR(codegen): ", errbuf);
-        wat_free(&w);
-        parse_result_free(&pr);
-        node_pool_free(&pool);
-        tokenlist_free(&toks);
-        return e;
+        result = make_err("ERROR(codegen): ", errbuf);
+        goto cleanup;
     }
-    /* Transfer ownership of the WAT buffer to the caller. */
-    char *out = w.buf;
+    /* Hand the WAT buffer to the caller; clear the builder's ref so the
+     * cleanup below (which is a no-op for the buf via NULL) doesn't take
+     * it back. */
+    result = w.buf;
     w.buf = NULL;
-    parse_result_free(&pr);
-    node_pool_free(&pool);
+
+cleanup:
+    if (have_wat)   wat_free(&w);
+    if (have_parse) parse_result_free(&pr);
+    if (have_pool)  node_pool_free(&pool);
     tokenlist_free(&toks);
-    return out;
+    return result;
 }
 
 EMSCRIPTEN_KEEPALIVE

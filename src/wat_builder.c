@@ -1,4 +1,5 @@
 #include "wat_builder.h"
+#include "xalloc.h"
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -6,7 +7,7 @@
 
 void wat_init(WatBuilder *w) {
     w->cap = 1024;
-    w->buf = malloc(w->cap);
+    w->buf = xmalloc(w->cap);
     w->buf[0] = '\0';
     w->used = 0;
 }
@@ -20,7 +21,7 @@ void wat_free(WatBuilder *w) {
 static void ensure(WatBuilder *w, size_t need) {
     if (w->used + need + 1 > w->cap) {
         while (w->used + need + 1 > w->cap) w->cap *= 2;
-        w->buf = realloc(w->buf, w->cap);
+        w->buf = xrealloc(w->buf, w->cap);
     }
 }
 

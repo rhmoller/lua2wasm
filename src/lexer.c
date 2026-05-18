@@ -1,4 +1,5 @@
 #include "lexer.h"
+#include "xalloc.h"
 #include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -13,7 +14,7 @@ typedef struct {
 static void push_tok(TokVec *v, Token t) {
     if (v->count == v->cap) {
         v->cap = v->cap ? v->cap * 2 : 16;
-        v->items = realloc(v->items, v->cap * sizeof(Token));
+        v->items = xrealloc(v->items, v->cap * sizeof(Token));
     }
     v->items[v->count++] = t;
 }
@@ -78,41 +79,132 @@ static int read_string(Lex *L, char q, char **out_buf, size_t *out_len) {
         if (*scan == '\\' && scan[1]) scan++;
         scan++; cap++;
     }
-    if (cap == 0) cap = 1; /* malloc(0) is implementation-defined */
     size_t len = 0;
-    char *buf = malloc(cap);
+    /* Reserve a small extra margin so `\u{...}` can emit up to 4 UTF-8 bytes
+     * from a short source form like `\u{0}` (which pre-scan counts as 4). */
+    char *buf = xmalloc(cap + 4);
     while (*L->p && *L->p != q) {
         if (*L->p == '\n') { lex_error(L, "newline in string literal"); free(buf); return 0; }
+        if (*L->p != '\\') { buf[len++] = *L->p++; continue; }
+        L->p++; /* consume backslash */
         char c;
-        if (*L->p == '\\') {
-            L->p++;
-            switch (*L->p) {
-                case 'n':  c = '\n'; break;
-                case 't':  c = '\t'; break;
-                case 'r':  c = '\r'; break;
-                case '\\': c = '\\'; break;
-                case '"':  c = '"';  break;
-                case '\'': c = '\''; break;
-                case '0':  c = '\0'; break;
-                case 'a':  c = '\a'; break;
-                case 'b':  c = '\b'; break;
-                case 'f':  c = '\f'; break;
-                case 'v':  c = '\v'; break;
-                default: {
-                    char msg[64];
-                    unsigned char bad = (unsigned char)*L->p;
-                    if (bad >= 0x20 && bad < 0x7f)
-                        snprintf(msg, sizeof(msg), "unknown escape sequence '\\%c'", bad);
-                    else
-                        snprintf(msg, sizeof(msg), "unknown escape sequence '\\x%02x'", bad);
-                    lex_error(L, msg);
-                    free(buf);
-                    return 0;
+        switch (*L->p) {
+            case 'n':  c = '\n'; L->p++; break;
+            case 't':  c = '\t'; L->p++; break;
+            case 'r':  c = '\r'; L->p++; break;
+            case '\\': c = '\\'; L->p++; break;
+            case '"':  c = '"';  L->p++; break;
+            case '\'': c = '\''; L->p++; break;
+            case 'a':  c = '\a'; L->p++; break;
+            case 'b':  c = '\b'; L->p++; break;
+            case 'f':  c = '\f'; L->p++; break;
+            case 'v':  c = '\v'; L->p++; break;
+
+            case 'x': {
+                /* `\xHH` — exactly two hex digits. */
+                L->p++;
+                if (!isxdigit((unsigned char)L->p[0]) || !isxdigit((unsigned char)L->p[1])) {
+                    lex_error(L, "hexadecimal digit expected after '\\x'");
+                    free(buf); return 0;
                 }
+                int hi = L->p[0]; int lo = L->p[1];
+                int v = ((isdigit(hi) ? hi - '0' : (hi | 32) - 'a' + 10) << 4)
+                      |  (isdigit(lo) ? lo - '0' : (lo | 32) - 'a' + 10);
+                c = (char)v;
+                L->p += 2;
+                break;
             }
-            L->p++;
-        } else {
-            c = *L->p++;
+
+            case 'z': {
+                /* `\z` — skip subsequent whitespace (incl. newlines). */
+                L->p++;
+                while (isspace((unsigned char)*L->p)) {
+                    if (*L->p == '\n') L->line++;
+                    L->p++;
+                }
+                continue;
+            }
+
+            case 'u': {
+                /* `\u{H...}` — variable-length Unicode escape; emits UTF-8. */
+                L->p++;
+                if (*L->p != '{') { lex_error(L, "'{' expected after '\\u'"); free(buf); return 0; }
+                L->p++;
+                unsigned long cp = 0;
+                int seen = 0;
+                while (isxdigit((unsigned char)*L->p)) {
+                    int d = *L->p;
+                    d = isdigit(d) ? d - '0' : (d | 32) - 'a' + 10;
+                    cp = (cp << 4) | (unsigned)d;
+                    if (cp > 0x7FFFFFFFu) {
+                        lex_error(L, "UTF-8 value too large in '\\u{...}'");
+                        free(buf); return 0;
+                    }
+                    L->p++; seen = 1;
+                }
+                if (!seen || *L->p != '}') {
+                    lex_error(L, "malformed '\\u{...}' escape"); free(buf); return 0;
+                }
+                L->p++; /* consume '}' */
+                /* Encode as UTF-8 (Lua accepts up to 0x7FFFFFFF — beyond Unicode). */
+                if (cp < 0x80) {
+                    buf[len++] = (char)cp;
+                } else if (cp < 0x800) {
+                    buf[len++] = (char)(0xC0 | (cp >> 6));
+                    buf[len++] = (char)(0x80 | (cp & 0x3F));
+                } else if (cp < 0x10000) {
+                    buf[len++] = (char)(0xE0 | (cp >> 12));
+                    buf[len++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+                    buf[len++] = (char)(0x80 | (cp & 0x3F));
+                } else if (cp < 0x200000) {
+                    buf[len++] = (char)(0xF0 | (cp >> 18));
+                    buf[len++] = (char)(0x80 | ((cp >> 12) & 0x3F));
+                    buf[len++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+                    buf[len++] = (char)(0x80 | (cp & 0x3F));
+                } else if (cp < 0x4000000) {
+                    buf[len++] = (char)(0xF8 | (cp >> 24));
+                    buf[len++] = (char)(0x80 | ((cp >> 18) & 0x3F));
+                    buf[len++] = (char)(0x80 | ((cp >> 12) & 0x3F));
+                    buf[len++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+                    buf[len++] = (char)(0x80 | (cp & 0x3F));
+                } else {
+                    buf[len++] = (char)(0xFC | (cp >> 30));
+                    buf[len++] = (char)(0x80 | ((cp >> 24) & 0x3F));
+                    buf[len++] = (char)(0x80 | ((cp >> 18) & 0x3F));
+                    buf[len++] = (char)(0x80 | ((cp >> 12) & 0x3F));
+                    buf[len++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+                    buf[len++] = (char)(0x80 | (cp & 0x3F));
+                }
+                continue;
+            }
+
+            case '0': case '1': case '2': case '3': case '4':
+            case '5': case '6': case '7': case '8': case '9': {
+                /* `\ddd` — 1 to 3 decimal digits, value must fit in a byte. */
+                int v = 0; int n = 0;
+                while (n < 3 && isdigit((unsigned char)*L->p)) {
+                    v = v * 10 + (*L->p - '0');
+                    L->p++; n++;
+                }
+                if (v > 255) {
+                    lex_error(L, "decimal escape '\\ddd' out of range");
+                    free(buf); return 0;
+                }
+                c = (char)v;
+                break;
+            }
+
+            default: {
+                char msg[64];
+                unsigned char bad = (unsigned char)*L->p;
+                if (bad >= 0x20 && bad < 0x7f)
+                    snprintf(msg, sizeof(msg), "unknown escape sequence '\\%c'", bad);
+                else
+                    snprintf(msg, sizeof(msg), "unknown escape sequence '\\x%02x'", bad);
+                lex_error(L, msg);
+                free(buf);
+                return 0;
+            }
         }
         buf[len++] = c;
     }
@@ -225,7 +317,7 @@ TokenList lex(const char *source) {
                     if (!*L.p) { lex_error(&L, "unterminated long string"); t.kind = TOK_ERROR; t.len = 0; break; }
                     size_t len = (size_t)(L.p - start);
                     t.kind = TOK_STRING;
-                    t.str_buf = malloc(len ? len : 1);
+                    t.str_buf = xmalloc(len);
                     if (len) memcpy(t.str_buf, start, len);
                     t.str_len = len;
                     L.p += 2; /* skip ]] */

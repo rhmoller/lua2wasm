@@ -1,5 +1,6 @@
 #include "codegen.h"
 #include "builtins.h"
+#include "xalloc.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -49,7 +50,7 @@ static StrRef strpool_add(StrPool *p, const char *bytes, size_t len) {
     if (p->used + len > p->cap) {
         size_t new_cap = p->cap ? p->cap : 64;
         while (p->used + len > new_cap) new_cap *= 2;
-        p->bytes = realloc(p->bytes, new_cap);
+        p->bytes = xrealloc(p->bytes, new_cap);
         p->cap = new_cap;
     }
     StrRef r = { .offset = p->used, .len = len };
