@@ -3047,7 +3047,8 @@
           (i32.add (i32.mul (local.get $idx) (i32.const 2)) (i32.const 1))
           (local.get $saved))
         (return (i32.const -1) (local.get $ncaps))))
-    ;; '%n' back-reference (n = 1..9).
+    ;; '%n' back-reference (n=1..9), '%bxy' balanced match, '%f[set]'
+    ;; frontier.
     (if (i32.eq (local.get $b) (i32.const 37))                     ;; '%'
       (then
         (if (i32.lt_s (i32.add (local.get $ppos) (i32.const 1))
@@ -3055,8 +3056,9 @@
           (then
             (local.set $b2 (array.get_u $LuaArr (local.get $pat)
               (i32.add (local.get $ppos) (i32.const 1))))
-            (if (i32.and (i32.ge_u (local.get $b2) (i32.const 49))   ;; '1'
-                         (i32.le_u (local.get $b2) (i32.const 57)))  ;; '9'
+            ;; %n back-reference
+            (if (i32.and (i32.ge_u (local.get $b2) (i32.const 49))
+                         (i32.le_u (local.get $b2) (i32.const 57)))
               (then
                 (local.set $idx (i32.sub (local.get $b2) (i32.const 49)))
                 (if (i32.ge_s (local.get $idx) (local.get $ncaps))
@@ -3084,6 +3086,71 @@
                 (return_call $match_pat (local.get $sub)
                   (i32.add (local.get $spos) (local.get $cap_len))
                   (local.get $pat) (i32.add (local.get $ppos) (i32.const 2))
+                  (local.get $caps) (local.get $ncaps))))
+            ;; %bxy balanced match. open = pat[ppos+2], close = pat[ppos+3].
+            (if (i32.eq (local.get $b2) (i32.const 98))            ;; 'b'
+              (then
+                (if (i32.gt_s (i32.add (local.get $ppos) (i32.const 4))
+                               (local.get $n_pat))
+                  (then (return (i32.const -1) (local.get $ncaps))))
+                (local.set $cap_start (array.get_u $LuaArr (local.get $pat)
+                  (i32.add (local.get $ppos) (i32.const 2))))
+                (local.set $cap_len (array.get_u $LuaArr (local.get $pat)
+                  (i32.add (local.get $ppos) (i32.const 3))))
+                (if (i32.ge_s (local.get $spos) (local.get $n_sub))
+                  (then (return (i32.const -1) (local.get $ncaps))))
+                (if (i32.ne (array.get_u $LuaArr (local.get $sub) (local.get $spos))
+                            (local.get $cap_start))
+                  (then (return (i32.const -1) (local.get $ncaps))))
+                (local.set $k (i32.add (local.get $spos) (i32.const 1)))
+                (local.set $idx (i32.const 1))                     ;; depth
+                (block $bdone (loop $bscan
+                  (br_if $bdone (i32.ge_s (local.get $k) (local.get $n_sub)))
+                  (local.set $b (array.get_u $LuaArr (local.get $sub) (local.get $k)))
+                  (if (i32.eq (local.get $b) (local.get $cap_start))
+                    (then (local.set $idx (i32.add (local.get $idx) (i32.const 1)))))
+                  (if (i32.eq (local.get $b) (local.get $cap_len))
+                    (then
+                      (local.set $idx (i32.sub (local.get $idx) (i32.const 1)))
+                      (if (i32.eqz (local.get $idx))
+                        (then
+                          (return_call $match_pat (local.get $sub)
+                            (i32.add (local.get $k) (i32.const 1))
+                            (local.get $pat)
+                            (i32.add (local.get $ppos) (i32.const 4))
+                            (local.get $caps) (local.get $ncaps))))))
+                  (local.set $k (i32.add (local.get $k) (i32.const 1)))
+                  (br $bscan)))
+                (return (i32.const -1) (local.get $ncaps))))
+            ;; %f[set] frontier — matches empty at spos iff
+            ;; sub[spos-1] is NOT in [set] AND sub[spos] IS in [set].
+            ;; (Treat sub[-1] and sub[n_sub] as 0.)
+            (if (i32.eq (local.get $b2) (i32.const 102))           ;; 'f'
+              (then
+                (if (i32.ge_s (i32.add (local.get $ppos) (i32.const 2))
+                               (local.get $n_pat))
+                  (then (return (i32.const -1) (local.get $ncaps))))
+                (if (i32.ne (array.get_u $LuaArr (local.get $pat)
+                              (i32.add (local.get $ppos) (i32.const 2)))
+                            (i32.const 91))                        ;; '['
+                  (then (return (i32.const -1) (local.get $ncaps))))
+                (local.set $idx (i32.add (local.get $ppos) (i32.const 2)))
+                (local.set $cap_len (call $item_end (local.get $pat) (local.get $idx)))
+                (local.set $cap_start (i32.const 0))
+                (if (i32.gt_s (local.get $spos) (i32.const 0))
+                  (then (local.set $cap_start
+                    (array.get_u $LuaArr (local.get $sub)
+                      (i32.sub (local.get $spos) (i32.const 1))))))
+                (local.set $b (i32.const 0))
+                (if (i32.lt_s (local.get $spos) (local.get $n_sub))
+                  (then (local.set $b
+                    (array.get_u $LuaArr (local.get $sub) (local.get $spos)))))
+                (if (call $match_set (local.get $cap_start) (local.get $pat) (local.get $idx))
+                  (then (return (i32.const -1) (local.get $ncaps))))
+                (if (i32.eqz (call $match_set (local.get $b) (local.get $pat) (local.get $idx)))
+                  (then (return (i32.const -1) (local.get $ncaps))))
+                (return_call $match_pat (local.get $sub) (local.get $spos)
+                  (local.get $pat) (local.get $cap_len)
                   (local.get $caps) (local.get $ncaps))))))))
     ;; Decode the matchable item ending at $item_end_pos. Read quantifier
     ;; (if any) immediately after.
