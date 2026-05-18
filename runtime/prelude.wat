@@ -4298,6 +4298,66 @@
                  (i32.sub (local.get $stride) (local.get $rem))))))
     (local.get $offset))
 
+  ;; Write the low $n bytes of $val into $buf[$off..$off+n] in the byte
+  ;; order selected by $le (1 = little-endian, 0 = big-endian).
+  (func $pack_write_int
+    (param $buf (ref $LuaArr)) (param $off i32) (param $n i32)
+    (param $le i32) (param $val i64)
+    (local $i i32) (local $b i32)
+    (block $done (loop $lp
+      (br_if $done (i32.ge_s (local.get $i) (local.get $n)))
+      (local.set $b (i32.and
+        (i32.wrap_i64
+          (i64.shr_u (local.get $val)
+                     (i64.extend_i32_u
+                       (i32.mul (local.get $i) (i32.const 8)))))
+        (i32.const 0xff)))
+      (if (local.get $le)
+        (then (array.set $LuaArr (local.get $buf)
+                (i32.add (local.get $off) (local.get $i)) (local.get $b)))
+        (else (array.set $LuaArr (local.get $buf)
+                (i32.add (local.get $off)
+                  (i32.sub (i32.sub (local.get $n) (i32.const 1))
+                           (local.get $i)))
+                (local.get $b))))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br $lp))))
+
+  ;; Read $n bytes from $buf[$off..$off+n] in the byte order $le and
+  ;; return the assembled value zero-extended to i64.
+  (func $pack_read_int
+    (param $buf (ref $LuaArr)) (param $off i32) (param $n i32)
+    (param $le i32) (result i64)
+    (local $i i32) (local $val i64) (local $b i32) (local $idx i32)
+    (block $done (loop $lp
+      (br_if $done (i32.ge_s (local.get $i) (local.get $n)))
+      (if (local.get $le)
+        (then (local.set $idx (i32.add (local.get $off) (local.get $i))))
+        (else (local.set $idx
+                (i32.add (local.get $off)
+                  (i32.sub (i32.sub (local.get $n) (i32.const 1))
+                           (local.get $i))))))
+      (local.set $b (array.get_u $LuaArr (local.get $buf) (local.get $idx)))
+      (local.set $val
+        (i64.or (local.get $val)
+                (i64.shl (i64.extend_i32_u (local.get $b))
+                         (i64.extend_i32_u
+                           (i32.mul (local.get $i) (i32.const 8))))))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br $lp)))
+    (local.get $val))
+
+  ;; 1 iff $val fits in $n bytes when interpreted as unsigned (top
+  ;; (64-8n) bits must be zero). For n=8 always returns 1.
+  (func $pack_fits_unsigned (param $val i64) (param $n i32) (result i32)
+    (if (result i32) (i32.ge_s (local.get $n) (i32.const 8))
+      (then (i32.const 1))
+      (else
+        (i64.eqz
+          (i64.shr_u (local.get $val)
+                     (i64.extend_i32_u
+                       (i32.mul (local.get $n) (i32.const 8))))))))
+
   ;; string.packsize(fmt) — returns the byte length that string.pack
   ;; with the same format would produce. Raises if the format contains
   ;; a variable-length option ('s' or 'z'), or any of the per-option
@@ -4386,6 +4446,301 @@
       (br $lp)))
     (array.new_fixed $ArgArr 1
       (call $make_int (i64.extend_i32_s (local.get $offset)))))
+
+  ;; string.pack(fmt, v1, v2, ...) — milestone 21 step 2: unsigned ints
+  ;; (B H I[N] J L T), x padding, !N alignment, Xop, < > = endianness.
+  ;; Signed ints / floats / c / s / z land in later steps; this dispatch
+  ;; raises on them.
+  (func $builtin_string_pack (type $LuaFn)
+    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr))
+    (result (ref $ArgArr))
+    (local $bytes (ref $LuaArr)) (local $len i32) (local $ppos i32)
+    (local $c i32) (local $endian_le i32) (local $max_align i32)
+    (local $sz i32) (local $n i32) (local $newpp i32)
+    (local $arg_idx i32) (local $val i64) (local $pad i32)
+    (local $b (ref $Builder)) (local $bbuf (ref $LuaArr)) (local $blen i32)
+    (local.set $endian_le (i32.const 1))
+    (local.set $max_align (i32.const 1))
+    (local.set $arg_idx (i32.const 1))
+    (local.set $b (call $builder_new))
+    (local.set $bytes (struct.get $LuaString $bytes
+      (ref.cast (ref $LuaString)
+        (call $args_at (local.get $args) (i32.const 0)))))
+    (local.set $len (array.len (local.get $bytes)))
+    (block $done (loop $lp
+      (br_if $done (i32.ge_u (local.get $ppos) (local.get $len)))
+      (local.set $c (array.get_u $LuaArr (local.get $bytes) (local.get $ppos)))
+      (local.set $ppos (i32.add (local.get $ppos) (i32.const 1)))
+      (if (i32.eq (local.get $c) (i32.const 32)) (then (br $lp)))
+      (if (i32.eq (local.get $c) (i32.const 60))                 ;; '<'
+        (then (local.set $endian_le (i32.const 1)) (br $lp)))
+      (if (i32.eq (local.get $c) (i32.const 62))                 ;; '>'
+        (then (local.set $endian_le (i32.const 0)) (br $lp)))
+      (if (i32.eq (local.get $c) (i32.const 61))                 ;; '='
+        (then (local.set $endian_le (i32.const 1)) (br $lp)))
+      ;; '!' [N]
+      (if (i32.eq (local.get $c) (i32.const 33))                 ;; '!'
+        (then
+          (call $pack_n_suffix (local.get $bytes) (local.get $ppos)
+                               (i32.const 8))
+          (local.set $newpp) (local.set $n)
+          (if (i32.lt_s (local.get $n) (i32.const 1))
+            (then (throw $LuaError (ref.null any))))
+          (if (i32.gt_s (local.get $n) (i32.const 16))
+            (then (throw $LuaError (ref.null any))))
+          (local.set $max_align (local.get $n))
+          (local.set $ppos (local.get $newpp))
+          (br $lp)))
+      ;; 'x' — one zero byte, no alignment.
+      (if (i32.eq (local.get $c) (i32.const 120))                ;; 'x'
+        (then (call $builder_append_byte (local.get $b) (i32.const 0))
+              (br $lp)))
+      ;; 'X' op — align with no payload, no arg consumed.
+      (if (i32.eq (local.get $c) (i32.const 88))                 ;; 'X'
+        (then
+          (if (i32.ge_u (local.get $ppos) (local.get $len))
+            (then (throw $LuaError (ref.null any))))
+          (local.set $c (array.get_u $LuaArr (local.get $bytes)
+                                      (local.get $ppos)))
+          (local.set $ppos (i32.add (local.get $ppos) (i32.const 1)))
+          (call $pack_opt_size (local.get $c) (local.get $bytes)
+                               (local.get $ppos))
+          (local.set $newpp) (local.set $sz)
+          (local.set $ppos (local.get $newpp))
+          (local.set $blen (struct.get $Builder $len (local.get $b)))
+          (local.set $pad
+            (i32.sub
+              (call $pack_align (local.get $blen)
+                                (local.get $sz) (local.get $max_align))
+              (local.get $blen)))
+          (block $pad_done (loop $pad_lp
+            (br_if $pad_done (i32.le_s (local.get $pad) (i32.const 0)))
+            (call $builder_append_byte (local.get $b) (i32.const 0))
+            (local.set $pad (i32.sub (local.get $pad) (i32.const 1)))
+            (br $pad_lp)))
+          (br $lp)))
+      ;; Variable-length and not-yet-implemented options raise.
+      (if (i32.or (i32.eq (local.get $c) (i32.const 115))        ;; 's'
+                  (i32.eq (local.get $c) (i32.const 122)))       ;; 'z'
+        (then (throw $LuaError (ref.null any))))
+      (if (i32.eq (local.get $c) (i32.const 99))                 ;; 'c'
+        (then (throw $LuaError (ref.null any))))
+      (if (i32.or (i32.eq (local.get $c) (i32.const 102))        ;; 'f'
+                  (i32.or (i32.eq (local.get $c) (i32.const 100))   ;; 'd'
+                          (i32.eq (local.get $c) (i32.const 110)))) ;; 'n'
+        (then (throw $LuaError (ref.null any))))
+      ;; Signed ints — step 3 fills these in.
+      (if (i32.or
+            (i32.or (i32.eq (local.get $c) (i32.const 98))       ;; 'b'
+                    (i32.eq (local.get $c) (i32.const 104)))     ;; 'h'
+            (i32.or
+              (i32.or (i32.eq (local.get $c) (i32.const 105))    ;; 'i'
+                      (i32.eq (local.get $c) (i32.const 106)))   ;; 'j'
+              (i32.eq (local.get $c) (i32.const 108))))          ;; 'l'
+        (then (throw $LuaError (ref.null any))))
+      ;; Otherwise: unsigned int option.
+      (call $pack_opt_size (local.get $c) (local.get $bytes)
+                           (local.get $ppos))
+      (local.set $newpp) (local.set $sz)
+      (local.set $ppos (local.get $newpp))
+      ;; Align builder.
+      (local.set $blen (struct.get $Builder $len (local.get $b)))
+      (local.set $pad
+        (i32.sub
+          (call $pack_align (local.get $blen)
+                            (local.get $sz) (local.get $max_align))
+          (local.get $blen)))
+      (block $pad_done (loop $pad_lp
+        (br_if $pad_done (i32.le_s (local.get $pad) (i32.const 0)))
+        (call $builder_append_byte (local.get $b) (i32.const 0))
+        (local.set $pad (i32.sub (local.get $pad) (i32.const 1)))
+        (br $pad_lp)))
+      ;; Fetch arg and validate fit.
+      (local.set $val (call $as_int (call $args_at (local.get $args)
+                                                    (local.get $arg_idx))))
+      (local.set $arg_idx (i32.add (local.get $arg_idx) (i32.const 1)))
+      (if (i32.eqz (call $pack_fits_unsigned (local.get $val) (local.get $sz)))
+        (then (throw $LuaError (ref.null any))))
+      ;; Write into the builder, then advance its $len.
+      (call $builder_reserve (local.get $b) (local.get $sz))
+      (local.set $bbuf (struct.get $Builder $arr (local.get $b)))
+      (local.set $blen (struct.get $Builder $len (local.get $b)))
+      (call $pack_write_int (local.get $bbuf) (local.get $blen)
+                            (local.get $sz) (local.get $endian_le)
+                            (local.get $val))
+      (struct.set $Builder $len (local.get $b)
+        (i32.add (local.get $blen) (local.get $sz)))
+      (br $lp)))
+    (array.new_fixed $ArgArr 1 (call $builder_finish (local.get $b))))
+
+  ;; string.unpack(fmt, s [, pos]) — same coverage as $builtin_string_pack
+  ;; (step 2: unsigned ints, x, !N, Xop, < > =). Returns values…, pos
+  ;; (one-past-last-consumed byte, 1-based).
+  (func $builtin_string_unpack (type $LuaFn)
+    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr))
+    (result (ref $ArgArr))
+    (local $bytes (ref $LuaArr)) (local $len i32) (local $ppos i32)
+    (local $c i32) (local $endian_le i32) (local $max_align i32)
+    (local $sz i32) (local $n i32) (local $newpp i32)
+    (local $subj (ref $LuaArr)) (local $subj_len i32) (local $offset i32)
+    (local $out (ref $ArgArr)) (local $out_idx i32) (local $nval i32)
+    (local $val i64)
+    (local.set $endian_le (i32.const 1))
+    (local.set $max_align (i32.const 1))
+    (local.set $bytes (struct.get $LuaString $bytes
+      (ref.cast (ref $LuaString)
+        (call $args_at (local.get $args) (i32.const 0)))))
+    (local.set $len (array.len (local.get $bytes)))
+    (local.set $subj (struct.get $LuaString $bytes
+      (ref.cast (ref $LuaString)
+        (call $args_at (local.get $args) (i32.const 1)))))
+    (local.set $subj_len (array.len (local.get $subj)))
+    ;; Optional pos: default 1, clamp negatives like string.sub (relative
+    ;; to end). For simplicity we accept positive integers >= 1 here.
+    (local.set $offset (i32.const 0))
+    (if (i32.gt_u (array.len (local.get $args)) (i32.const 2))
+      (then (local.set $offset
+        (i32.sub
+          (i32.wrap_i64
+            (call $as_int (call $args_at (local.get $args) (i32.const 2))))
+          (i32.const 1)))))
+    ;; Pre-count value-producing options to size the output ArgArr.
+    (local.set $nval (call $pack_count_values (local.get $bytes)))
+    (local.set $out
+      (array.new $ArgArr (ref.null any)
+                 (i32.add (local.get $nval) (i32.const 1))))
+    (block $done (loop $lp
+      (br_if $done (i32.ge_u (local.get $ppos) (local.get $len)))
+      (local.set $c (array.get_u $LuaArr (local.get $bytes) (local.get $ppos)))
+      (local.set $ppos (i32.add (local.get $ppos) (i32.const 1)))
+      (if (i32.eq (local.get $c) (i32.const 32)) (then (br $lp)))
+      (if (i32.eq (local.get $c) (i32.const 60))                 ;; '<'
+        (then (local.set $endian_le (i32.const 1)) (br $lp)))
+      (if (i32.eq (local.get $c) (i32.const 62))                 ;; '>'
+        (then (local.set $endian_le (i32.const 0)) (br $lp)))
+      (if (i32.eq (local.get $c) (i32.const 61))                 ;; '='
+        (then (local.set $endian_le (i32.const 1)) (br $lp)))
+      (if (i32.eq (local.get $c) (i32.const 33))                 ;; '!'
+        (then
+          (call $pack_n_suffix (local.get $bytes) (local.get $ppos)
+                               (i32.const 8))
+          (local.set $newpp) (local.set $n)
+          (if (i32.lt_s (local.get $n) (i32.const 1))
+            (then (throw $LuaError (ref.null any))))
+          (if (i32.gt_s (local.get $n) (i32.const 16))
+            (then (throw $LuaError (ref.null any))))
+          (local.set $max_align (local.get $n))
+          (local.set $ppos (local.get $newpp))
+          (br $lp)))
+      (if (i32.eq (local.get $c) (i32.const 120))                ;; 'x'
+        (then (local.set $offset (i32.add (local.get $offset) (i32.const 1)))
+              (br $lp)))
+      (if (i32.eq (local.get $c) (i32.const 88))                 ;; 'X'
+        (then
+          (if (i32.ge_u (local.get $ppos) (local.get $len))
+            (then (throw $LuaError (ref.null any))))
+          (local.set $c (array.get_u $LuaArr (local.get $bytes)
+                                      (local.get $ppos)))
+          (local.set $ppos (i32.add (local.get $ppos) (i32.const 1)))
+          (call $pack_opt_size (local.get $c) (local.get $bytes)
+                               (local.get $ppos))
+          (local.set $newpp) (local.set $sz)
+          (local.set $ppos (local.get $newpp))
+          (local.set $offset
+            (call $pack_align (local.get $offset)
+                              (local.get $sz) (local.get $max_align)))
+          (br $lp)))
+      (if (i32.or (i32.eq (local.get $c) (i32.const 115))
+                  (i32.eq (local.get $c) (i32.const 122)))
+        (then (throw $LuaError (ref.null any))))
+      (if (i32.eq (local.get $c) (i32.const 99))
+        (then (throw $LuaError (ref.null any))))
+      (if (i32.or (i32.eq (local.get $c) (i32.const 102))
+                  (i32.or (i32.eq (local.get $c) (i32.const 100))
+                          (i32.eq (local.get $c) (i32.const 110))))
+        (then (throw $LuaError (ref.null any))))
+      (if (i32.or
+            (i32.or (i32.eq (local.get $c) (i32.const 98))
+                    (i32.eq (local.get $c) (i32.const 104)))
+            (i32.or
+              (i32.or (i32.eq (local.get $c) (i32.const 105))
+                      (i32.eq (local.get $c) (i32.const 106)))
+              (i32.eq (local.get $c) (i32.const 108))))
+        (then (throw $LuaError (ref.null any))))
+      ;; Unsigned int read.
+      (call $pack_opt_size (local.get $c) (local.get $bytes)
+                           (local.get $ppos))
+      (local.set $newpp) (local.set $sz)
+      (local.set $ppos (local.get $newpp))
+      (local.set $offset
+        (call $pack_align (local.get $offset)
+                          (local.get $sz) (local.get $max_align)))
+      (if (i32.gt_u (i32.add (local.get $offset) (local.get $sz))
+                    (local.get $subj_len))
+        (then (throw $LuaError (ref.null any))))
+      (local.set $val (call $pack_read_int (local.get $subj)
+                            (local.get $offset) (local.get $sz)
+                            (local.get $endian_le)))
+      (local.set $offset (i32.add (local.get $offset) (local.get $sz)))
+      (array.set $ArgArr (local.get $out) (local.get $out_idx)
+        (call $make_int (local.get $val)))
+      (local.set $out_idx (i32.add (local.get $out_idx) (i32.const 1)))
+      (br $lp)))
+    ;; Append final 1-based position.
+    (array.set $ArgArr (local.get $out) (local.get $out_idx)
+      (call $make_int (i64.extend_i32_s
+        (i32.add (local.get $offset) (i32.const 1)))))
+    (local.get $out))
+
+  ;; Count value-producing options in a format string (everything but
+  ;; configurations, padding, and the sized prefix of Xop). Used by
+  ;; unpack to pre-size its $ArgArr. Doesn't validate; the actual walk
+  ;; raises on bad input.
+  (func $pack_count_values (param $bytes (ref $LuaArr)) (result i32)
+    (local $len i32) (local $ppos i32) (local $c i32) (local $n i32)
+    (local $newpp i32) (local $count i32)
+    (local.set $len (array.len (local.get $bytes)))
+    (block $done (loop $lp
+      (br_if $done (i32.ge_u (local.get $ppos) (local.get $len)))
+      (local.set $c (array.get_u $LuaArr (local.get $bytes) (local.get $ppos)))
+      (local.set $ppos (i32.add (local.get $ppos) (i32.const 1)))
+      ;; Skip space, < > =.
+      (if (i32.or (i32.eq (local.get $c) (i32.const 32))
+                  (i32.or (i32.eq (local.get $c) (i32.const 60))
+                          (i32.or (i32.eq (local.get $c) (i32.const 62))
+                                  (i32.eq (local.get $c) (i32.const 61)))))
+        (then (br $lp)))
+      ;; ! [N] — consume any digits.
+      (if (i32.eq (local.get $c) (i32.const 33))
+        (then
+          (call $pack_n_suffix (local.get $bytes) (local.get $ppos)
+                               (i32.const 0))
+          (local.set $newpp) (local.set $n)
+          (local.set $ppos (local.get $newpp))
+          (br $lp)))
+      ;; x — padding, no value.
+      (if (i32.eq (local.get $c) (i32.const 120)) (then (br $lp)))
+      ;; X op[N] — advance past op letter + any digits, no value.
+      (if (i32.eq (local.get $c) (i32.const 88))
+        (then
+          (if (i32.ge_u (local.get $ppos) (local.get $len)) (then (br $lp)))
+          (local.set $ppos (i32.add (local.get $ppos) (i32.const 1)))
+          (call $pack_n_suffix (local.get $bytes) (local.get $ppos)
+                               (i32.const 0))
+          (local.set $newpp) (local.set $n)
+          (local.set $ppos (local.get $newpp))
+          (br $lp)))
+      ;; Otherwise: a value-producing option (incl. b h i j l B H I J L T
+      ;; f d n c s z). Skip any [N] suffix uniformly — over-skip on
+      ;; letters that don't take one is harmless since digits don't
+      ;; follow them naturally.
+      (call $pack_n_suffix (local.get $bytes) (local.get $ppos)
+                           (i32.const 0))
+      (local.set $newpp) (local.set $n)
+      (local.set $ppos (local.get $newpp))
+      (local.set $count (i32.add (local.get $count) (i32.const 1)))
+      (br $lp)))
+    (local.get $count))
 
   ;; bytes_of_lit: looks up a built-in literal name (`number`, `string`, etc.)
   ;; by index into the type-name slab. Indices into the slab:
