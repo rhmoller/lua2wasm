@@ -97,11 +97,21 @@ directly with nil) and `$lua_tostring` (trapped on tables/functions).
 in the prelude and the codegen output for assumptions the old
 behaviour was hiding. Don't ship the fix without auditing.
 
-### Hex literals not yet lexed
+### Trailing whitespace in test EXPECTED literals
 
-Test fixtures written with `0xFF`-style constants fail to compile
-until milestone 16. Author in decimal until then. (Reminder: `255`
-is `0xFF`, `65 535` is `0xFFFF`, `2147483647` is INT_MAX, etc.)
+Some editors (and my own Write tool through certain paths) strip
+trailing whitespace on save, which silently breaks fixtures whose
+output legitimately ends a line with spaces. The `long_brackets`
+fixture hit this — `[[ plain ]]` produces ` plain ` (space-plain-space)
+on a line.
+
+**Mitigations:**
+- Use `$'...'` shell-quoted form for EXPECTED (preserves bytes more
+  reliably than `"..."` through some tooling).
+- Or build EXPECTED with `printf` from explicit hex escapes.
+- When `diff` reports a 1-character mismatch on a string that should
+  match, immediately `cat -A` both sides to expose invisible
+  whitespace.
 
 ### Hand-authored expected output
 
@@ -110,6 +120,19 @@ Two self-correction commits (`string_rep` blank-line count,
 copy-paste the actual `node host.mjs … wasm` output, never hand-write
 the expected string. The expected output is what the program produces;
 the *fixture comments* are where you encode intent.
+
+### Docs go stale faster than features ship
+
+Milestone 16's preflight expected to add `\xHH`, `\u{…}`, `\ddd`, `\z`
+because docs/language-features.md listed them as missing. They were
+all already implemented; only `\<line-break>` was actually missing.
+Same with hex literals — listed twice in the README's "Not yet"
+column, but the docs.md only ever called out the lexer-side gap.
+
+**Mitigation:** before starting a milestone, run the existing
+implementation against fixtures derived from the manual examples,
+not against the stale doc claims. The compiler is the source of
+truth for what's currently supported; the doc is just a label.
 
 ### Hand-counting parens in WAT
 
