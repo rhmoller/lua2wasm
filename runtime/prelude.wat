@@ -59,6 +59,13 @@
   (global $g_empty_args   (ref $ArgArr)   (array.new_fixed $ArgArr 0))
   ;; Scratch byte buffer that host_fmt writes into (set up by stdlib_init).
   (global $fmt_buf (mut (ref null $LuaArr)) (ref.null $LuaArr))
+
+  ;; xoshiro256** state. Initial seed is fixed; user can call
+  ;; math.randomseed(x [, y]) to override. Non-zero by construction.
+  (global $g_rng0 (mut i64) (i64.const 0x9E3779B97F4A7C15))
+  (global $g_rng1 (mut i64) (i64.const 0xBF58476D1CE4E5B9))
+  (global $g_rng2 (mut i64) (i64.const 0x94D049BB133111EB))
+  (global $g_rng3 (mut i64) (i64.const 0xD1B54A32D192ED03))
   ;; --- truthiness: only nil and false are falsy ---
   (func $lua_truthy (param $v anyref) (result i32)
     (if (ref.is_null (local.get $v)) (then (return (i32.const 0))))
@@ -1272,6 +1279,117 @@
         (i64.lt_u
           (call $as_int (call $args_at (local.get $args) (i32.const 0)))
           (call $as_int (call $args_at (local.get $args) (i32.const 1)))))))
+
+  ;; xoshiro256** single step. Mutates the four state globals; returns the
+  ;; output u64. Algorithm from Blackman & Vigna's public description.
+  (func $rng_next (result i64)
+    (local $s0 i64) (local $s1 i64) (local $s2 i64) (local $s3 i64)
+    (local $result i64) (local $t i64)
+    (local.set $s0 (global.get $g_rng0))
+    (local.set $s1 (global.get $g_rng1))
+    (local.set $s2 (global.get $g_rng2))
+    (local.set $s3 (global.get $g_rng3))
+    ;; result = rotl(s1 * 5, 7) * 9
+    (local.set $result (i64.mul (local.get $s1) (i64.const 5)))
+    (local.set $result (i64.rotl (local.get $result) (i64.const 7)))
+    (local.set $result (i64.mul (local.get $result) (i64.const 9)))
+    ;; t = s1 << 17
+    (local.set $t (i64.shl (local.get $s1) (i64.const 17)))
+    ;; s2 ^= s0;  s3 ^= s1;  s1 ^= s2;  s0 ^= s3;  s2 ^= t;  s3 = rotl(s3, 45)
+    (local.set $s2 (i64.xor (local.get $s2) (local.get $s0)))
+    (local.set $s3 (i64.xor (local.get $s3) (local.get $s1)))
+    (local.set $s1 (i64.xor (local.get $s1) (local.get $s2)))
+    (local.set $s0 (i64.xor (local.get $s0) (local.get $s3)))
+    (local.set $s2 (i64.xor (local.get $s2) (local.get $t)))
+    (local.set $s3 (i64.rotl (local.get $s3) (i64.const 45)))
+    (global.set $g_rng0 (local.get $s0))
+    (global.set $g_rng1 (local.get $s1))
+    (global.set $g_rng2 (local.get $s2))
+    (global.set $g_rng3 (local.get $s3))
+    (local.get $result))
+
+  ;; SplitMix64 — used to expand a single user seed into our 4-word state
+  ;; without leaving any state word zero (a degenerate xoshiro seed).
+  (func $rng_splitmix64 (param $x i64) (result i64)
+    (local $z i64)
+    (local.set $z (i64.add (local.get $x) (i64.const 0x9E3779B97F4A7C15)))
+    (local.set $z (i64.mul
+      (i64.xor (local.get $z) (i64.shr_u (local.get $z) (i64.const 30)))
+      (i64.const 0xBF58476D1CE4E5B9)))
+    (local.set $z (i64.mul
+      (i64.xor (local.get $z) (i64.shr_u (local.get $z) (i64.const 27)))
+      (i64.const 0x94D049BB133111EB)))
+    (i64.xor (local.get $z) (i64.shr_u (local.get $z) (i64.const 31))))
+
+  ;; math.random([m [, n]])
+  ;;   0 args: float in [0, 1)
+  ;;   1 arg n  (n != 0): integer in [1, n]
+  ;;   1 arg 0       : full-range integer (any i64)
+  ;;   2 args m, n : integer in [m, n]
+  (func $builtin_math_random (type $LuaFn)
+    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
+    (local $n i32) (local $r i64) (local $lo i64) (local $hi i64) (local $range i64)
+    (local $bits i64) (local $f f64)
+    (local.set $n (array.len (local.get $args)))
+    (if (i32.eqz (local.get $n))
+      (then
+        ;; Take the top 53 bits as the mantissa of a float in [0, 1).
+        (local.set $bits (i64.shr_u (call $rng_next) (i64.const 11)))
+        (local.set $f (f64.mul
+          (f64.convert_i64_u (local.get $bits))
+          (f64.const 0x1p-53)))
+        (return (array.new_fixed $ArgArr 1 (call $make_float (local.get $f))))))
+    ;; integer modes
+    (local.set $hi (call $as_int (call $args_at (local.get $args) (i32.const 0))))
+    (local.set $lo (i64.const 1))
+    (if (i32.gt_u (local.get $n) (i32.const 1))
+      (then
+        (local.set $lo (local.get $hi))
+        (local.set $hi (call $as_int (call $args_at (local.get $args) (i32.const 1))))))
+    ;; full-range mode: math.random(0)
+    (if (i32.and (i32.eq (local.get $n) (i32.const 1))
+                 (i64.eqz (local.get $hi)))
+      (then (return (array.new_fixed $ArgArr 1
+              (call $make_int (call $rng_next))))))
+    (if (i64.gt_s (local.get $lo) (local.get $hi))
+      (then (throw $LuaError (ref.null any))))
+    ;; range = hi - lo + 1; pick uniform via mod (good enough for our
+    ;; purposes; the bias is < 1/2^32 for any range < 2^32).
+    (local.set $range (i64.add (i64.sub (local.get $hi) (local.get $lo)) (i64.const 1)))
+    (local.set $r (i64.rem_u (call $rng_next) (local.get $range)))
+    (array.new_fixed $ArgArr 1
+      (call $make_int (i64.add (local.get $lo) (local.get $r)))))
+
+  ;; math.randomseed([x [, y]]) — set the PRNG state, return (seed1, seed2).
+  ;; With one seed x, expand via SplitMix64 to fill all four state words.
+  ;; With two seeds, use them as (s0, s2) and derive (s1, s3) the same way.
+  ;; With no seeds, reseed from a fixed combination (we don't have a clock).
+  (func $builtin_math_randomseed (type $LuaFn)
+    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
+    (local $n i32) (local $x i64) (local $y i64)
+    (local $out (ref $ArgArr))
+    (local.set $n (array.len (local.get $args)))
+    (if (i32.eqz (local.get $n))
+      (then
+        ;; deterministic re-seed in absence of a host clock
+        (local.set $x (i64.const 0x243F6A8885A308D3))
+        (local.set $y (i64.const 0x13198A2E03707344)))
+      (else
+        (local.set $x (call $as_int (call $args_at (local.get $args) (i32.const 0))))
+        (if (i32.gt_u (local.get $n) (i32.const 1))
+          (then (local.set $y (call $as_int (call $args_at (local.get $args) (i32.const 1)))))
+          (else (local.set $y (i64.const 0))))))
+    (global.set $g_rng0 (call $rng_splitmix64 (local.get $x)))
+    (global.set $g_rng1 (call $rng_splitmix64
+      (i64.add (local.get $x) (i64.const 1))))
+    (global.set $g_rng2 (call $rng_splitmix64
+      (i64.add (local.get $y) (i64.const 2))))
+    (global.set $g_rng3 (call $rng_splitmix64
+      (i64.add (local.get $y) (i64.const 3))))
+    (local.set $out (array.new $ArgArr (ref.null any) (i32.const 2)))
+    (array.set $ArgArr (local.get $out) (i32.const 0) (call $make_int (local.get $x)))
+    (array.set $ArgArr (local.get $out) (i32.const 1) (call $make_int (local.get $y)))
+    (local.get $out))
 
   ;; math.deg(x) — radians to degrees.
   (func $builtin_math_deg (type $LuaFn)
