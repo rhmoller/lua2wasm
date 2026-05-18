@@ -1266,6 +1266,58 @@
 
   ;; table.unpack(t [, i [, j]]) -> t[i], t[i+1], ..., t[j].
   ;; Defaults: i = 1, j = #t. Returns no values when j < i.
+  ;; table.move(a1, f, e, t [, a2]): copy a1[f..e] to (a2 or a1)[t..].
+  ;; Returns the destination table. Handles overlap (a1 == a2 with
+  ;; t in [f, e]) by choosing iteration direction.
+  ;; If f > e, nothing to copy; still returns the destination.
+  (func $builtin_table_move (type $LuaFn)
+    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
+    (local $a1 (ref $LuaTable)) (local $a2 (ref $LuaTable))
+    (local $f i32) (local $e i32) (local $t i32)
+    (local $n i32) (local $i i32) (local $v anyref)
+    (local.set $a1 (ref.cast (ref $LuaTable) (call $args_at (local.get $args) (i32.const 0))))
+    (local.set $f  (i32.wrap_i64 (call $as_int (call $args_at (local.get $args) (i32.const 1)))))
+    (local.set $e  (i32.wrap_i64 (call $as_int (call $args_at (local.get $args) (i32.const 2)))))
+    (local.set $t  (i32.wrap_i64 (call $as_int (call $args_at (local.get $args) (i32.const 3)))))
+    ;; optional 5th arg: destination table; defaults to a1.
+    (local.set $a2 (local.get $a1))
+    (if (i32.gt_u (array.len (local.get $args)) (i32.const 4))
+      (then (local.set $a2
+              (ref.cast (ref $LuaTable) (call $args_at (local.get $args) (i32.const 4))))))
+    ;; nothing to do if range is empty (f > e).
+    (if (i32.le_s (local.get $f) (local.get $e))
+      (then
+        (local.set $n (i32.add (i32.sub (local.get $e) (local.get $f)) (i32.const 1)))
+        ;; If dst overlaps src and t > f, iterate backward to avoid clobbering.
+        ;; Backward iteration: i = n-1 ..= 0, dst[t+i] = src[f+i].
+        ;; Forward iteration:  i = 0 ..< n.
+        (if (i32.and
+              (ref.eq (local.get $a1) (local.get $a2))
+              (i32.gt_s (local.get $t) (local.get $f)))
+          (then
+            (local.set $i (i32.sub (local.get $n) (i32.const 1)))
+            (block $done (loop $lp
+              (br_if $done (i32.lt_s (local.get $i) (i32.const 0)))
+              (local.set $v (call $tab_get_raw (local.get $a1)
+                              (ref.i31 (i32.add (local.get $f) (local.get $i)))))
+              (call $tab_set (local.get $a2)
+                (ref.i31 (i32.add (local.get $t) (local.get $i)))
+                (local.get $v))
+              (local.set $i (i32.sub (local.get $i) (i32.const 1)))
+              (br $lp))))
+          (else
+            (local.set $i (i32.const 0))
+            (block $done2 (loop $lp2
+              (br_if $done2 (i32.ge_s (local.get $i) (local.get $n)))
+              (local.set $v (call $tab_get_raw (local.get $a1)
+                              (ref.i31 (i32.add (local.get $f) (local.get $i)))))
+              (call $tab_set (local.get $a2)
+                (ref.i31 (i32.add (local.get $t) (local.get $i)))
+                (local.get $v))
+              (local.set $i (i32.add (local.get $i) (i32.const 1)))
+              (br $lp2)))))))
+    (array.new_fixed $ArgArr 1 (local.get $a2)))
+
   ;; table.pack(...): returns { [1] = a1, ..., [n] = an, n = nargs }.
   (func $builtin_table_pack (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
