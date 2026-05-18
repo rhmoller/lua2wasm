@@ -166,12 +166,30 @@
               (f64.div (call $as_float (local.get $a))
                        (call $as_float (local.get $b))))))))
 
+  ;; Floor modulo: a - floor(a/b)*b. Differs from truncating remainder
+  ;; (i64.rem_s, C's `%`) when the operands have different signs.
+  ;; Integer case: start with rem_s and adjust by +b when the remainder
+  ;; is non-zero and the operand signs disagree.
+  ;; Float case: a - floor(a/b)*b directly.
   (func $lua_mod (param $a anyref) (param $b anyref) (result anyref)
-    (if (result anyref)
-      (i32.and (call $is_int (local.get $a)) (call $is_int (local.get $b)))
-      (then (call $make_int (i64.rem_s (call $as_int (local.get $a))
-                                       (call $as_int (local.get $b)))))
-      (else (call $make_float (f64.const 0)))))   ;; v2 stub: float % returns 0
+    (local $ai i64) (local $bi i64) (local $r i64)
+    (local $af f64) (local $bf f64)
+    (if (i32.and (call $is_int (local.get $a)) (call $is_int (local.get $b)))
+      (then
+        (local.set $ai (call $as_int (local.get $a)))
+        (local.set $bi (call $as_int (local.get $b)))
+        (local.set $r  (i64.rem_s (local.get $ai) (local.get $bi)))
+        (if (i32.and
+              (i64.ne (local.get $r) (i64.const 0))
+              (i64.lt_s (i64.xor (local.get $ai) (local.get $bi)) (i64.const 0)))
+          (then (local.set $r (i64.add (local.get $r) (local.get $bi)))))
+        (return (call $make_int (local.get $r)))))
+    (local.set $af (call $as_float (local.get $a)))
+    (local.set $bf (call $as_float (local.get $b)))
+    (call $make_float
+      (f64.sub (local.get $af)
+               (f64.mul (f64.floor (f64.div (local.get $af) (local.get $bf)))
+                        (local.get $bf)))))
 
   (func $lua_pow (param $a anyref) (param $b anyref) (result anyref)
     (local $base f64) (local $exp f64) (local $r f64) (local $i i32)

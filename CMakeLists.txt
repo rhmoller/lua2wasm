@@ -272,6 +272,14 @@ add_test(
 )
 
 add_test(
+    NAME test_e2e_mod_floor
+    COMMAND bash ${CMAKE_SOURCE_DIR}/tests/test_e2e_mod_floor.sh
+            $<TARGET_FILE:lua2wasm>
+            ${CMAKE_SOURCE_DIR}
+            ${CMAKE_BINARY_DIR}
+)
+
+add_test(
     NAME test_e2e_method_sugar
     COMMAND bash ${CMAKE_SOURCE_DIR}/tests/test_e2e_method_sugar.sh
             $<TARGET_FILE:lua2wasm>
