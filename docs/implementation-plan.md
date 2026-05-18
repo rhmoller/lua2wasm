@@ -93,7 +93,7 @@ not a justification.
 
 ---
 
-## Milestone 9 — "raw" primitives + table fillers (S)
+## Milestone 9 — "raw" primitives + table fillers (S) — ✅ done
 
 **Goal:** make defensive Lua code stop crashing on missing globals.
 
@@ -118,7 +118,7 @@ verify `rawget` returns `nil`).
 
 ---
 
-## Milestone 10 — `string` byte-level fillers (S)
+## Milestone 10 — `string` byte-level fillers (S) — ✅ done
 
 **Goal:** the half of `string.*` that doesn't need a pattern engine.
 
@@ -140,7 +140,7 @@ verify `rawget` returns `nil`).
 
 ---
 
-## Milestone 11 — `math` fillers + PRNG (S→M)
+## Milestone 11 — `math` fillers + PRNG (S→M) — ✅ done
 
 **Goal:** close the math library except for the corners nobody uses.
 
@@ -167,7 +167,9 @@ seeded `math.random()` reproducible across runs.
 
 ---
 
-## Milestone 12 — `utf8` library (S)
+## Milestone 12 — `utf8` library (S) — ✅ done
+
+> `utf8.codes` accepts the `lax` flag but does not yet honour it (carry-over).
 
 **Goal:** full `utf8.*` module (~150 lines reference).
 
@@ -187,7 +189,7 @@ UTF-8 decode helper that everything else builds on.
 
 ---
 
-## Milestone 13 — finish `string.format` + `io.read` formats (M)
+## Milestone 13 — finish `string.format` + `io.read` formats (M) — ✅ done
 
 **Goal:** stop being a "half-printf"; let programs read more than lines.
 
@@ -210,7 +212,7 @@ for `string.format` parser.
 
 ---
 
-## Milestone 14 — `table.sort` (M)
+## Milestone 14 — `table.sort` (M) — ✅ done
 
 **Goal:** the last "obviously expected" missing `table.*` entry.
 
@@ -225,7 +227,7 @@ for `string.format` parser.
 
 ---
 
-## Milestone 15 — Metamethod completeness (M)
+## Milestone 15 — Metamethod completeness (M) — ✅ done
 
 **Goal:** raise the metatable from "demo" to "usable".
 
@@ -251,7 +253,10 @@ and `__newindex` correctly traps on missing keys but lets `rawset` through.
 
 ---
 
-## Milestone 16 — Numeric-literal completeness (S)
+## Milestone 16 — Numeric-literal completeness (S) — ✅ done
+
+> `\ddd` decimal escapes were already in the lexer; the milestone added hex
+> int/float literals, `\<newline>` continuation, and level-N long brackets.
 
 **Goal:** stop syntax-erroring on `0xff`.
 
@@ -272,7 +277,7 @@ in the middle.
 
 ---
 
-## Milestone 17 — `goto` / `::label::` (M)
+## Milestone 17 — `goto` / `::label::` (M) — ✅ done
 
 **Goal:** close the last common control-flow gap.
 
@@ -290,7 +295,7 @@ and the "jumps into local scope" error case.
 
 ---
 
-## Milestone 18 — Bitwise operators (M)
+## Milestone 18 — Bitwise operators (M) — ✅ done
 
 **Goal:** integers actually behave like Lua 5.5 integers.
 
@@ -307,7 +312,11 @@ and the "jumps into local scope" error case.
 
 ---
 
-## Milestone 19 — `_G`, `xpcall`, `warn`, `error(msg, level)` (M)
+## Milestone 19 — `_G`, `xpcall`, `warn`, `error(msg, level)` (M) — ✅ done
+
+> `error(msg, level)` accepts and validates `level` but does not yet prepend
+> `"file:line: "` — that requires the line-info side band scheduled for
+> milestone 22.
 
 **Goal:** finish the small base-lib leftovers.
 
@@ -331,7 +340,7 @@ info already tracked).
 
 ---
 
-## Milestone 20 — Lua patterns (L)
+## Milestone 20 — Lua patterns (L) — ✅ done
 
 **Goal:** `string.find`, `string.match`, `string.gmatch`, `string.gsub`.
 
@@ -371,7 +380,7 @@ Lua happens to do.
 
 ---
 
-## Milestone 21 — `string.pack` / `string.unpack` / `string.packsize` (L)
+## Milestone 21 — `string.pack` / `string.unpack` / `string.packsize` (L) — ⏳ pending
 
 **Goal:** binary serialization. ~500 lines reference.
 
@@ -386,7 +395,7 @@ other string ops.
 
 ---
 
-## Milestone 22 — Error location prefixing + minimal `debug` (M)
+## Milestone 22 — Error location prefixing + minimal `debug` (M) — ⏳ pending
 
 **Goal:** when `error("oops")` fires, see `"file:line: oops"`.
 
@@ -403,7 +412,7 @@ other string ops.
 
 ---
 
-## Milestone 23 — `<const>` and `<close>` attributes (M)
+## Milestone 23 — `<const>` and `<close>` attributes (M) — ⏳ pending
 
 **Goal:** modern Lua local-attribute syntax.
 
@@ -422,7 +431,7 @@ other string ops.
 
 ---
 
-## Milestone 24 — `os.*` browser-friendly subset + `io.open` (M→L)
+## Milestone 24 — `os.*` browser-friendly subset + `io.open` (M→L) — ⏳ pending
 
 **Goal:** real I/O against a host capability layer.
 
@@ -445,7 +454,7 @@ Out of scope for now: `os.execute`, `os.remove`, `os.rename`, `os.setlocale`,
 
 ---
 
-## Milestone 25 — Static `require` (M)
+## Milestone 25 — Static `require` (M) — ⏳ pending
 
 **Goal:** programs split across multiple files compile into one wasm.
 
@@ -461,7 +470,7 @@ Out of scope for now: `os.execute`, `os.remove`, `os.rename`, `os.setlocale`,
 
 ---
 
-## Milestone 26 — `load` / `loadfile` / `dofile` (L)
+## Milestone 26 — `load` / `loadfile` / `dofile` (L) — ⏳ pending
 
 **Goal:** dynamic code loading.
 
@@ -474,7 +483,7 @@ Defer behind `--with-loader` until 24 and 25 settle.
 
 ---
 
-## Milestone 27 — Coroutines (L, blocked)
+## Milestone 27 — Coroutines (L, blocked) — ⛔ blocked (awaiting WASM stack-switching)
 
 Blocked on the WASM stack-switching proposal shipping in browsers (Safari
 position pending; Chrome flag-gated). When it ships:
@@ -506,15 +515,15 @@ position pending; Chrome flag-gated). When it ships:
 ## Suggested ordering at a glance
 
 ```
-Quick wins:        9 → 10 → 11 → 12 → 16   (≈ 1 week elapsed)
-Polish / sharpen:  13 → 14 → 15 → 19        (≈ 1 week)
-Big language gaps: 17 → 18 → 23             (≈ 1 week)
-Heavy stdlib:      20 → 21                  (≈ 1–2 weeks; ship 20 first)
-Host integration:  22 → 24 → 25 → 26        (≈ 2 weeks)
-Blocked:           27 (coroutines)
+Quick wins:        9 → 10 → 11 → 12 → 16    ✅ done
+Polish / sharpen:  13 → 14 → 15 → 19        ✅ done
+Big language gaps: 17 → 18 → 23             ✅ 17, 18 done · ⏳ 23 pending
+Heavy stdlib:      20 → 21                  ✅ 20 done · ⏳ 21 pending
+Host integration:  22 → 24 → 25 → 26        ⏳ all pending
+Blocked:           27 (coroutines)          ⛔ awaiting stack switching
 ```
 
-After milestone 18 the README's "Not yet" column collapses to roughly:
-`<const>/<close>`, the heavy `string.*` (patterns + pack), `os.*`/file I/O,
-`load`/`require`, and coroutines — and each remaining item has a milestone
-number.
+The remaining "Not yet" surface in the README:
+`<const>/<close>` (23), `string.{pack,unpack,packsize}` (21), error-location
+prefix + `debug.*` (22), `os.*` / `io.open` (24), `require` (25),
+`load`/`loadfile`/`dofile` (26), coroutines (27).
