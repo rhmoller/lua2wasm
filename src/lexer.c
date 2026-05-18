@@ -246,17 +246,34 @@ TokenList lex(const char *source) {
 
         Token t = { .start = L.p, .line = L.line };
 
-        /* numbers (int or float) */
+        /* numbers (int or float, decimal or 0x-hex) */
         if (isdigit((unsigned char)c)) {
             const char *s = L.p;
             int is_float = 0;
-            while (isdigit((unsigned char)*L.p)) L.p++;
-            if (*L.p == '.') { is_float = 1; L.p++; while (isdigit((unsigned char)*L.p)) L.p++; }
-            if (*L.p == 'e' || *L.p == 'E') {
-                is_float = 1;
-                L.p++;
-                if (*L.p == '+' || *L.p == '-') L.p++;
+            /* Hex literal: 0x... or 0X... */
+            if (c == '0' && (L.p[1] == 'x' || L.p[1] == 'X')) {
+                L.p += 2;
+                while (isxdigit((unsigned char)*L.p)) L.p++;
+                if (*L.p == '.') {
+                    is_float = 1;
+                    L.p++;
+                    while (isxdigit((unsigned char)*L.p)) L.p++;
+                }
+                if (*L.p == 'p' || *L.p == 'P') {
+                    is_float = 1;
+                    L.p++;
+                    if (*L.p == '+' || *L.p == '-') L.p++;
+                    while (isdigit((unsigned char)*L.p)) L.p++;
+                }
+            } else {
                 while (isdigit((unsigned char)*L.p)) L.p++;
+                if (*L.p == '.') { is_float = 1; L.p++; while (isdigit((unsigned char)*L.p)) L.p++; }
+                if (*L.p == 'e' || *L.p == 'E') {
+                    is_float = 1;
+                    L.p++;
+                    if (*L.p == '+' || *L.p == '-') L.p++;
+                    while (isdigit((unsigned char)*L.p)) L.p++;
+                }
             }
             t.len = (size_t)(L.p - s);
             char tmp[64];
@@ -264,10 +281,12 @@ TokenList lex(const char *source) {
             memcpy(tmp, s, n); tmp[n] = '\0';
             if (is_float) {
                 t.kind = TOK_FLOAT;
+                /* strtod handles both decimal and C99 hex floats (0x1.8p3). */
                 t.f_val = strtod(tmp, NULL);
             } else {
                 t.kind = TOK_INT;
-                t.i_val = strtoll(tmp, NULL, 10);
+                /* strtoll with base 0 auto-detects 0x prefix. */
+                t.i_val = strtoll(tmp, NULL, 0);
             }
             push_tok(&v, t);
             continue;
