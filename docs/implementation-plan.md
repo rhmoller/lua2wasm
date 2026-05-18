@@ -395,7 +395,7 @@ other string ops.
 
 ---
 
-## Milestone 22 — Error location prefixing + minimal `debug` (M) — ⏳ pending
+## Milestone 22 — Error location prefixing + minimal `debug` (M) — ✅ done
 
 **Goal:** when `error("oops")` fires, see `"file:line: oops"`.
 
@@ -519,7 +519,7 @@ Quick wins:        9 → 10 → 11 → 12 → 16    ✅ done
 Polish / sharpen:  13 → 14 → 15 → 19        ✅ done
 Big language gaps: 17 → 18 → 23             ✅ 17, 18 done · ⏳ 23 pending
 Heavy stdlib:      20 → 21                  ✅ done
-Host integration:  22 → 24 → 25 → 26        ⏳ all pending
+Host integration:  22 → 24 → 25 → 26        ✅ 22 done · ⏳ 24, 25, 26 pending
 Blocked:           27 (coroutines)          ⛔ awaiting stack switching
 ```
 

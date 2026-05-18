@@ -92,6 +92,10 @@ static const struct {
     { "move",   4, "$builtin_table_move",   BLT_LIB_TABLE },
     { "create", 6, "$builtin_table_create", BLT_LIB_TABLE },
     { "sort",   4, "$builtin_table_sort",   BLT_LIB_TABLE },
+    /* debug library (milestone 22) */
+    { "traceback",    9, "$builtin_debug_traceback",    BLT_LIB_DEBUG },
+    { "getmetatable", 12, "$builtin_debug_getmetatable", BLT_LIB_DEBUG },
+    { "setmetatable", 12, "$builtin_debug_setmetatable", BLT_LIB_DEBUG },
 };
 
 #define N (sizeof(BUILTINS)/sizeof(BUILTINS[0]))

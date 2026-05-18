@@ -16,6 +16,11 @@
   ;;               -1    open substring capture (still on the parser stack)
   ;;               -2    position capture (cell [2*i] is the 0-based pos)
   (type $CapArr    (array (mut i32)))
+  ;; Call-frame line stack. Indexed by $call_depth: entry [d] is the
+  ;; source line where the function currently at depth d+1 was called
+  ;; from. error(msg, level) reads [depth - level] to build the
+  ;; "<src>:<line>: " prefix; debug.traceback walks the whole stack.
+  (type $LineArr   (array (mut i32)))
   ;; Growable byte buffer used by string.gsub. Owns a backing $LuaArr
   ;; that doubles on overflow.
   (type $Builder   (struct (field $arr (mut (ref $LuaArr)))
@@ -95,6 +100,13 @@
   (global $g_empty_args   (ref $ArgArr)   (array.new_fixed $ArgArr 0))
   ;; Scratch byte buffer that host_fmt writes into (set up by stdlib_init).
   (global $fmt_buf (mut (ref null $LuaArr)) (ref.null $LuaArr))
+
+  ;; Call-frame line stack. Doubled on overflow by $push_call_frame.
+  ;; $call_depth is the count of active frames; index 0..depth-1 is live.
+  (global $call_lines (mut (ref null $LineArr)) (ref.null $LineArr))
+  (global $call_depth (mut i32) (i32.const 0))
+  ;; Lua-style source name ("main" for main.lua). Set in $stdlib_init.
+  (global $g_src_name (mut (ref null $LuaString)) (ref.null $LuaString))
 
   ;; xoshiro256** state. Initial seed is fixed; user can call
   ;; math.randomseed(x [, y]) to override. Non-zero by construction.
@@ -1096,6 +1108,49 @@
           (then (throw $LuaError (struct.new $LuaString
             (array.new_data $LuaArr $str_data (i32.const 75) (i32.const 18)))))))))
 
+  ;; Frame-stack helpers (milestone 22).
+  ;;
+  ;; $push_call_frame writes $line at index $call_depth and increments
+  ;; depth. Grows the backing array (initial cap 256, doubling) when
+  ;; depth would overflow. The pop counterpart is just a decrement —
+  ;; on the error path it's outer-pcall's responsibility to restore
+  ;; depth to its pre-try value.
+  (func $push_call_frame (param $line i32)
+    (local $lines (ref $LineArr)) (local $cap i32)
+    (local $new_cap i32) (local $new (ref $LineArr))
+    (local.set $lines (ref.as_non_null (global.get $call_lines)))
+    (local.set $cap (array.len (local.get $lines)))
+    (if (i32.ge_s (global.get $call_depth) (local.get $cap))
+      (then
+        (local.set $new_cap (i32.mul (local.get $cap) (i32.const 2)))
+        (local.set $new
+          (array.new $LineArr (i32.const 0) (local.get $new_cap)))
+        (array.copy $LineArr $LineArr
+          (local.get $new) (i32.const 0)
+          (local.get $lines) (i32.const 0) (local.get $cap))
+        (global.set $call_lines (local.get $new))
+        (local.set $lines (local.get $new))))
+    (array.set $LineArr (local.get $lines)
+      (global.get $call_depth) (local.get $line))
+    (global.set $call_depth
+      (i32.add (global.get $call_depth) (i32.const 1))))
+
+  (func $pop_call_frame
+    (if (i32.gt_s (global.get $call_depth) (i32.const 0))
+      (then (global.set $call_depth
+              (i32.sub (global.get $call_depth) (i32.const 1))))))
+
+  ;; Tail calls reuse the caller's WASM frame, so semantically the top
+  ;; entry is *replaced*, not pushed. Codegen emits this immediately
+  ;; before return_call_ref.
+  (func $replace_top_call_frame (param $line i32)
+    (local $idx i32)
+    (local.set $idx (i32.sub (global.get $call_depth) (i32.const 1)))
+    (if (i32.ge_s (local.get $idx) (i32.const 0))
+      (then (array.set $LineArr
+        (ref.as_non_null (global.get $call_lines))
+        (local.get $idx) (local.get $line)))))
+
   ;; --- closure dispatch + multi-value helpers + print builtin ---
   (func $lua_call (param $closure (ref $LuaClosure)) (param $args (ref $ArgArr))
                   (result (ref $ArgArr))
@@ -1108,15 +1163,24 @@
   ;; a Lua-shaped "attempt to call a non-function value" $LuaError if
   ;; the chain bottoms out on a non-callable. A small iteration cap
   ;; keeps a cyclic __call from looping forever.
+  ;;
+  ;; $line is the source line of the call site, pushed onto the frame
+  ;; stack so error() / debug.traceback can report it. Popped on normal
+  ;; return; left elevated on the throw paths so the enclosing pcall
+  ;; can restore $call_depth.
   (func $lua_call_any (param $v anyref) (param $args (ref $ArgArr))
-                      (result (ref $ArgArr))
-    (local $mm anyref) (local $i i32)
+                      (param $line i32) (result (ref $ArgArr))
+    (local $mm anyref) (local $i i32) (local $r (ref $ArgArr))
+    (call $push_call_frame (local.get $line))
     (local.set $i (i32.const 0))
     (loop $resolve
       (if (ref.test (ref $LuaClosure) (local.get $v))
-        (then (return (call $lua_call
-                        (ref.cast (ref $LuaClosure) (local.get $v))
-                        (local.get $args)))))
+        (then
+          (local.set $r (call $lua_call
+                          (ref.cast (ref $LuaClosure) (local.get $v))
+                          (local.get $args)))
+          (call $pop_call_frame)
+          (return (local.get $r))))
       (local.set $mm (call $get_metamethod (local.get $v)
                        (ref.as_non_null (global.get $g_mkey_call))))
       (if (ref.is_null (local.get $mm))
@@ -1220,9 +1284,65 @@
     (call $host_print (local.get $acc))
     (global.get $g_empty_args))
 
+  ;; Build "<src>:<line>: <msg>" as a new $LuaString.
+  (func $prefix_error_msg
+    (param $src (ref $LuaString)) (param $line i32) (param $msg (ref $LuaString))
+    (result (ref $LuaString))
+    (local $src_b (ref $LuaArr)) (local $line_b (ref $LuaArr))
+    (local $msg_b (ref $LuaArr)) (local $out (ref $LuaArr))
+    (local $off i32) (local $total i32)
+    (local.set $src_b (struct.get $LuaString $bytes (local.get $src)))
+    (local.set $line_b (call $int_to_bytes (i64.extend_i32_s (local.get $line))))
+    (local.set $msg_b (struct.get $LuaString $bytes (local.get $msg)))
+    (local.set $total
+      (i32.add (array.len (local.get $src_b))
+      (i32.add (i32.const 1)
+      (i32.add (array.len (local.get $line_b))
+      (i32.add (i32.const 2)
+               (array.len (local.get $msg_b)))))))
+    (local.set $out (array.new $LuaArr (i32.const 0) (local.get $total)))
+    (array.copy $LuaArr $LuaArr (local.get $out) (i32.const 0)
+      (local.get $src_b) (i32.const 0) (array.len (local.get $src_b)))
+    (local.set $off (array.len (local.get $src_b)))
+    (array.set $LuaArr (local.get $out) (local.get $off) (i32.const 58))  ;; ':'
+    (local.set $off (i32.add (local.get $off) (i32.const 1)))
+    (array.copy $LuaArr $LuaArr (local.get $out) (local.get $off)
+      (local.get $line_b) (i32.const 0) (array.len (local.get $line_b)))
+    (local.set $off (i32.add (local.get $off) (array.len (local.get $line_b))))
+    (array.set $LuaArr (local.get $out) (local.get $off) (i32.const 58))  ;; ':'
+    (array.set $LuaArr (local.get $out)
+      (i32.add (local.get $off) (i32.const 1)) (i32.const 32))             ;; ' '
+    (local.set $off (i32.add (local.get $off) (i32.const 2)))
+    (array.copy $LuaArr $LuaArr (local.get $out) (local.get $off)
+      (local.get $msg_b) (i32.const 0) (array.len (local.get $msg_b)))
+    (struct.new $LuaString (local.get $out)))
+
   (func $builtin_error (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
-    (throw $LuaError (call $args_at (local.get $args) (i32.const 0)))
+    (local $msg anyref) (local $level i32) (local $idx i32)
+    (local.set $msg (call $args_at (local.get $args) (i32.const 0)))
+    (local.set $level (i32.const 1))
+    (if (i32.gt_u (array.len (local.get $args)) (i32.const 1))
+      (then (local.set $level (i32.wrap_i64
+              (call $as_int
+                (call $args_at (local.get $args) (i32.const 1)))))))
+    ;; Prepend "<src>:<line>: " when msg is a string AND level > 0 AND
+    ;; the requested frame exists. Same rule as reference Lua.
+    (if (i32.gt_s (local.get $level) (i32.const 0))
+      (then
+        (if (ref.test (ref $LuaString) (local.get $msg))
+          (then
+            (local.set $idx (i32.sub (global.get $call_depth)
+                                     (local.get $level)))
+            (if (i32.ge_s (local.get $idx) (i32.const 0))
+              (then (local.set $msg
+                (call $prefix_error_msg
+                  (ref.as_non_null (global.get $g_src_name))
+                  (array.get $LineArr
+                    (ref.as_non_null (global.get $call_lines))
+                    (local.get $idx))
+                  (ref.cast (ref $LuaString) (local.get $msg))))))))))
+    (throw $LuaError (local.get $msg))
     ;; unreachable, but typechecker needs a tail expression:
     (global.get $g_empty_args))
 
@@ -1234,6 +1354,7 @@
     (local $f_args (ref $ArgArr))
     (local $n_total i32) (local $n_fargs i32) (local $i i32)
     (local $err anyref) (local $results (ref $ArgArr)) (local $r2 (ref $ArgArr))
+    (local $saved_depth i32)
     (local.set $n_total (array.len (local.get $args)))
     (if (i32.eqz (local.get $n_total))
       (then (throw $LuaError (ref.null any))))
@@ -1248,6 +1369,9 @@
           (i32.add (local.get $i) (i32.const 1))))
       (local.set $i (i32.add (local.get $i) (i32.const 1)))
       (br $cp)))
+    ;; Save frame depth so an in-flight throw doesn't leave the stack
+    ;; elevated for callers up the chain.
+    (local.set $saved_depth (global.get $call_depth))
     (block $catch_err (result anyref)
       ;; success path: build (true, results...) and return.
       (local.set $results
@@ -1260,8 +1384,9 @@
       (array.copy $ArgArr $ArgArr (local.get $r2) (i32.const 1)
         (local.get $results) (i32.const 0) (array.len (local.get $results)))
       (return (local.get $r2)))
-    ;; catch path: stack has the error anyref
+    ;; catch path: restore depth and return (false, err).
     (local.set $err)
+    (global.set $call_depth (local.get $saved_depth))
     (array.new_fixed $ArgArr 2 (global.get $g_false) (local.get $err)))
 
   ;; xpcall(f, msgh, ...): like pcall, but on error calls msgh(err) and
@@ -1273,7 +1398,7 @@
     (local $f_args (ref $ArgArr))
     (local $n_total i32) (local $n_fargs i32) (local $i i32)
     (local $err anyref) (local $results (ref $ArgArr)) (local $r2 (ref $ArgArr))
-    (local $handled anyref)
+    (local $handled anyref) (local $saved_depth i32)
     (local.set $n_total (array.len (local.get $args)))
     (if (i32.lt_s (local.get $n_total) (i32.const 2))
       (then (throw $LuaError (ref.null any))))
@@ -1290,6 +1415,7 @@
           (i32.add (local.get $i) (i32.const 2))))
       (local.set $i (i32.add (local.get $i) (i32.const 1)))
       (br $cp)))
+    (local.set $saved_depth (global.get $call_depth))
     (block $catch_err (result anyref)
       (local.set $results
         (try_table (result (ref $ArgArr)) (catch $LuaError $catch_err)
@@ -1301,8 +1427,9 @@
       (array.copy $ArgArr $ArgArr (local.get $r2) (i32.const 1)
         (local.get $results) (i32.const 0) (array.len (local.get $results)))
       (return (local.get $r2)))
-    ;; error path: stack has $err.
+    ;; error path: stack has $err. Restore depth before invoking msgh.
     (local.set $err)
+    (global.set $call_depth (local.get $saved_depth))
     ;; Call msgh(err) — itself wrapped so its throw doesn't escape xpcall.
     (block $msgh_throw (result anyref)
       (local.set $handled (call $args_first
@@ -1312,6 +1439,7 @@
       (return (array.new_fixed $ArgArr 2 (global.get $g_false) (local.get $handled))))
     ;; msgh threw: stack has its own error value.
     (local.set $handled)
+    (global.set $call_depth (local.get $saved_depth))
     (array.new_fixed $ArgArr 2 (global.get $g_false) (local.get $handled)))
 
   ;; warn(...): hand a concatenated string to the host. Accepts (and
@@ -1351,10 +1479,26 @@
   ;; --- additional top-level builtins ---
   (func $builtin_assert (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
+    (local $msg anyref) (local $idx i32)
     (if (call $lua_truthy (call $args_at (local.get $args) (i32.const 0)))
       (then (return (local.get $args))))
-    ;; failed: throw the message (args[1]) or a default
-    (throw $LuaError (call $args_at (local.get $args) (i32.const 1)))
+    ;; failed: prefix string messages with "<src>:<assert-call-line>: "
+    ;; — same shape as error(msg) at level 1 (assert is "error(msg,2)"
+    ;; conceptually, but from our frame stack's POV the assert call
+    ;; site is the topmost frame).
+    (local.set $msg (call $args_at (local.get $args) (i32.const 1)))
+    (if (ref.test (ref $LuaString) (local.get $msg))
+      (then
+        (local.set $idx (i32.sub (global.get $call_depth) (i32.const 1)))
+        (if (i32.ge_s (local.get $idx) (i32.const 0))
+          (then (local.set $msg
+            (call $prefix_error_msg
+              (ref.as_non_null (global.get $g_src_name))
+              (array.get $LineArr
+                (ref.as_non_null (global.get $call_lines))
+                (local.get $idx))
+              (ref.cast (ref $LuaString) (local.get $msg))))))))
+    (throw $LuaError (local.get $msg))
     (global.get $g_empty_args))
 
   ;; rawlen(v): byte length for strings, table-border length for tables.
@@ -1685,6 +1829,104 @@
     (if (i32.eqz (ref.is_null (local.get $guard)))
       (then (return (array.new_fixed $ArgArr 1 (local.get $guard)))))
     (array.new_fixed $ArgArr 1 (ref.as_non_null (local.get $mt))))
+
+  ;; --- debug library (milestone 22) ---
+  ;;
+  ;; Returns a "stack traceback:\n  <src>:<line>:\n  <src>:<line>:..."
+  ;; string. Optional first arg = prefix message, second arg = level
+  ;; (defaults to 1 = caller of traceback). debug.traceback walks the
+  ;; same $call_lines stack error() uses.
+  (func $builtin_debug_traceback (type $LuaFn)
+    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
+    (local $msg anyref) (local $level i32) (local $b (ref $Builder))
+    (local $i i32) (local $line i32) (local $line_b (ref $LuaArr))
+    (local $src_b (ref $LuaArr))
+    (local.set $msg (call $args_at (local.get $args) (i32.const 0)))
+    ;; If msg is present but neither a string nor nil, return it
+    ;; unchanged (per Lua spec).
+    (if (i32.and (i32.eqz (ref.is_null (local.get $msg)))
+                 (i32.eqz (ref.test (ref $LuaString) (local.get $msg))))
+      (then (return (array.new_fixed $ArgArr 1 (local.get $msg)))))
+    (local.set $level (i32.const 1))
+    (if (i32.gt_u (array.len (local.get $args)) (i32.const 1))
+      (then (local.set $level (i32.wrap_i64
+              (call $as_int
+                (call $args_at (local.get $args) (i32.const 1)))))))
+    (local.set $b (call $builder_new))
+    ;; Optional prefix message + newline.
+    (if (ref.test (ref $LuaString) (local.get $msg))
+      (then
+        (local.set $src_b (struct.get $LuaString $bytes
+          (ref.cast (ref $LuaString) (local.get $msg))))
+        (call $builder_append (local.get $b) (local.get $src_b)
+                              (i32.const 0) (array.len (local.get $src_b)))
+        (call $builder_append_byte (local.get $b) (i32.const 10))))
+    ;; "stack traceback:"
+    (call $builder_append_byte (local.get $b) (i32.const 115))     ;; 's'
+    (call $builder_append_byte (local.get $b) (i32.const 116))     ;; 't'
+    (call $builder_append_byte (local.get $b) (i32.const 97))      ;; 'a'
+    (call $builder_append_byte (local.get $b) (i32.const 99))      ;; 'c'
+    (call $builder_append_byte (local.get $b) (i32.const 107))     ;; 'k'
+    (call $builder_append_byte (local.get $b) (i32.const 32))
+    (call $builder_append_byte (local.get $b) (i32.const 116))     ;; 't'
+    (call $builder_append_byte (local.get $b) (i32.const 114))     ;; 'r'
+    (call $builder_append_byte (local.get $b) (i32.const 97))
+    (call $builder_append_byte (local.get $b) (i32.const 99))
+    (call $builder_append_byte (local.get $b) (i32.const 101))     ;; 'e'
+    (call $builder_append_byte (local.get $b) (i32.const 98))      ;; 'b'
+    (call $builder_append_byte (local.get $b) (i32.const 97))
+    (call $builder_append_byte (local.get $b) (i32.const 99))
+    (call $builder_append_byte (local.get $b) (i32.const 107))
+    (call $builder_append_byte (local.get $b) (i32.const 58))      ;; ':'
+    ;; Walk frames from depth-level down to 0.
+    (local.set $src_b (struct.get $LuaString $bytes
+      (ref.as_non_null (global.get $g_src_name))))
+    (local.set $i (i32.sub (global.get $call_depth) (local.get $level)))
+    (block $tb_done (loop $tb_lp
+      (br_if $tb_done (i32.lt_s (local.get $i) (i32.const 0)))
+      (call $builder_append_byte (local.get $b) (i32.const 10))    ;; '\n'
+      (call $builder_append_byte (local.get $b) (i32.const 9))     ;; '\t'
+      (call $builder_append (local.get $b) (local.get $src_b)
+                            (i32.const 0) (array.len (local.get $src_b)))
+      (call $builder_append_byte (local.get $b) (i32.const 58))    ;; ':'
+      (local.set $line (array.get $LineArr
+        (ref.as_non_null (global.get $call_lines)) (local.get $i)))
+      (local.set $line_b (call $int_to_bytes
+        (i64.extend_i32_s (local.get $line))))
+      (call $builder_append (local.get $b) (local.get $line_b)
+                            (i32.const 0) (array.len (local.get $line_b)))
+      (local.set $i (i32.sub (local.get $i) (i32.const 1)))
+      (br $tb_lp)))
+    (array.new_fixed $ArgArr 1 (call $builder_finish (local.get $b))))
+
+  ;; debug.getmetatable(v) — like base but ignores __metatable.
+  ;; Currently only $LuaTable values carry metatables; for others
+  ;; returns nil (no per-type metatable infrastructure yet).
+  (func $builtin_debug_getmetatable (type $LuaFn)
+    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
+    (local $v anyref) (local $mt (ref null $LuaTable))
+    (local.set $v (call $args_at (local.get $args) (i32.const 0)))
+    (if (i32.eqz (ref.test (ref $LuaTable) (local.get $v)))
+      (then (return (array.new_fixed $ArgArr 1 (ref.null any)))))
+    (local.set $mt (struct.get $LuaTable $meta
+      (ref.cast (ref $LuaTable) (local.get $v))))
+    (if (ref.is_null (local.get $mt))
+      (then (return (array.new_fixed $ArgArr 1 (ref.null any)))))
+    (array.new_fixed $ArgArr 1 (ref.as_non_null (local.get $mt))))
+
+  ;; debug.setmetatable(v, t) — like base but ignores __metatable
+  ;; protection. Only applies to tables for now (no per-type meta).
+  (func $builtin_debug_setmetatable (type $LuaFn)
+    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
+    (local $t (ref $LuaTable)) (local $mt anyref)
+    (local.set $t (ref.cast (ref $LuaTable)
+      (call $args_at (local.get $args) (i32.const 0))))
+    (local.set $mt (call $args_at (local.get $args) (i32.const 1)))
+    (if (ref.is_null (local.get $mt))
+      (then (struct.set $LuaTable $meta (local.get $t) (ref.null $LuaTable)))
+      (else (struct.set $LuaTable $meta (local.get $t)
+        (ref.cast (ref $LuaTable) (local.get $mt)))))
+    (array.new_fixed $ArgArr 1 (local.get $t)))
 
   ;; --- math library ---
   (func $builtin_math_floor (type $LuaFn)

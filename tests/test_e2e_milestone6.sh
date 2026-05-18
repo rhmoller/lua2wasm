@@ -12,15 +12,15 @@ wasm-as --all-features -o "$WASM" "$WAT"
 EXPECTED="true
 5.0
 false
-div by zero
+milestone6:4: div by zero
 true
 42
 false
-re-raised: inner
+milestone6:28: re-raised: milestone6:26: inner
 true
 1
 false
-two!
+milestone6:38: two!
 true
 3"
 

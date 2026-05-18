@@ -42,7 +42,8 @@ char *lua2wasm_compile(const char *source) {
 
     wat_init(&w); have_wat = 1;
     char errbuf[256] = {0};
-    if (!codegen_module(&pr, &w, errbuf, sizeof(errbuf))) {
+    /* Playground compiles the inline buffer with no filename; use "input". */
+    if (!codegen_module(&pr, "input", &w, errbuf, sizeof(errbuf))) {
         result = make_err("ERROR(codegen): ", errbuf);
         goto cleanup;
     }

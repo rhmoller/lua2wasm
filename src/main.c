@@ -58,10 +58,22 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    /* Derive Lua-style source name: basename of input, sans .lua suffix.
+     * Used by error() for the "<src>:<line>: " prefix and by
+     * debug.traceback. */
+    const char *base = strrchr(in, '/');
+    base = base ? base + 1 : in;
+    char src_name[128];
+    snprintf(src_name, sizeof(src_name), "%s", base);
+    size_t sn_len = strlen(src_name);
+    if (sn_len >= 4 && strcmp(src_name + sn_len - 4, ".lua") == 0) {
+        src_name[sn_len - 4] = '\0';
+    }
+
     WatBuilder w;
     wat_init(&w);
     char err[256] = {0};
-    if (!codegen_module(&pr, &w, err, sizeof(err))) {
+    if (!codegen_module(&pr, src_name, &w, err, sizeof(err))) {
         fprintf(stderr, "%s\n", err);
         return 1;
     }

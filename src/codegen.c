@@ -559,12 +559,16 @@ static void emit_call_array(CG *c, const Expr *e, int depth) {
             emit_args_array(c, e->as.method_call.args, mna, depth + 2);
         }
         emit_indent(c, depth + 1); wat_append(c->w, ")\n");
+        emit_indent(c, depth + 1);
+        wat_appendf(c->w, "(i32.const %d)\n", e->line);
         emit_indent(c, depth); wat_append(c->w, ")\n");
         return;
     }
     emit_indent(c, depth); wat_append(c->w, "(call $lua_call_any\n");
     emit_expr(c, e->as.call.callee, depth + 1);
     emit_args_array(c, e->as.call.args, e->as.call.nargs, depth + 1);
+    emit_indent(c, depth + 1);
+    wat_appendf(c->w, "(i32.const %d)\n", e->line);
     emit_indent(c, depth); wat_append(c->w, ")\n");
 }
 
@@ -589,10 +593,14 @@ static void emit_tail_call(CG *c, const Expr *e, int depth) {
     emit_indent(c, depth); wat_append(c->w, "(local.set $tmp_args\n");
     emit_args_array(c, e->as.call.args, e->as.call.nargs, depth + 1);
     emit_indent(c, depth); wat_append(c->w, ")\n");
-    /* Fast path: real closure -> return_call_ref. */
+    /* Fast path: real closure -> return_call_ref. Update the top frame
+     * line so error()/traceback see this site instead of the (now-defunct)
+     * caller's. */
     emit_indent(c, depth);
     wat_append(c->w, "(if (ref.test (ref $LuaClosure) (local.get $tmp_any))\n");
     emit_indent(c, depth + 1); wat_append(c->w, "(then\n");
+    emit_indent(c, depth + 2);
+    wat_appendf(c->w, "(call $replace_top_call_frame (i32.const %d))\n", e->line);
     emit_indent(c, depth + 2);
     wat_append(c->w, "(local.set $tmp_clo (ref.cast (ref $LuaClosure) (local.get $tmp_any)))\n");
     emit_indent(c, depth + 2); wat_append(c->w, "(return_call_ref $LuaFn\n");
@@ -604,9 +612,10 @@ static void emit_tail_call(CG *c, const Expr *e, int depth) {
     wat_append(c->w, "(struct.get $LuaClosure $code (ref.as_non_null (local.get $tmp_clo))))))\n");
     /* Slow path: __call walk / typed error. */
     emit_indent(c, depth);
-    wat_append(c->w,
+    wat_appendf(c->w,
         "(return (call $lua_call_any (local.get $tmp_any) "
-        "(ref.as_non_null (local.get $tmp_args))))\n");
+        "(ref.as_non_null (local.get $tmp_args)) (i32.const %d)))\n",
+        e->line);
 }
 
 /* ----- function expression: build a closure -----
@@ -1035,6 +1044,8 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
             emit_indent(c, depth + 4);
             wat_append(c->w,
                 "(array.new_fixed $ArgArr 2 (local.get $for_state) (local.get $for_k))\n");
+            emit_indent(c, depth + 4);
+            wat_appendf(c->w, "(i32.const %d)\n", s->line);
             emit_indent(c, depth + 3); wat_append(c->w, ")\n");
             emit_indent(c, depth + 2); wat_append(c->w, ")\n");
             /* terminate if results[0] is nil */
@@ -1329,8 +1340,8 @@ static void emit_user_function(CG *c, const LuaFunc *fn) {
     c->cur_n_locals = prev_n_locals;
 }
 
-int codegen_module(const ParseResult *pr, WatBuilder *out,
-                   char *err, size_t errlen) {
+int codegen_module(const ParseResult *pr, const char *src_name,
+                   WatBuilder *out, char *err, size_t errlen) {
     CG c = { .w = out, .pr = pr, .ok = 1, .in_main = 1 };
     strpool_add(&c.strs, LITERAL_PREFIX, LITERAL_PREFIX_LEN);
 
@@ -1418,7 +1429,22 @@ int codegen_module(const ParseResult *pr, WatBuilder *out,
         "    (global.set $g_empty_str\n"
         "      (struct.new $LuaString (array.new $LuaArr (i32.const 0) (i32.const 0))))\n"
         "    (global.set $fmt_buf\n"
-        "      (array.new $LuaArr (i32.const 0) (i32.const 1024)))\n");
+        "      (array.new $LuaArr (i32.const 0) (i32.const 1024)))\n"
+        "    (global.set $call_lines\n"
+        "      (array.new $LineArr (i32.const 0) (i32.const 256)))\n");
+    /* Source name used by error() and debug.traceback. */
+    if (src_name) {
+        StrRef sn = strpool_add(&c.strs, src_name, strlen(src_name));
+        wat_appendf(out,
+            "    (global.set $g_src_name\n"
+            "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
+            "        (i32.const %zu) (i32.const %zu))))\n",
+            sn.offset, sn.len);
+    } else {
+        wat_append(out,
+            "    (global.set $g_src_name\n"
+            "      (struct.new $LuaString (array.new $LuaArr (i32.const 0) (i32.const 0))))\n");
+    }
     /* Create the global-environment table $g_globals. Every Lua global
      * (user-declared, library, builtin) is installed as an entry below;
      * codegen emits $tab_get / $tab_set against this table for every
@@ -1476,6 +1502,7 @@ int codegen_module(const ParseResult *pr, WatBuilder *out,
         else if (glen == 2 && memcmp(gname, "io",     2) == 0) cls = BLT_LIB_IO;
         else if (glen == 5 && memcmp(gname, "table",  5) == 0) cls = BLT_LIB_TABLE;
         else if (glen == 4 && memcmp(gname, "utf8",   4) == 0) cls = BLT_LIB_UTF8;
+        else if (glen == 5 && memcmp(gname, "debug",  5) == 0) cls = BLT_LIB_DEBUG;
         else continue;
         wat_append(out, "    (local.set $tab (call $tab_new))\n");
         for (int bi = 0; bi < nb; bi++) {

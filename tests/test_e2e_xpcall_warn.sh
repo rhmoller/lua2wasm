@@ -8,15 +8,15 @@ WASM="$BUILD_DIR/xpcall_warn.wasm"
 "$BIN" "$FIXTURE" -o "$WAT"
 wasm-as --all-features -o "$WASM" "$WAT"
 
-EXPECTED=$'false\thandled: boom
+EXPECTED=$'false\thandled: xpcall_warn:6: boom
 true\t7
 true\t1\t2\t3
-false\tfrom handler
+false\txpcall_warn:19: from handler
 1
-false\th1:x
-false\tno level
+false\th1:xpcall_warn:26: x
+false\txpcall_warn:31: no level
 false\tlevel 0
-false\tlevel 2
+false\txpcall_warn:33: level 2
 Lua warning: hello
 Lua warning: abc
 Lua warning: after
