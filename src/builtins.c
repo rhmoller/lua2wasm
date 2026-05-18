@@ -22,6 +22,7 @@ static const struct {
     { "assert",       6,  "$builtin_assert",       BLT_TOPLEVEL },
     { "select",       6,  "$builtin_select",       BLT_TOPLEVEL },
     { "rawequal",     8,  "$builtin_rawequal",     BLT_TOPLEVEL },
+    { "rawlen",       6,  "$builtin_rawlen",       BLT_TOPLEVEL },
     /* iterators for ipairs/pairs (not user-visible by name) */
     { "_ipairs_iter", 12, "$builtin_ipairs_iter", BLT_TOPLEVEL },
     /* math library (installed into the `math` table) */

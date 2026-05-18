@@ -844,6 +844,25 @@
     (throw $LuaError (call $args_at (local.get $args) (i32.const 1)))
     (global.get $g_empty_args))
 
+  ;; rawlen(v): byte length for strings, table-border length for tables.
+  ;; Errors otherwise. Bypasses __len (we don't honour __len yet, but the
+  ;; contract is: never consult it).
+  (func $builtin_rawlen (type $LuaFn)
+    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
+    (local $v anyref)
+    (local.set $v (call $args_at (local.get $args) (i32.const 0)))
+    (if (ref.test (ref $LuaTable) (local.get $v))
+      (then (return (array.new_fixed $ArgArr 1
+              (call $make_int (i64.extend_i32_s
+                (call $tab_len (ref.cast (ref $LuaTable) (local.get $v))))))))
+      (else (if (ref.test (ref $LuaString) (local.get $v))
+        (then (return (array.new_fixed $ArgArr 1
+                (call $make_int (i64.extend_i32_u
+                  (array.len (struct.get $LuaString $bytes
+                    (ref.cast (ref $LuaString) (local.get $v))))))))))))
+    (throw $LuaError (ref.null any))
+    (global.get $g_empty_args))
+
   ;; rawequal(a, b): equality without consulting __eq.
   (func $builtin_rawequal (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
