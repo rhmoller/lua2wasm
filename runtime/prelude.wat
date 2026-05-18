@@ -4358,6 +4358,49 @@
                      (i64.extend_i32_u
                        (i32.mul (local.get $n) (i32.const 8))))))))
 
+  ;; 1 iff $val fits in $n bytes when interpreted as signed two's
+  ;; complement, i.e. val ∈ [-(2^(8n-1)), 2^(8n-1)-1]. For n=8 always
+  ;; returns 1. Implemented as (val << (64-8n)) >> (64-8n) == val.
+  (func $pack_fits_signed (param $val i64) (param $n i32) (result i32)
+    (local $shift i64)
+    (if (result i32) (i32.ge_s (local.get $n) (i32.const 8))
+      (then (i32.const 1))
+      (else
+        (local.set $shift
+          (i64.extend_i32_u
+            (i32.mul (i32.sub (i32.const 8) (local.get $n))
+                     (i32.const 8))))
+        (i64.eq (local.get $val)
+                (i64.shr_s (i64.shl (local.get $val) (local.get $shift))
+                           (local.get $shift))))))
+
+  ;; Sign-extend the low (8n) bits of $val to a full i64. For n=8 this
+  ;; is a no-op.
+  (func $pack_signext (param $val i64) (param $n i32) (result i64)
+    (local $shift i64)
+    (if (result i64) (i32.ge_s (local.get $n) (i32.const 8))
+      (then (local.get $val))
+      (else
+        (local.set $shift
+          (i64.extend_i32_u
+            (i32.mul (i32.sub (i32.const 8) (local.get $n))
+                     (i32.const 8))))
+        (i64.shr_s (i64.shl (local.get $val) (local.get $shift))
+                   (local.get $shift)))))
+
+  ;; 1 iff $c is one of the signed integer option letters
+  ;; (b, h, i, j, l). All other ints (B H I J L T) are unsigned;
+  ;; configurations and non-int options are filtered by the walker
+  ;; before we ask this.
+  (func $pack_opt_is_signed (param $c i32) (result i32)
+    (i32.or
+      (i32.or (i32.eq (local.get $c) (i32.const 98))         ;; 'b'
+              (i32.eq (local.get $c) (i32.const 104)))       ;; 'h'
+      (i32.or
+        (i32.or (i32.eq (local.get $c) (i32.const 105))      ;; 'i'
+                (i32.eq (local.get $c) (i32.const 106)))     ;; 'j'
+        (i32.eq (local.get $c) (i32.const 108)))))           ;; 'l'
+
   ;; string.packsize(fmt) — returns the byte length that string.pack
   ;; with the same format would produce. Raises if the format contains
   ;; a variable-length option ('s' or 'z'), or any of the per-option
@@ -4529,16 +4572,7 @@
                   (i32.or (i32.eq (local.get $c) (i32.const 100))   ;; 'd'
                           (i32.eq (local.get $c) (i32.const 110)))) ;; 'n'
         (then (throw $LuaError (ref.null any))))
-      ;; Signed ints — step 3 fills these in.
-      (if (i32.or
-            (i32.or (i32.eq (local.get $c) (i32.const 98))       ;; 'b'
-                    (i32.eq (local.get $c) (i32.const 104)))     ;; 'h'
-            (i32.or
-              (i32.or (i32.eq (local.get $c) (i32.const 105))    ;; 'i'
-                      (i32.eq (local.get $c) (i32.const 106)))   ;; 'j'
-              (i32.eq (local.get $c) (i32.const 108))))          ;; 'l'
-        (then (throw $LuaError (ref.null any))))
-      ;; Otherwise: unsigned int option.
+      ;; Integer option (signed or unsigned).
       (call $pack_opt_size (local.get $c) (local.get $bytes)
                            (local.get $ppos))
       (local.set $newpp) (local.set $sz)
@@ -4555,12 +4589,17 @@
         (call $builder_append_byte (local.get $b) (i32.const 0))
         (local.set $pad (i32.sub (local.get $pad) (i32.const 1)))
         (br $pad_lp)))
-      ;; Fetch arg and validate fit.
+      ;; Fetch arg and validate fit (signed vs unsigned per letter).
       (local.set $val (call $as_int (call $args_at (local.get $args)
                                                     (local.get $arg_idx))))
       (local.set $arg_idx (i32.add (local.get $arg_idx) (i32.const 1)))
-      (if (i32.eqz (call $pack_fits_unsigned (local.get $val) (local.get $sz)))
-        (then (throw $LuaError (ref.null any))))
+      (if (call $pack_opt_is_signed (local.get $c))
+        (then
+          (if (i32.eqz (call $pack_fits_signed (local.get $val) (local.get $sz)))
+            (then (throw $LuaError (ref.null any)))))
+        (else
+          (if (i32.eqz (call $pack_fits_unsigned (local.get $val) (local.get $sz)))
+            (then (throw $LuaError (ref.null any))))))
       ;; Write into the builder, then advance its $len.
       (call $builder_reserve (local.get $b) (local.get $sz))
       (local.set $bbuf (struct.get $Builder $arr (local.get $b)))
@@ -4659,15 +4698,7 @@
                   (i32.or (i32.eq (local.get $c) (i32.const 100))
                           (i32.eq (local.get $c) (i32.const 110))))
         (then (throw $LuaError (ref.null any))))
-      (if (i32.or
-            (i32.or (i32.eq (local.get $c) (i32.const 98))
-                    (i32.eq (local.get $c) (i32.const 104)))
-            (i32.or
-              (i32.or (i32.eq (local.get $c) (i32.const 105))
-                      (i32.eq (local.get $c) (i32.const 106)))
-              (i32.eq (local.get $c) (i32.const 108))))
-        (then (throw $LuaError (ref.null any))))
-      ;; Unsigned int read.
+      ;; Integer read (signed or unsigned per letter).
       (call $pack_opt_size (local.get $c) (local.get $bytes)
                            (local.get $ppos))
       (local.set $newpp) (local.set $sz)
@@ -4681,6 +4712,8 @@
       (local.set $val (call $pack_read_int (local.get $subj)
                             (local.get $offset) (local.get $sz)
                             (local.get $endian_le)))
+      (if (call $pack_opt_is_signed (local.get $c))
+        (then (local.set $val (call $pack_signext (local.get $val) (local.get $sz)))))
       (local.set $offset (i32.add (local.get $offset) (local.get $sz)))
       (array.set $ArgArr (local.get $out) (local.get $out_idx)
         (call $make_int (local.get $val)))
