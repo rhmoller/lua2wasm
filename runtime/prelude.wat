@@ -3282,16 +3282,47 @@
       (local.get $sub) (local.get $start) (local.get $len))
     (struct.new $LuaString (local.get $bytes)))
 
+  ;; Plain byte-for-byte search: returns the 0-based end-position of
+  ;; the first occurrence of $needle starting at $start, or -1.
+  (func $plain_find
+    (param $hay (ref $LuaArr)) (param $start i32)
+    (param $needle (ref $LuaArr)) (result i32)
+    (local $n_hay i32) (local $n_need i32) (local $sp i32) (local $k i32)
+    (local.set $n_hay (array.len (local.get $hay)))
+    (local.set $n_need (array.len (local.get $needle)))
+    (if (i32.eqz (local.get $n_need))
+      (then (return (local.get $start))))
+    (local.set $sp (local.get $start))
+    (block $done (loop $outer
+      (br_if $done (i32.gt_s (i32.add (local.get $sp) (local.get $n_need))
+                              (local.get $n_hay)))
+      (local.set $k (i32.const 0))
+      (block $no_match (loop $inner
+        (br_if $no_match (i32.ge_s (local.get $k) (local.get $n_need)))
+        (br_if $no_match (i32.ne
+          (array.get_u $LuaArr (local.get $hay)
+            (i32.add (local.get $sp) (local.get $k)))
+          (array.get_u $LuaArr (local.get $needle) (local.get $k))))
+        (local.set $k (i32.add (local.get $k) (i32.const 1)))
+        (br $inner)))
+      (if (i32.eq (local.get $k) (local.get $n_need))
+        (then (return (i32.add (local.get $sp) (local.get $n_need)))))
+      (local.set $sp (i32.add (local.get $sp) (i32.const 1)))
+      (br $outer)))
+    (i32.const -1))
+
   ;; string.find(s, pat [, init [, plain]]).
   ;; Returns (start, end, captures…) on success — 1-based positions of
   ;; the first and last matched bytes (or end < start for an empty
-  ;; match). Returns nil on no match. plain mode is step 9.
+  ;; match). Returns nil on no match. With $plain truthy, $pat is
+  ;; treated as a literal byte string (no pattern interpretation).
   (func $builtin_string_find (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
     (local $sub (ref $LuaArr)) (local $pat (ref $LuaArr))
     (local $n_sub i32) (local $n_pat i32) (local $nargs i32)
     (local $init i32) (local $anchored i32) (local $start_ppos i32)
     (local $sp i32) (local $end i32) (local $ncaps i32)
+    (local $plain i32)
     (local $caps (ref $CapArr)) (local $out (ref $ArgArr)) (local $i i32)
     (local.set $sub (struct.get $LuaString $bytes
       (ref.cast (ref $LuaString) (call $args_at (local.get $args) (i32.const 0)))))
@@ -3304,6 +3335,9 @@
     (if (i32.gt_u (local.get $nargs) (i32.const 2))
       (then (local.set $init (i32.wrap_i64
               (call $as_int (call $args_at (local.get $args) (i32.const 2)))))))
+    (if (i32.gt_u (local.get $nargs) (i32.const 3))
+      (then (local.set $plain (call $lua_truthy
+              (call $args_at (local.get $args) (i32.const 3))))))
     (if (i32.lt_s (local.get $init) (i32.const 0))
       (then (local.set $init (i32.add (local.get $n_sub)
                                        (i32.add (local.get $init) (i32.const 1))))))
@@ -3311,6 +3345,18 @@
       (then (local.set $init (i32.const 1))))
     (if (i32.gt_s (local.get $init) (i32.add (local.get $n_sub) (i32.const 1)))
       (then (return (array.new_fixed $ArgArr 1 (ref.null any)))))
+    ;; Plain mode: literal substring search, no captures.
+    (if (local.get $plain)
+      (then
+        (local.set $end (call $plain_find
+          (local.get $sub) (i32.sub (local.get $init) (i32.const 1))
+          (local.get $pat)))
+        (if (i32.lt_s (local.get $end) (i32.const 0))
+          (then (return (array.new_fixed $ArgArr 1 (ref.null any)))))
+        (return (array.new_fixed $ArgArr 2
+          (call $make_int (i64.extend_i32_s
+            (i32.add (i32.sub (local.get $end) (local.get $n_pat)) (i32.const 1))))
+          (call $make_int (i64.extend_i32_s (local.get $end)))))))
     (local.set $start_ppos (i32.const 0))
     (if (i32.and (i32.gt_s (local.get $n_pat) (i32.const 0))
                  (i32.eq (array.get_u $LuaArr (local.get $pat) (i32.const 0))
