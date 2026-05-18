@@ -863,6 +863,19 @@
     (throw $LuaError (ref.null any))
     (global.get $g_empty_args))
 
+  ;; rawget(t, k): table read without consulting __index.
+  ;; First arg must be a table; second is the key. Returns nil on miss.
+  (func $builtin_rawget (type $LuaFn)
+    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
+    (local $t anyref)
+    (local.set $t (call $args_at (local.get $args) (i32.const 0)))
+    (if (i32.eqz (ref.test (ref $LuaTable) (local.get $t)))
+      (then (throw $LuaError (ref.null any))))
+    (array.new_fixed $ArgArr 1
+      (call $tab_get_raw
+        (ref.cast (ref $LuaTable) (local.get $t))
+        (call $args_at (local.get $args) (i32.const 1)))))
+
   ;; rawequal(a, b): equality without consulting __eq.
   (func $builtin_rawequal (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
