@@ -46,6 +46,20 @@ lines of glue.
 When the *third* function in a milestone wants the same boilerplate,
 extract the helper before the third is written.
 
+### Design doc before high-blast-radius work
+
+Milestones 19 (`_G` reification) and 20 (patterns) both started with a
+short `docs/design/<n>-*.md`. Both paid back the 30 min – 3 h cost in
+avoided mid-PR rework: lockable invariants got named upfront, the risk
+register surfaced the gotcha that would otherwise have bitten in
+implementation. See the retros below for specifics.
+
+Trigger to write one: the milestone either (a) touches a load-bearing
+invariant ("globals live in per-name wasm slots"), or (b) introduces a
+new internal contract that >3 prelude functions will share (capture
+state shape, pattern bytecode). For purely additive milestones (a new
+builtin, a new operator) the preflight checklist is enough.
+
 ### WASM-levers table from the implementation plan
 
 Actually consulted. `array.copy` for string building; `i31ref` for
@@ -79,26 +93,21 @@ prove it was set.
 
 ### Two embeddings of the same host imports
 
-The Node runner (`runtime/host.mjs`) and the in-browser playground
-(`runtime/playground.html`) each had their own copy of the host
-imports block. Every time a milestone added a new import — `math2`
-for `atan2`/`pow`, `parse_num` for `tonumber`, `fmt_spec` for the
-new `string.format`, mode-aware `read`, `read_num` — I only updated
-the Node side. The playground silently broke (and stayed broken
-until someone tried it). Symptom: `WebAssembly.instantiate(): Import
-"host" "math2": function import requires a callable`.
+The Node runner (`runtime/host.mjs`) and the playground
+(`runtime/playground.html`) used to maintain parallel host-import
+blocks. Every new import landed on the Node side only; the playground
+silently broke until someone tried it (symptom:
+`WebAssembly.instantiate(): Import "host" "math2": function import
+requires a callable`).
 
-**Fix that landed:** extracted pure-JS helpers into
-`runtime/host-bindings.mjs` as a `makeHelpers({ getInstance, formatFloat })`
-factory. Both runners import from it. Each contributes its own
-print/write/read wiring (sync stdin vs JSPI line prompt) and shares
-the rest.
+**Now:** pure-JS helpers live in `runtime/host-bindings.mjs`
+(`makeHelpers({ getInstance, formatFloat })`); both runners import
+from it and each contributes only its own print/write/read wiring
+(sync stdin vs JSPI line prompt).
 
-**Mitigation going forward:** any new `host.*` import goes into the
-factory. If a milestone adds a new import, audit BOTH host wrappers
-in the same commit. Add a follow-up smoke test of the playground
-periodically — the Node suite's clean pass doesn't tell you anything
-about the browser binding.
+**Mitigation:** any new `host.*` import goes into the factory. The
+Node test suite's clean pass tells you nothing about the playground
+— smoke-test it manually after milestones that add host imports.
 
 ### Global-name collisions across builtin classes
 
@@ -108,6 +117,31 @@ when adding `math.type`; fixed by switching to the unique WAT func
 name. Future milestones must watch this for: `pairs`, `next`, `type`,
 `pcall`, `assert`, `select`, `error`, `tostring`, `tonumber` — any
 top-level that a library might want to mirror.
+
+### `i32.and` is not short-circuiting
+
+Bit twice in milestone 20 (`$match_set` range guard, `?`-quantifier
+sub-read). `(i32.and A B)` evaluates *both* operands unconditionally,
+so if `B` does e.g. `(array.get_u $LuaStringBytes …)` with an index
+that's only valid when `A` is true, you get an OOB trap, not a `false`.
+
+```wat
+;; BAD: array.get_u runs even when spos >= len
+(i32.and
+  (i32.lt_u (local.get $spos) (local.get $len))
+  (i32.eq (array.get_u $bytes (local.get $buf) (local.get $spos))
+          (i32.const 0x2D)))
+
+;; GOOD: gate with if/then/else (or select with a safe default)
+(if (result i32)
+  (i32.lt_u (local.get $spos) (local.get $len))
+  (then (i32.eq (array.get_u $bytes (local.get $buf) (local.get $spos))
+                (i32.const 0x2D)))
+  (else (i32.const 0)))
+```
+
+**Look-here-first instinct:** when a prelude helper traps on a boundary
+input but the logic *reads* correct, suspect this before reading deeper.
 
 ### Cascade fixes when fixing a fundamental
 
@@ -195,6 +229,13 @@ decimal transition). Hit twice (`bisect` sample, `1.2e+4` vs
 substring", treat that as a signal that the formatter — not the
 computation — is the variable.
 
+**Mitigation:** `runtime/format.mjs` is the canonical float
+formatter. Both `runtime/host.mjs` and `runtime/playground.html`
+import `formatFloat` / `formatScalar` from it — no duplicates. Never
+reach for `Number.prototype.toString` / `toPrecision` directly in
+WAT-adjacent JS; extend `format.mjs` instead so both runners stay
+in lockstep.
+
 ---
 
 ## Per-milestone preflight (10 minutes, before the first commit)
@@ -229,6 +270,8 @@ Before opening the prelude for a new milestone, jot down:
    keep reading the manual.
 
 ---
+
+## Design-doc retros
 
 ### When the design doc actually paid off (milestone 19, `_G`)
 
@@ -312,11 +355,8 @@ for:
   lines. Format directives, alignment, endianness, length-prefixed
   strings. Similar risk profile.
 
-- **Milestone 19 — `_G`, xpcall, error-with-level, warn.**
-  Reifying globals as a real table has large blast radius — every
-  global read/write becomes a table access. The design must answer:
-  do compile-time-known globals stay in fast-path wasm globals while
-  `_G.foo` is the runtime path? How are they kept in sync?
+- ~~**Milestone 19 — `_G`, xpcall, error-with-level, warn.**~~ Shipped.
+  The design doc held up; retro above.
 
 - **Milestone 27 — coroutines.** Blocked anyway. When unblocked: state
   machine, scheduling, `__close` interaction, JSPI relationship.
