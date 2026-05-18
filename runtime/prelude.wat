@@ -4191,6 +4191,202 @@
       (br $main)))
     (array.new_fixed $ArgArr 1 (call $lua_tostring (local.get $acc))))
 
+  ;; --- string.pack / string.unpack / string.packsize helpers ---
+
+  ;; 1 iff $n is a positive power of 2.
+  (func $pack_is_pow2 (param $n i32) (result i32)
+    (i32.and
+      (i32.gt_s (local.get $n) (i32.const 0))
+      (i32.eqz (i32.and (local.get $n) (i32.sub (local.get $n) (i32.const 1))))))
+
+  ;; Parse an optional decimal [N] at $bytes[$ppos]. If at least one
+  ;; digit is consumed returns that value; otherwise returns $default.
+  ;; Returns (value, new_ppos). No range check — caller decides.
+  (func $pack_n_suffix
+    (param $bytes (ref $LuaArr)) (param $ppos i32) (param $default i32)
+    (result i32 i32)
+    (local $len i32) (local $c i32) (local $n i32) (local $any i32)
+    (local.set $len (array.len (local.get $bytes)))
+    (block $done
+      (loop $lp
+        (br_if $done (i32.ge_u (local.get $ppos) (local.get $len)))
+        (local.set $c (array.get_u $LuaArr (local.get $bytes) (local.get $ppos)))
+        (br_if $done (i32.lt_u (local.get $c) (i32.const 48)))   ;; '0'
+        (br_if $done (i32.gt_u (local.get $c) (i32.const 57)))   ;; '9'
+        (local.set $n
+          (i32.add (i32.mul (local.get $n) (i32.const 10))
+                   (i32.sub (local.get $c) (i32.const 48))))
+        (local.set $any (i32.const 1))
+        (local.set $ppos (i32.add (local.get $ppos) (i32.const 1)))
+        (br $lp)))
+    (if (i32.eqz (local.get $any))
+      (then (local.set $n (local.get $default))))
+    (local.get $n) (local.get $ppos))
+
+  ;; Compute the byte size of a fixed-size value option letter (b B h H
+  ;; i[N] I[N] l L j J T f d n c[N]). Advances ppos past any [N]
+  ;; suffix. Returns (size, new_ppos). Raises on:
+  ;;   - unknown letter
+  ;;   - i[N] / I[N] with N outside [1, 16]
+  ;;   - c without [N], or c0
+  ;; Caller handles configuration options (< > = ! x X space) and the
+  ;; variable-length string options (s z) before invoking this.
+  (func $pack_opt_size
+    (param $opt i32) (param $bytes (ref $LuaArr)) (param $ppos i32)
+    (result i32 i32)
+    (local $n i32) (local $newpp i32)
+    ;; Fixed-size letters first.
+    (if (i32.or (i32.eq (local.get $opt) (i32.const 98))         ;; 'b'
+                (i32.eq (local.get $opt) (i32.const 66)))        ;; 'B'
+      (then (return (i32.const 1) (local.get $ppos))))
+    (if (i32.or (i32.eq (local.get $opt) (i32.const 104))        ;; 'h'
+                (i32.eq (local.get $opt) (i32.const 72)))        ;; 'H'
+      (then (return (i32.const 2) (local.get $ppos))))
+    (if (i32.or (i32.eq (local.get $opt) (i32.const 108))        ;; 'l'
+                (i32.eq (local.get $opt) (i32.const 76)))        ;; 'L'
+      (then (return (i32.const 8) (local.get $ppos))))
+    (if (i32.or (i32.eq (local.get $opt) (i32.const 106))        ;; 'j'
+                (i32.eq (local.get $opt) (i32.const 74)))        ;; 'J'
+      (then (return (i32.const 8) (local.get $ppos))))
+    (if (i32.eq (local.get $opt) (i32.const 84))                 ;; 'T'
+      (then (return (i32.const 8) (local.get $ppos))))
+    (if (i32.eq (local.get $opt) (i32.const 102))                ;; 'f'
+      (then (return (i32.const 4) (local.get $ppos))))
+    (if (i32.or (i32.eq (local.get $opt) (i32.const 100))        ;; 'd'
+                (i32.eq (local.get $opt) (i32.const 110)))       ;; 'n'
+      (then (return (i32.const 8) (local.get $ppos))))
+    ;; i / I: optional [N], default 4, range 1..16.
+    (if (i32.or (i32.eq (local.get $opt) (i32.const 105))        ;; 'i'
+                (i32.eq (local.get $opt) (i32.const 73)))        ;; 'I'
+      (then
+        (call $pack_n_suffix (local.get $bytes) (local.get $ppos)
+                             (i32.const 4))
+        (local.set $newpp) (local.set $n)
+        (if (i32.lt_s (local.get $n) (i32.const 1))
+          (then (throw $LuaError (ref.null any))))
+        (if (i32.gt_s (local.get $n) (i32.const 16))
+          (then (throw $LuaError (ref.null any))))
+        (return (local.get $n) (local.get $newpp))))
+    ;; c: required [N] >= 0. (c0 is allowed and means "zero bytes".)
+    (if (i32.eq (local.get $opt) (i32.const 99))                 ;; 'c'
+      (then
+        (call $pack_n_suffix (local.get $bytes) (local.get $ppos)
+                             (i32.const -1))
+        (local.set $newpp) (local.set $n)
+        (if (i32.lt_s (local.get $n) (i32.const 0))
+          (then (throw $LuaError (ref.null any))))
+        (return (local.get $n) (local.get $newpp))))
+    ;; Unknown letter.
+    (throw $LuaError (ref.null any)))
+
+  ;; Add alignment padding so the next $sz-byte write lands at an
+  ;; offset that's a multiple of min($sz, $max_align). Raises if that
+  ;; stride is not a positive power of 2.
+  (func $pack_align
+    (param $offset i32) (param $sz i32) (param $max_align i32)
+    (result i32)
+    (local $stride i32) (local $rem i32)
+    (local.set $stride (local.get $sz))
+    (if (i32.gt_s (local.get $stride) (local.get $max_align))
+      (then (local.set $stride (local.get $max_align))))
+    (if (i32.eqz (call $pack_is_pow2 (local.get $stride)))
+      (then (throw $LuaError (ref.null any))))
+    (local.set $rem (i32.rem_u (local.get $offset) (local.get $stride)))
+    (if (i32.ne (local.get $rem) (i32.const 0))
+      (then (local.set $offset
+        (i32.add (local.get $offset)
+                 (i32.sub (local.get $stride) (local.get $rem))))))
+    (local.get $offset))
+
+  ;; string.packsize(fmt) — returns the byte length that string.pack
+  ;; with the same format would produce. Raises if the format contains
+  ;; a variable-length option ('s' or 'z'), or any of the per-option
+  ;; validation errors raised by helpers above.
+  (func $builtin_string_packsize (type $LuaFn)
+    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr))
+    (result (ref $ArgArr))
+    (local $bytes (ref $LuaArr)) (local $len i32) (local $ppos i32)
+    (local $c i32) (local $endian_le i32) (local $max_align i32)
+    (local $offset i32) (local $sz i32) (local $n i32) (local $newpp i32)
+    (local.set $endian_le (i32.const 1))
+    (local.set $max_align (i32.const 1))
+    (local.set $bytes (struct.get $LuaString $bytes
+      (ref.cast (ref $LuaString)
+        (call $args_at (local.get $args) (i32.const 0)))))
+    (local.set $len (array.len (local.get $bytes)))
+    (block $done (loop $lp
+      (br_if $done (i32.ge_u (local.get $ppos) (local.get $len)))
+      (local.set $c (array.get_u $LuaArr (local.get $bytes) (local.get $ppos)))
+      (local.set $ppos (i32.add (local.get $ppos) (i32.const 1)))
+      ;; Space: ignored.
+      (if (i32.eq (local.get $c) (i32.const 32)) (then (br $lp)))
+      ;; Endianness flags only change state.
+      (if (i32.eq (local.get $c) (i32.const 60))                 ;; '<'
+        (then (local.set $endian_le (i32.const 1)) (br $lp)))
+      (if (i32.eq (local.get $c) (i32.const 62))                 ;; '>'
+        (then (local.set $endian_le (i32.const 0)) (br $lp)))
+      (if (i32.eq (local.get $c) (i32.const 61))                 ;; '='
+        (then (local.set $endian_le (i32.const 1)) (br $lp)))
+      ;; '!' [N] — set max alignment. Default when no [N] follows is 8
+      ;; (native alignment). Range 1..16.
+      (if (i32.eq (local.get $c) (i32.const 33))                 ;; '!'
+        (then
+          (call $pack_n_suffix (local.get $bytes) (local.get $ppos)
+                               (i32.const 8))
+          (local.set $newpp) (local.set $n)
+          (if (i32.lt_s (local.get $n) (i32.const 1))
+            (then (throw $LuaError (ref.null any))))
+          (if (i32.gt_s (local.get $n) (i32.const 16))
+            (then (throw $LuaError (ref.null any))))
+          (local.set $max_align (local.get $n))
+          (local.set $ppos (local.get $newpp))
+          (br $lp)))
+      ;; 'x' — one byte padding, no alignment.
+      (if (i32.eq (local.get $c) (i32.const 120))                ;; 'x'
+        (then (local.set $offset
+                (i32.add (local.get $offset) (i32.const 1)))
+              (br $lp)))
+      ;; 'X' op — align to op's size, no payload.
+      (if (i32.eq (local.get $c) (i32.const 88))                 ;; 'X'
+        (then
+          (if (i32.ge_u (local.get $ppos) (local.get $len))
+            (then (throw $LuaError (ref.null any))))
+          (local.set $c (array.get_u $LuaArr (local.get $bytes)
+                                      (local.get $ppos)))
+          (local.set $ppos (i32.add (local.get $ppos) (i32.const 1)))
+          (call $pack_opt_size (local.get $c) (local.get $bytes)
+                               (local.get $ppos))
+          (local.set $newpp) (local.set $sz)
+          (local.set $ppos (local.get $newpp))
+          (local.set $offset
+            (call $pack_align (local.get $offset)
+                              (local.get $sz) (local.get $max_align)))
+          (br $lp)))
+      ;; 's' / 'z' — variable length; rejected in packsize.
+      (if (i32.eq (local.get $c) (i32.const 115))                ;; 's'
+        (then (throw $LuaError (ref.null any))))
+      (if (i32.eq (local.get $c) (i32.const 122))                ;; 'z'
+        (then (throw $LuaError (ref.null any))))
+      ;; Any other letter: a fixed-size value option.
+      (call $pack_opt_size (local.get $c) (local.get $bytes)
+                           (local.get $ppos))
+      (local.set $newpp) (local.set $sz)
+      (local.set $ppos (local.get $newpp))
+      ;; 'c' is not aligned (manual §6.5.2). All other fixed-size
+      ;; options are.
+      (if (i32.eq (local.get $c) (i32.const 99))                 ;; 'c'
+        (then (local.set $offset
+                (i32.add (local.get $offset) (local.get $sz))))
+        (else
+          (local.set $offset
+            (call $pack_align (local.get $offset)
+                              (local.get $sz) (local.get $max_align)))
+          (local.set $offset
+            (i32.add (local.get $offset) (local.get $sz)))))
+      (br $lp)))
+    (array.new_fixed $ArgArr 1
+      (call $make_int (i64.extend_i32_s (local.get $offset)))))
+
   ;; bytes_of_lit: looks up a built-in literal name (`number`, `string`, etc.)
   ;; by index into the type-name slab. Indices into the slab:
   ;;   0  "number"     (6 bytes)
