@@ -1,5 +1,7 @@
 build/
 build-em/
+# Created when ctest is accidentally run from the repo root.
+Testing/
 *.wasm
 *.wat
 # The embedded runtime prelude is checked-in source, not a build artifact.
