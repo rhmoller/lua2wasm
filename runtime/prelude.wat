@@ -257,6 +257,32 @@
   (func $lua_neq (param $a anyref) (param $b anyref) (result anyref)
     (call $lua_bool_to_ref (i32.eqz (call $lua_eq_raw (local.get $a) (local.get $b)))))
 
+  ;; Raw equality — never consults __eq. Used by `rawequal`.
+  ;; Mirrors $lua_eq_raw but for the two-table case falls back to ref.eq
+  ;; identity unconditionally.
+  (func $lua_rawequal (param $a anyref) (param $b anyref) (result i32)
+    (if (i32.and (ref.is_null (local.get $a)) (ref.is_null (local.get $b)))
+      (then (return (i32.const 1))))
+    (if (i32.or  (ref.is_null (local.get $a)) (ref.is_null (local.get $b)))
+      (then (return (i32.const 0))))
+    (if (i32.and (ref.test (ref $LuaBool) (local.get $a))
+                 (ref.test (ref $LuaBool) (local.get $b)))
+      (then (return (i32.eq
+        (struct.get $LuaBool $b (ref.cast (ref $LuaBool) (local.get $a)))
+        (struct.get $LuaBool $b (ref.cast (ref $LuaBool) (local.get $b)))))))
+    (if (i32.and
+          (i32.or (call $is_int (local.get $a)) (call $is_float (local.get $a)))
+          (i32.or (call $is_int (local.get $b)) (call $is_float (local.get $b))))
+      (then (return (call $num_eq (local.get $a) (local.get $b)))))
+    (if (i32.and (ref.test (ref $LuaString) (local.get $a))
+                 (ref.test (ref $LuaString) (local.get $b)))
+      (then (return (call $str_eq (local.get $a) (local.get $b)))))
+    (if (i32.and (ref.test (ref eq) (local.get $a))
+                 (ref.test (ref eq) (local.get $b)))
+      (then (return (ref.eq (ref.cast (ref null eq) (local.get $a))
+                             (ref.cast (ref null eq) (local.get $b))))))
+    (i32.const 0))
+
   (func $num_lt (param $a anyref) (param $b anyref) (result i32)
     (if (result i32)
       (i32.and (call $is_int (local.get $a)) (call $is_int (local.get $b)))
@@ -817,6 +843,15 @@
     ;; failed: throw the message (args[1]) or a default
     (throw $LuaError (call $args_at (local.get $args) (i32.const 1)))
     (global.get $g_empty_args))
+
+  ;; rawequal(a, b): equality without consulting __eq.
+  (func $builtin_rawequal (type $LuaFn)
+    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
+    (array.new_fixed $ArgArr 1
+      (call $lua_bool_to_ref
+        (call $lua_rawequal
+          (call $args_at (local.get $args) (i32.const 0))
+          (call $args_at (local.get $args) (i32.const 1))))))
 
   ;; select(n, ...): if n is the string "#", returns the count of extras.
   ;; Otherwise n is an integer index (1-based); returns args from that index on.
