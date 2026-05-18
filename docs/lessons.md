@@ -214,6 +214,35 @@ Before opening the prelude for a new milestone, jot down:
 
 ---
 
+### When the design doc actually paid off (milestone 19, `_G`)
+
+The pre-coding `docs/design/19-global-env.md` was worth the 30 minutes.
+It forced answers to questions that would have been expensive to
+discover mid-implementation:
+
+- *What's the storage model?* Is `_G` a proxy, a shadow, or the source
+  of truth? The Lua spec answers "source of truth" — the doc made me
+  commit to Plan A before I started typing.
+- *What about the existing per-builtin wasm globals?* The doc clarified
+  they stay (internal prelude code references them) but are no longer
+  user-reachable. User reads/writes go to `$g_globals` only.
+- *Are builtin reassignments legal?* Yes per spec — but the parser
+  rejected them. Spotted during the doc, fixed in the parser changes.
+- *Performance impact?* One hash lookup per global access instead of
+  one wasm-global load. The doc noted that reference Lua does exactly
+  the same thing, so we're not regressing relative to it.
+
+Code-change count came out close to the doc's "five steps". No
+surprise mid-PR fixes; implementation was mostly mechanical
+substitution. Compare to milestone 17's `goto` where I designed
+mid-flight and hit the overlap edge case unprepared.
+
+The pattern: when the existing codebase has a *load-bearing* invariant
+that the milestone changes (here: globals live in per-name wasm slots),
+a design pass that names both the invariant and its replacement is
+high value. When the change is purely additive (new builtin, new
+operator), the preflight checklist is sufficient.
+
 ## When to write a full design doc
 
 Most milestones (raw* primitives, table fillers, math fillers, utf8
