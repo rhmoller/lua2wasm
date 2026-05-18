@@ -863,6 +863,30 @@
     (throw $LuaError (ref.null any))
     (global.get $g_empty_args))
 
+  ;; rawset(t, k, v): table write without consulting __newindex.
+  ;; First arg must be a table. Key must not be nil or NaN. Returns the
+  ;; table (so callers can chain).
+  (func $builtin_rawset (type $LuaFn)
+    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
+    (local $t anyref) (local $k anyref) (local $f f64)
+    (local.set $t (call $args_at (local.get $args) (i32.const 0)))
+    (local.set $k (call $args_at (local.get $args) (i32.const 1)))
+    (if (i32.eqz (ref.test (ref $LuaTable) (local.get $t)))
+      (then (throw $LuaError (ref.null any))))
+    (if (ref.is_null (local.get $k))
+      (then (throw $LuaError (ref.null any))))
+    ;; NaN check: a float key whose value != itself.
+    (if (call $is_float (local.get $k))
+      (then
+        (local.set $f (call $as_float (local.get $k)))
+        (if (f64.ne (local.get $f) (local.get $f))
+          (then (throw $LuaError (ref.null any))))))
+    (call $tab_set
+      (ref.cast (ref $LuaTable) (local.get $t))
+      (local.get $k)
+      (call $args_at (local.get $args) (i32.const 2)))
+    (array.new_fixed $ArgArr 1 (local.get $t)))
+
   ;; rawget(t, k): table read without consulting __index.
   ;; First arg must be a table; second is the key. Returns nil on miss.
   (func $builtin_rawget (type $LuaFn)
