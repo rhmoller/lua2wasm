@@ -93,7 +93,7 @@ instructions. Anything not in this table is a compile-time error.
 | **Tables**        | array part + hash part, positional / named / `[expr]=` constructors, `t.k` and `t[k]` read+write, nil-assignment delete, `#t` border rule, nesting, identity equality via `ref.eq` (table keys work as in Lua)                                                                                                  | metatable performance tricks                                     |
 | **Locals**        | `local x`, `local x, y, z = …`, lexical block scoping, shadowing                                                                                                                                                                                                                                                | `<const>` / `<close>` attributes                                 |
 | **Globals**       | Lua-traditional implicit globals — `num = 42` at top level just works; reading an undeclared name yields `nil`. Explicit `global x` declarations also supported and recommended for clarity                                                                                                                     | strict mode (`global <const> *` opt-in), implicit `_G` table     |
-| **Statements**    | `local`, `local function`, **top-level `function f() end`** incl. dotted (`function T.x.y() end`) and method (`function T:m() end`) forms, multi-assign, `if/elseif/else`, `while`, `for i = a,b[,c]`, generic `for k[,v,…] in …`, `repeat ... until`, `break`, bare `do`, expression-statement, `return e1, …` | `goto / ::label::`                                               |
+| **Statements**    | `local`, `local function`, **top-level `function f() end`** incl. dotted (`function T.x.y() end`) and method (`function T:m() end`) forms, multi-assign, `if/elseif/else`, `while`, `for i = a,b[,c]`, generic `for k[,v,…] in …`, `repeat ... until`, `break`, **`goto NAME` / `::NAME::`**, bare `do`, expression-statement, `return e1, …` | —                                                                |
 | **Operators**     | `+ - * / // % ^`, `== ~= < <= > >=`, `and or not`, `..`, `#`                                                                                                                                                                                                                                                    | bitwise                                                          |
 | **Functions**     | N-ary arguments, multiple return values (`return a, b, c`), upvalue capture (mutable shared boxes), transitive captures, **method-call sugar `obj:m(args)`**, **paren-less single-arg call `f"x"` / `f{k=1}`**, **varargs `function f(...)` / `function f(a, ...)` with `...` spliced into call args, returns, table constructors, and multi-assign**, proper tail calls (`return f(...)` → `return_call_ref`, doesn't grow the stack)                  | —                                                                |
 | **Errors**        | `error(v)` / `pcall(f, …)` / `assert(v[, msg])` lowered to WASM exception handling (`throw $LuaError` + `try_table`)                                                                                                                                                                                            | error message annotations, tracebacks                            |
@@ -247,19 +247,17 @@ flowchart LR
 Cards in roughly priority order. Open a discussion before tackling
 anything large.
 
-1. More metamethods: `__newindex`, `__call`, `__tostring`, `__lt`, `__le`, `__sub` / `__mul` / `__div` / `__mod` / `__pow` / `__unm` / `__concat` / `__len`.
-2. Wider `string` library: `upper`, `lower`, `rep`, `byte`, `char`, plus the pattern functions `find` / `match` / `gmatch` / `gsub` (these are the big-ticket items — Lua's pattern language is a small parser of its own).
-3. `string.format` flags and width (currently only `.N` precision is honoured).
-4. `table.sort` (needs a comparator callback).
-5. `_G` — a real global env table aliasing all module globals; would also let strict mode honour `global <const> *` as an opt-in.
-6. Bitwise operators (`& | ~ << >>`) — lexer already recognises them.
-7. Float `%` and a non-`<float>`-placeholder path for `..` of floats inside the wasm-side concat (the `print` and `string.format` paths already format correctly via the JS host).
-8. `goto / ::label::`.
-9. `os.{date, time, getenv}`, `io.open` / `io.lines` / file handles.
-10. Binary integer literals (`0b…`) — not in Lua 5.5 but trivial to add as an extension.
-11. Coroutines — blocked on the WASM stack-switching proposal landing in browsers.
-12. Source maps so DevTools can step from compiled WASM back into Lua.
-13. `wasm-opt` step in the build pipeline (size + speed wins for the shipped `.wasm`).
+1. Lua patterns: `string.{find, match, gmatch, gsub}` — the big-ticket item; Lua's pattern language is a small parser of its own.
+2. `string.{pack, unpack, packsize}` — binary serialization.
+3. Bitwise operators (`& | ~ << >>`) — lexer already recognises them; parser/codegen to go.
+4. `_G` — a real global env table aliasing all module globals; would also let strict mode honour `global <const> *` as an opt-in.
+5. `<const>` and `<close>` local attributes (the latter needs `__close` and to-be-closed scope tracking).
+6. `xpcall`, `error(msg, level)`, `warn`; full `debug.*` would be its own milestone.
+7. `os.{clock, time, date, difftime, getenv}`, `io.open` / `io.lines` / file handles.
+8. `load` / `loadfile` / `require` — dynamic compilation; needs the compiler at runtime.
+9. Coroutines — blocked on the WASM stack-switching proposal landing in browsers.
+10. Source maps so DevTools can step from compiled WASM back into Lua.
+11. `wasm-opt` step in the build pipeline (size + speed wins for the shipped `.wasm`).
 
 ## Contributing
 
