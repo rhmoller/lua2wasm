@@ -533,6 +533,18 @@
     (local.get $out))
 
   (func $lua_tostring (param $v anyref) (result (ref $LuaString))
+    (local $mm anyref) (local $r anyref)
+    ;; Honour __tostring on any value with a metatable.
+    (local.set $mm (call $get_metamethod (local.get $v)
+      (ref.as_non_null (global.get $g_mkey_tostring))))
+    (if (i32.eqz (ref.is_null (local.get $mm)))
+      (then
+        (local.set $r (call $args_first (call $lua_call
+          (ref.cast (ref $LuaClosure) (local.get $mm))
+          (array.new_fixed $ArgArr 1 (local.get $v)))))
+        (if (i32.eqz (ref.test (ref $LuaString) (local.get $r)))
+          (then (throw $LuaError (ref.null any))))
+        (return (ref.cast (ref $LuaString) (local.get $r)))))
     (if (ref.is_null (local.get $v))
       (then (return (struct.new $LuaString
         (array.new_data $LuaArr $str_data (i32.const 0) (i32.const 3))))))
@@ -866,6 +878,53 @@
         (i32.add (local.get $h) (i32.const 1))))
       (br $probe)))
 
+  ;; `t[k] = v` with __newindex dispatch. Used by user-code assignments.
+  ;; Table-constructor inserts go through bare \$tab_set since they target
+  ;; freshly built tables with no metatable.
+  ;;
+  ;; Lua: if t[k] is already present, do a raw set (no metamethod). Otherwise,
+  ;; if t has __newindex:
+  ;;   - table form: do lua_tabset on that table (recurses, with cycle guard)
+  ;;   - function form: call __newindex(t, k, v)
+  ;; If __newindex is absent, do the raw set.
+  (func $lua_tabset (param $v anyref) (param $k anyref) (param $val anyref)
+    (local $t (ref $LuaTable)) (local $mt (ref null $LuaTable))
+    (local $mm anyref) (local $depth i32)
+    (block $exit (loop $top
+      ;; If $v isn't a table, fall through to the metamethod path on the
+      ;; value's metatable (rare; objects with __index/__newindex but no
+      ;; backing table). For now require a table.
+      (if (i32.eqz (ref.test (ref $LuaTable) (local.get $v)))
+        (then (throw $LuaError (ref.null any))))
+      (local.set $t (ref.cast (ref $LuaTable) (local.get $v)))
+      ;; If key is already present, raw-set (no MM consulted).
+      (if (i32.ge_s (call $tab_find (local.get $t) (local.get $k)) (i32.const 0))
+        (then (call $tab_set (local.get $t) (local.get $k) (local.get $val))
+              (br $exit)))
+      ;; Look up __newindex on the metatable.
+      (local.set $mt (struct.get $LuaTable $meta (local.get $t)))
+      (if (ref.is_null (local.get $mt))
+        (then (call $tab_set (local.get $t) (local.get $k) (local.get $val))
+              (br $exit)))
+      (local.set $mm (call $tab_get_raw (ref.as_non_null (local.get $mt))
+        (ref.as_non_null (global.get $g_mkey_newindex))))
+      (if (ref.is_null (local.get $mm))
+        (then (call $tab_set (local.get $t) (local.get $k) (local.get $val))
+              (br $exit)))
+      ;; Function form: call __newindex(t, k, val) and we're done.
+      (if (ref.test (ref $LuaClosure) (local.get $mm))
+        (then
+          (drop (call $lua_call (ref.cast (ref $LuaClosure) (local.get $mm))
+                  (array.new_fixed $ArgArr 3
+                    (local.get $v) (local.get $k) (local.get $val))))
+          (br $exit)))
+      ;; Table form: continue with $v = mm. Cycle cap matches __index.
+      (local.set $v (local.get $mm))
+      (local.set $depth (i32.add (local.get $depth) (i32.const 1)))
+      (if (i32.gt_s (local.get $depth) (i32.const 200))
+        (then (throw $LuaError (ref.null any))))
+      (br $top))))
+
   ;; Length via array-border rule: count k=1,2,3,... while t[k] is non-nil.
   (func $tab_len (param $t (ref $LuaTable)) (result i32)
     (local $i i32) (local $k anyref)
@@ -992,12 +1051,16 @@
       (then
         (call $host_print (ref.as_non_null (global.get $g_empty_str)))
         (return (global.get $g_empty_args))))
-    ;; Single arg: pass the raw value through so the host's value formatter
-    ;; can render floats etc. without going through wasm-side tostring (which
-    ;; currently returns the "<float>" placeholder for floats).
+    ;; Single arg: tostring it so __tostring fires, then hand to host.
+    ;; (For values without __tostring, $lua_tostring covers all the
+    ;; primitive cases — float formatting matches the host's renderer.)
     (if (i32.eq (local.get $n) (i32.const 1))
       (then
-        (call $host_print (call $args_at (local.get $args) (i32.const 0)))
+        (local.set $acc (call $args_at (local.get $args) (i32.const 0)))
+        (if (i32.eqz (ref.is_null (call $get_metamethod (local.get $acc)
+              (ref.as_non_null (global.get $g_mkey_tostring)))))
+          (then (local.set $acc (call $lua_tostring (local.get $acc)))))
+        (call $host_print (local.get $acc))
         (return (global.get $g_empty_args))))
     ;; Multi-arg: stringify each value (so nil/bool/table render fine
     ;; without tripping the concat type check), then join with TAB.
@@ -1366,9 +1429,17 @@
 
   (func $builtin_setmetatable (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
-    (local $t (ref $LuaTable)) (local $mt anyref)
+    (local $t (ref $LuaTable)) (local $mt anyref) (local $cur (ref null $LuaTable))
     (local.set $t (ref.cast (ref $LuaTable) (call $args_at (local.get $args) (i32.const 0))))
     (local.set $mt (call $args_at (local.get $args) (i32.const 1)))
+    ;; Protect: if the existing metatable carries __metatable, error.
+    (local.set $cur (struct.get $LuaTable $meta (local.get $t)))
+    (if (i32.eqz (ref.is_null (local.get $cur)))
+      (then
+        (if (i32.eqz (ref.is_null
+              (call $tab_get_raw (ref.as_non_null (local.get $cur))
+                (ref.as_non_null (global.get $g_mkey_metatable)))))
+          (then (throw $LuaError (ref.null any))))))
     (if (ref.is_null (local.get $mt))
       (then (struct.set $LuaTable $meta (local.get $t) (ref.null $LuaTable)))
       (else (struct.set $LuaTable $meta (local.get $t)
@@ -1377,11 +1448,16 @@
 
   (func $builtin_getmetatable (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
-    (local $t (ref $LuaTable)) (local $mt (ref null $LuaTable))
+    (local $t (ref $LuaTable)) (local $mt (ref null $LuaTable)) (local $guard anyref)
     (local.set $t (ref.cast (ref $LuaTable) (call $args_at (local.get $args) (i32.const 0))))
     (local.set $mt (struct.get $LuaTable $meta (local.get $t)))
     (if (ref.is_null (local.get $mt))
       (then (return (array.new_fixed $ArgArr 1 (ref.null any)))))
+    ;; If __metatable is set, return it instead of the real metatable.
+    (local.set $guard (call $tab_get_raw (ref.as_non_null (local.get $mt))
+      (ref.as_non_null (global.get $g_mkey_metatable))))
+    (if (i32.eqz (ref.is_null (local.get $guard)))
+      (then (return (array.new_fixed $ArgArr 1 (local.get $guard)))))
     (array.new_fixed $ArgArr 1 (ref.as_non_null (local.get $mt))))
 
   ;; --- math library ---
@@ -2713,7 +2789,12 @@
           (local.set $arg (ref.null any)))
         (else
           (local.set $arg (call $args_at (local.get $args) (local.get $arg_idx)))
-          (local.set $arg_idx (i32.add (local.get $arg_idx) (i32.const 1)))))
+          (local.set $arg_idx (i32.add (local.get $arg_idx) (i32.const 1)))
+          ;; For %s and %q, pre-tostring so __tostring is honoured.
+          (local.set $b (array.get_u $LuaArr (local.get $fmt) (local.get $j)))
+          (if (i32.or (i32.eq (local.get $b) (i32.const 115))   ;; 's'
+                      (i32.eq (local.get $b) (i32.const 113)))  ;; 'q'
+            (then (local.set $arg (call $lua_tostring (local.get $arg)))))))
       (local.set $written (call $host_fmt_spec
         (struct.new $LuaString (local.get $spec))
         (local.get $arg)))

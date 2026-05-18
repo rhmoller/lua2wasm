@@ -211,10 +211,11 @@ static void emit_target_open(CG *c, const AssignTarget *t, int depth) {
                 break;
         }
     } else {
-        emit_indent(c, depth); wat_append(c->w, "(call $tab_set\n");
-        emit_indent(c, depth + 1); wat_append(c->w, "(ref.cast (ref $LuaTable)\n");
-        emit_expr(c, t->as.index.table, depth + 2);
-        emit_indent(c, depth + 1); wat_append(c->w, ")\n");
+        /* User-code assignment goes through \$lua_tabset so __newindex
+         * has a chance to fire. Table constructors emit \$tab_set
+         * directly since freshly built tables have no metatable. */
+        emit_indent(c, depth); wat_append(c->w, "(call $lua_tabset\n");
+        emit_expr(c, t->as.index.table, depth + 1);
         emit_expr(c, t->as.index.key, depth + 1);
     }
 }
