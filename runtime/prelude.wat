@@ -1750,6 +1750,123 @@
       (br $lp)))
     (local.get $out))
 
+  ;; --- utf8 library ---
+  ;;
+  ;; UTF-8 encoding helper. Writes the UTF-8 encoding of $cp at $out[$pos..]
+  ;; and returns the number of bytes written. By default accepts codepoints
+  ;; up to 0x10FFFF (real Unicode); with $lax non-zero, accepts up to
+  ;; 0x7FFFFFFF using Lua's extended 5- and 6-byte forms. Returns -1 if
+  ;; the codepoint is out of range for the chosen mode.
+  (func $utf8_encode (param $out (ref $LuaArr)) (param $pos i32)
+                     (param $cp i32) (param $lax i32) (result i32)
+    (if (i32.lt_s (local.get $cp) (i32.const 0))
+      (then (return (i32.const -1))))
+    (if (i32.lt_u (local.get $cp) (i32.const 0x80))
+      (then
+        (array.set $LuaArr (local.get $out) (local.get $pos) (local.get $cp))
+        (return (i32.const 1))))
+    (if (i32.lt_u (local.get $cp) (i32.const 0x800))
+      (then
+        (array.set $LuaArr (local.get $out) (local.get $pos)
+          (i32.or (i32.const 0xC0) (i32.shr_u (local.get $cp) (i32.const 6))))
+        (array.set $LuaArr (local.get $out) (i32.add (local.get $pos) (i32.const 1))
+          (i32.or (i32.const 0x80) (i32.and (local.get $cp) (i32.const 0x3F))))
+        (return (i32.const 2))))
+    (if (i32.lt_u (local.get $cp) (i32.const 0x10000))
+      (then
+        (array.set $LuaArr (local.get $out) (local.get $pos)
+          (i32.or (i32.const 0xE0) (i32.shr_u (local.get $cp) (i32.const 12))))
+        (array.set $LuaArr (local.get $out) (i32.add (local.get $pos) (i32.const 1))
+          (i32.or (i32.const 0x80) (i32.and (i32.shr_u (local.get $cp) (i32.const 6))
+                                            (i32.const 0x3F))))
+        (array.set $LuaArr (local.get $out) (i32.add (local.get $pos) (i32.const 2))
+          (i32.or (i32.const 0x80) (i32.and (local.get $cp) (i32.const 0x3F))))
+        (return (i32.const 3))))
+    (if (i32.lt_u (local.get $cp) (i32.const 0x110000))
+      (then
+        (array.set $LuaArr (local.get $out) (local.get $pos)
+          (i32.or (i32.const 0xF0) (i32.shr_u (local.get $cp) (i32.const 18))))
+        (array.set $LuaArr (local.get $out) (i32.add (local.get $pos) (i32.const 1))
+          (i32.or (i32.const 0x80) (i32.and (i32.shr_u (local.get $cp) (i32.const 12))
+                                            (i32.const 0x3F))))
+        (array.set $LuaArr (local.get $out) (i32.add (local.get $pos) (i32.const 2))
+          (i32.or (i32.const 0x80) (i32.and (i32.shr_u (local.get $cp) (i32.const 6))
+                                            (i32.const 0x3F))))
+        (array.set $LuaArr (local.get $out) (i32.add (local.get $pos) (i32.const 3))
+          (i32.or (i32.const 0x80) (i32.and (local.get $cp) (i32.const 0x3F))))
+        (return (i32.const 4))))
+    ;; lax: 5-byte (0x200000..0x3FFFFFF) and 6-byte (0x4000000..0x7FFFFFFF).
+    (if (i32.eqz (local.get $lax)) (then (return (i32.const -1))))
+    (if (i32.lt_u (local.get $cp) (i32.const 0x4000000))
+      (then
+        (array.set $LuaArr (local.get $out) (local.get $pos)
+          (i32.or (i32.const 0xF8) (i32.shr_u (local.get $cp) (i32.const 24))))
+        (array.set $LuaArr (local.get $out) (i32.add (local.get $pos) (i32.const 1))
+          (i32.or (i32.const 0x80) (i32.and (i32.shr_u (local.get $cp) (i32.const 18))
+                                            (i32.const 0x3F))))
+        (array.set $LuaArr (local.get $out) (i32.add (local.get $pos) (i32.const 2))
+          (i32.or (i32.const 0x80) (i32.and (i32.shr_u (local.get $cp) (i32.const 12))
+                                            (i32.const 0x3F))))
+        (array.set $LuaArr (local.get $out) (i32.add (local.get $pos) (i32.const 3))
+          (i32.or (i32.const 0x80) (i32.and (i32.shr_u (local.get $cp) (i32.const 6))
+                                            (i32.const 0x3F))))
+        (array.set $LuaArr (local.get $out) (i32.add (local.get $pos) (i32.const 4))
+          (i32.or (i32.const 0x80) (i32.and (local.get $cp) (i32.const 0x3F))))
+        (return (i32.const 5))))
+    (if (i32.le_u (local.get $cp) (i32.const 0x7FFFFFFF))
+      (then
+        (array.set $LuaArr (local.get $out) (local.get $pos)
+          (i32.or (i32.const 0xFC) (i32.shr_u (local.get $cp) (i32.const 30))))
+        (array.set $LuaArr (local.get $out) (i32.add (local.get $pos) (i32.const 1))
+          (i32.or (i32.const 0x80) (i32.and (i32.shr_u (local.get $cp) (i32.const 24))
+                                            (i32.const 0x3F))))
+        (array.set $LuaArr (local.get $out) (i32.add (local.get $pos) (i32.const 2))
+          (i32.or (i32.const 0x80) (i32.and (i32.shr_u (local.get $cp) (i32.const 18))
+                                            (i32.const 0x3F))))
+        (array.set $LuaArr (local.get $out) (i32.add (local.get $pos) (i32.const 3))
+          (i32.or (i32.const 0x80) (i32.and (i32.shr_u (local.get $cp) (i32.const 12))
+                                            (i32.const 0x3F))))
+        (array.set $LuaArr (local.get $out) (i32.add (local.get $pos) (i32.const 4))
+          (i32.or (i32.const 0x80) (i32.and (i32.shr_u (local.get $cp) (i32.const 6))
+                                            (i32.const 0x3F))))
+        (array.set $LuaArr (local.get $out) (i32.add (local.get $pos) (i32.const 5))
+          (i32.or (i32.const 0x80) (i32.and (local.get $cp) (i32.const 0x3F))))
+        (return (i32.const 6))))
+    (i32.const -1))
+
+  ;; utf8.char(...) — encode each integer codepoint, concatenated.
+  ;; Strict mode (Lua's default for utf8.char): codepoints must be valid
+  ;; Unicode (0..0x10FFFF). We do a worst-case 4-byte pre-allocate, encode,
+  ;; then if the total comes up short, shrink via array.copy.
+  (func $builtin_utf8_char (type $LuaFn)
+    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
+    (local $n i32) (local $i i32) (local $cp i64) (local $w i32) (local $pos i32)
+    (local $buf (ref $LuaArr)) (local $out (ref $LuaArr))
+    (local.set $n (array.len (local.get $args)))
+    (local.set $buf (array.new $LuaArr (i32.const 0)
+                      (i32.mul (local.get $n) (i32.const 4))))
+    (block $done (loop $lp
+      (br_if $done (i32.ge_s (local.get $i) (local.get $n)))
+      (local.set $cp (call $as_int (call $args_at (local.get $args) (local.get $i))))
+      ;; reject out-of-range before truncating to i32
+      (if (i32.or (i64.lt_s (local.get $cp) (i64.const 0))
+                  (i64.gt_s (local.get $cp) (i64.const 0x10FFFF)))
+        (then (throw $LuaError (ref.null any))))
+      (local.set $w (call $utf8_encode
+        (local.get $buf) (local.get $pos)
+        (i32.wrap_i64 (local.get $cp)) (i32.const 0)))
+      (if (i32.lt_s (local.get $w) (i32.const 0))
+        (then (throw $LuaError (ref.null any))))
+      (local.set $pos (i32.add (local.get $pos) (local.get $w)))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br $lp)))
+    ;; trim to actual length
+    (local.set $out (array.new $LuaArr (i32.const 0) (local.get $pos)))
+    (array.copy $LuaArr $LuaArr
+      (local.get $out) (i32.const 0)
+      (local.get $buf) (i32.const 0) (local.get $pos))
+    (array.new_fixed $ArgArr 1 (struct.new $LuaString (local.get $out))))
+
   ;; --- string library ---
   (func $builtin_string_len (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))

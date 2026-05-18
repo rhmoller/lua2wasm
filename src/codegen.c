@@ -1110,6 +1110,7 @@ int codegen_module(const ParseResult *pr, WatBuilder *out,
         else if (glen == 6 && memcmp(gname, "string", 6) == 0) cls = BLT_LIB_STRING;
         else if (glen == 2 && memcmp(gname, "io",     2) == 0) cls = BLT_LIB_IO;
         else if (glen == 5 && memcmp(gname, "table",  5) == 0) cls = BLT_LIB_TABLE;
+        else if (glen == 4 && memcmp(gname, "utf8",   4) == 0) cls = BLT_LIB_UTF8;
         else continue;
         wat_append(out, "    (local.set $tab (call $tab_new))\n");
         for (int bi = 0; bi < nb; bi++) {

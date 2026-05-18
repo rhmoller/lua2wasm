@@ -9,6 +9,7 @@ typedef enum {
     BLT_LIB_STRING,     /* installed into the `string` global table */
     BLT_LIB_IO,         /* installed into the `io` global table */
     BLT_LIB_TABLE,      /* installed into the `table` global table */
+    BLT_LIB_UTF8,       /* installed into the `utf8` global table */
 } BuiltinClass;
 
 /* Lookup a top-level builtin by name. Returns builtin idx or -1. */
