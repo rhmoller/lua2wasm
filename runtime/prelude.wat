@@ -9,6 +9,13 @@
   (type $Box       (sub (struct (field $v (mut anyref)))))
   (type $ArgArr    (array (mut anyref)))
   (type $UpvalArr  (array (mut (ref $Box))))
+  ;; Capture buffer for Lua patterns. Two i32 cells per capture:
+  ;;   [2*i]   = subject byte offset where capture i starts
+  ;;   [2*i+1] = length sentinel:
+  ;;               >= 0  closed substring capture, that many bytes
+  ;;               -1    open substring capture (still on the parser stack)
+  ;;               -2    position capture (cell [2*i] is the 0-based pos)
+  (type $CapArr    (array (mut i32)))
   (rec
     (type $LuaClosure (sub (struct (field $code (ref $LuaFn))
                                    (field $upvals (ref $UpvalArr)))))
@@ -2938,27 +2945,39 @@
       (then (return (call $match_set (local.get $byte) (local.get $pat) (local.get $ppos)))))
     (i32.eq (local.get $byte) (local.get $b)))
 
-  ;; --- Lua patterns: $match_pat core (step 2 of milestone 20) ---
+  ;; --- Lua patterns: $match_pat core (steps 2-3 of milestone 20) ---
   ;;
   ;; Recursive backtracking matcher. Walks $pat from $ppos and $sub from
-  ;; $spos. Returns the end subject-position (one past the last matched
-  ;; byte) on success, or -1 on failure. Step 2 does not yet handle
-  ;; captures, %n back-refs, %bxy, or %f[set] — those are step 3 and 5.
+  ;; $spos. Returns multi-value (end_spos, ncaps_out):
+  ;;   end_spos = the subject position one past the last matched byte
+  ;;              on success, OR -1 on failure
+  ;;   ncaps_out = number of captures recorded in $caps after a
+  ;;               successful match (caller ignores it on failure)
   ;;
-  ;; Quantifiers (* + - ?) apply to a single matchable item:
-  ;;   literal | '.' | '%X' | '[set]'
-  ;; per Lua spec (NOT to groups, back-refs, or specials).
+  ;; Captures live in $caps as (start, len) i32 pairs. len sentinels:
+  ;;   -1 = open substring capture; -2 = position capture.
+  ;; A close (')') walks back from ncaps-1 to find the most recent open
+  ;; and writes its length; the write is reverted if the recursive
+  ;; continuation fails (the parent of this call may re-enter the close
+  ;; from a different backtrack path).
+  ;;
+  ;; Quantifiers (* + - ?) apply to a single matchable item per spec
+  ;; (NOT to groups, back-refs, %bxy, or %f[set]).
   (func $match_pat
     (param $sub (ref $LuaArr)) (param $spos i32)
-    (param $pat (ref $LuaArr)) (param $ppos i32) (result i32)
-    (local $n_pat i32) (local $n_sub i32) (local $b i32)
+    (param $pat (ref $LuaArr)) (param $ppos i32)
+    (param $caps (ref $CapArr)) (param $ncaps i32)
+    (result i32 i32)
+    (local $n_pat i32) (local $n_sub i32) (local $b i32) (local $b2 i32)
     (local $item_end_pos i32) (local $quant i32) (local $next_ppos i32)
-    (local $k i32) (local $min_k i32) (local $r i32)
+    (local $k i32) (local $min_k i32) (local $r i32) (local $r_n i32)
+    (local $idx i32) (local $cap_start i32) (local $cap_len i32)
+    (local $saved i32)
     (local.set $n_pat (array.len (local.get $pat)))
     (local.set $n_sub (array.len (local.get $sub)))
     ;; Base: end of pattern → success.
     (if (i32.ge_s (local.get $ppos) (local.get $n_pat))
-      (then (return (local.get $spos))))
+      (then (return (local.get $spos) (local.get $ncaps))))
     (local.set $b (array.get_u $LuaArr (local.get $pat) (local.get $ppos)))
     ;; `$` at the final pattern position → anchor-to-end.
     (if (i32.and (i32.eq (local.get $b) (i32.const 36))            ;; '$'
@@ -2966,8 +2985,106 @@
                          (local.get $n_pat)))
       (then
         (if (i32.eq (local.get $spos) (local.get $n_sub))
-          (then (return (local.get $spos))))
-        (return (i32.const -1))))
+          (then (return (local.get $spos) (local.get $ncaps))))
+        (return (i32.const -1) (local.get $ncaps))))
+    ;; '(' open: position capture if next char is ')'; else substring.
+    (if (i32.eq (local.get $b) (i32.const 40))                     ;; '('
+      (then
+        (local.set $b2 (i32.const 0))
+        (if (i32.lt_s (i32.add (local.get $ppos) (i32.const 1))
+                       (local.get $n_pat))
+          (then (local.set $b2 (array.get_u $LuaArr (local.get $pat)
+                  (i32.add (local.get $ppos) (i32.const 1))))))
+        (array.set $CapArr (local.get $caps)
+          (i32.mul (local.get $ncaps) (i32.const 2)) (local.get $spos))
+        (if (i32.eq (local.get $b2) (i32.const 41))                ;; ')'
+          (then
+            ;; position capture
+            (array.set $CapArr (local.get $caps)
+              (i32.add (i32.mul (local.get $ncaps) (i32.const 2)) (i32.const 1))
+              (i32.const -2))
+            (return_call $match_pat (local.get $sub) (local.get $spos)
+              (local.get $pat) (i32.add (local.get $ppos) (i32.const 2))
+              (local.get $caps) (i32.add (local.get $ncaps) (i32.const 1)))))
+        ;; substring capture (open)
+        (array.set $CapArr (local.get $caps)
+          (i32.add (i32.mul (local.get $ncaps) (i32.const 2)) (i32.const 1))
+          (i32.const -1))
+        (return_call $match_pat (local.get $sub) (local.get $spos)
+          (local.get $pat) (i32.add (local.get $ppos) (i32.const 1))
+          (local.get $caps) (i32.add (local.get $ncaps) (i32.const 1)))))
+    ;; ')' close: find the most recent open and fix it up; restore on
+    ;; failure so a different backtrack path can still close it.
+    (if (i32.eq (local.get $b) (i32.const 41))                     ;; ')'
+      (then
+        (local.set $idx (i32.sub (local.get $ncaps) (i32.const 1)))
+        (block $found (loop $scan
+          (if (i32.lt_s (local.get $idx) (i32.const 0))
+            (then (return (i32.const -1) (local.get $ncaps))))
+          (if (i32.eq (array.get $CapArr (local.get $caps)
+                        (i32.add (i32.mul (local.get $idx) (i32.const 2))
+                                 (i32.const 1)))
+                      (i32.const -1))
+            (then (br $found)))
+          (local.set $idx (i32.sub (local.get $idx) (i32.const 1)))
+          (br $scan)))
+        ;; idx is the open capture to close.
+        (local.set $saved (i32.const -1))
+        (array.set $CapArr (local.get $caps)
+          (i32.add (i32.mul (local.get $idx) (i32.const 2)) (i32.const 1))
+          (i32.sub (local.get $spos)
+            (array.get $CapArr (local.get $caps)
+              (i32.mul (local.get $idx) (i32.const 2)))))
+        (call $match_pat (local.get $sub) (local.get $spos)
+          (local.get $pat) (i32.add (local.get $ppos) (i32.const 1))
+          (local.get $caps) (local.get $ncaps))
+        (local.set $r_n)
+        (local.set $r)
+        (if (i32.ge_s (local.get $r) (i32.const 0))
+          (then (return (local.get $r) (local.get $r_n))))
+        ;; rewind the close
+        (array.set $CapArr (local.get $caps)
+          (i32.add (i32.mul (local.get $idx) (i32.const 2)) (i32.const 1))
+          (local.get $saved))
+        (return (i32.const -1) (local.get $ncaps))))
+    ;; '%n' back-reference (n = 1..9).
+    (if (i32.eq (local.get $b) (i32.const 37))                     ;; '%'
+      (then
+        (if (i32.lt_s (i32.add (local.get $ppos) (i32.const 1))
+                       (local.get $n_pat))
+          (then
+            (local.set $b2 (array.get_u $LuaArr (local.get $pat)
+              (i32.add (local.get $ppos) (i32.const 1))))
+            (if (i32.and (i32.ge_u (local.get $b2) (i32.const 49))   ;; '1'
+                         (i32.le_u (local.get $b2) (i32.const 57)))  ;; '9'
+              (then
+                (local.set $idx (i32.sub (local.get $b2) (i32.const 49)))
+                (if (i32.ge_s (local.get $idx) (local.get $ncaps))
+                  (then (return (i32.const -1) (local.get $ncaps))))
+                (local.set $cap_start (array.get $CapArr (local.get $caps)
+                  (i32.mul (local.get $idx) (i32.const 2))))
+                (local.set $cap_len (array.get $CapArr (local.get $caps)
+                  (i32.add (i32.mul (local.get $idx) (i32.const 2)) (i32.const 1))))
+                (if (i32.lt_s (local.get $cap_len) (i32.const 0))
+                  (then (return (i32.const -1) (local.get $ncaps))))
+                (if (i32.gt_s (i32.add (local.get $spos) (local.get $cap_len))
+                               (local.get $n_sub))
+                  (then (return (i32.const -1) (local.get $ncaps))))
+                (local.set $k (i32.const 0))
+                (block $bdone (loop $bcmp
+                  (br_if $bdone (i32.ge_s (local.get $k) (local.get $cap_len)))
+                  (if (i32.ne
+                        (array.get_u $LuaArr (local.get $sub)
+                          (i32.add (local.get $spos) (local.get $k)))
+                        (array.get_u $LuaArr (local.get $sub)
+                          (i32.add (local.get $cap_start) (local.get $k))))
+                    (then (return (i32.const -1) (local.get $ncaps))))
+                  (local.set $k (i32.add (local.get $k) (i32.const 1)))
+                  (br $bcmp)))
+                (return_call $match_pat (local.get $sub)
+                  (i32.add (local.get $spos) (local.get $cap_len))
+                  (local.get $pat) (i32.add (local.get $ppos) (i32.const 2))
+                  (local.get $caps) (local.get $ncaps))))))))
     ;; Decode the matchable item ending at $item_end_pos. Read quantifier
     ;; (if any) immediately after.
     (local.set $item_end_pos (call $item_end (local.get $pat) (local.get $ppos)))
@@ -2993,37 +3110,41 @@
                        (array.get_u $LuaArr (local.get $sub) (local.get $spos))
                        (local.get $pat) (local.get $ppos)))
           (then
-            (local.set $r (call $match_pat
+            (call $match_pat
               (local.get $sub) (i32.add (local.get $spos) (i32.const 1))
-              (local.get $pat) (local.get $next_ppos)))
+              (local.get $pat) (local.get $next_ppos)
+              (local.get $caps) (local.get $ncaps))
+            (local.set $r_n) (local.set $r)
             (if (i32.ge_s (local.get $r) (i32.const 0))
-              (then (return (local.get $r))))))
-        (return (call $match_pat (local.get $sub) (local.get $spos)
-                                  (local.get $pat) (local.get $next_ppos)))))
+              (then (return (local.get $r) (local.get $r_n))))))
+        (return_call $match_pat (local.get $sub) (local.get $spos)
+          (local.get $pat) (local.get $next_ppos)
+          (local.get $caps) (local.get $ncaps))))
     (if (i32.eq (local.get $quant) (i32.const 45))                 ;; '-' lazy
       (then
         (local.set $k (i32.const 0))
         (loop $lazy
-          (local.set $r (call $match_pat
+          (call $match_pat
             (local.get $sub) (i32.add (local.get $spos) (local.get $k))
-            (local.get $pat) (local.get $next_ppos)))
+            (local.get $pat) (local.get $next_ppos)
+            (local.get $caps) (local.get $ncaps))
+          (local.set $r_n) (local.set $r)
           (if (i32.ge_s (local.get $r) (i32.const 0))
-            (then (return (local.get $r))))
+            (then (return (local.get $r) (local.get $r_n))))
           (if (i32.ge_s (i32.add (local.get $spos) (local.get $k))
                          (local.get $n_sub))
-            (then (return (i32.const -1))))
+            (then (return (i32.const -1) (local.get $ncaps))))
           (if (i32.eqz (call $match_one_item
                 (array.get_u $LuaArr (local.get $sub)
                   (i32.add (local.get $spos) (local.get $k)))
                 (local.get $pat) (local.get $ppos)))
-            (then (return (i32.const -1))))
+            (then (return (i32.const -1) (local.get $ncaps))))
           (local.set $k (i32.add (local.get $k) (i32.const 1)))
           (br $lazy))
         (unreachable)))
     (if (i32.or (i32.eq (local.get $quant) (i32.const 42))         ;; '*' or '+'
                 (i32.eq (local.get $quant) (i32.const 43)))
       (then
-        ;; Count how many consecutive items match starting at $spos.
         (local.set $k (i32.const 0))
         (block $count_done
           (loop $count
@@ -3037,44 +3158,67 @@
             (local.set $k (i32.add (local.get $k) (i32.const 1)))
             (br $count)))
         (local.set $min_k (i32.const 0))
-        (if (i32.eq (local.get $quant) (i32.const 43))             ;; '+' needs ≥1
+        (if (i32.eq (local.get $quant) (i32.const 43))
           (then (local.set $min_k (i32.const 1))))
         (if (i32.lt_s (local.get $k) (local.get $min_k))
-          (then (return (i32.const -1))))
-        ;; Try k, k-1, ..., min_k.
+          (then (return (i32.const -1) (local.get $ncaps))))
         (loop $backoff
-          (local.set $r (call $match_pat
+          (call $match_pat
             (local.get $sub) (i32.add (local.get $spos) (local.get $k))
-            (local.get $pat) (local.get $next_ppos)))
+            (local.get $pat) (local.get $next_ppos)
+            (local.get $caps) (local.get $ncaps))
+          (local.set $r_n) (local.set $r)
           (if (i32.ge_s (local.get $r) (i32.const 0))
-            (then (return (local.get $r))))
+            (then (return (local.get $r) (local.get $r_n))))
           (if (i32.le_s (local.get $k) (local.get $min_k))
-            (then (return (i32.const -1))))
+            (then (return (i32.const -1) (local.get $ncaps))))
           (local.set $k (i32.sub (local.get $k) (i32.const 1)))
           (br $backoff))
         (unreachable)))
     ;; No quantifier: match exactly once.
     (if (i32.ge_s (local.get $spos) (local.get $n_sub))
-      (then (return (i32.const -1))))
+      (then (return (i32.const -1) (local.get $ncaps))))
     (if (i32.eqz (call $match_one_item
           (array.get_u $LuaArr (local.get $sub) (local.get $spos))
           (local.get $pat) (local.get $ppos)))
-      (then (return (i32.const -1))))
-    (call $match_pat
+      (then (return (i32.const -1) (local.get $ncaps))))
+    (return_call $match_pat
       (local.get $sub) (i32.add (local.get $spos) (i32.const 1))
-      (local.get $pat) (local.get $next_ppos)))
+      (local.get $pat) (local.get $next_ppos)
+      (local.get $caps) (local.get $ncaps)))
+
+  ;; Materialize one capture as an anyref Lua value:
+  ;;   position capture (len == -2) → 1-based integer
+  ;;   substring capture (len >= 0) → $LuaString of sub[start..start+len]
+  ;; Open captures (len == -1) shouldn't survive into the result.
+  (func $cap_to_value (param $sub (ref $LuaArr))
+                      (param $caps (ref $CapArr)) (param $idx i32)
+                      (result anyref)
+    (local $start i32) (local $len i32) (local $bytes (ref $LuaArr))
+    (local.set $start (array.get $CapArr (local.get $caps)
+      (i32.mul (local.get $idx) (i32.const 2))))
+    (local.set $len (array.get $CapArr (local.get $caps)
+      (i32.add (i32.mul (local.get $idx) (i32.const 2)) (i32.const 1))))
+    (if (i32.eq (local.get $len) (i32.const -2))
+      (then (return (call $make_int (i64.extend_i32_s
+        (i32.add (local.get $start) (i32.const 1)))))))
+    (local.set $bytes (array.new $LuaArr (i32.const 0) (local.get $len)))
+    (array.copy $LuaArr $LuaArr
+      (local.get $bytes) (i32.const 0)
+      (local.get $sub) (local.get $start) (local.get $len))
+    (struct.new $LuaString (local.get $bytes)))
 
   ;; string.find(s, pat [, init [, plain]]).
-  ;; Step 2 form: no captures, no plain flag, no %n / %bxy / %f.
-  ;; Returns (start, end) on success — 1-based positions of the first
-  ;; and last matched bytes (or end < start for an empty match at
-  ;; position start). Returns nil on no match.
+  ;; Returns (start, end, captures…) on success — 1-based positions of
+  ;; the first and last matched bytes (or end < start for an empty
+  ;; match). Returns nil on no match. plain mode is step 9.
   (func $builtin_string_find (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
     (local $sub (ref $LuaArr)) (local $pat (ref $LuaArr))
     (local $n_sub i32) (local $n_pat i32) (local $nargs i32)
     (local $init i32) (local $anchored i32) (local $start_ppos i32)
-    (local $sp i32) (local $end i32)
+    (local $sp i32) (local $end i32) (local $ncaps i32)
+    (local $caps (ref $CapArr)) (local $out (ref $ArgArr)) (local $i i32)
     (local.set $sub (struct.get $LuaString $bytes
       (ref.cast (ref $LuaString) (call $args_at (local.get $args) (i32.const 0)))))
     (local.set $pat (struct.get $LuaString $bytes
@@ -3082,7 +3226,6 @@
     (local.set $n_sub (array.len (local.get $sub)))
     (local.set $n_pat (array.len (local.get $pat)))
     (local.set $nargs (array.len (local.get $args)))
-    ;; init: default 1, 1-based, may be negative.
     (local.set $init (i32.const 1))
     (if (i32.gt_u (local.get $nargs) (i32.const 2))
       (then (local.set $init (i32.wrap_i64
@@ -3092,11 +3235,8 @@
                                        (i32.add (local.get $init) (i32.const 1))))))
     (if (i32.lt_s (local.get $init) (i32.const 1))
       (then (local.set $init (i32.const 1))))
-    ;; If init > n_sub + 1, no match is possible — but Lua still allows
-    ;; init == n_sub + 1 (matching the empty position past the end).
     (if (i32.gt_s (local.get $init) (i32.add (local.get $n_sub) (i32.const 1)))
       (then (return (array.new_fixed $ArgArr 1 (ref.null any)))))
-    ;; Anchor handling: '^' at pattern position 0.
     (local.set $start_ppos (i32.const 0))
     (if (i32.and (i32.gt_s (local.get $n_pat) (i32.const 0))
                  (i32.eq (array.get_u $LuaArr (local.get $pat) (i32.const 0))
@@ -3104,16 +3244,33 @@
       (then (local.set $anchored (i32.const 1))
             (local.set $start_ppos (i32.const 1))))
     (local.set $sp (i32.sub (local.get $init) (i32.const 1)))
+    (local.set $caps (array.new $CapArr (i32.const 0) (i32.const 64)))
     (block $search_done (loop $search
-      (local.set $end (call $match_pat
+      (call $match_pat
         (local.get $sub) (local.get $sp)
-        (local.get $pat) (local.get $start_ppos)))
+        (local.get $pat) (local.get $start_ppos)
+        (local.get $caps) (i32.const 0))
+      (local.set $ncaps)
+      (local.set $end)
       (if (i32.ge_s (local.get $end) (i32.const 0))
         (then
-          (return (array.new_fixed $ArgArr 2
+          ;; Build (start, end, cap1, cap2, ...)
+          (local.set $out (array.new $ArgArr (ref.null any)
+            (i32.add (i32.const 2) (local.get $ncaps))))
+          (array.set $ArgArr (local.get $out) (i32.const 0)
             (call $make_int (i64.extend_i32_s
-              (i32.add (local.get $sp) (i32.const 1))))
-            (call $make_int (i64.extend_i32_s (local.get $end)))))))
+              (i32.add (local.get $sp) (i32.const 1)))))
+          (array.set $ArgArr (local.get $out) (i32.const 1)
+            (call $make_int (i64.extend_i32_s (local.get $end))))
+          (local.set $i (i32.const 0))
+          (block $cdone (loop $cp
+            (br_if $cdone (i32.ge_s (local.get $i) (local.get $ncaps)))
+            (array.set $ArgArr (local.get $out)
+              (i32.add (local.get $i) (i32.const 2))
+              (call $cap_to_value (local.get $sub) (local.get $caps) (local.get $i)))
+            (local.set $i (i32.add (local.get $i) (i32.const 1)))
+            (br $cp)))
+          (return (local.get $out))))
       (br_if $search_done (local.get $anchored))
       (local.set $sp (i32.add (local.get $sp) (i32.const 1)))
       (br_if $search_done (i32.gt_s (local.get $sp) (local.get $n_sub)))
