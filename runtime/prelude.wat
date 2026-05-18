@@ -51,6 +51,13 @@
   ;; host_read: read next line from stdin into $fmt_buf and return the
   ;; length; returns -1 on EOF.
   (import "host" "read" (func $host_read (result i32)))
+  ;; host_fmt_spec: format one value per a Lua-format directive.
+  ;; spec is a LuaString like "%-10s" or "%05.2f" — the bytes from
+  ;; (and including) % through the conversion char. val is the value
+  ;; to format. Host parses the spec, formats, writes the result
+  ;; bytes into the shared fmt_buf, returns the byte length.
+  (import "host" "fmt_spec"
+    (func $host_fmt_spec (param anyref) (param anyref) (result i32)))
   ;; host_parse_num: parses a Lua string per Lua semantics (whitespace
   ;; trim, optional sign, decimal int, hex int 0x..., decimal float
   ;; with optional exponent). The optional base (2..36) constrains to
@@ -2403,13 +2410,16 @@
 
   ;; string.format(fmt, ...) — supports %s %d %x %g %f %e with optional .N
   ;; precision, plus %%. No width/flags.
+  ;; string.format(fmt, ...) — walks fmt, copying literal runs and
+  ;; delegating each %... directive to the host's fmt_spec helper.
+  ;; The host handles flags/width/precision and all the conversion
+  ;; specifiers (s d i o u x X c q e E f F g G a A %).
   (func $builtin_string_format (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
-    (local $fmt (ref $LuaArr))
-    (local $n i32) (local $i i32) (local $j i32)
-    (local $acc anyref) (local $b i32) (local $conv i32) (local $prec i32)
-    (local $arg_idx i32) (local $piece (ref $LuaArr))
-    (local $arg anyref) (local $written i32)
+    (local $fmt (ref $LuaArr)) (local $n i32) (local $i i32) (local $j i32)
+    (local $acc anyref) (local $b i32) (local $piece (ref $LuaArr))
+    (local $arg_idx i32) (local $arg anyref) (local $written i32)
+    (local $spec (ref $LuaArr))
     (local.set $fmt (struct.get $LuaString $bytes
       (ref.cast (ref $LuaString) (call $args_at (local.get $args) (i32.const 0)))))
     (local.set $n (array.len (local.get $fmt)))
@@ -2418,7 +2428,7 @@
     (block $done (loop $main
       (br_if $done (i32.ge_s (local.get $i) (local.get $n)))
       (local.set $b (array.get_u $LuaArr (local.get $fmt) (local.get $i)))
-      (if (i32.ne (local.get $b) (i32.const 37))     ;; not '%' -> collect run
+      (if (i32.ne (local.get $b) (i32.const 37))     ;; not '%' -> literal run
         (then
           (local.set $j (i32.add (local.get $i) (i32.const 1)))
           (block $rdone (loop $rloop
@@ -2436,88 +2446,48 @@
                             (struct.new $LuaString (local.get $piece))))
           (local.set $i (local.get $j))
           (br $main)))
-      ;; here $b == '%'
-      (if (i32.ge_s (i32.add (local.get $i) (i32.const 1)) (local.get $n))
-        (then (br $done)))
-      ;; %% -> literal %
-      (if (i32.eq (array.get_u $LuaArr (local.get $fmt) (i32.add (local.get $i) (i32.const 1)))
+      ;; here $b == '%'.  Scan ahead to find the conversion character.
+      ;; Valid char set: flags [-+ #0'], digits, '.', length modifiers
+      ;; (we ignore those), then a single alphabetic conversion char,
+      ;; OR another '%' for the literal escape.
+      (local.set $j (i32.add (local.get $i) (i32.const 1)))
+      (if (i32.ge_s (local.get $j) (local.get $n)) (then (br $done)))
+      (block $sdone (loop $sloop
+        (if (i32.ge_s (local.get $j) (local.get $n)) (then (br $sdone)))
+        (local.set $b (array.get_u $LuaArr (local.get $fmt) (local.get $j)))
+        ;; Stop on '%' (literal escape) or on an alphabetic char.
+        (br_if $sdone (i32.eq (local.get $b) (i32.const 37)))
+        (br_if $sdone (i32.and
+          (i32.or
+            (i32.and (i32.ge_u (local.get $b) (i32.const 65))
+                     (i32.le_u (local.get $b) (i32.const 90)))    ;; A-Z
+            (i32.and (i32.ge_u (local.get $b) (i32.const 97))
+                     (i32.le_u (local.get $b) (i32.const 122))))  ;; a-z
+          (i32.const 1)))
+        (local.set $j (i32.add (local.get $j) (i32.const 1)))
+        (br $sloop)))
+      (if (i32.ge_s (local.get $j) (local.get $n)) (then (br $done)))
+      ;; Build a LuaString containing %...conv (inclusive).
+      (local.set $spec (array.new $LuaArr (i32.const 0)
+                          (i32.add (i32.sub (local.get $j) (local.get $i))
+                                    (i32.const 1))))
+      (array.copy $LuaArr $LuaArr (local.get $spec) (i32.const 0)
+        (local.get $fmt) (local.get $i)
+        (i32.add (i32.sub (local.get $j) (local.get $i)) (i32.const 1)))
+      ;; %% literal: no arg consumed
+      (if (i32.eq (array.get_u $LuaArr (local.get $fmt) (local.get $j))
                   (i32.const 37))
         (then
-          (local.set $piece (array.new $LuaArr (i32.const 37) (i32.const 1)))
-          (local.set $acc (call $lua_concat (local.get $acc)
-                            (struct.new $LuaString (local.get $piece))))
-          (local.set $i (i32.add (local.get $i) (i32.const 2)))
-          (br $main)))
-      ;; parse optional .NNN precision after the %
-      (local.set $i (i32.add (local.get $i) (i32.const 1)))
-      (local.set $prec (i32.const -1))
-      (if (i32.eq (array.get_u $LuaArr (local.get $fmt) (local.get $i)) (i32.const 46))
-        (then
-          (local.set $i (i32.add (local.get $i) (i32.const 1)))
-          (local.set $prec (i32.const 0))
-          (block $pdone (loop $ploop
-            (br_if $pdone (i32.ge_s (local.get $i) (local.get $n)))
-            (local.set $b (array.get_u $LuaArr (local.get $fmt) (local.get $i)))
-            (br_if $pdone (i32.or (i32.lt_s (local.get $b) (i32.const 48))
-                                   (i32.gt_s (local.get $b) (i32.const 57))))
-            (local.set $prec
-              (i32.add (i32.mul (local.get $prec) (i32.const 10))
-                        (i32.sub (local.get $b) (i32.const 48))))
-            (local.set $i (i32.add (local.get $i) (i32.const 1)))
-            (br $ploop)))))
-      ;; conversion char
-      (if (i32.ge_s (local.get $i) (local.get $n)) (then (br $done)))
-      (local.set $conv (array.get_u $LuaArr (local.get $fmt) (local.get $i)))
-      (local.set $i (i32.add (local.get $i) (i32.const 1)))
-      (local.set $arg (call $args_at (local.get $args) (local.get $arg_idx)))
-      (local.set $arg_idx (i32.add (local.get $arg_idx) (i32.const 1)))
-      ;; dispatch
-      (if (i32.eq (local.get $conv) (i32.const 115))   ;; 's'
-        (then
-          (local.set $acc (call $lua_concat (local.get $acc)
-                            (call $lua_tostring (local.get $arg))))
-          (br $main)))
-      (if (i32.eq (local.get $conv) (i32.const 100))   ;; 'd'
-        (then
-          (local.set $written (call $host_fmt (i32.const 0)
-                                (call $as_int (local.get $arg)) (f64.const 0)
-                                (local.get $prec)))
-          (local.set $acc (call $lua_concat (local.get $acc)
-                            (call $fmt_buf_to_str (local.get $written))))
-          (br $main)))
-      (if (i32.eq (local.get $conv) (i32.const 120))   ;; 'x'
-        (then
-          (local.set $written (call $host_fmt (i32.const 5)
-                                (call $as_int (local.get $arg)) (f64.const 0)
-                                (local.get $prec)))
-          (local.set $acc (call $lua_concat (local.get $acc)
-                            (call $fmt_buf_to_str (local.get $written))))
-          (br $main)))
-      (if (i32.eq (local.get $conv) (i32.const 103))   ;; 'g'
-        (then
-          (local.set $written (call $host_fmt (i32.const 2)
-                                (i64.const 0) (call $as_float (local.get $arg))
-                                (local.get $prec)))
-          (local.set $acc (call $lua_concat (local.get $acc)
-                            (call $fmt_buf_to_str (local.get $written))))
-          (br $main)))
-      (if (i32.eq (local.get $conv) (i32.const 102))   ;; 'f'
-        (then
-          (local.set $written (call $host_fmt (i32.const 3)
-                                (i64.const 0) (call $as_float (local.get $arg))
-                                (local.get $prec)))
-          (local.set $acc (call $lua_concat (local.get $acc)
-                            (call $fmt_buf_to_str (local.get $written))))
-          (br $main)))
-      (if (i32.eq (local.get $conv) (i32.const 101))   ;; 'e'
-        (then
-          (local.set $written (call $host_fmt (i32.const 4)
-                                (i64.const 0) (call $as_float (local.get $arg))
-                                (local.get $prec)))
-          (local.set $acc (call $lua_concat (local.get $acc)
-                            (call $fmt_buf_to_str (local.get $written))))
-          (br $main)))
-      ;; unknown conversion — just skip
+          (local.set $arg (ref.null any)))
+        (else
+          (local.set $arg (call $args_at (local.get $args) (local.get $arg_idx)))
+          (local.set $arg_idx (i32.add (local.get $arg_idx) (i32.const 1)))))
+      (local.set $written (call $host_fmt_spec
+        (struct.new $LuaString (local.get $spec))
+        (local.get $arg)))
+      (local.set $acc (call $lua_concat (local.get $acc)
+                        (call $fmt_buf_to_str (local.get $written))))
+      (local.set $i (i32.add (local.get $j) (i32.const 1)))
       (br $main)))
     (array.new_fixed $ArgArr 1 (call $lua_tostring (local.get $acc))))
 
