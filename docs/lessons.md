@@ -161,7 +161,11 @@ truth for what's currently supported; the doc is just a label.
 
 The `$lua_tostring` extension produced "Unexpected tokens after
 module" because of one extra `))` after a multi-branch nested
-`if/then/else`. Two mitigations:
+`if/then/else`. Hit it AGAIN on the `$match_class` chained
+else-if (10 levels deep), surfacing as "unrecognized module field"
+in `wasm-as` because the extra close ended the module early.
+
+**Mitigations:**
 
 - Prefer `(return …)` early in each branch over nested `if … else`
   with a shared result expression. Flatter structure, easier to
@@ -169,6 +173,18 @@ module" because of one extra `))` after a multi-branch nested
 - WAT comments containing `(` or `)` can confuse external paren
   counters. Use plain prose: `;; takes an optional second arg` not
   `;; takes an optional second arg (in the args array)`.
+- For chained `else-if` past ~5 levels: count nesting explicitly
+  before writing the closing tail. Each `(else (if …))` adds 2
+  closing parens; an N-way dispatch with a final `else` needs
+  `1 + 2*(N-1)` trailing closes. Always verify by running the
+  per-line-depth awk:
+
+  ```sh
+  awk '/^  \(func \$NAME/,/^  \(func \$NEXT/' prelude.wat \
+    | awk '{for(i=1;i<=length;i++){c=substr($0,i,1);if(c=="(")d++;else if(c==")")d--}print d,$0}'
+  ```
+
+  A negative number at any line is your miscount.
 
 ### Behavioural-vs-formatting mismatches in the host
 
