@@ -2720,6 +2720,225 @@
       (local.get $buf) (i32.const 0) (local.get $pos))
     (array.new_fixed $ArgArr 1 (struct.new $LuaString (local.get $out))))
 
+  ;; --- Lua patterns: helpers (step 1 of milestone 20) ---
+  ;;
+  ;; See docs/design/20-lua-patterns.md for the full design. These three
+  ;; helpers are the bytewise primitives the recursive $match_pat will
+  ;; sit on top of in step 2:
+  ;;   $match_class — test a byte against a %X char-class letter
+  ;;   $match_set   — test a byte against a [...] set (with ^ negation,
+  ;;                  %X member classes, and a-z ranges)
+  ;;   $item_end    — return the pattern position right after the item
+  ;;                  starting at $ppos (NOT including the quantifier)
+  ;;   $match_one_item — test a byte against the matchable item at $ppos
+
+  ;; Lowercase letter -> positive predicate, uppercase -> negation.
+  ;; A non-class letter (anything outside a/A d/D l/L u/U w/W x/X
+  ;; s/S c/C p/P g/G) falls back to a literal comparison so `%(` matches
+  ;; '(' etc.
+  (func $match_class (param $byte i32) (param $letter i32) (result i32)
+    (local $lo i32) (local $hit i32) (local $neg i32)
+    (local.set $lo (i32.or (local.get $letter) (i32.const 0x20)))
+    ;; Detect uppercase letter (negation). A class letter is lowercase
+    ;; OR an uppercase whose lower-form is a recognized class.
+    (local.set $neg (i32.and
+      (i32.ge_u (local.get $letter) (i32.const 65))
+      (i32.le_u (local.get $letter) (i32.const 90))))
+    ;; Compute the positive predicate for the lower-form letter.
+    ;;   'a'/97 — letter
+    ;;   'd'/100 — digit
+    ;;   'l'/108 — lowercase
+    ;;   'u'/117 — uppercase
+    ;;   'w'/119 — alnum
+    ;;   'x'/120 — hex digit
+    ;;   's'/115 — space (incl. \t \n \v \f \r)
+    ;;   'c'/99 — control (0..31 or 127)
+    ;;   'p'/112 — punctuation (printable, non-alnum, non-space)
+    ;;   'g'/103 — printable non-space (0x21..0x7E)
+    (local.set $hit (i32.const 0))
+    (if (i32.eq (local.get $lo) (i32.const 100))                ;; 'd'
+      (then (local.set $hit (i32.and (i32.ge_u (local.get $byte) (i32.const 48))
+                                      (i32.le_u (local.get $byte) (i32.const 57)))))
+      (else (if (i32.eq (local.get $lo) (i32.const 97))         ;; 'a'
+        (then (local.set $hit (i32.or
+          (i32.and (i32.ge_u (local.get $byte) (i32.const 65))
+                   (i32.le_u (local.get $byte) (i32.const 90)))
+          (i32.and (i32.ge_u (local.get $byte) (i32.const 97))
+                   (i32.le_u (local.get $byte) (i32.const 122))))))
+        (else (if (i32.eq (local.get $lo) (i32.const 108))      ;; 'l'
+          (then (local.set $hit (i32.and (i32.ge_u (local.get $byte) (i32.const 97))
+                                          (i32.le_u (local.get $byte) (i32.const 122)))))
+          (else (if (i32.eq (local.get $lo) (i32.const 117))    ;; 'u'
+            (then (local.set $hit (i32.and (i32.ge_u (local.get $byte) (i32.const 65))
+                                            (i32.le_u (local.get $byte) (i32.const 90)))))
+            (else (if (i32.eq (local.get $lo) (i32.const 119))  ;; 'w'
+              (then (local.set $hit (i32.or
+                (i32.or
+                  (i32.and (i32.ge_u (local.get $byte) (i32.const 48))
+                           (i32.le_u (local.get $byte) (i32.const 57)))
+                  (i32.and (i32.ge_u (local.get $byte) (i32.const 65))
+                           (i32.le_u (local.get $byte) (i32.const 90))))
+                (i32.and (i32.ge_u (local.get $byte) (i32.const 97))
+                         (i32.le_u (local.get $byte) (i32.const 122))))))
+              (else (if (i32.eq (local.get $lo) (i32.const 120)) ;; 'x'
+                (then (local.set $hit (i32.or
+                  (i32.or
+                    (i32.and (i32.ge_u (local.get $byte) (i32.const 48))
+                             (i32.le_u (local.get $byte) (i32.const 57)))
+                    (i32.and (i32.ge_u (local.get $byte) (i32.const 97))
+                             (i32.le_u (local.get $byte) (i32.const 102))))
+                  (i32.and (i32.ge_u (local.get $byte) (i32.const 65))
+                           (i32.le_u (local.get $byte) (i32.const 70))))))
+                (else (if (i32.eq (local.get $lo) (i32.const 115)) ;; 's'
+                  (then (local.set $hit (i32.or
+                    (i32.eq (local.get $byte) (i32.const 32))
+                    (i32.and (i32.ge_u (local.get $byte) (i32.const 9))
+                             (i32.le_u (local.get $byte) (i32.const 13))))))
+                  (else (if (i32.eq (local.get $lo) (i32.const 99)) ;; 'c'
+                    (then (local.set $hit (i32.or
+                      (i32.lt_u (local.get $byte) (i32.const 32))
+                      (i32.eq (local.get $byte) (i32.const 127)))))
+                    (else (if (i32.eq (local.get $lo) (i32.const 103)) ;; 'g'
+                      (then (local.set $hit (i32.and
+                        (i32.ge_u (local.get $byte) (i32.const 33))
+                        (i32.le_u (local.get $byte) (i32.const 126)))))
+                      (else (if (i32.eq (local.get $lo) (i32.const 112)) ;; 'p'
+                        (then (local.set $hit (i32.and
+                          (i32.and (i32.ge_u (local.get $byte) (i32.const 33))
+                                   (i32.le_u (local.get $byte) (i32.const 126)))
+                          (i32.eqz
+                            ;; not alnum
+                            (i32.or (i32.or
+                              (i32.and (i32.ge_u (local.get $byte) (i32.const 48))
+                                       (i32.le_u (local.get $byte) (i32.const 57)))
+                              (i32.and (i32.ge_u (local.get $byte) (i32.const 65))
+                                       (i32.le_u (local.get $byte) (i32.const 90))))
+                              (i32.and (i32.ge_u (local.get $byte) (i32.const 97))
+                                       (i32.le_u (local.get $byte) (i32.const 122))))))))
+                        (else
+                          ;; Unrecognized class letter — literal compare.
+                          (return (i32.eq (local.get $byte) (local.get $letter)))))))))))))))))))))))
+    (if (local.get $neg)
+      (then (return (i32.eqz (local.get $hit)))))
+    (local.get $hit))
+
+  ;; Test $byte against the set whose '[' is at $lpos. Walks the body
+  ;; until the matching ']' (per pattern rules, the first body byte —
+  ;; possibly after a '^' — may itself be ']' as a literal). Returns 1
+  ;; on match, 0 otherwise.
+  (func $match_set (param $byte i32) (param $pat (ref $LuaArr))
+                   (param $lpos i32) (result i32)
+    (local $n i32) (local $i i32) (local $neg i32)
+    (local $b i32) (local $a i32) (local $c i32)
+    (local $first i32) (local $hit i32)
+    (local.set $n (array.len (local.get $pat)))
+    (local.set $i (i32.add (local.get $lpos) (i32.const 1)))
+    ;; Negation: [^...]
+    (if (i32.and (i32.lt_s (local.get $i) (local.get $n))
+                 (i32.eq (array.get_u $LuaArr (local.get $pat) (local.get $i))
+                         (i32.const 94)))   ;; '^'
+      (then (local.set $neg (i32.const 1))
+            (local.set $i (i32.add (local.get $i) (i32.const 1)))))
+    (local.set $first (i32.const 1))
+    (block $done (loop $lp
+      (br_if $done (i32.ge_s (local.get $i) (local.get $n)))
+      (local.set $b (array.get_u $LuaArr (local.get $pat) (local.get $i)))
+      ;; ']' closes the set unless it's the very first body byte.
+      (if (i32.and (i32.eq (local.get $b) (i32.const 93))   ;; ']'
+                   (i32.eqz (local.get $first)))
+        (then (br $done)))
+      (local.set $first (i32.const 0))
+      (if (i32.eq (local.get $b) (i32.const 37))            ;; '%'
+        (then
+          (if (i32.ge_s (i32.add (local.get $i) (i32.const 1)) (local.get $n))
+            (then (br $done)))
+          (if (call $match_class (local.get $byte)
+                (array.get_u $LuaArr (local.get $pat)
+                  (i32.add (local.get $i) (i32.const 1))))
+            (then (local.set $hit (i32.const 1)) (br $done)))
+          (local.set $i (i32.add (local.get $i) (i32.const 2)))
+          (br $lp)))
+      ;; range a-z (only if the '-' isn't the trailing one and isn't
+      ;; immediately followed by ']'.)
+      (if (i32.and
+            (i32.lt_s (i32.add (local.get $i) (i32.const 2)) (local.get $n))
+            (i32.and
+              (i32.eq (array.get_u $LuaArr (local.get $pat)
+                        (i32.add (local.get $i) (i32.const 1)))
+                      (i32.const 45))       ;; '-'
+              (i32.ne (array.get_u $LuaArr (local.get $pat)
+                        (i32.add (local.get $i) (i32.const 2)))
+                      (i32.const 93))))     ;; not ']'
+        (then
+          (local.set $a (local.get $b))
+          (local.set $c (array.get_u $LuaArr (local.get $pat)
+                          (i32.add (local.get $i) (i32.const 2))))
+          (if (i32.and (i32.ge_u (local.get $byte) (local.get $a))
+                       (i32.le_u (local.get $byte) (local.get $c)))
+            (then (local.set $hit (i32.const 1)) (br $done)))
+          (local.set $i (i32.add (local.get $i) (i32.const 3)))
+          (br $lp)))
+      ;; literal
+      (if (i32.eq (local.get $byte) (local.get $b))
+        (then (local.set $hit (i32.const 1)) (br $done)))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br $lp)))
+    (if (local.get $neg)
+      (then (return (i32.eqz (local.get $hit)))))
+    (local.get $hit))
+
+  ;; Returns the pattern position right after the matchable item at
+  ;; $ppos (NOT including any quantifier suffix). Item kinds:
+  ;;   literal       end = ppos + 1
+  ;;   '.'           end = ppos + 1
+  ;;   '%X'          end = ppos + 2
+  ;;   '[...]'       end = position of the byte after the closing ']'
+  (func $item_end (param $pat (ref $LuaArr)) (param $ppos i32) (result i32)
+    (local $b i32) (local $n i32) (local $i i32) (local $first i32)
+    (local.set $n (array.len (local.get $pat)))
+    (local.set $b (array.get_u $LuaArr (local.get $pat) (local.get $ppos)))
+    (if (i32.eq (local.get $b) (i32.const 37))      ;; '%'
+      (then (return (i32.add (local.get $ppos) (i32.const 2)))))
+    (if (i32.ne (local.get $b) (i32.const 91))      ;; '['
+      (then (return (i32.add (local.get $ppos) (i32.const 1)))))
+    ;; Walk a set body to its closing ']'.
+    (local.set $i (i32.add (local.get $ppos) (i32.const 1)))
+    (if (i32.and (i32.lt_s (local.get $i) (local.get $n))
+                 (i32.eq (array.get_u $LuaArr (local.get $pat) (local.get $i))
+                         (i32.const 94)))
+      (then (local.set $i (i32.add (local.get $i) (i32.const 1)))))
+    (local.set $first (i32.const 1))
+    (block $done (loop $lp
+      (br_if $done (i32.ge_s (local.get $i) (local.get $n)))
+      (local.set $b (array.get_u $LuaArr (local.get $pat) (local.get $i)))
+      (if (i32.and (i32.eq (local.get $b) (i32.const 93))
+                   (i32.eqz (local.get $first)))
+        (then (return (i32.add (local.get $i) (i32.const 1)))))
+      (local.set $first (i32.const 0))
+      (if (i32.eq (local.get $b) (i32.const 37))
+        (then (local.set $i (i32.add (local.get $i) (i32.const 2))))
+        (else (local.set $i (i32.add (local.get $i) (i32.const 1)))))
+      (br $lp)))
+    ;; Unterminated set — return end of pattern. The matcher caller
+    ;; will fail naturally on the unmatched item.
+    (local.get $n))
+
+  ;; Test $byte against the matchable item at $ppos. Dispatches on
+  ;; pat[ppos]: '.', '%X', '[...]', or a literal byte.
+  (func $match_one_item (param $byte i32) (param $pat (ref $LuaArr))
+                         (param $ppos i32) (result i32)
+    (local $b i32)
+    (local.set $b (array.get_u $LuaArr (local.get $pat) (local.get $ppos)))
+    (if (i32.eq (local.get $b) (i32.const 46))      ;; '.'
+      (then (return (i32.const 1))))
+    (if (i32.eq (local.get $b) (i32.const 37))      ;; '%'
+      (then (return (call $match_class (local.get $byte)
+        (array.get_u $LuaArr (local.get $pat)
+          (i32.add (local.get $ppos) (i32.const 1)))))))
+    (if (i32.eq (local.get $b) (i32.const 91))      ;; '['
+      (then (return (call $match_set (local.get $byte) (local.get $pat) (local.get $ppos)))))
+    (i32.eq (local.get $byte) (local.get $b)))
+
   ;; --- string library ---
   (func $builtin_string_len (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
