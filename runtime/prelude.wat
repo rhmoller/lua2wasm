@@ -16,6 +16,10 @@
   ;;               -1    open substring capture (still on the parser stack)
   ;;               -2    position capture (cell [2*i] is the 0-based pos)
   (type $CapArr    (array (mut i32)))
+  ;; Growable byte buffer used by string.gsub. Owns a backing $LuaArr
+  ;; that doubles on overflow.
+  (type $Builder   (struct (field $arr (mut (ref $LuaArr)))
+                           (field $len (mut i32))))
   (rec
     (type $LuaClosure (sub (struct (field $code (ref $LuaFn))
                                    (field $upvals (ref $UpvalArr)))))
@@ -3172,18 +3176,21 @@
     ;; Quantifier-specific dispatch.
     (if (i32.eq (local.get $quant) (i32.const 63))                 ;; '?'
       (then
-        (if (i32.and (i32.lt_s (local.get $spos) (local.get $n_sub))
-                     (call $match_one_item
-                       (array.get_u $LuaArr (local.get $sub) (local.get $spos))
-                       (local.get $pat) (local.get $ppos)))
+        ;; i32.and is eager — short-circuit via nested if so we don't
+        ;; read sub[spos] when spos == n_sub.
+        (if (i32.lt_s (local.get $spos) (local.get $n_sub))
           (then
-            (call $match_pat
-              (local.get $sub) (i32.add (local.get $spos) (i32.const 1))
-              (local.get $pat) (local.get $next_ppos)
-              (local.get $caps) (local.get $ncaps))
-            (local.set $r_n) (local.set $r)
-            (if (i32.ge_s (local.get $r) (i32.const 0))
-              (then (return (local.get $r) (local.get $r_n))))))
+            (if (call $match_one_item
+                  (array.get_u $LuaArr (local.get $sub) (local.get $spos))
+                  (local.get $pat) (local.get $ppos))
+              (then
+                (call $match_pat
+                  (local.get $sub) (i32.add (local.get $spos) (i32.const 1))
+                  (local.get $pat) (local.get $next_ppos)
+                  (local.get $caps) (local.get $ncaps))
+                (local.set $r_n) (local.set $r)
+                (if (i32.ge_s (local.get $r) (i32.const 0))
+                  (then (return (local.get $r) (local.get $r_n))))))))
         (return_call $match_pat (local.get $sub) (local.get $spos)
           (local.get $pat) (local.get $next_ppos)
           (local.get $caps) (local.get $ncaps))))
@@ -3506,6 +3513,216 @@
           (struct.new $Box (call $args_at (local.get $args) (i32.const 1)))
           (struct.new $Box (call $make_int
             (i64.extend_i32_s (i32.sub (local.get $init) (i32.const 1)))))))))
+
+  ;; --- byte-builder for string.gsub output (step 7) ---
+  (func $builder_new (result (ref $Builder))
+    (struct.new $Builder
+      (array.new $LuaArr (i32.const 0) (i32.const 32))
+      (i32.const 0)))
+
+  ;; Ensure $b->arr has at least $need bytes of capacity beyond $b->len.
+  (func $builder_reserve (param $b (ref $Builder)) (param $need i32)
+    (local $cap i32) (local $new_cap i32) (local $new_arr (ref $LuaArr))
+    (local.set $cap (array.len (struct.get $Builder $arr (local.get $b))))
+    (if (i32.lt_s
+          (i32.sub (local.get $cap) (struct.get $Builder $len (local.get $b)))
+          (local.get $need))
+      (then
+        (local.set $new_cap (i32.mul (local.get $cap) (i32.const 2)))
+        (block $ok (loop $grow
+          (br_if $ok (i32.ge_s
+            (i32.sub (local.get $new_cap)
+                     (struct.get $Builder $len (local.get $b)))
+            (local.get $need)))
+          (local.set $new_cap (i32.mul (local.get $new_cap) (i32.const 2)))
+          (br $grow)))
+        (local.set $new_arr (array.new $LuaArr (i32.const 0) (local.get $new_cap)))
+        (array.copy $LuaArr $LuaArr
+          (local.get $new_arr) (i32.const 0)
+          (struct.get $Builder $arr (local.get $b)) (i32.const 0)
+          (struct.get $Builder $len (local.get $b)))
+        (struct.set $Builder $arr (local.get $b) (local.get $new_arr)))))
+
+  (func $builder_append (param $b (ref $Builder)) (param $src (ref $LuaArr))
+                        (param $src_start i32) (param $src_len i32)
+    (if (i32.le_s (local.get $src_len) (i32.const 0)) (then (return)))
+    (call $builder_reserve (local.get $b) (local.get $src_len))
+    (array.copy $LuaArr $LuaArr
+      (struct.get $Builder $arr (local.get $b))
+      (struct.get $Builder $len (local.get $b))
+      (local.get $src) (local.get $src_start) (local.get $src_len))
+    (struct.set $Builder $len (local.get $b)
+      (i32.add (struct.get $Builder $len (local.get $b)) (local.get $src_len))))
+
+  (func $builder_append_byte (param $b (ref $Builder)) (param $byte i32)
+    (call $builder_reserve (local.get $b) (i32.const 1))
+    (array.set $LuaArr (struct.get $Builder $arr (local.get $b))
+      (struct.get $Builder $len (local.get $b)) (local.get $byte))
+    (struct.set $Builder $len (local.get $b)
+      (i32.add (struct.get $Builder $len (local.get $b)) (i32.const 1))))
+
+  ;; Convert the builder into a (ref $LuaString), trimming to exact length.
+  (func $builder_finish (param $b (ref $Builder)) (result (ref $LuaString))
+    (local $out (ref $LuaArr)) (local $n i32)
+    (local.set $n (struct.get $Builder $len (local.get $b)))
+    (local.set $out (array.new $LuaArr (i32.const 0) (local.get $n)))
+    (array.copy $LuaArr $LuaArr
+      (local.get $out) (i32.const 0)
+      (struct.get $Builder $arr (local.get $b)) (i32.const 0)
+      (local.get $n))
+    (struct.new $LuaString (local.get $out)))
+
+  ;; Append capture $idx of the match (sub bytes, ncaps captures) to $b.
+  ;; Position captures append their 1-based position as a decimal string.
+  ;; Substring captures append their bytes verbatim.
+  (func $builder_append_cap
+    (param $b (ref $Builder)) (param $sub (ref $LuaArr))
+    (param $caps (ref $CapArr)) (param $idx i32)
+    (local $start i32) (local $len i32) (local $bytes (ref $LuaArr))
+    (local.set $start (array.get $CapArr (local.get $caps)
+      (i32.mul (local.get $idx) (i32.const 2))))
+    (local.set $len (array.get $CapArr (local.get $caps)
+      (i32.add (i32.mul (local.get $idx) (i32.const 2)) (i32.const 1))))
+    (if (i32.eq (local.get $len) (i32.const -2))
+      (then
+        (local.set $bytes (call $int_to_bytes
+          (i64.extend_i32_s (i32.add (local.get $start) (i32.const 1)))))
+        (call $builder_append (local.get $b) (local.get $bytes)
+          (i32.const 0) (array.len (local.get $bytes)))
+        (return)))
+    (call $builder_append (local.get $b) (local.get $sub)
+      (local.get $start) (local.get $len)))
+
+  ;; Expand a string repl into the builder. Treats %0..%9 as backrefs
+  ;; (with %0 = whole match), %% = literal '%', other %X = literal X.
+  (func $apply_repl_string
+    (param $b (ref $Builder))
+    (param $repl (ref $LuaArr))
+    (param $sub (ref $LuaArr))
+    (param $caps (ref $CapArr)) (param $ncaps i32)
+    (param $match_start i32) (param $match_end i32)
+    (local $n i32) (local $i i32) (local $ch i32) (local $d i32)
+    (local $idx i32) (local $start i32) (local $len i32)
+    (local.set $n (array.len (local.get $repl)))
+    (block $done (loop $lp
+      (br_if $done (i32.ge_s (local.get $i) (local.get $n)))
+      (local.set $ch (array.get_u $LuaArr (local.get $repl) (local.get $i)))
+      (if (i32.eq (local.get $ch) (i32.const 37))           ;; '%'
+        (then
+          (if (i32.ge_s (i32.add (local.get $i) (i32.const 1)) (local.get $n))
+            (then (br $done)))
+          (local.set $d (array.get_u $LuaArr (local.get $repl)
+            (i32.add (local.get $i) (i32.const 1))))
+          (if (i32.eq (local.get $d) (i32.const 37))        ;; '%%'
+            (then
+              (call $builder_append_byte (local.get $b) (i32.const 37))
+              (local.set $i (i32.add (local.get $i) (i32.const 2)))
+              (br $lp)))
+          (if (i32.and (i32.ge_u (local.get $d) (i32.const 48))
+                       (i32.le_u (local.get $d) (i32.const 57)))
+            (then
+              (local.set $idx (i32.sub (local.get $d) (i32.const 48)))
+              (if (i32.eqz (local.get $idx))
+                (then
+                  (call $builder_append (local.get $b) (local.get $sub)
+                    (local.get $match_start)
+                    (i32.sub (local.get $match_end) (local.get $match_start))))
+                (else
+                  (if (i32.gt_s (local.get $idx) (local.get $ncaps))
+                    (then
+                      ;; If pattern has no captures, %1 refers to the whole match.
+                      (if (i32.and (i32.eqz (local.get $ncaps))
+                                   (i32.eq (local.get $idx) (i32.const 1)))
+                        (then (call $builder_append (local.get $b) (local.get $sub)
+                                (local.get $match_start)
+                                (i32.sub (local.get $match_end) (local.get $match_start))))
+                        (else (throw $LuaError (ref.null any)))))
+                    (else
+                      (call $builder_append_cap (local.get $b)
+                        (local.get $sub) (local.get $caps)
+                        (i32.sub (local.get $idx) (i32.const 1)))))))
+              (local.set $i (i32.add (local.get $i) (i32.const 2)))
+              (br $lp)))
+          ;; Other '%X' — append X literally (and drop the '%').
+          (call $builder_append_byte (local.get $b) (local.get $d))
+          (local.set $i (i32.add (local.get $i) (i32.const 2)))
+          (br $lp)))
+      (call $builder_append_byte (local.get $b) (local.get $ch))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br $lp))))
+
+  ;; string.gsub(s, pat, repl [, n]). Step 7 supports string repl only;
+  ;; table and function repl come in step 8.
+  (func $builtin_string_gsub (type $LuaFn)
+    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
+    (local $sub (ref $LuaArr)) (local $pat (ref $LuaArr))
+    (local $repl (ref $LuaArr))
+    (local $n_sub i32) (local $n_pat i32) (local $nargs i32)
+    (local $limit i32) (local $count i32) (local $sp i32) (local $end i32)
+    (local $ncaps i32) (local $caps (ref $CapArr))
+    (local $anchored i32) (local $start_ppos i32)
+    (local $last_end i32) (local $b (ref $Builder))
+    (local.set $sub (struct.get $LuaString $bytes
+      (ref.cast (ref $LuaString) (call $args_at (local.get $args) (i32.const 0)))))
+    (local.set $pat (struct.get $LuaString $bytes
+      (ref.cast (ref $LuaString) (call $args_at (local.get $args) (i32.const 1)))))
+    (local.set $repl (struct.get $LuaString $bytes
+      (ref.cast (ref $LuaString) (call $args_at (local.get $args) (i32.const 2)))))
+    (local.set $n_sub (array.len (local.get $sub)))
+    (local.set $n_pat (array.len (local.get $pat)))
+    (local.set $nargs (array.len (local.get $args)))
+    (local.set $limit (i32.const 2147483647))
+    (if (i32.gt_u (local.get $nargs) (i32.const 3))
+      (then (local.set $limit (i32.wrap_i64
+              (call $as_int (call $args_at (local.get $args) (i32.const 3)))))))
+    (local.set $start_ppos (i32.const 0))
+    (if (i32.and (i32.gt_s (local.get $n_pat) (i32.const 0))
+                 (i32.eq (array.get_u $LuaArr (local.get $pat) (i32.const 0))
+                         (i32.const 94)))
+      (then (local.set $anchored (i32.const 1))
+            (local.set $start_ppos (i32.const 1))))
+    (local.set $b (call $builder_new))
+    (local.set $caps (array.new $CapArr (i32.const 0) (i32.const 64)))
+    (block $done (loop $lp
+      (br_if $done (i32.ge_s (local.get $count) (local.get $limit)))
+      (br_if $done (i32.gt_s (local.get $sp) (local.get $n_sub)))
+      (call $match_pat
+        (local.get $sub) (local.get $sp)
+        (local.get $pat) (local.get $start_ppos)
+        (local.get $caps) (i32.const 0))
+      (local.set $ncaps)
+      (local.set $end)
+      (if (i32.ge_s (local.get $end) (i32.const 0))
+        (then
+          ;; Copy gap before match.
+          (call $builder_append (local.get $b) (local.get $sub)
+            (local.get $last_end)
+            (i32.sub (local.get $sp) (local.get $last_end)))
+          ;; Apply replacement.
+          (call $apply_repl_string (local.get $b) (local.get $repl)
+            (local.get $sub) (local.get $caps) (local.get $ncaps)
+            (local.get $sp) (local.get $end))
+          (local.set $count (i32.add (local.get $count) (i32.const 1)))
+          (if (i32.eq (local.get $end) (local.get $sp))
+            (then
+              ;; Empty match: keep the byte at sp verbatim, advance one.
+              (if (i32.lt_s (local.get $sp) (local.get $n_sub))
+                (then (call $builder_append_byte (local.get $b)
+                        (array.get_u $LuaArr (local.get $sub) (local.get $sp)))))
+              (local.set $sp (i32.add (local.get $sp) (i32.const 1))))
+            (else (local.set $sp (local.get $end))))
+          (local.set $last_end (local.get $sp))
+          (br_if $done (local.get $anchored))
+          (br $lp)))
+      (br_if $done (local.get $anchored))
+      (local.set $sp (i32.add (local.get $sp) (i32.const 1)))
+      (br $lp)))
+    (call $builder_append (local.get $b) (local.get $sub)
+      (local.get $last_end)
+      (i32.sub (local.get $n_sub) (local.get $last_end)))
+    (array.new_fixed $ArgArr 2
+      (call $builder_finish (local.get $b))
+      (call $make_int (i64.extend_i32_s (local.get $count)))))
 
   ;; --- string library ---
   (func $builtin_string_len (type $LuaFn)

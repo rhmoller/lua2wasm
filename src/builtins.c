@@ -70,6 +70,7 @@ static const struct {
     { "find",   4, "$builtin_string_find",   BLT_LIB_STRING },
     { "match",  5, "$builtin_string_match",  BLT_LIB_STRING },
     { "gmatch", 6, "$builtin_string_gmatch", BLT_LIB_STRING },
+    { "gsub",   4, "$builtin_string_gsub",   BLT_LIB_STRING },
     /* utf8 library */
     { "char",   4, "$builtin_utf8_char",   BLT_LIB_UTF8 },
     { "len",    3, "$builtin_utf8_len",    BLT_LIB_UTF8 },
