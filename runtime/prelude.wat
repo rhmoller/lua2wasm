@@ -3651,12 +3651,111 @@
       (local.set $i (i32.add (local.get $i) (i32.const 1)))
       (br $lp))))
 
-  ;; string.gsub(s, pat, repl [, n]). Step 7 supports string repl only;
-  ;; table and function repl come in step 8.
+  ;; Append a replacement-result value to the builder. Supports string,
+  ;; number (rendered via tostring), and nil/false (which inserts the
+  ;; original match unchanged). Anything else raises.
+  (func $append_repl_result
+    (param $b (ref $Builder)) (param $v anyref)
+    (param $sub (ref $LuaArr))
+    (param $match_start i32) (param $match_end i32)
+    (local $bytes (ref $LuaArr))
+    (if (ref.is_null (local.get $v))
+      (then
+        (call $builder_append (local.get $b) (local.get $sub)
+          (local.get $match_start)
+          (i32.sub (local.get $match_end) (local.get $match_start)))
+        (return)))
+    (if (ref.test (ref $LuaBool) (local.get $v))
+      (then
+        (if (i32.eqz (struct.get $LuaBool $b
+                       (ref.cast (ref $LuaBool) (local.get $v))))
+          (then
+            (call $builder_append (local.get $b) (local.get $sub)
+              (local.get $match_start)
+              (i32.sub (local.get $match_end) (local.get $match_start)))
+            (return)))
+        (throw $LuaError (ref.null any))))
+    (if (ref.test (ref $LuaString) (local.get $v))
+      (then
+        (local.set $bytes (struct.get $LuaString $bytes
+          (ref.cast (ref $LuaString) (local.get $v))))
+        (call $builder_append (local.get $b) (local.get $bytes)
+          (i32.const 0) (array.len (local.get $bytes)))
+        (return)))
+    (if (i32.or (call $is_int (local.get $v)) (call $is_float (local.get $v)))
+      (then
+        (local.set $bytes (struct.get $LuaString $bytes
+          (call $lua_tostring (local.get $v))))
+        (call $builder_append (local.get $b) (local.get $bytes)
+          (i32.const 0) (array.len (local.get $bytes)))
+        (return)))
+    (throw $LuaError (ref.null any)))
+
+  ;; Table repl: $tab[first_capture_or_whole_match] is the replacement.
+  (func $apply_repl_table
+    (param $b (ref $Builder)) (param $tab (ref $LuaTable))
+    (param $sub (ref $LuaArr))
+    (param $caps (ref $CapArr)) (param $ncaps i32)
+    (param $match_start i32) (param $match_end i32)
+    (local $key anyref) (local $bytes (ref $LuaArr))
+    (if (i32.eqz (local.get $ncaps))
+      (then
+        (local.set $bytes (array.new $LuaArr (i32.const 0)
+          (i32.sub (local.get $match_end) (local.get $match_start))))
+        (array.copy $LuaArr $LuaArr
+          (local.get $bytes) (i32.const 0)
+          (local.get $sub) (local.get $match_start)
+          (i32.sub (local.get $match_end) (local.get $match_start)))
+        (local.set $key (struct.new $LuaString (local.get $bytes))))
+      (else
+        (local.set $key (call $cap_to_value
+          (local.get $sub) (local.get $caps) (i32.const 0)))))
+    (call $append_repl_result
+      (local.get $b) (call $tab_get (local.get $tab) (local.get $key))
+      (local.get $sub) (local.get $match_start) (local.get $match_end)))
+
+  ;; Function repl: call $fn with captures (or whole match) and use the
+  ;; first return value as the replacement.
+  (func $apply_repl_function
+    (param $b (ref $Builder)) (param $fn (ref $LuaClosure))
+    (param $sub (ref $LuaArr))
+    (param $caps (ref $CapArr)) (param $ncaps i32)
+    (param $match_start i32) (param $match_end i32)
+    (local $n i32) (local $i i32)
+    (local $args (ref $ArgArr)) (local $bytes (ref $LuaArr))
+    (local.set $n (local.get $ncaps))
+    (if (i32.eqz (local.get $n)) (then (local.set $n (i32.const 1))))
+    (local.set $args (array.new $ArgArr (ref.null any) (local.get $n)))
+    (if (i32.eqz (local.get $ncaps))
+      (then
+        (local.set $bytes (array.new $LuaArr (i32.const 0)
+          (i32.sub (local.get $match_end) (local.get $match_start))))
+        (array.copy $LuaArr $LuaArr
+          (local.get $bytes) (i32.const 0)
+          (local.get $sub) (local.get $match_start)
+          (i32.sub (local.get $match_end) (local.get $match_start)))
+        (array.set $ArgArr (local.get $args) (i32.const 0)
+          (struct.new $LuaString (local.get $bytes))))
+      (else
+        (block $cdone (loop $cp
+          (br_if $cdone (i32.ge_s (local.get $i) (local.get $ncaps)))
+          (array.set $ArgArr (local.get $args) (local.get $i)
+            (call $cap_to_value
+              (local.get $sub) (local.get $caps) (local.get $i)))
+          (local.set $i (i32.add (local.get $i) (i32.const 1)))
+          (br $cp)))))
+    (call $append_repl_result
+      (local.get $b)
+      (call $args_first (call $lua_call (local.get $fn) (local.get $args)))
+      (local.get $sub) (local.get $match_start) (local.get $match_end)))
+
+  ;; string.gsub(s, pat, repl [, n]). repl is a string, table, or
+  ;; function — type dispatched per match.
   (func $builtin_string_gsub (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
     (local $sub (ref $LuaArr)) (local $pat (ref $LuaArr))
-    (local $repl (ref $LuaArr))
+    (local $repl_v anyref) (local $repl_bytes (ref $LuaArr))
+    (local $repl_kind i32)        ;; 0=string, 1=table, 2=function
     (local $n_sub i32) (local $n_pat i32) (local $nargs i32)
     (local $limit i32) (local $count i32) (local $sp i32) (local $end i32)
     (local $ncaps i32) (local $caps (ref $CapArr))
@@ -3666,8 +3765,10 @@
       (ref.cast (ref $LuaString) (call $args_at (local.get $args) (i32.const 0)))))
     (local.set $pat (struct.get $LuaString $bytes
       (ref.cast (ref $LuaString) (call $args_at (local.get $args) (i32.const 1)))))
-    (local.set $repl (struct.get $LuaString $bytes
-      (ref.cast (ref $LuaString) (call $args_at (local.get $args) (i32.const 2)))))
+    (local.set $repl_v (call $args_at (local.get $args) (i32.const 2)))
+    ;; Initialize repl_bytes to an empty array so the validator can see
+    ;; it's dominated. The classify chain may overwrite it.
+    (local.set $repl_bytes (array.new $LuaArr (i32.const 0) (i32.const 0)))
     (local.set $n_sub (array.len (local.get $sub)))
     (local.set $n_pat (array.len (local.get $pat)))
     (local.set $nargs (array.len (local.get $args)))
@@ -3675,6 +3776,18 @@
     (if (i32.gt_u (local.get $nargs) (i32.const 3))
       (then (local.set $limit (i32.wrap_i64
               (call $as_int (call $args_at (local.get $args) (i32.const 3)))))))
+    ;; Classify repl. Reject unsupported types early.
+    (if (ref.test (ref $LuaString) (local.get $repl_v))
+      (then (local.set $repl_kind (i32.const 0))
+            (local.set $repl_bytes (struct.get $LuaString $bytes
+              (ref.cast (ref $LuaString) (local.get $repl_v)))))
+      (else (if (ref.test (ref $LuaTable) (local.get $repl_v))
+        (then (local.set $repl_kind (i32.const 1))
+              (local.set $repl_bytes (array.new $LuaArr (i32.const 0) (i32.const 0))))
+        (else (if (ref.test (ref $LuaClosure) (local.get $repl_v))
+          (then (local.set $repl_kind (i32.const 2))
+                (local.set $repl_bytes (array.new $LuaArr (i32.const 0) (i32.const 0))))
+          (else (throw $LuaError (ref.null any))))))))
     (local.set $start_ppos (i32.const 0))
     (if (i32.and (i32.gt_s (local.get $n_pat) (i32.const 0))
                  (i32.eq (array.get_u $LuaArr (local.get $pat) (i32.const 0))
@@ -3694,14 +3807,23 @@
       (local.set $end)
       (if (i32.ge_s (local.get $end) (i32.const 0))
         (then
-          ;; Copy gap before match.
           (call $builder_append (local.get $b) (local.get $sub)
             (local.get $last_end)
             (i32.sub (local.get $sp) (local.get $last_end)))
-          ;; Apply replacement.
-          (call $apply_repl_string (local.get $b) (local.get $repl)
-            (local.get $sub) (local.get $caps) (local.get $ncaps)
-            (local.get $sp) (local.get $end))
+          (if (i32.eq (local.get $repl_kind) (i32.const 0))
+            (then (call $apply_repl_string (local.get $b) (local.get $repl_bytes)
+                    (local.get $sub) (local.get $caps) (local.get $ncaps)
+                    (local.get $sp) (local.get $end))))
+          (if (i32.eq (local.get $repl_kind) (i32.const 1))
+            (then (call $apply_repl_table (local.get $b)
+                    (ref.cast (ref $LuaTable) (local.get $repl_v))
+                    (local.get $sub) (local.get $caps) (local.get $ncaps)
+                    (local.get $sp) (local.get $end))))
+          (if (i32.eq (local.get $repl_kind) (i32.const 2))
+            (then (call $apply_repl_function (local.get $b)
+                    (ref.cast (ref $LuaClosure) (local.get $repl_v))
+                    (local.get $sub) (local.get $caps) (local.get $ncaps)
+                    (local.get $sp) (local.get $end))))
           (local.set $count (i32.add (local.get $count) (i32.const 1)))
           (if (i32.eq (local.get $end) (local.get $sp))
             (then
