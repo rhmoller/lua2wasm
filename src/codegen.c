@@ -66,9 +66,21 @@ typedef struct {
     int in_main;            /* 1 while emitting $main body, 0 inside user fn */
     int break_labels[16];   /* break targets for nested while/for/repeat */
     int break_depth;
+    /* Escape-analysis context for the currently-emitted body: cur_captured[s]
+     * != 0 means slot s must be heap-boxed (some descendant function captures
+     * it); cur_captured[s] == 0 lets the slot be a plain wasm anyref. Set
+     * before emitting either a user function body or the main chunk. */
+    const unsigned char *cur_captured;
+    int cur_n_locals;
     char err[256];
     int ok;
 } CG;
+
+/* True iff the local at this slot index must be allocated as a $Box. */
+static int slot_is_boxed(const CG *c, int slot) {
+    if (slot < 0 || slot >= c->cur_n_locals) return 1; /* defensive */
+    return c->cur_captured ? c->cur_captured[slot] : 1;
+}
 
 static void cg_error(CG *c, const char *msg) {
     if (!c->ok) return;
@@ -121,7 +133,11 @@ static void emit_var_read(CG *c, VarKind kind, int idx, int depth) {
     emit_indent(c, depth);
     switch (kind) {
         case VAR_LOCAL:
-            wat_appendf(c->w, "(struct.get $Box $v (local.get $L%d))\n", idx);
+            if (slot_is_boxed(c, idx)) {
+                wat_appendf(c->w, "(struct.get $Box $v (local.get $L%d))\n", idx);
+            } else {
+                wat_appendf(c->w, "(local.get $L%d)\n", idx);
+            }
             break;
         case VAR_UPVAL:
             wat_appendf(c->w,
@@ -140,11 +156,16 @@ static void emit_var_read(CG *c, VarKind kind, int idx, int depth) {
 
 /* Emit code that pushes the (ref $Box) for the named binding (not its value).
  * Used for upvalue capture into a child closure. Globals and builtins don't
- * have boxes. */
+ * have boxes. Invariant: any local reached here must have been flagged
+ * captured during name resolution, so it really is boxed at codegen time. */
 static void emit_box_ref(CG *c, VarKind kind, int idx, int depth) {
     emit_indent(c, depth);
     switch (kind) {
         case VAR_LOCAL:
+            if (!slot_is_boxed(c, idx)) {
+                cg_error(c, "internal: emit_box_ref on unboxed local");
+                return;
+            }
             wat_appendf(c->w, "(local.get $L%d)\n", idx);
             break;
         case VAR_UPVAL:
@@ -166,6 +187,14 @@ static void emit_target_open(CG *c, const AssignTarget *t, int depth) {
     if (t->kind == TGT_VAR) {
         switch (t->as.var.kind) {
             case VAR_LOCAL:
+                if (slot_is_boxed(c, t->as.var.idx)) {
+                    emit_indent(c, depth); wat_append(c->w, "(struct.set $Box $v\n");
+                    emit_box_ref(c, VAR_LOCAL, t->as.var.idx, depth + 1);
+                } else {
+                    emit_indent(c, depth);
+                    wat_appendf(c->w, "(local.set $L%d\n", t->as.var.idx);
+                }
+                break;
             case VAR_UPVAL:
                 emit_indent(c, depth); wat_append(c->w, "(struct.set $Box $v\n");
                 emit_box_ref(c, t->as.var.kind, t->as.var.idx, depth + 1);
@@ -540,17 +569,22 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
                 emit_indent(c, depth); wat_append(c->w, ")\n");
             }
             for (int i = 0; i < n_names; i++) {
+                int slot = s->as.local.local_idxs[i];
+                int boxed = slot_is_boxed(c, slot);
                 emit_indent(c, depth);
-                wat_appendf(c->w,
-                    "(local.set $L%d (struct.new $Box\n",
-                    s->as.local.local_idxs[i]);
+                if (boxed) {
+                    wat_appendf(c->w, "(local.set $L%d (struct.new $Box\n", slot);
+                } else {
+                    wat_appendf(c->w, "(local.set $L%d\n", slot);
+                }
                 if (n_values == 0) {
                     emit_indent(c, depth + 1); wat_append(c->w, "(ref.null any)\n");
                 } else {
                     emit_distributed_value(c, i, n_values, s->as.local.values,
                                            last_call, depth + 1);
                 }
-                emit_indent(c, depth); wat_append(c->w, "))\n");
+                emit_indent(c, depth);
+                wat_append(c->w, boxed ? "))\n" : ")\n");
             }
             break;
         }
@@ -673,12 +707,17 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
             int label = c->next_label++;
             c->break_labels[c->break_depth++] = label;
             int slot = s->as.for_num.local_idx;
-            /* Initialize control variable's box with `start`, and stash
+            int boxed = slot_is_boxed(c, slot);
+            /* Initialize the control variable with `start`, and stash
              * stop/step in scratch locals. */
             emit_indent(c, depth);
-            wat_appendf(c->w, "(local.set $L%d (struct.new $Box\n", slot);
+            if (boxed) {
+                wat_appendf(c->w, "(local.set $L%d (struct.new $Box\n", slot);
+            } else {
+                wat_appendf(c->w, "(local.set $L%d\n", slot);
+            }
             emit_expr(c, s->as.for_num.start, depth + 1);
-            emit_indent(c, depth); wat_append(c->w, "))\n");
+            emit_indent(c, depth); wat_append(c->w, boxed ? "))\n" : ")\n");
             emit_indent(c, depth); wat_append(c->w, "(local.set $for_stop\n");
             emit_expr(c, s->as.for_num.stop, depth + 1);
             emit_indent(c, depth); wat_append(c->w, ")\n");
@@ -699,25 +738,35 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
             wat_append(c->w,
                 "(if (call $for_step_positive (local.get $for_step))\n");
             emit_indent(c, depth + 2); wat_append(c->w, "  (then\n");
+            const char *load_i  = boxed ? "(struct.get $Box $v (local.get $L%d))"
+                                        : "(local.get $L%d)";
+            char load_buf[80];
+            snprintf(load_buf, sizeof(load_buf), load_i, slot);
             emit_indent(c, depth + 2);
             wat_appendf(c->w,
                 "    (br_if $brk_%d (i32.eqz (call $num_le\n"
-                "      (struct.get $Box $v (local.get $L%d))\n"
-                "      (local.get $for_stop)))))\n", label, slot);
+                "      %s\n"
+                "      (local.get $for_stop)))))\n", label, load_buf);
             emit_indent(c, depth + 2); wat_append(c->w, "  (else\n");
             emit_indent(c, depth + 2);
             wat_appendf(c->w,
                 "    (br_if $brk_%d (i32.eqz (call $num_le\n"
                 "      (local.get $for_stop)\n"
-                "      (struct.get $Box $v (local.get $L%d)))))))\n", label, slot);
+                "      %s)))))\n", label, load_buf);
             /* body */
             emit_block(c, &s->as.for_num.body, depth + 2);
             /* i = i + step */
             emit_indent(c, depth + 2);
-            wat_appendf(c->w,
-                "(struct.set $Box $v (local.get $L%d) "
-                "(call $lua_add (struct.get $Box $v (local.get $L%d)) "
-                "(local.get $for_step)))\n", slot, slot);
+            if (boxed) {
+                wat_appendf(c->w,
+                    "(struct.set $Box $v (local.get $L%d) "
+                    "(call $lua_add (struct.get $Box $v (local.get $L%d)) "
+                    "(local.get $for_step)))\n", slot, slot);
+            } else {
+                wat_appendf(c->w,
+                    "(local.set $L%d (call $lua_add (local.get $L%d) "
+                    "(local.get $for_step)))\n", slot, slot);
+            }
             emit_indent(c, depth + 2); wat_appendf(c->w, "br $cont_%d\n", label);
             emit_indent(c, depth + 1); wat_append(c->w, ")\n");
             emit_indent(c, depth);     wat_append(c->w, ")\n");
@@ -747,12 +796,16 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
                 "(local.set $for_k "
                 "(call $args_at (ref.as_non_null (local.get $tmp_args)) (i32.const 2)))\n");
 
-            /* Pre-allocate boxes for the loop variables. */
+            /* Pre-allocate boxes (or just nil-init the local) per loop var. */
             for (int i = 0; i < s->as.for_gen.n_names; i++) {
+                int li = s->as.for_gen.local_idxs[i];
                 emit_indent(c, depth);
-                wat_appendf(c->w,
-                    "(local.set $L%d (struct.new $Box (ref.null any)))\n",
-                    s->as.for_gen.local_idxs[i]);
+                if (slot_is_boxed(c, li)) {
+                    wat_appendf(c->w,
+                        "(local.set $L%d (struct.new $Box (ref.null any)))\n", li);
+                } else {
+                    wat_appendf(c->w, "(local.set $L%d (ref.null any))\n", li);
+                }
             }
 
             emit_indent(c, depth); wat_appendf(c->w, "(block $brk_%d\n", label);
@@ -781,12 +834,19 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
                 "(call $args_at (ref.as_non_null (local.get $tmp_args)) (i32.const 0)))\n");
             /* bind loop vars from results */
             for (int i = 0; i < s->as.for_gen.n_names; i++) {
+                int li = s->as.for_gen.local_idxs[i];
                 emit_indent(c, depth + 2);
-                wat_appendf(c->w,
-                    "(struct.set $Box $v (local.get $L%d) "
-                    "(call $args_at (ref.as_non_null (local.get $tmp_args)) "
-                    "(i32.const %d)))\n",
-                    s->as.for_gen.local_idxs[i], i);
+                if (slot_is_boxed(c, li)) {
+                    wat_appendf(c->w,
+                        "(struct.set $Box $v (local.get $L%d) "
+                        "(call $args_at (ref.as_non_null (local.get $tmp_args)) "
+                        "(i32.const %d)))\n", li, i);
+                } else {
+                    wat_appendf(c->w,
+                        "(local.set $L%d "
+                        "(call $args_at (ref.as_non_null (local.get $tmp_args)) "
+                        "(i32.const %d)))\n", li, i);
+                }
             }
             /* body */
             emit_block(c, &s->as.for_gen.body, depth + 2);
@@ -843,19 +903,27 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
         }
 
         case STMT_LOCAL_FUNC: {
-            /* Pre-allocate the box with nil so the function body can capture
-             * its own slot (recursion). Then build the closure (which may
-             * capture this very slot via UPVAL_FROM_LOCAL). Finally store
-             * the closure into the box. */
-            emit_indent(c, depth);
-            wat_appendf(c->w,
-                "(local.set $L%d (struct.new $Box (ref.null any)))\n",
-                s->as.local_func.local_idx);
-            emit_indent(c, depth); wat_append(c->w, "(struct.set $Box $v\n");
-            emit_indent(c, depth + 1);
-            wat_appendf(c->w, "(local.get $L%d)\n", s->as.local_func.local_idx);
-            emit_function_expr(c, s->as.local_func.func, depth + 1);
-            emit_indent(c, depth); wat_append(c->w, ")\n");
+            int slot = s->as.local_func.local_idx;
+            int boxed = slot_is_boxed(c, slot);
+            /* If the slot is captured (e.g. by the closure itself for
+             * recursion), pre-allocate the box with nil so the function body
+             * can see its own slot; then store the closure into the box.
+             * If not captured, simply build the closure and store it. */
+            if (boxed) {
+                emit_indent(c, depth);
+                wat_appendf(c->w,
+                    "(local.set $L%d (struct.new $Box (ref.null any)))\n", slot);
+                emit_indent(c, depth); wat_append(c->w, "(struct.set $Box $v\n");
+                emit_indent(c, depth + 1);
+                wat_appendf(c->w, "(local.get $L%d)\n", slot);
+                emit_function_expr(c, s->as.local_func.func, depth + 1);
+                emit_indent(c, depth); wat_append(c->w, ")\n");
+            } else {
+                emit_indent(c, depth);
+                wat_appendf(c->w, "(local.set $L%d\n", slot);
+                emit_function_expr(c, s->as.local_func.func, depth + 1);
+                emit_indent(c, depth); wat_append(c->w, ")\n");
+            }
             break;
         }
     }
@@ -891,8 +959,18 @@ static void emit_user_function(CG *c, const LuaFunc *fn) {
         "(param $args (ref $ArgArr)) (result (ref $ArgArr))\n",
         fn->func_idx);
 
+    /* Wire escape-analysis state for this body. */
+    const unsigned char *prev_captured = c->cur_captured;
+    int prev_n_locals = c->cur_n_locals;
+    c->cur_captured = fn->captured;
+    c->cur_n_locals = fn->n_locals;
+
     for (int i = 0; i < fn->n_locals; i++) {
-        wat_appendf(w, "    (local $L%d (ref $Box))\n", i);
+        if (fn->captured && fn->captured[i]) {
+            wat_appendf(w, "    (local $L%d (ref $Box))\n", i);
+        } else {
+            wat_appendf(w, "    (local $L%d anyref)\n", i);
+        }
     }
     wat_append(w, "    (local $tmp_any anyref)\n");
     wat_append(w, "    (local $tmp_args (ref null $ArgArr))\n");
@@ -910,9 +988,15 @@ static void emit_user_function(CG *c, const LuaFunc *fn) {
 
     /* Param extraction: each declared parameter takes args[i] (nil if missing). */
     for (int i = 0; i < fn->n_params; i++) {
-        wat_appendf(w,
-            "    (local.set $L%d (struct.new $Box "
-            "(call $args_at (local.get $args) (i32.const %d))))\n", i, i);
+        if (fn->captured && fn->captured[i]) {
+            wat_appendf(w,
+                "    (local.set $L%d (struct.new $Box "
+                "(call $args_at (local.get $args) (i32.const %d))))\n", i, i);
+        } else {
+            wat_appendf(w,
+                "    (local.set $L%d "
+                "(call $args_at (local.get $args) (i32.const %d)))\n", i, i);
+        }
     }
     if (fn->is_vararg) {
         wat_appendf(w,
@@ -931,6 +1015,9 @@ static void emit_user_function(CG *c, const LuaFunc *fn) {
 
     /* Declare so the funcref is usable in const init / closures. */
     wat_appendf(w, "  (elem declare func $user_%d)\n", fn->func_idx);
+
+    c->cur_captured = prev_captured;
+    c->cur_n_locals = prev_n_locals;
 }
 
 int codegen_module(const ParseResult *pr, WatBuilder *out,
@@ -1048,8 +1135,14 @@ int codegen_module(const ParseResult *pr, WatBuilder *out,
     if (c.ok) {
         wat_append(out, "\n  ;; --- main (top-level chunk) ---\n");
         wat_append(out, "  (func $main (export \"main\")\n");
+        c.cur_captured = pr->main_captured;
+        c.cur_n_locals = pr->main_n_locals;
         for (int i = 0; i < pr->main_n_locals; i++) {
-            wat_appendf(out, "    (local $L%d (ref $Box))\n", i);
+            if (pr->main_captured && pr->main_captured[i]) {
+                wat_appendf(out, "    (local $L%d (ref $Box))\n", i);
+            } else {
+                wat_appendf(out, "    (local $L%d anyref)\n", i);
+            }
         }
         wat_append(out, "    (local $tmp_any anyref)\n");
         wat_append(out, "    (local $tmp_args (ref null $ArgArr))\n");

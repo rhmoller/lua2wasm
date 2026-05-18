@@ -255,6 +255,12 @@ struct LuaFunc {
     Block body;
     int line;
     int is_vararg;              /* `function f(...)` or `function f(a, ...)` */
+    /* Escape-analysis bitmap (size n_locals). captured[i] != 0 means some
+     * descendant function references local slot i as an upvalue — that slot
+     * must be heap-allocated as a $Box so the box can be shared with the
+     * child closure. The common case (captured[i] == 0) lets codegen store
+     * the local as a plain wasm `anyref`, skipping the box. */
+    unsigned char *captured;
 };
 
 /* ---------- node pool ----------

@@ -46,6 +46,10 @@ typedef struct {
     UpvalueRef upvalues[MAX_UPVALS_PER_FN];
     int n_upvalues;
     int is_vararg;         /* `...` is bound in this frame's scope */
+    /* Escape-analysis: captured[s] == 1 iff slot s is referenced as an
+     * upvalue by some descendant function. Set lazily during name
+     * resolution; consumed when the LuaFunc is finalised. */
+    unsigned char captured[MAX_LOCALS_PER_FN];
 } FuncFrame;
 
 typedef struct {
@@ -116,6 +120,7 @@ static void frame_init(FuncFrame *f) {
     f->next_slot = 0;
     f->n_upvalues = 0;
     f->is_vararg = 0;
+    memset(f->captured, 0, sizeof(f->captured));
 }
 
 static int frame_mark(FuncFrame *f) { return f->local_count; }
@@ -200,6 +205,12 @@ static int resolve_in_frame(Parser *p, int frame_idx, const char *name, size_t n
         return 1;
     }
     UpvalSource src = (parent_kind == VAR_LOCAL) ? UPVAL_FROM_LOCAL : UPVAL_FROM_UPVAL;
+    if (src == UPVAL_FROM_LOCAL) {
+        /* The parent's local is reached as an upvalue from here — flag it
+         * so codegen will box it. Transitive captures (UPVAL_FROM_UPVAL)
+         * propagate via the original parent's already-set flag. */
+        p->frames[frame_idx - 1].captured[parent_idx] = 1;
+    }
     int upval_idx = frame_add_upvalue(f, src, parent_idx);
     if (upval_idx < 0) {
         set_error(p, "too many upvalues");
@@ -1115,6 +1126,12 @@ static LuaFunc *parse_function_body_ex(Parser *p, int line, int with_self) {
     } else {
         fn->upvalues = NULL;
     }
+    if (fn->n_locals) {
+        fn->captured = node_pool_alloc(p->pool, (size_t)fn->n_locals);
+        memcpy(fn->captured, cur_frame(p)->captured, (size_t)fn->n_locals);
+    } else {
+        fn->captured = NULL;
+    }
 
     p->frame_depth--;
     return fn;
@@ -1137,6 +1154,10 @@ ParseResult parse(const TokenList *tokens, NodePool *pool) {
     r.ok = p.ok;
     r.main_body = main;
     r.main_n_locals = p.frames[0].next_slot;
+    if (r.main_n_locals) {
+        r.main_captured = node_pool_alloc(pool, (size_t)r.main_n_locals);
+        memcpy(r.main_captured, p.frames[0].captured, (size_t)r.main_n_locals);
+    }
     r.funcs.count = (size_t)p.n_funcs;
     if (p.n_funcs) {
         r.funcs.items = malloc(sizeof(LuaFunc *) * p.n_funcs);

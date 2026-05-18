@@ -22,6 +22,8 @@ typedef struct {
 typedef struct {
     Block main_body;
     int main_n_locals;
+    /* Escape-analysis bitmap for top-level locals; see LuaFunc.captured. */
+    unsigned char *main_captured;
     FuncTable funcs;
     GlobalTable globals;
     char error[256];

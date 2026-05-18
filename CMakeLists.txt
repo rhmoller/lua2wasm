@@ -236,6 +236,14 @@ add_test(
 )
 
 add_test(
+    NAME test_e2e_no_capture_loop
+    COMMAND bash ${CMAKE_SOURCE_DIR}/tests/test_e2e_no_capture_loop.sh
+            $<TARGET_FILE:lua2wasm>
+            ${CMAKE_SOURCE_DIR}
+            ${CMAKE_BINARY_DIR}
+)
+
+add_test(
     NAME test_e2e_for_step_zero
     COMMAND bash ${CMAKE_SOURCE_DIR}/tests/test_e2e_for_step_zero.sh
             $<TARGET_FILE:lua2wasm>
