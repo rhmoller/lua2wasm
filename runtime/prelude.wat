@@ -3277,6 +3277,79 @@
       (br $search)))
     (array.new_fixed $ArgArr 1 (ref.null any)))
 
+  ;; string.match(s, pat [, init]).
+  ;; Like find, but returns the captures (or the whole match if no
+  ;; captures) instead of the position pair.
+  (func $builtin_string_match (type $LuaFn)
+    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
+    (local $sub (ref $LuaArr)) (local $pat (ref $LuaArr))
+    (local $n_sub i32) (local $n_pat i32) (local $nargs i32)
+    (local $init i32) (local $anchored i32) (local $start_ppos i32)
+    (local $sp i32) (local $end i32) (local $ncaps i32)
+    (local $caps (ref $CapArr)) (local $out (ref $ArgArr)) (local $i i32)
+    (local $whole (ref $LuaArr))
+    (local.set $sub (struct.get $LuaString $bytes
+      (ref.cast (ref $LuaString) (call $args_at (local.get $args) (i32.const 0)))))
+    (local.set $pat (struct.get $LuaString $bytes
+      (ref.cast (ref $LuaString) (call $args_at (local.get $args) (i32.const 1)))))
+    (local.set $n_sub (array.len (local.get $sub)))
+    (local.set $n_pat (array.len (local.get $pat)))
+    (local.set $nargs (array.len (local.get $args)))
+    (local.set $init (i32.const 1))
+    (if (i32.gt_u (local.get $nargs) (i32.const 2))
+      (then (local.set $init (i32.wrap_i64
+              (call $as_int (call $args_at (local.get $args) (i32.const 2)))))))
+    (if (i32.lt_s (local.get $init) (i32.const 0))
+      (then (local.set $init (i32.add (local.get $n_sub)
+                                       (i32.add (local.get $init) (i32.const 1))))))
+    (if (i32.lt_s (local.get $init) (i32.const 1))
+      (then (local.set $init (i32.const 1))))
+    (if (i32.gt_s (local.get $init) (i32.add (local.get $n_sub) (i32.const 1)))
+      (then (return (array.new_fixed $ArgArr 1 (ref.null any)))))
+    (local.set $start_ppos (i32.const 0))
+    (if (i32.and (i32.gt_s (local.get $n_pat) (i32.const 0))
+                 (i32.eq (array.get_u $LuaArr (local.get $pat) (i32.const 0))
+                         (i32.const 94)))
+      (then (local.set $anchored (i32.const 1))
+            (local.set $start_ppos (i32.const 1))))
+    (local.set $sp (i32.sub (local.get $init) (i32.const 1)))
+    (local.set $caps (array.new $CapArr (i32.const 0) (i32.const 64)))
+    (block $search_done (loop $search
+      (call $match_pat
+        (local.get $sub) (local.get $sp)
+        (local.get $pat) (local.get $start_ppos)
+        (local.get $caps) (i32.const 0))
+      (local.set $ncaps)
+      (local.set $end)
+      (if (i32.ge_s (local.get $end) (i32.const 0))
+        (then
+          (if (i32.eqz (local.get $ncaps))
+            (then
+              ;; No captures: return the whole match as a $LuaString.
+              (local.set $whole (array.new $LuaArr (i32.const 0)
+                (i32.sub (local.get $end) (local.get $sp))))
+              (array.copy $LuaArr $LuaArr
+                (local.get $whole) (i32.const 0)
+                (local.get $sub) (local.get $sp)
+                (i32.sub (local.get $end) (local.get $sp)))
+              (return (array.new_fixed $ArgArr 1
+                (struct.new $LuaString (local.get $whole))))))
+          ;; One or more captures: return each.
+          (local.set $out (array.new $ArgArr (ref.null any) (local.get $ncaps)))
+          (local.set $i (i32.const 0))
+          (block $cdone (loop $cp
+            (br_if $cdone (i32.ge_s (local.get $i) (local.get $ncaps)))
+            (array.set $ArgArr (local.get $out) (local.get $i)
+              (call $cap_to_value (local.get $sub) (local.get $caps) (local.get $i)))
+            (local.set $i (i32.add (local.get $i) (i32.const 1)))
+            (br $cp)))
+          (return (local.get $out))))
+      (br_if $search_done (local.get $anchored))
+      (local.set $sp (i32.add (local.get $sp) (i32.const 1)))
+      (br_if $search_done (i32.gt_s (local.get $sp) (local.get $n_sub)))
+      (br $search)))
+    (array.new_fixed $ArgArr 1 (ref.null any)))
+
   ;; --- string library ---
   (func $builtin_string_len (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
