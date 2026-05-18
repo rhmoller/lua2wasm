@@ -45,6 +45,9 @@
   ;; host_math: dispatch transcendental functions to the JS Math API.
   ;;   0 sin  1 cos  2 tan  3 asin  4 acos  5 atan  6 exp  7 log
   (import "host" "math" (func $host_math (param i32) (param f64) (result f64)))
+  ;; host_math2: two-arg math fns (atan2, etc).
+  ;;   0 atan2(y, x)
+  (import "host" "math2" (func $host_math2 (param i32) (param f64) (param f64) (result f64)))
   ;; host_read: read next line from stdin into $fmt_buf and return the
   ;; length; returns -1 on EOF.
   (import "host" "read" (func $host_read (result i32)))
@@ -1141,11 +1144,29 @@
     (call $math_via_host (i32.const 3) (local.get $args)))
   (func $builtin_math_acos (type $LuaFn) (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
     (call $math_via_host (i32.const 4) (local.get $args)))
-  (func $builtin_math_atan (type $LuaFn) (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
+  ;; math.atan(y [, x]) — 1-arg: atan(y). 2-arg: atan2(y, x).
+  (func $builtin_math_atan (type $LuaFn)
+    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
+    (if (i32.gt_u (array.len (local.get $args)) (i32.const 1))
+      (then (return (array.new_fixed $ArgArr 1
+        (call $make_float (call $host_math2 (i32.const 0)
+          (call $as_float (call $args_at (local.get $args) (i32.const 0)))
+          (call $as_float (call $args_at (local.get $args) (i32.const 1)))))))))
     (call $math_via_host (i32.const 5) (local.get $args)))
   (func $builtin_math_exp  (type $LuaFn) (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
     (call $math_via_host (i32.const 6) (local.get $args)))
-  (func $builtin_math_log  (type $LuaFn) (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
+  ;; math.log(x [, base]) — 1-arg: ln(x). 2-arg: log_base(x) = ln(x)/ln(base).
+  (func $builtin_math_log (type $LuaFn)
+    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
+    (local $lx f64) (local $lb f64)
+    (if (i32.gt_u (array.len (local.get $args)) (i32.const 1))
+      (then
+        (local.set $lx (call $host_math (i32.const 7)
+          (call $as_float (call $args_at (local.get $args) (i32.const 0)))))
+        (local.set $lb (call $host_math (i32.const 7)
+          (call $as_float (call $args_at (local.get $args) (i32.const 1)))))
+        (return (array.new_fixed $ArgArr 1
+          (call $make_float (f64.div (local.get $lx) (local.get $lb)))))))
     (call $math_via_host (i32.const 7) (local.get $args)))
 
   ;; math.fmod(x, y) — truncating remainder (rounds quotient toward zero).
