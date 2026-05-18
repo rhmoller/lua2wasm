@@ -230,6 +230,7 @@ import createLua2WasmModule       from "../build-em/lua2wasm.js";
 import binaryen                   from "https://cdn.jsdelivr.net/npm/binaryen@121.0.0/index.js";
 import { MATH_FNS, MATH2_FNS,
          makeHelpers }            from "./host-bindings.mjs";
+import { formatFloat, formatScalar } from "./format.mjs";
 
 /* ----- fixture presets ----- */
 const PRESETS = {
@@ -670,11 +671,6 @@ function watToWasm(wat) {
 
 /* ----- runtime host ----- */
 let curInstance;
-function formatFloat(f) {
-  if (!Number.isFinite(f)) return f === Infinity ? "inf" : f === -Infinity ? "-inf" : "nan";
-  if (Number.isInteger(f)) return `${f}.0`;
-  return f.toPrecision(14).replace(/\.?0+(e|$)/, "$1");
-}
 const helpers = makeHelpers({ getInstance: () => curInstance, formatFloat });
 const { luaToString, formatSpec, parseLuaNumber } = helpers;
 
@@ -697,21 +693,6 @@ async function run() {
 
   try {
     let instance;
-    function formatScalar(kind, i, f, prec) {
-      if (prec < 0) prec = 6;
-      switch (kind) {
-        case 0: return String(i);
-        case 2: return Number(f).toPrecision(prec === 6 ? 14 : prec).replace(/\.?0+(e|$)/, "$1");
-        case 3: return Number(f).toFixed(prec);
-        case 4: return Number(f).toExponential(prec === 6 ? 1 : prec);
-        case 5: return BigInt(i).toString(16);
-        case 6:
-          if (!Number.isFinite(f)) return f === Infinity ? "inf" : f === -Infinity ? "-inf" : "nan";
-          if (Number.isInteger(f)) return `${f}.0`;
-          return Number(f).toPrecision(14).replace(/\.?0+(e|$)/, "$1");
-        default: return "";
-      }
-    }
     /* JSPI: io.read suspends the wasm caller while we wait for the user to
      * type a line into the output pane. Falls back to "return -1" (EOF) if
      * the browser lacks WebAssembly.Suspending / WebAssembly.promising. */
