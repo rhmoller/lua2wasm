@@ -1954,6 +1954,109 @@
       (br $lp2)))
     (local.get $out))
 
+  ;; utf8.offset(s, n [, i]) — byte position of the n-th codepoint
+  ;; relative to byte position i. Default i = 1 (when n >= 0) or
+  ;; #s + 1 (when n < 0). Returns nil if the position is out of range.
+  ;; Special case: n == 0 returns the start of the codepoint that
+  ;; contains byte i.
+  (func $builtin_utf8_offset (type $LuaFn)
+    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
+    (local $bytes (ref $LuaArr)) (local $n_bytes i32) (local $nargs i32)
+    (local $n i32) (local $i i32) (local $p i32) (local $b i32)
+    (local $count i32)
+    (local.set $bytes (struct.get $LuaString $bytes
+      (ref.cast (ref $LuaString) (call $args_at (local.get $args) (i32.const 0)))))
+    (local.set $n_bytes (array.len (local.get $bytes)))
+    (local.set $nargs (array.len (local.get $args)))
+    (local.set $n (i32.wrap_i64
+      (call $as_int (call $args_at (local.get $args) (i32.const 1)))))
+    ;; Default i: 1 if n >= 0, else #s+1.
+    (if (i32.gt_u (local.get $nargs) (i32.const 2))
+      (then (local.set $i (i32.wrap_i64
+              (call $as_int (call $args_at (local.get $args) (i32.const 2))))))
+      (else (if (i32.ge_s (local.get $n) (i32.const 0))
+        (then (local.set $i (i32.const 1)))
+        (else (local.set $i (i32.add (local.get $n_bytes) (i32.const 1)))))))
+    ;; negative i counts from the end
+    (if (i32.lt_s (local.get $i) (i32.const 0))
+      (then (local.set $i (i32.add (local.get $n_bytes)
+                                    (i32.add (local.get $i) (i32.const 1))))))
+    ;; i must be in [1, #s+1]
+    (if (i32.or (i32.lt_s (local.get $i) (i32.const 1))
+                (i32.gt_s (local.get $i) (i32.add (local.get $n_bytes) (i32.const 1))))
+      (then (return (array.new_fixed $ArgArr 1 (ref.null any)))))
+    (local.set $p (i32.sub (local.get $i) (i32.const 1)))  ;; 0-based
+
+    ;; n == 0: walk back from $p to the nearest non-continuation byte.
+    (if (i32.eqz (local.get $n))
+      (then
+        (block $found (loop $bw
+          (br_if $found (i32.le_s (local.get $p) (i32.const 0)))
+          (local.set $b (array.get_u $LuaArr (local.get $bytes) (local.get $p)))
+          (br_if $found (i32.lt_u (i32.and (local.get $b) (i32.const 0xC0))
+                                   (i32.const 0x80)))
+          (br_if $found (i32.ge_u (local.get $b) (i32.const 0xC0)))
+          (local.set $p (i32.sub (local.get $p) (i32.const 1)))
+          (br $bw)))
+        (return (array.new_fixed $ArgArr 1
+          (call $make_int (i64.extend_i32_s
+            (i32.add (local.get $p) (i32.const 1))))))))
+
+    ;; n > 0: starting at $p, advance (n-1) codepoints. $p must NOT be
+    ;; mid-codepoint (continuation byte) unless we're at end+1.
+    (if (i32.gt_s (local.get $n) (i32.const 0))
+      (then
+        (if (i32.lt_s (local.get $p) (local.get $n_bytes))
+          (then
+            (local.set $b (array.get_u $LuaArr (local.get $bytes) (local.get $p)))
+            (if (i32.and (i32.ge_u (local.get $b) (i32.const 0x80))
+                         (i32.lt_u (local.get $b) (i32.const 0xC0)))
+              (then (throw $LuaError (ref.null any))))))
+        (local.set $count (i32.sub (local.get $n) (i32.const 1)))
+        (block $fdone (loop $fw
+          (br_if $fdone (i32.le_s (local.get $count) (i32.const 0)))
+          (if (i32.ge_s (local.get $p) (local.get $n_bytes))
+            (then (return (array.new_fixed $ArgArr 1 (ref.null any)))))
+          ;; advance one codepoint = 1 + count of trailing continuation bytes
+          (local.set $p (i32.add (local.get $p) (i32.const 1)))
+          (block $skip_done (loop $skip
+            (br_if $skip_done (i32.ge_s (local.get $p) (local.get $n_bytes)))
+            (local.set $b (array.get_u $LuaArr (local.get $bytes) (local.get $p)))
+            (br_if $skip_done (i32.lt_u (i32.and (local.get $b) (i32.const 0xC0))
+                                         (i32.const 0x80)))
+            (br_if $skip_done (i32.ge_u (local.get $b) (i32.const 0xC0)))
+            (local.set $p (i32.add (local.get $p) (i32.const 1)))
+            (br $skip)))
+          (local.set $count (i32.sub (local.get $count) (i32.const 1)))
+          (br $fw)))
+        (if (i32.gt_s (local.get $p) (local.get $n_bytes))
+          (then (return (array.new_fixed $ArgArr 1 (ref.null any)))))
+        (return (array.new_fixed $ArgArr 1
+          (call $make_int (i64.extend_i32_s
+            (i32.add (local.get $p) (i32.const 1))))))))
+
+    ;; n < 0: step back (-n) codepoints from $p.
+    (local.set $count (i32.sub (i32.const 0) (local.get $n)))
+    (block $bdone (loop $bw2
+      (br_if $bdone (i32.le_s (local.get $count) (i32.const 0)))
+      (local.set $p (i32.sub (local.get $p) (i32.const 1)))
+      (if (i32.lt_s (local.get $p) (i32.const 0))
+        (then (return (array.new_fixed $ArgArr 1 (ref.null any)))))
+      ;; back up over continuation bytes to the lead byte
+      (block $lead_done (loop $back
+        (br_if $lead_done (i32.le_s (local.get $p) (i32.const 0)))
+        (local.set $b (array.get_u $LuaArr (local.get $bytes) (local.get $p)))
+        (br_if $lead_done (i32.lt_u (i32.and (local.get $b) (i32.const 0xC0))
+                                     (i32.const 0x80)))
+        (br_if $lead_done (i32.ge_u (local.get $b) (i32.const 0xC0)))
+        (local.set $p (i32.sub (local.get $p) (i32.const 1)))
+        (br $back)))
+      (local.set $count (i32.sub (local.get $count) (i32.const 1)))
+      (br $bw2)))
+    (array.new_fixed $ArgArr 1
+      (call $make_int (i64.extend_i32_s
+        (i32.add (local.get $p) (i32.const 1))))))
+
   ;; utf8.len(s [, i [, j [, lax]]]) — count codepoints starting in [i, j].
   ;; Returns the count, OR (nil, errpos) on the first invalid byte.
   (func $builtin_utf8_len (type $LuaFn)
