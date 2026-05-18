@@ -44,6 +44,11 @@ static const struct {
     { "log",   3, "$builtin_math_log",   BLT_LIB_MATH },
     { "deg",   3, "$builtin_math_deg",   BLT_LIB_MATH },
     { "rad",   3, "$builtin_math_rad",   BLT_LIB_MATH },
+    { "fmod",  4, "$builtin_math_fmod",  BLT_LIB_MATH },
+    { "modf",  4, "$builtin_math_modf",  BLT_LIB_MATH },
+    { "tointeger", 9, "$builtin_math_tointeger", BLT_LIB_MATH },
+    { "type",  4, "$builtin_math_type",  BLT_LIB_MATH },
+    { "ult",   3, "$builtin_math_ult",   BLT_LIB_MATH },
     /* string library */
     { "len",    3, "$builtin_string_len",    BLT_LIB_STRING },
     { "sub",    3, "$builtin_string_sub",    BLT_LIB_STRING },

@@ -147,7 +147,9 @@ static void emit_var_read(CG *c, VarKind kind, int idx, int depth) {
                 "(i32.const %d)))\n", idx);
             break;
         case VAR_BUILTIN:
-            wat_appendf(c->w, "(global.get $g_builtin_%s)\n", builtin_name(idx));
+            /* Use the unique WAT func name (sans leading $) so library
+             * builtins like `math.type` don't collide with top-level `type`. */
+            wat_appendf(c->w, "(global.get $g_%s)\n", builtin_func_name(idx) + 1);
             break;
         case VAR_GLOBAL:
             wat_appendf(c->w, "(global.get $g_user_%d)\n", idx);
@@ -1048,12 +1050,15 @@ int codegen_module(const ParseResult *pr, WatBuilder *out,
     }
     wat_append(out, ")\n");
 
-    /* One $g_builtin_NAME wasm global per builtin, pre-wrapping a closure. */
+    /* One wasm global per builtin, pre-wrapping a closure. The global
+     * name mirrors the WAT func name (sans $), so library builtins
+     * (e.g. $builtin_math_type) don't collide with top-level ones
+     * (e.g. $builtin_type) that happen to share a Lua-visible name. */
     for (int i = 0; i < nb; i++) {
         wat_appendf(out,
-            "  (global $g_builtin_%s (ref $LuaClosure)\n"
+            "  (global $g_%s (ref $LuaClosure)\n"
             "    (struct.new $LuaClosure (ref.func %s) (global.get $g_empty_upvals)))\n",
-            builtin_name(i), builtin_func_name(i));
+            builtin_func_name(i) + 1, builtin_func_name(i));
     }
 
     /* User-declared globals: one mutable anyref wasm global each. */
@@ -1116,8 +1121,8 @@ int codegen_module(const ParseResult *pr, WatBuilder *out,
                 "    (call $tab_set (local.get $tab)\n"
                 "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
                 "        (i32.const %zu) (i32.const %zu)))\n"
-                "      (global.get $g_builtin_%s))\n",
-                sr.offset, sr.len, builtin_name(bi));
+                "      (global.get $g_%s))\n",
+                sr.offset, sr.len, builtin_func_name(bi) + 1);
         }
         /* Plain-value constants for the math library. */
         if (cls == BLT_LIB_MATH) {
@@ -1135,6 +1140,20 @@ int codegen_module(const ParseResult *pr, WatBuilder *out,
                 "        (i32.const %zu) (i32.const %zu)))\n"
                 "      (struct.new $LuaFloat (f64.const inf)))\n",
                 huge_key.offset, huge_key.len);
+            StrRef maxi_key = strpool_add(&c.strs, "maxinteger", 10);
+            wat_appendf(out,
+                "    (call $tab_set (local.get $tab)\n"
+                "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
+                "        (i32.const %zu) (i32.const %zu)))\n"
+                "      (call $make_int (i64.const 9223372036854775807)))\n",
+                maxi_key.offset, maxi_key.len);
+            StrRef mini_key = strpool_add(&c.strs, "mininteger", 10);
+            wat_appendf(out,
+                "    (call $tab_set (local.get $tab)\n"
+                "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
+                "        (i32.const %zu) (i32.const %zu)))\n"
+                "      (call $make_int (i64.const -9223372036854775808)))\n",
+                mini_key.offset, mini_key.len);
         }
         wat_appendf(out, "    (global.set $g_user_%zu (local.get $tab))\n", gi);
     }

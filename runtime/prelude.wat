@@ -1073,7 +1073,7 @@
   (func $builtin_ipairs (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
     (array.new_fixed $ArgArr 3
-      (global.get $g_builtin__ipairs_iter)
+      (global.get $g_builtin_ipairs_iter)
       (call $args_at (local.get $args) (i32.const 0))
       (ref.i31 (i32.const 0))))
 
@@ -1147,6 +1147,110 @@
     (call $math_via_host (i32.const 6) (local.get $args)))
   (func $builtin_math_log  (type $LuaFn) (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
     (call $math_via_host (i32.const 7) (local.get $args)))
+
+  ;; math.fmod(x, y) — truncating remainder (rounds quotient toward zero).
+  ;; Distinct from Lua's `%` operator (which is floor-modulo).
+  ;; If both args are integers: integer result; y == 0 raises.
+  ;; Otherwise: float result via x - trunc(x/y)*y.
+  (func $builtin_math_fmod (type $LuaFn)
+    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
+    (local $a anyref) (local $b anyref) (local $iy i64)
+    (local $fx f64) (local $fy f64)
+    (local.set $a (call $args_at (local.get $args) (i32.const 0)))
+    (local.set $b (call $args_at (local.get $args) (i32.const 1)))
+    (if (i32.and (call $is_int (local.get $a)) (call $is_int (local.get $b)))
+      (then
+        (local.set $iy (call $as_int (local.get $b)))
+        (if (i64.eqz (local.get $iy))
+          (then (throw $LuaError (ref.null any))))
+        (return (array.new_fixed $ArgArr 1
+          (call $make_int (i64.rem_s (call $as_int (local.get $a))
+                                      (local.get $iy)))))))
+    (local.set $fx (call $as_float (local.get $a)))
+    (local.set $fy (call $as_float (local.get $b)))
+    (array.new_fixed $ArgArr 1
+      (call $make_float
+        (f64.sub (local.get $fx)
+                 (f64.mul (f64.trunc (f64.div (local.get $fx) (local.get $fy)))
+                          (local.get $fy))))))
+
+  ;; math.modf(x) — returns (integral, fractional).
+  ;; Integral part is returned as integer if it fits in i64, else as float.
+  ;; Fractional part is always a float.
+  (func $builtin_math_modf (type $LuaFn)
+    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
+    (local $x f64) (local $ip f64) (local $fp f64)
+    (local $out (ref $ArgArr)) (local $head anyref)
+    (local.set $x (call $as_float (call $args_at (local.get $args) (i32.const 0))))
+    (local.set $ip (f64.trunc (local.get $x)))
+    (local.set $fp (f64.sub (local.get $x) (local.get $ip)))
+    ;; Integral as int if representable: |ip| < 2^63 and ip == ip (not NaN).
+    (if (i32.and
+          (f64.eq (local.get $ip) (local.get $ip))
+          (i32.and
+            (f64.ge (local.get $ip) (f64.const -9223372036854775808.0))
+            (f64.lt (local.get $ip) (f64.const  9223372036854775808.0))))
+      (then (local.set $head (call $make_int (i64.trunc_f64_s (local.get $ip)))))
+      (else (local.set $head (call $make_float (local.get $ip)))))
+    (local.set $out (array.new $ArgArr (ref.null any) (i32.const 2)))
+    (array.set $ArgArr (local.get $out) (i32.const 0) (local.get $head))
+    (array.set $ArgArr (local.get $out) (i32.const 1) (call $make_float (local.get $fp)))
+    (local.get $out))
+
+  ;; math.tointeger(v) — int passthrough; float with integer value → int;
+  ;; anything else (incl. non-integer float, nil, etc.) → nil.
+  ;; (Strings: this implementation does NOT accept strings; per the manual
+  ;; it should accept anything `tonumber` accepts, which is a future
+  ;; refinement.)
+  (func $builtin_math_tointeger (type $LuaFn)
+    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
+    (local $v anyref) (local $f f64) (local $i i64)
+    (local.set $v (call $args_at (local.get $args) (i32.const 0)))
+    (if (call $is_int (local.get $v))
+      (then (return (array.new_fixed $ArgArr 1 (local.get $v)))))
+    (if (call $is_float (local.get $v))
+      (then
+        (local.set $f (call $as_float (local.get $v)))
+        ;; representable as i64 AND has no fractional part
+        (if (i32.and
+              (f64.eq (local.get $f) (f64.trunc (local.get $f)))
+              (i32.and
+                (f64.eq (local.get $f) (local.get $f))      ;; not NaN
+                (i32.and
+                  (f64.ge (local.get $f) (f64.const -9223372036854775808.0))
+                  (f64.lt (local.get $f) (f64.const  9223372036854775808.0)))))
+          (then (return (array.new_fixed $ArgArr 1
+                  (call $make_int (i64.trunc_f64_s (local.get $f)))))))))
+    (array.new_fixed $ArgArr 1 (ref.null any)))
+
+  ;; math.type(v) — "integer" / "float" / nil.
+  (func $builtin_math_type (type $LuaFn)
+    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
+    (local $v anyref)
+    (local.set $v (call $args_at (local.get $args) (i32.const 0)))
+    (if (call $is_int (local.get $v))
+      (then (return (array.new_fixed $ArgArr 1
+              (struct.new $LuaString
+                (array.new_fixed $LuaArr 7
+                  (i32.const 105) (i32.const 110) (i32.const 116)
+                  (i32.const 101) (i32.const 103) (i32.const 101)
+                  (i32.const 114)))))))
+    (if (call $is_float (local.get $v))
+      (then (return (array.new_fixed $ArgArr 1
+              (struct.new $LuaString
+                (array.new_fixed $LuaArr 5
+                  (i32.const 102) (i32.const 108) (i32.const 111)
+                  (i32.const 97)  (i32.const 116)))))))
+    (array.new_fixed $ArgArr 1 (ref.null any)))
+
+  ;; math.ult(m, n) — unsigned i64 less-than. Both args must be integers.
+  (func $builtin_math_ult (type $LuaFn)
+    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
+    (array.new_fixed $ArgArr 1
+      (call $lua_bool_to_ref
+        (i64.lt_u
+          (call $as_int (call $args_at (local.get $args) (i32.const 0)))
+          (call $as_int (call $args_at (local.get $args) (i32.const 1)))))))
 
   ;; math.deg(x) — radians to degrees.
   (func $builtin_math_deg (type $LuaFn)
