@@ -51,6 +51,13 @@
   ;; host_read: read next line from stdin into $fmt_buf and return the
   ;; length; returns -1 on EOF.
   (import "host" "read" (func $host_read (result i32)))
+  ;; host_parse_num: parses a Lua string per Lua semantics (whitespace
+  ;; trim, optional sign, decimal int, hex int 0x..., decimal float
+  ;; with optional exponent). The optional base (2..36) constrains to
+  ;; integer parsing in that base; 0 means "no base specified".
+  ;; Returns a Lua value: i31/struct int, $LuaFloat, or null.
+  (import "host" "parse_num"
+    (func $host_parse_num (param anyref) (param i32) (result anyref)))
 
   ;; --- singletons ---
   (global $g_true  (ref $LuaBool) (struct.new $LuaBool (i32.const 1)))
@@ -1028,40 +1035,32 @@
     (array.new_fixed $ArgArr 1
       (call $lua_tostring (call $args_at (local.get $args) (i32.const 0)))))
 
-  ;; tonumber: numbers passthrough, strings parsed as ints (simple form),
-  ;; everything else returns nil. (Phase-7 limitation.)
+  ;; tonumber(v [, base])
+  ;;   - numbers: passthrough (when base absent)
+  ;;   - strings: parsed per Lua rules — whitespace trim, optional sign,
+  ;;              decimal int, 0x... hex int, decimal float with optional
+  ;;              exponent. With a base argument, only integer parsing
+  ;;              in that base is attempted.
+  ;;   - anything else: nil
+  ;; The parser lives host-side (see runtime/host.mjs); WAT just dispatches.
   (func $builtin_tonumber (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
-    (local $v anyref) (local $bytes (ref $LuaArr))
-    (local $n i32) (local $i i32) (local $acc i64) (local $neg i32) (local $b i32)
+    (local $v anyref) (local $base i32) (local $nargs i32)
     (local.set $v (call $args_at (local.get $args) (i32.const 0)))
-    (if (i32.or (call $is_int (local.get $v)) (call $is_float (local.get $v)))
-      (then (return (array.new_fixed $ArgArr 1 (local.get $v)))))
+    (local.set $nargs (array.len (local.get $args)))
+    (if (i32.gt_u (local.get $nargs) (i32.const 1))
+      (then (local.set $base (i32.wrap_i64
+              (call $as_int (call $args_at (local.get $args) (i32.const 1)))))))
+    ;; with no base, numeric arguments pass through unchanged.
+    (if (i32.eqz (local.get $base))
+      (then
+        (if (i32.or (call $is_int (local.get $v)) (call $is_float (local.get $v)))
+          (then (return (array.new_fixed $ArgArr 1 (local.get $v)))))))
+    ;; otherwise, only strings can be parsed; non-strings yield nil.
     (if (i32.eqz (ref.test (ref $LuaString) (local.get $v)))
       (then (return (array.new_fixed $ArgArr 1 (ref.null any)))))
-    (local.set $bytes (struct.get $LuaString $bytes
-                        (ref.cast (ref $LuaString) (local.get $v))))
-    (local.set $n (array.len (local.get $bytes)))
-    (if (i32.eqz (local.get $n))
-      (then (return (array.new_fixed $ArgArr 1 (ref.null any)))))
-    (if (i32.eq (array.get_u $LuaArr (local.get $bytes) (i32.const 0)) (i32.const 45))
-      (then (local.set $neg (i32.const 1)) (local.set $i (i32.const 1))))
-    (if (i32.ge_s (local.get $i) (local.get $n))
-      (then (return (array.new_fixed $ArgArr 1 (ref.null any)))))
-    (block $done (loop $lp
-      (br_if $done (i32.ge_s (local.get $i) (local.get $n)))
-      (local.set $b (array.get_u $LuaArr (local.get $bytes) (local.get $i)))
-      (if (i32.or (i32.lt_s (local.get $b) (i32.const 48))
-                  (i32.gt_s (local.get $b) (i32.const 57)))
-        (then (return (array.new_fixed $ArgArr 1 (ref.null any)))))
-      (local.set $acc (i64.add (i64.mul (local.get $acc) (i64.const 10))
-                                (i64.extend_i32_u
-                                  (i32.sub (local.get $b) (i32.const 48)))))
-      (local.set $i (i32.add (local.get $i) (i32.const 1)))
-      (br $lp)))
-    (if (local.get $neg)
-      (then (local.set $acc (i64.sub (i64.const 0) (local.get $acc)))))
-    (array.new_fixed $ArgArr 1 (call $make_int (local.get $acc))))
+    (array.new_fixed $ArgArr 1
+      (call $host_parse_num (local.get $v) (local.get $base))))
 
   ;; next(t, k): returns next key/value pair, or nothing when exhausted.
   (func $builtin_next (type $LuaFn)
@@ -2048,6 +2047,12 @@
     (array.get_u $LuaArr
       (struct.get $LuaString $bytes (ref.cast (ref $LuaString) (local.get $v)))
       (local.get $i)))
+  ;; Host-callable constructors so JS can build int/float values from
+  ;; parsed strings (used by tonumber).
+  (func (export "lua_make_int") (param $v i64) (result anyref)
+    (call $make_int (local.get $v)))
+  (func (export "lua_make_float") (param $v f64) (result anyref)
+    (call $make_float (local.get $v)))
   ;; JS-side writer for the format scratch buffer.
   (func (export "fmt_buf_set") (param $i i32) (param $b i32)
     (array.set $LuaArr (ref.as_non_null (global.get $fmt_buf))
