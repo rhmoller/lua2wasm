@@ -1954,6 +1954,57 @@
       (br $lp2)))
     (local.get $out))
 
+  ;; utf8.codes iterator. Called with (s, prev_p).
+  ;;   prev_p == 0 -> emit first codepoint at byte 1
+  ;;   prev_p > 0  -> advance past codepoint at prev_p, emit next
+  ;; Returns empty when past end. Raises on invalid sequences (strict).
+  ;; (Lax flag from utf8.codes(s, lax) is currently ignored — see
+  ;;  docs/stdlib.md.)
+  (func $builtin_utf8_codes_iter (type $LuaFn)
+    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
+    (local $bytes (ref $LuaArr)) (local $n_bytes i32)
+    (local $prev i32) (local $p i32) (local $w i32)
+    (local $out (ref $ArgArr))
+    (local.set $bytes (struct.get $LuaString $bytes
+      (ref.cast (ref $LuaString) (call $args_at (local.get $args) (i32.const 0)))))
+    (local.set $n_bytes (array.len (local.get $bytes)))
+    (local.set $prev (i32.wrap_i64
+      (call $as_int (call $args_at (local.get $args) (i32.const 1)))))
+    (if (i32.eqz (local.get $prev))
+      (then (local.set $p (i32.const 0)))
+      (else
+        ;; advance past the codepoint at byte $prev (1-based)
+        (local.set $w (call $utf8_decode_step
+          (local.get $bytes) (i32.sub (local.get $prev) (i32.const 1))
+          (i32.const 0)))
+        (if (i32.eqz (local.get $w))
+          (then (throw $LuaError (ref.null any))))
+        (local.set $p (i32.add (i32.sub (local.get $prev) (i32.const 1))
+                                (local.get $w)))))
+    (if (i32.ge_s (local.get $p) (local.get $n_bytes))
+      (then (return (global.get $g_empty_args))))
+    (local.set $w (call $utf8_decode_step
+      (local.get $bytes) (local.get $p) (i32.const 0)))
+    (if (i32.eqz (local.get $w))
+      (then (throw $LuaError (ref.null any))))
+    (local.set $out (array.new $ArgArr (ref.null any) (i32.const 2)))
+    (array.set $ArgArr (local.get $out) (i32.const 0)
+      (call $make_int (i64.extend_i32_s
+        (i32.add (local.get $p) (i32.const 1)))))
+    (array.set $ArgArr (local.get $out) (i32.const 1)
+      (call $make_int (i64.extend_i32_u
+        (call $utf8_assemble (local.get $bytes) (local.get $p) (local.get $w)))))
+    (local.get $out))
+
+  ;; utf8.codes(s [, lax]) — returns (iter, s, 0) for generic for.
+  ;; Generic for then drives iter(s, prev) until it returns nothing.
+  (func $builtin_utf8_codes (type $LuaFn)
+    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
+    (array.new_fixed $ArgArr 3
+      (global.get $g_builtin_utf8_codes_iter)
+      (call $args_at (local.get $args) (i32.const 0))
+      (ref.i31 (i32.const 0))))
+
   ;; utf8.offset(s, n [, i]) — byte position of the n-th codepoint
   ;; relative to byte position i. Default i = 1 (when n >= 0) or
   ;; #s + 1 (when n < 0). Returns nil if the position is out of range.

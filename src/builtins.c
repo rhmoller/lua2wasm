@@ -27,6 +27,10 @@ static const struct {
     { "rawset",       6,  "$builtin_rawset",       BLT_TOPLEVEL },
     /* iterators for ipairs/pairs (not user-visible by name) */
     { "_ipairs_iter", 12, "$builtin_ipairs_iter", BLT_TOPLEVEL },
+    /* iterator helper for utf8.codes — same trick: leading underscore
+     * keeps it out of user-facing lookups while still creating the
+     * \$g_builtin_utf8_codes_iter global. */
+    { "_utf8_codes_iter", 16, "$builtin_utf8_codes_iter", BLT_TOPLEVEL },
     /* math library (installed into the `math` table) */
     { "floor", 5, "$builtin_math_floor", BLT_LIB_MATH },
     { "abs",   3, "$builtin_math_abs",   BLT_LIB_MATH },
@@ -66,6 +70,7 @@ static const struct {
     { "len",    3, "$builtin_utf8_len",    BLT_LIB_UTF8 },
     { "codepoint", 9, "$builtin_utf8_codepoint", BLT_LIB_UTF8 },
     { "offset",    6, "$builtin_utf8_offset",    BLT_LIB_UTF8 },
+    { "codes",     5, "$builtin_utf8_codes",     BLT_LIB_UTF8 },
     /* io library */
     { "write", 5, "$builtin_io_write", BLT_LIB_IO },
     { "read",  4, "$builtin_io_read",  BLT_LIB_IO },
