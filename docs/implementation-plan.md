@@ -15,6 +15,15 @@ Guiding rules:
   table *in the same commit*.
 - **Order = leverage first.** Cheap wins early, big-ticket items (patterns,
   pack/unpack) deferred behind their own design docs.
+- **Preflight before code.** Spend 10 minutes per milestone on the
+  checklist in [`lessons.md`](lessons.md) — manual edge cases, existing
+  helpers, WASM levers, integration points, name-clash check, fixture
+  sketch. Most cycles I've lost mid-milestone trace back to skipping
+  this step.
+- **Audit after fixing a fundamental.** When a fix lands in a primitive
+  op (`..`, `==`, `<`, arithmetic, table-set), immediately grep every
+  caller. Old assumptions usually hide elsewhere too. See the cascade
+  notes in `lessons.md`.
 
 Effort estimates: **S** = ½ day · **M** = 1–2 days · **L** = ≥ 3 days.
 
