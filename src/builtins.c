@@ -50,6 +50,7 @@ static const struct {
     { "lower",  5, "$builtin_string_lower",  BLT_LIB_STRING },
     { "reverse",7, "$builtin_string_reverse",BLT_LIB_STRING },
     { "rep",    3, "$builtin_string_rep",    BLT_LIB_STRING },
+    { "byte",   4, "$builtin_string_byte",   BLT_LIB_STRING },
     /* io library */
     { "write", 5, "$builtin_io_write", BLT_LIB_IO },
     { "read",  4, "$builtin_io_read",  BLT_LIB_IO },

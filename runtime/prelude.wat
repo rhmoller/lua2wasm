@@ -1412,6 +1412,48 @@
       (br $lp)))
     (local.get $out))
 
+  ;; string.byte(s [, i [, j]]) — returns the byte values of s[i..j]
+  ;; as multiple results. Defaults: i = 1, j = i. Negative indices
+  ;; count from the end. Empty range returns no values.
+  (func $builtin_string_byte (type $LuaFn)
+    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
+    (local $bytes (ref $LuaArr)) (local $n i32)
+    (local $i i32) (local $j i32) (local $count i32) (local $k i32)
+    (local $nargs i32) (local $out (ref $ArgArr))
+    (local.set $bytes (struct.get $LuaString $bytes
+      (ref.cast (ref $LuaString) (call $args_at (local.get $args) (i32.const 0)))))
+    (local.set $n (array.len (local.get $bytes)))
+    (local.set $nargs (array.len (local.get $args)))
+    (local.set $i (i32.const 1))
+    (if (i32.gt_u (local.get $nargs) (i32.const 1))
+      (then (local.set $i (i32.wrap_i64
+              (call $as_int (call $args_at (local.get $args) (i32.const 1)))))))
+    (local.set $j (local.get $i))
+    (if (i32.gt_u (local.get $nargs) (i32.const 2))
+      (then (local.set $j (i32.wrap_i64
+              (call $as_int (call $args_at (local.get $args) (i32.const 2)))))))
+    ;; negative index normalisation (relative to end of string)
+    (if (i32.lt_s (local.get $i) (i32.const 0))
+      (then (local.set $i (i32.add (local.get $n) (i32.add (local.get $i) (i32.const 1))))))
+    (if (i32.lt_s (local.get $j) (i32.const 0))
+      (then (local.set $j (i32.add (local.get $n) (i32.add (local.get $j) (i32.const 1))))))
+    ;; clamp to [1, n]
+    (if (i32.lt_s (local.get $i) (i32.const 1)) (then (local.set $i (i32.const 1))))
+    (if (i32.gt_s (local.get $j) (local.get $n)) (then (local.set $j (local.get $n))))
+    (if (i32.gt_s (local.get $i) (local.get $j))
+      (then (return (global.get $g_empty_args))))
+    (local.set $count (i32.add (i32.sub (local.get $j) (local.get $i)) (i32.const 1)))
+    (local.set $out (array.new $ArgArr (ref.null any) (local.get $count)))
+    (block $done (loop $lp
+      (br_if $done (i32.ge_s (local.get $k) (local.get $count)))
+      (array.set $ArgArr (local.get $out) (local.get $k)
+        (call $make_int (i64.extend_i32_u
+          (array.get_u $LuaArr (local.get $bytes)
+            (i32.sub (i32.add (local.get $i) (local.get $k)) (i32.const 1))))))
+      (local.set $k (i32.add (local.get $k) (i32.const 1)))
+      (br $lp)))
+    (local.get $out))
+
   ;; string.rep(s, n [, sep]) — n copies of s, joined by sep.
   ;; n <= 0 returns "". sep defaults to "". Result length is
   ;; n*len(s) + max(0, n-1)*len(sep), allocated once.
