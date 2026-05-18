@@ -1264,7 +1264,7 @@
       (local.get $b)   (i32.const 0) (local.get $nb))
     (local.get $out))
 
-  (tag $LuaError (param anyref))
+  (tag $LuaError (export "LuaError") (param anyref))
 
   ;; Real-Lua print: tostring each arg, join with TAB, host prints with a
   ;; trailing newline. Zero args -> just a newline.
@@ -1498,7 +1498,7 @@
   ;; --- additional top-level builtins ---
   (func $builtin_assert (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
-    (local $msg anyref) (local $idx i32)
+    (local $msg anyref) (local $idx i32) (local $bytes (ref $LuaArr))
     (if (call $lua_truthy (call $args_at (local.get $args) (i32.const 0)))
       (then (return (local.get $args))))
     ;; failed: prefix string messages with "<src>:<assert-call-line>: "
@@ -1506,6 +1506,28 @@
     ;; conceptually, but from our frame stack's POV the assert call
     ;; site is the topmost frame).
     (local.set $msg (call $args_at (local.get $args) (i32.const 1)))
+    ;; Default message when none given (per Lua spec): "assertion failed!"
+    (if (ref.is_null (local.get $msg))
+      (then
+        (local.set $bytes (array.new $LuaArr (i32.const 0) (i32.const 17)))
+        (array.set $LuaArr (local.get $bytes) (i32.const  0) (i32.const 97))   ;; a
+        (array.set $LuaArr (local.get $bytes) (i32.const  1) (i32.const 115))  ;; s
+        (array.set $LuaArr (local.get $bytes) (i32.const  2) (i32.const 115))  ;; s
+        (array.set $LuaArr (local.get $bytes) (i32.const  3) (i32.const 101))  ;; e
+        (array.set $LuaArr (local.get $bytes) (i32.const  4) (i32.const 114))  ;; r
+        (array.set $LuaArr (local.get $bytes) (i32.const  5) (i32.const 116))  ;; t
+        (array.set $LuaArr (local.get $bytes) (i32.const  6) (i32.const 105))  ;; i
+        (array.set $LuaArr (local.get $bytes) (i32.const  7) (i32.const 111))  ;; o
+        (array.set $LuaArr (local.get $bytes) (i32.const  8) (i32.const 110))  ;; n
+        (array.set $LuaArr (local.get $bytes) (i32.const  9) (i32.const 32))   ;; space
+        (array.set $LuaArr (local.get $bytes) (i32.const 10) (i32.const 102))  ;; f
+        (array.set $LuaArr (local.get $bytes) (i32.const 11) (i32.const 97))   ;; a
+        (array.set $LuaArr (local.get $bytes) (i32.const 12) (i32.const 105))  ;; i
+        (array.set $LuaArr (local.get $bytes) (i32.const 13) (i32.const 108))  ;; l
+        (array.set $LuaArr (local.get $bytes) (i32.const 14) (i32.const 101))  ;; e
+        (array.set $LuaArr (local.get $bytes) (i32.const 15) (i32.const 100))  ;; d
+        (array.set $LuaArr (local.get $bytes) (i32.const 16) (i32.const 33))   ;; !
+        (local.set $msg (struct.new $LuaString (local.get $bytes)))))
     (if (ref.test (ref $LuaString) (local.get $msg))
       (then
         (local.set $idx (i32.sub (global.get $call_depth) (i32.const 1)))

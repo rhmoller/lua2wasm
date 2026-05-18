@@ -779,7 +779,20 @@ async function run() {
       instance.exports.main();
     }
   } catch (e) {
-    logLine("ERROR (run): " + (e && e.message ? e.message : e), "err");
+    let msg;
+    /* Uncaught Lua error arrives as a WebAssembly.Exception carrying
+     * the $LuaError tag (exported as "LuaError"). Pull the anyref
+     * payload out and run it through luaToString so the user sees the
+     * actual error value — typically "<src>:<line>: message". */
+    const tag = curInstance && curInstance.exports && curInstance.exports.LuaError;
+    if (tag && e instanceof WebAssembly.Exception && e.is(tag)) {
+      const payload = e.getArg(tag, 0);
+      msg = payload === null || payload === undefined
+              ? "(nil error)" : luaToString(payload);
+    } else {
+      msg = e && e.message ? e.message : String(e);
+    }
+    logLine("ERROR (run): " + msg, "err");
     console.error(e); return;
   }
   const t3 = performance.now();

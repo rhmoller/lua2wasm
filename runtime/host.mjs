@@ -90,4 +90,19 @@ function hostReadNum() {
         read_num:  ()             => hostReadNum(),
     },
 }));
-instance.exports.main();
+try {
+    instance.exports.main();
+} catch (e) {
+    /* Uncaught Lua error: unwrap the $LuaError payload (exported tag
+     * "LuaError") and print it via luaToString. Falls back to Node's
+     * default formatting for any other exception. */
+    const tag = instance.exports && instance.exports.LuaError;
+    if (tag && e instanceof WebAssembly.Exception && e.is(tag)) {
+        const payload = e.getArg(tag, 0);
+        const msg = payload === null || payload === undefined
+                      ? "(nil error)" : luaToString(payload);
+        process.stderr.write("lua: " + msg + "\n");
+        process.exit(1);
+    }
+    throw e;
+}
