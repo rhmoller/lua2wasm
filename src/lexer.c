@@ -228,16 +228,55 @@ static int read_string(Lex *L, char q, char **out_buf, size_t *out_len) {
     return 1;
 }
 
-/* --[[ ... ]] long comment.  Caller already consumed "--". */
-static void skip_long_comment(Lex *L) {
-    /* p currently at first '[' */
-    L->p += 2; /* skip [[ */
+/* Probe whether the current position starts a long-bracket opener
+ *   "[=*["
+ * — that is, `[` followed by N>=0 `=`s followed by another `[`. Returns
+ * the level N on success (advancing L->p past the opener and the
+ * optional leading newline). Returns -1 if not a long bracket and
+ * leaves L->p unchanged. */
+static int try_open_long_bracket(Lex *L) {
+    if (L->p[0] != '[') return -1;
+    int level = 0;
+    while (L->p[1 + level] == '=') level++;
+    if (L->p[1 + level] != '[') return -1;
+    L->p += 2 + level;                       /* skip "[=...=[" */
+    if (*L->p == '\n') { L->line++; L->p++; }
+    return level;
+}
+
+/* Read the body of a long bracket until the matching close "]=...=]".
+ * Sets *out_buf / *out_len to the body bytes (caller frees). Returns 1
+ * on success, 0 if EOF was hit before the close. */
+static int read_long_body(Lex *L, int level, char **out_buf, size_t *out_len) {
+    const char *start = L->p;
     while (*L->p) {
-        if (L->p[0] == ']' && L->p[1] == ']') { L->p += 2; return; }
+        if (L->p[0] == ']') {
+            int n = 0;
+            while (L->p[1 + n] == '=') n++;
+            if (n == level && L->p[1 + n] == ']') {
+                size_t len = (size_t)(L->p - start);
+                char *buf = xmalloc(len ? len : 1);
+                if (len) memcpy(buf, start, len);
+                *out_buf = buf; *out_len = len;
+                L->p += 2 + level;           /* skip "]=...=]" */
+                return 1;
+            }
+        }
         if (*L->p == '\n') L->line++;
         L->p++;
     }
-    lex_error(L, "unterminated long comment");
+    return 0;
+}
+
+/* --[=*[ ... ]=*] long comment.  Caller already consumed "--" and the
+ * opener has just been recognized by try_open_long_bracket. */
+static void skip_long_comment(Lex *L, int level) {
+    char *buf = NULL; size_t len = 0;
+    if (!read_long_body(L, level, &buf, &len)) {
+        lex_error(L, "unterminated long comment");
+        return;
+    }
+    free(buf);
 }
 
 TokenList lex(const char *source) {
@@ -252,7 +291,10 @@ TokenList lex(const char *source) {
         /* comments */
         if (c == '-' && L.p[1] == '-') {
             L.p += 2;
-            if (L.p[0] == '[' && L.p[1] == '[') { skip_long_comment(&L); continue; }
+            if (L.p[0] == '[') {
+                int level = try_open_long_bracket(&L);
+                if (level >= 0) { skip_long_comment(&L, level); continue; }
+            }
             while (*L.p && *L.p != '\n') L.p++;
             continue;
         }
@@ -334,30 +376,21 @@ TokenList lex(const char *source) {
             case ')': ONE(TOK_RPAREN); break;
             case '{': ONE(TOK_LBRACE); break;
             case '}': ONE(TOK_RBRACE); break;
-            case '[':
-                if (L.p[1] == '[') {
-                    /* Long-bracket string [[ ... ]] (level 0 only; no [=[…]=]) */
-                    L.p += 2; /* skip [[ */
-                    /* Per Lua: a leading newline immediately after the open
-                     * bracket is stripped. */
-                    if (*L.p == '\n') { L.line++; L.p++; }
-                    const char *start = L.p;
-                    while (*L.p && !(L.p[0] == ']' && L.p[1] == ']')) {
-                        if (*L.p == '\n') L.line++;
-                        L.p++;
-                    }
-                    if (!*L.p) { lex_error(&L, "unterminated long string"); t.kind = TOK_ERROR; t.len = 0; break; }
-                    size_t len = (size_t)(L.p - start);
-                    t.kind = TOK_STRING;
-                    t.str_buf = xmalloc(len);
-                    if (len) memcpy(t.str_buf, start, len);
-                    t.str_len = len;
-                    L.p += 2; /* skip ]] */
-                    t.len = (size_t)(L.p - t.start);
-                } else {
-                    ONE(TOK_LBRACKET);
+            case '[': {
+                int level = try_open_long_bracket(&L);
+                if (level < 0) { ONE(TOK_LBRACKET); break; }
+                /* Long-bracket string [=*[ ... ]=*]. Body bytes verbatim
+                 * (no escape processing), leading newline already stripped
+                 * by try_open_long_bracket. */
+                if (!read_long_body(&L, level, &t.str_buf, &t.str_len)) {
+                    lex_error(&L, "unterminated long string");
+                    t.kind = TOK_ERROR; t.len = 0;
+                    break;
                 }
+                t.kind = TOK_STRING;
+                t.len = (size_t)(L.p - t.start);
                 break;
+            }
             case ']': ONE(TOK_RBRACKET); break;
             case ',': ONE(TOK_COMMA); break;
             case ';': ONE(TOK_SEMI); break;
