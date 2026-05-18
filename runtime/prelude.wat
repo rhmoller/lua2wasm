@@ -48,9 +48,19 @@
   ;; host_math2: two-arg math fns.
   ;;   0 atan2(y, x)   1 pow(base, exp)
   (import "host" "math2" (func $host_math2 (param i32) (param f64) (param f64) (result f64)))
-  ;; host_read: read next line from stdin into $fmt_buf and return the
-  ;; length; returns -1 on EOF.
-  (import "host" "read" (func $host_read (result i32)))
+  ;; host_read: read from stdin in one of several modes into $fmt_buf.
+  ;;   mode 0  -> "l" (line, no \n)
+  ;;   mode 1  -> "L" (line, with \n)
+  ;;   mode 2  -> "a" (read all remaining)
+  ;;   mode 3  -> count: exactly $count bytes (or fewer if EOF)
+  ;; Returns the number of bytes written, or -1 on EOF.
+  ;; For mode 2 ("a"), 0 bytes means "" — never -1 — so callers can
+  ;; distinguish empty-string-at-EOF from genuine EOF for line modes.
+  (import "host" "read" (func $host_read (param i32) (param i32) (result i32)))
+  ;; host_read_num: skip whitespace, parse one number per Lua syntax.
+  ;; Returns the parsed value (int or float subtype) or nil if EOF /
+  ;; no number found at the cursor.
+  (import "host" "read_num" (func $host_read_num (result anyref)))
   ;; host_fmt_spec: format one value per a Lua-format directive.
   ;; spec is a LuaString like "%-10s" or "%05.2f" — the bytes from
   ;; (and including) % through the conversion char. val is the value
@@ -1091,13 +1101,82 @@
 
   ;; io.read — single-line reader. Host writes the line into $fmt_buf and
   ;; returns its length; -1 means EOF, in which case we return nil.
+  ;; io.read(...) — one result per format arg.
+  ;; Formats:
+  ;;   "l"          line, no trailing \n (default if no args)
+  ;;   "L"          line, with trailing \n
+  ;;   "a"          read all remaining (empty string at EOF, not nil)
+  ;;   "n"          parse one number; returns nil if no number at cursor
+  ;;   integer N    read up to N bytes (returns "" at EOF for N == 0,
+  ;;                otherwise nil at EOF)
+  ;; Older Lua's leading '*' in format strings (e.g. "*l") is tolerated.
   (func $builtin_io_read (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
-    (local $n i32)
-    (local.set $n (call $host_read))
-    (if (i32.lt_s (local.get $n) (i32.const 0))
-      (then (return (array.new_fixed $ArgArr 1 (ref.null any)))))
-    (array.new_fixed $ArgArr 1 (call $fmt_buf_to_str (local.get $n))))
+    (local $nargs i32) (local $i i32) (local $fmt anyref)
+    (local $bytes (ref $LuaArr)) (local $blen i32) (local $b0 i32) (local $b1 i32)
+    (local $mode i32) (local $count i32) (local $written i32)
+    (local $out (ref $ArgArr)) (local $val anyref)
+    (local.set $nargs (array.len (local.get $args)))
+    ;; No args: behave as io.read("l").
+    (if (i32.eqz (local.get $nargs))
+      (then
+        (local.set $written (call $host_read (i32.const 0) (i32.const 0)))
+        (if (i32.lt_s (local.get $written) (i32.const 0))
+          (then (return (array.new_fixed $ArgArr 1 (ref.null any)))))
+        (return (array.new_fixed $ArgArr 1
+          (call $fmt_buf_to_str (local.get $written))))))
+    (local.set $out (array.new $ArgArr (ref.null any) (local.get $nargs)))
+    (block $loopdone (loop $loop
+      (br_if $loopdone (i32.ge_s (local.get $i) (local.get $nargs)))
+      (local.set $fmt (call $args_at (local.get $args) (local.get $i)))
+      (if (ref.test (ref $LuaString) (local.get $fmt))
+        (then
+          (local.set $bytes (struct.get $LuaString $bytes
+            (ref.cast (ref $LuaString) (local.get $fmt))))
+          (local.set $blen (array.len (local.get $bytes)))
+          ;; Strip an optional leading '*' (legacy compat).
+          (local.set $b0 (i32.const 0))
+          (if (i32.and (i32.gt_s (local.get $blen) (i32.const 0))
+                       (i32.eq (array.get_u $LuaArr (local.get $bytes) (i32.const 0))
+                               (i32.const 42)))   ;; '*'
+            (then (local.set $b0 (i32.const 1))))
+          (if (i32.le_s (local.get $blen) (local.get $b0))
+            (then (throw $LuaError (ref.null any))))
+          (local.set $b1 (array.get_u $LuaArr (local.get $bytes) (local.get $b0)))
+          ;; map first non-'*' char to a mode
+          (if (i32.eq (local.get $b1) (i32.const 108))         ;; 'l'
+            (then (local.set $mode (i32.const 0)))
+            (else (if (i32.eq (local.get $b1) (i32.const 76))  ;; 'L'
+              (then (local.set $mode (i32.const 1)))
+              (else (if (i32.eq (local.get $b1) (i32.const 97)) ;; 'a'
+                (then (local.set $mode (i32.const 2)))
+                (else (if (i32.eq (local.get $b1) (i32.const 110)) ;; 'n'
+                  (then (local.set $mode (i32.const -1)))    ;; sentinel: number
+                  (else (throw $LuaError (ref.null any))))))))))
+          (if (i32.eq (local.get $mode) (i32.const -1))
+            (then (local.set $val (call $host_read_num)))
+            (else
+              (local.set $written
+                (call $host_read (local.get $mode) (i32.const 0)))
+              (if (i32.lt_s (local.get $written) (i32.const 0))
+                (then (local.set $val (ref.null any)))
+                (else (local.set $val (call $fmt_buf_to_str (local.get $written))))))))
+        (else
+          ;; integer count — exact N bytes
+          (local.set $count (i32.wrap_i64 (call $as_int (local.get $fmt))))
+          (if (i32.lt_s (local.get $count) (i32.const 0))
+            (then (throw $LuaError (ref.null any))))
+          (local.set $written (call $host_read (i32.const 3) (local.get $count)))
+          (if (i32.lt_s (local.get $written) (i32.const 0))
+            (then
+              (if (i32.eqz (local.get $count))
+                (then (local.set $val (call $fmt_buf_to_str (i32.const 0))))
+                (else (local.set $val (ref.null any)))))
+            (else (local.set $val (call $fmt_buf_to_str (local.get $written)))))))
+      (array.set $ArgArr (local.get $out) (local.get $i) (local.get $val))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br $loop)))
+    (local.get $out))
 
   (func $builtin_type (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))

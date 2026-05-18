@@ -288,18 +288,80 @@ function parseLuaNumber(strRef, base) {
     return null;
 }
 
-// io.read backing: read all of stdin synchronously at first call, hand out one
-// line per io.read(). EOF → length -1.
-let stdinLines = null;
-function readNextLine() {
-    if (stdinLines === null) {
-        try {
-            const data = readFileSync(0, "utf8");
-            stdinLines = data.split("\n");
-            if (stdinLines.length && stdinLines[stdinLines.length - 1] === "") stdinLines.pop();
-        } catch { stdinLines = []; }
+// io.read backing: pulls all of stdin synchronously at first call and
+// keeps a byte cursor. Supports all of Lua's read modes via hostRead().
+let stdinBuf = null;     // Uint8Array of all stdin bytes
+let stdinPos = 0;        // cursor (byte offset into stdinBuf)
+function ensureStdin() {
+    if (stdinBuf !== null) return;
+    try {
+        const s = readFileSync(0, "utf8");
+        stdinBuf = new TextEncoder().encode(s);
+    } catch { stdinBuf = new Uint8Array(0); }
+}
+
+function writeBytesToFmtBuf(slice) {
+    for (let i = 0; i < slice.length; i++)
+        instance.exports.fmt_buf_set(i, slice[i]);
+    return slice.length;
+}
+
+// mode 0 = "l", 1 = "L", 2 = "a", 3 = N-byte count
+function hostRead(mode, count) {
+    ensureStdin();
+    if (mode === 2) {
+        // "a": remaining bytes; empty at EOF, never -1.
+        const slice = stdinBuf.subarray(stdinPos);
+        stdinPos = stdinBuf.length;
+        return writeBytesToFmtBuf(slice);
     }
-    return stdinLines.length ? stdinLines.shift() : null;
+    if (mode === 3) {
+        if (count === 0) {
+            // Lua: "n=0" tests for EOF — returns "" if data available, nil otherwise.
+            return stdinPos >= stdinBuf.length ? -1 : 0;
+        }
+        if (stdinPos >= stdinBuf.length) return -1;
+        const end = Math.min(stdinPos + count, stdinBuf.length);
+        const slice = stdinBuf.subarray(stdinPos, end);
+        stdinPos = end;
+        return writeBytesToFmtBuf(slice);
+    }
+    // line modes
+    if (stdinPos >= stdinBuf.length) return -1;
+    let end = stdinPos;
+    while (end < stdinBuf.length && stdinBuf[end] !== 0x0A) end++;
+    const includeNewline = mode === 1 && end < stdinBuf.length;
+    const slice = stdinBuf.subarray(stdinPos, end + (includeNewline ? 1 : 0));
+    stdinPos = end + (end < stdinBuf.length ? 1 : 0); // always consume the \n
+    return writeBytesToFmtBuf(slice);
+}
+
+// "n" format: skip leading whitespace, parse one Lua number, advance cursor.
+function hostReadNum() {
+    ensureStdin();
+    while (stdinPos < stdinBuf.length) {
+        const b = stdinBuf[stdinPos];
+        if (b === 0x20 || b === 0x09 || b === 0x0A || b === 0x0D || b === 0x0B || b === 0x0C) stdinPos++;
+        else break;
+    }
+    if (stdinPos >= stdinBuf.length) return null;
+    // Greedy regex over the remaining bytes (re-encoded to a JS string).
+    const tail = new TextDecoder().decode(stdinBuf.subarray(stdinPos));
+    const m = /^[+-]?(0[xX][0-9a-fA-F]+(\.[0-9a-fA-F]*)?([pP][+-]?[0-9]+)?|[0-9]+\.?[0-9]*([eE][+-]?[0-9]+)?|\.[0-9]+([eE][+-]?[0-9]+)?)/.exec(tail);
+    if (!m) return null;
+    const consumed = new TextEncoder().encode(m[0]).length;
+    stdinPos += consumed;
+    const text = m[0];
+    // Prefer integer subtype when it's an integer literal.
+    if (/^[+-]?(0[xX][0-9a-fA-F]+|[0-9]+)$/.test(text)) {
+        const sign = text.startsWith("-") ? -1n : 1n;
+        const body = text.replace(/^[+-]/, "");
+        const v = body.startsWith("0x") || body.startsWith("0X")
+            ? BigInt(body) : BigInt(body);
+        return instance.exports.lua_make_int(sign * v);
+    }
+    const f = Number(text);
+    return Number.isNaN(f) ? null : instance.exports.lua_make_float(f);
 }
 
 ({ instance } = await WebAssembly.instantiate(bytes, {
@@ -315,12 +377,8 @@ function readNextLine() {
         math2:     (kind, x, y) => MATH2_FNS[kind](x, y),
         parse_num: (s, base) => parseLuaNumber(s, base),
         fmt_spec:  (spec, val) => formatSpec(spec, val),
-        read:      () => {
-            const s = readNextLine();
-            if (s === null) return -1;
-            for (let j = 0; j < s.length; j++) instance.exports.fmt_buf_set(j, s.charCodeAt(j));
-            return s.length;
-        },
+        read:      (mode, count) => hostRead(mode, count),
+        read_num:  () => hostReadNum(),
     },
 }));
 instance.exports.main();
