@@ -45,8 +45,8 @@
   ;; host_math: dispatch transcendental functions to the JS Math API.
   ;;   0 sin  1 cos  2 tan  3 asin  4 acos  5 atan  6 exp  7 log
   (import "host" "math" (func $host_math (param i32) (param f64) (result f64)))
-  ;; host_math2: two-arg math fns (atan2, etc).
-  ;;   0 atan2(y, x)
+  ;; host_math2: two-arg math fns.
+  ;;   0 atan2(y, x)   1 pow(base, exp)
   (import "host" "math2" (func $host_math2 (param i32) (param f64) (param f64) (result f64)))
   ;; host_read: read next line from stdin into $fmt_buf and return the
   ;; length; returns -1 on EOF.
@@ -203,18 +203,14 @@
                (f64.mul (f64.floor (f64.div (local.get $af) (local.get $bf)))
                         (local.get $bf)))))
 
+  ;; `^` is always-float per Lua spec. Routes to host pow so that
+  ;; non-integer exponents (2^0.5), negative exponents (2^-1), and
+  ;; mixed-sign edge cases (NaN, inf, 0^0) all match IEEE-754 pow.
   (func $lua_pow (param $a anyref) (param $b anyref) (result anyref)
-    (local $base f64) (local $exp f64) (local $r f64) (local $i i32)
-    (local.set $base (call $as_float (local.get $a)))
-    (local.set $exp  (call $as_float (local.get $b)))
-    (local.set $r (f64.const 1))
-    (local.set $i (i32.trunc_f64_s (local.get $exp)))
-    (block $done (loop $lp
-      (br_if $done (i32.le_s (local.get $i) (i32.const 0)))
-      (local.set $r (f64.mul (local.get $r) (local.get $base)))
-      (local.set $i (i32.sub (local.get $i) (i32.const 1)))
-      (br $lp)))
-    (call $make_float (local.get $r)))
+    (call $make_float
+      (call $host_math2 (i32.const 1)
+        (call $as_float (local.get $a))
+        (call $as_float (local.get $b)))))
 
   (func $lua_neg (param $a anyref) (result anyref)
     (if (result anyref) (call $is_int (local.get $a))

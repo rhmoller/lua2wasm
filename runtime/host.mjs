@@ -37,7 +37,7 @@ function luaToString(v) {
 const bytes = await readFile(wasmPath);
 
 const MATH_FNS = [Math.sin, Math.cos, Math.tan, Math.asin, Math.acos, Math.atan, Math.exp, Math.log];
-const MATH2_FNS = [Math.atan2];
+const MATH2_FNS = [Math.atan2, Math.pow];
 
 // io.read backing: read all of stdin synchronously at first call, hand out one
 // line per io.read(). EOF → length -1.
