@@ -82,6 +82,7 @@ static const struct {
     { "pack",   4, "$builtin_table_pack",   BLT_LIB_TABLE },
     { "move",   4, "$builtin_table_move",   BLT_LIB_TABLE },
     { "create", 6, "$builtin_table_create", BLT_LIB_TABLE },
+    { "sort",   4, "$builtin_table_sort",   BLT_LIB_TABLE },
 };
 
 #define N (sizeof(BUILTINS)/sizeof(BUILTINS[0]))

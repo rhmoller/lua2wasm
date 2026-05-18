@@ -1718,6 +1718,75 @@
 
   ;; table.unpack(t [, i [, j]]) -> t[i], t[i+1], ..., t[j].
   ;; Defaults: i = 1, j = #t. Returns no values when j < i.
+  ;; --- table.sort ---
+  ;;
+  ;; Comparator wrapper: if $cmp is null, use the built-in `<`; otherwise
+  ;; invoke the user closure with (a, b) and take the truthiness of its
+  ;; first return.
+  (func $cmp_lt (param $cmp (ref null $LuaClosure))
+                (param $a anyref) (param $b anyref) (result i32)
+    (if (result i32) (ref.is_null (local.get $cmp))
+      (then (call $lua_lt_raw (local.get $a) (local.get $b)))
+      (else (call $lua_truthy
+        (call $args_first
+          (call $lua_call (ref.as_non_null (local.get $cmp))
+            (array.new_fixed $ArgArr 2 (local.get $a) (local.get $b))))))))
+
+  ;; In-place quicksort over the array part [lo, hi]. Uses Lomuto
+  ;; partitioning with the last element as pivot, then "recurse on the
+  ;; smaller side, iterate on the larger" to keep stack depth O(log n).
+  (func $qsort (param $t (ref $LuaTable))
+               (param $lo i32) (param $hi i32)
+               (param $cmp (ref null $LuaClosure))
+    (local $i i32) (local $j i32)
+    (local $pivot anyref) (local $tmp anyref) (local $a anyref)
+    (block $exit (loop $top
+      (br_if $exit (i32.ge_s (local.get $lo) (local.get $hi)))
+      (local.set $pivot (call $tab_get (local.get $t) (ref.i31 (local.get $hi))))
+      (local.set $i (i32.sub (local.get $lo) (i32.const 1)))
+      (local.set $j (local.get $lo))
+      (block $pdone (loop $ploop
+        (br_if $pdone (i32.ge_s (local.get $j) (local.get $hi)))
+        (local.set $a (call $tab_get (local.get $t) (ref.i31 (local.get $j))))
+        (if (call $cmp_lt (local.get $cmp) (local.get $a) (local.get $pivot))
+          (then
+            (local.set $i (i32.add (local.get $i) (i32.const 1)))
+            (local.set $tmp (call $tab_get (local.get $t) (ref.i31 (local.get $i))))
+            (call $tab_set (local.get $t) (ref.i31 (local.get $i)) (local.get $a))
+            (call $tab_set (local.get $t) (ref.i31 (local.get $j)) (local.get $tmp))))
+        (local.set $j (i32.add (local.get $j) (i32.const 1)))
+        (br $ploop)))
+      ;; place pivot at index $i+1
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (local.set $tmp (call $tab_get (local.get $t) (ref.i31 (local.get $i))))
+      (call $tab_set (local.get $t) (ref.i31 (local.get $i)) (local.get $pivot))
+      (call $tab_set (local.get $t) (ref.i31 (local.get $hi)) (local.get $tmp))
+      ;; recurse smaller, iterate larger
+      (if (i32.lt_s (i32.sub (local.get $i) (local.get $lo))
+                    (i32.sub (local.get $hi) (local.get $i)))
+        (then
+          (call $qsort (local.get $t) (local.get $lo)
+                       (i32.sub (local.get $i) (i32.const 1)) (local.get $cmp))
+          (local.set $lo (i32.add (local.get $i) (i32.const 1))))
+        (else
+          (call $qsort (local.get $t) (i32.add (local.get $i) (i32.const 1))
+                       (local.get $hi) (local.get $cmp))
+          (local.set $hi (i32.sub (local.get $i) (i32.const 1)))))
+      (br $top))))
+
+  ;; table.sort(t [, cmp]) — in-place sort of t[1..#t].
+  (func $builtin_table_sort (type $LuaFn)
+    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
+    (local $t (ref $LuaTable)) (local $cmp (ref null $LuaClosure)) (local $n i32)
+    (local.set $t (ref.cast (ref $LuaTable) (call $args_at (local.get $args) (i32.const 0))))
+    (if (i32.gt_u (array.len (local.get $args)) (i32.const 1))
+      (then (local.set $cmp (ref.cast (ref $LuaClosure)
+              (call $args_at (local.get $args) (i32.const 1))))))
+    (local.set $n (call $tab_len (local.get $t)))
+    (if (i32.gt_s (local.get $n) (i32.const 1))
+      (then (call $qsort (local.get $t) (i32.const 1) (local.get $n) (local.get $cmp))))
+    (global.get $g_empty_args))
+
   ;; table.create(nseq [, nrec]): allocates a table with pre-sized
   ;; storage. The table starts empty (n=0); the pre-sizing means
   ;; subsequent inserts up to nseq+nrec won't trigger a grow.

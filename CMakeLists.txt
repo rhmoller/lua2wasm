@@ -384,6 +384,14 @@ add_test(
 )
 
 add_test(
+    NAME test_e2e_table_sort
+    COMMAND bash ${CMAKE_SOURCE_DIR}/tests/test_e2e_table_sort.sh
+            $<TARGET_FILE:lua2wasm>
+            ${CMAKE_SOURCE_DIR}
+            ${CMAKE_BINARY_DIR}
+)
+
+add_test(
     NAME test_e2e_method_sugar
     COMMAND bash ${CMAKE_SOURCE_DIR}/tests/test_e2e_method_sugar.sh
             $<TARGET_FILE:lua2wasm>
