@@ -125,6 +125,19 @@ static int read_string(Lex *L, char q, char **out_buf, size_t *out_len) {
                 continue;
             }
 
+            case '\n': case '\r': {
+                /* `\<line break>` — line continuation. The escape produces
+                 * exactly one '\n' regardless of which CR/LF variant ended
+                 * the source line (\n, \r, \r\n, \n\r). */
+                char first = *L->p;
+                L->p++;
+                if ((first == '\r' && *L->p == '\n')
+                 || (first == '\n' && *L->p == '\r')) L->p++;
+                L->line++;
+                c = '\n';
+                break;
+            }
+
             case 'u': {
                 /* `\u{H...}` — variable-length Unicode escape; emits UTF-8. */
                 L->p++;
