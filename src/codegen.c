@@ -1381,27 +1381,225 @@ static void emit_user_function(CG *c, const LuaFunc *fn) {
     c->cur_n_locals = prev_n_locals;
 }
 
+/* ---------- tree-shaking (milestone 0 / size opt) ---------- */
+/* mark_* walks the AST and records which top-level builtins and which
+ * pre-declared globals are referenced. Used by codegen_module to skip
+ * emitting closure globals, _G entries, and library installations
+ * that nothing in the program touches. */
+typedef struct {
+    unsigned char *live;      /* builtin idx -> 1 if referenced */
+    unsigned char *gref;      /* pr->globals idx -> 1 if referenced */
+    int n_builtins;
+    int n_globals;
+} LiveSet;
+
+static void ts_mark_expr(LiveSet *L, const Expr *e);
+static void ts_mark_stmt(LiveSet *L, const Stmt *s);
+static void ts_mark_block(LiveSet *L, const Block *b) {
+    if (!b) return;
+    for (size_t i = 0; i < b->count; i++) ts_mark_stmt(L, b->items[i]);
+}
+
+static void ts_mark_var(LiveSet *L, VarKind k, int idx) {
+    if (k == VAR_BUILTIN && idx >= 0 && idx < L->n_builtins) L->live[idx] = 1;
+    else if (k == VAR_GLOBAL && idx >= 0 && idx < L->n_globals) L->gref[idx] = 1;
+}
+
+static void ts_mark_expr(LiveSet *L, const Expr *e) {
+    if (!e) return;
+    switch (e->kind) {
+        case EXPR_VAR: ts_mark_var(L, e->as.var.kind, e->as.var.idx); break;
+        case EXPR_CALL:
+            ts_mark_expr(L, e->as.call.callee);
+            for (size_t i = 0; i < e->as.call.nargs; i++)
+                ts_mark_expr(L, e->as.call.args[i]);
+            break;
+        case EXPR_BINOP:
+            ts_mark_expr(L, e->as.binop.lhs);
+            ts_mark_expr(L, e->as.binop.rhs);
+            break;
+        case EXPR_UNOP: ts_mark_expr(L, e->as.unop.operand); break;
+        case EXPR_FUNCTION:
+            ts_mark_block(L, &e->as.func_expr.func->body);
+            break;
+        case EXPR_INDEX:
+            ts_mark_expr(L, e->as.index.table);
+            ts_mark_expr(L, e->as.index.key);
+            break;
+        case EXPR_TABLE:
+            for (int i = 0; i < e->as.table_ctor.n_entries; i++) {
+                ts_mark_expr(L, e->as.table_ctor.entries[i].key);
+                ts_mark_expr(L, e->as.table_ctor.entries[i].value);
+            }
+            break;
+        case EXPR_METHOD_CALL:
+            ts_mark_expr(L, e->as.method_call.recv);
+            for (size_t i = 0; i < e->as.method_call.nargs; i++)
+                ts_mark_expr(L, e->as.method_call.args[i]);
+            break;
+        default: break;  /* literals, vararg — no refs */
+    }
+}
+
+static void ts_mark_stmt(LiveSet *L, const Stmt *s) {
+    if (!s) return;
+    switch (s->kind) {
+        case STMT_LOCAL:
+            for (int i = 0; i < s->as.local.n_values; i++)
+                ts_mark_expr(L, s->as.local.values[i]);
+            break;
+        case STMT_ASSIGN:
+            for (int i = 0; i < s->as.assign.n_targets; i++) {
+                const AssignTarget *t = &s->as.assign.targets[i];
+                if (t->kind == TGT_INDEX) {
+                    ts_mark_expr(L, t->as.index.table);
+                    ts_mark_expr(L, t->as.index.key);
+                } else {
+                    ts_mark_var(L, t->as.var.kind, t->as.var.idx);
+                }
+            }
+            for (int i = 0; i < s->as.assign.n_values; i++)
+                ts_mark_expr(L, s->as.assign.values[i]);
+            break;
+        case STMT_EXPR: ts_mark_expr(L, s->as.expr_stmt.expr); break;
+        case STMT_IF:
+            for (size_t i = 0; i < s->as.if_stmt.narms; i++) {
+                ts_mark_expr(L, s->as.if_stmt.arms[i].cond);
+                ts_mark_block(L, &s->as.if_stmt.arms[i].body);
+            }
+            if (s->as.if_stmt.has_else)
+                ts_mark_block(L, &s->as.if_stmt.else_body);
+            break;
+        case STMT_WHILE:
+            ts_mark_expr(L, s->as.while_stmt.cond);
+            ts_mark_block(L, &s->as.while_stmt.body);
+            break;
+        case STMT_DO: ts_mark_block(L, &s->as.do_stmt.body); break;
+        case STMT_RETURN:
+            for (int i = 0; i < s->as.return_stmt.n_values; i++)
+                ts_mark_expr(L, s->as.return_stmt.values[i]);
+            break;
+        case STMT_LOCAL_FUNC:
+            ts_mark_block(L, &s->as.local_func.func->body);
+            break;
+        case STMT_FOR_NUM:
+            ts_mark_expr(L, s->as.for_num.start);
+            ts_mark_expr(L, s->as.for_num.stop);
+            ts_mark_expr(L, s->as.for_num.step);
+            ts_mark_block(L, &s->as.for_num.body);
+            break;
+        case STMT_FOR_GEN:
+            for (int i = 0; i < s->as.for_gen.n_exprs; i++)
+                ts_mark_expr(L, s->as.for_gen.exprs[i]);
+            ts_mark_block(L, &s->as.for_gen.body);
+            break;
+        case STMT_REPEAT:
+            ts_mark_block(L, &s->as.repeat.body);
+            ts_mark_expr(L, s->as.repeat.cond);
+            break;
+        case STMT_GLOBAL:
+            for (int i = 0; i < s->as.global_decl.n_values; i++)
+                ts_mark_expr(L, s->as.global_decl.values[i]);
+            break;
+        default: break;  /* BREAK, GOTO, LABEL — no refs */
+    }
+}
+
+/* Map a global name to a BuiltinClass if it's one of the pre-declared
+ * library tables. Returns -1 otherwise. */
+static int class_for_global(const char *name, size_t name_len) {
+    if (name_len == 4 && memcmp(name, "math", 4) == 0)   return BLT_LIB_MATH;
+    if (name_len == 6 && memcmp(name, "string", 6) == 0) return BLT_LIB_STRING;
+    if (name_len == 2 && memcmp(name, "io", 2) == 0)     return BLT_LIB_IO;
+    if (name_len == 5 && memcmp(name, "table", 5) == 0)  return BLT_LIB_TABLE;
+    if (name_len == 4 && memcmp(name, "utf8", 4) == 0)   return BLT_LIB_UTF8;
+    if (name_len == 5 && memcmp(name, "debug", 5) == 0)  return BLT_LIB_DEBUG;
+    return -1;
+}
+
+static void compute_live_set(const ParseResult *pr, int n_builtins,
+                             unsigned char *live, unsigned char *gref) {
+    LiveSet L = { live, gref, n_builtins, (int)pr->globals.count };
+    ts_mark_block(&L, &pr->main_body);
+    for (size_t i = 0; i < pr->funcs.count; i++)
+        ts_mark_block(&L, &pr->funcs.items[i]->body);
+
+    /* If a library global was referenced, mark every member of that
+     * class live (the whole table gets installed). */
+    for (size_t gi = 0; gi < pr->globals.count; gi++) {
+        if (!gref[gi]) continue;
+        int cls = class_for_global(pr->globals.items[gi].name,
+                                   pr->globals.items[gi].name_len);
+        if (cls < 0) continue;
+        for (int bi = 0; bi < n_builtins; bi++) {
+            if ((int)builtin_class(bi) == cls) live[bi] = 1;
+        }
+    }
+
+    /* Internal cross-references baked into the prelude:
+     *   pairs        -> next       (via $g_builtin_next)
+     *   ipairs       -> _ipairs_iter
+     *   utf8.codes   -> _utf8_codes_iter
+     * If we don't mark these, the live builtin's body won't validate
+     * for lack of the global it references. */
+    int idx_pairs = -1, idx_next = -1, idx_ipairs = -1, idx_ipairs_iter = -1;
+    int idx_u8codes = -1, idx_u8codes_iter = -1;
+    for (int i = 0; i < n_builtins; i++) {
+        const char *n = builtin_name(i);
+        BuiltinClass c = builtin_class(i);
+        if (c == BLT_TOPLEVEL) {
+            if (strcmp(n, "pairs") == 0)             idx_pairs = i;
+            else if (strcmp(n, "next") == 0)         idx_next = i;
+            else if (strcmp(n, "ipairs") == 0)       idx_ipairs = i;
+            else if (strcmp(n, "_ipairs_iter") == 0) idx_ipairs_iter = i;
+            else if (strcmp(n, "_utf8_codes_iter") == 0) idx_u8codes_iter = i;
+        } else if (c == BLT_LIB_UTF8 && strcmp(n, "codes") == 0) {
+            idx_u8codes = i;
+        }
+    }
+    if (idx_pairs >= 0 && live[idx_pairs] && idx_next >= 0) live[idx_next] = 1;
+    if (idx_ipairs >= 0 && live[idx_ipairs] && idx_ipairs_iter >= 0) live[idx_ipairs_iter] = 1;
+    if (idx_u8codes >= 0 && live[idx_u8codes] && idx_u8codes_iter >= 0) live[idx_u8codes_iter] = 1;
+}
+
 int codegen_module(const ParseResult *pr, const char *src_name,
-                   WatBuilder *out, char *err, size_t errlen) {
+                   int tree_shake, WatBuilder *out,
+                   char *err, size_t errlen) {
     CG c = { .w = out, .pr = pr, .ok = 1, .in_main = 1 };
     strpool_add(&c.strs, LITERAL_PREFIX, LITERAL_PREFIX_LEN);
 
     wat_append(out, "(module\n");
     wat_append(out, PRELUDE);
 
-    /* elem declare for every builtin func, so ref.func works in const init. */
-    wat_append(out, "\n  (elem declare func");
     int nb = builtin_count();
+    unsigned char *live = calloc((size_t)nb, 1);
+    unsigned char *gref = calloc(pr->globals.count + 1, 1);
+    if (!live || !gref) {
+        snprintf(err, errlen, "out of memory");
+        free(live); free(gref);
+        return 0;
+    }
+    if (tree_shake) {
+        compute_live_set(pr, nb, live, gref);
+    } else {
+        for (int i = 0; i < nb; i++) live[i] = 1;
+        for (size_t i = 0; i < pr->globals.count; i++) gref[i] = 1;
+    }
+
+    /* elem declare for every live builtin func, so ref.func works in const init. */
+    wat_append(out, "\n  (elem declare func");
     for (int i = 0; i < nb; i++) {
+        if (!live[i]) continue;
         wat_appendf(out, " %s", builtin_func_name(i));
     }
     wat_append(out, ")\n");
 
-    /* One wasm global per builtin, pre-wrapping a closure. The global
+    /* One wasm global per live builtin, pre-wrapping a closure. The global
      * name mirrors the WAT func name (sans $), so library builtins
      * (e.g. $builtin_math_type) don't collide with top-level ones
      * (e.g. $builtin_type) that happen to share a Lua-visible name. */
     for (int i = 0; i < nb; i++) {
+        if (!live[i]) continue;
         wat_appendf(out,
             "  (global $g_%s (ref $LuaClosure)\n"
             "    (struct.new $LuaClosure (ref.func %s) (global.get $g_empty_upvals)))\n",
@@ -1493,12 +1691,13 @@ int codegen_module(const ParseResult *pr, const char *src_name,
      * global read/write. */
     wat_append(out, "    (global.set $g_globals (call $tab_new))\n");
 
-    /* Install every top-level builtin (print, error, pcall, ...) as a
-     * $g_globals entry. The underlying $g_<func_name> closure is the
-     * value; user reassignment via `print = 42` writes a new entry,
+    /* Install every live top-level builtin (print, error, pcall, ...)
+     * as a $g_globals entry. The underlying $g_<func_name> closure is
+     * the value; user reassignment via `print = 42` writes a new entry,
      * leaving the original closure intact. */
     for (int bi = 0; bi < nb; bi++) {
         if (builtin_class(bi) != BLT_TOPLEVEL) continue;
+        if (!live[bi]) continue;
         const char *key = builtin_name(bi);
         if (key[0] == '_') continue;   /* internal-only (e.g. _ipairs_iter) */
         StrRef sr = strpool_add(&c.strs, key, strlen(key));
@@ -1522,11 +1721,14 @@ int codegen_module(const ParseResult *pr, const char *src_name,
     }
 
     /* Library tables + the _VERSION constant. Each library table is built
-     * locally, then installed as $g_globals.<name>. */
+     * locally, then installed as $g_globals.<name>. With tree-shake on,
+     * a library is skipped unless its global name was actually
+     * referenced in user code. */
     for (size_t gi = 0; gi < pr->globals.count; gi++) {
         const char *gname = pr->globals.items[gi].name;
         size_t glen = pr->globals.items[gi].name_len;
         if (glen == 8 && memcmp(gname, "_VERSION", 8) == 0) {
+            if (!gref[gi]) continue;
             StrRef key = strpool_add(&c.strs, "_VERSION", 8);
             wat_appendf(out,
                 "    (call $tab_set (ref.as_non_null (global.get $g_globals))\n"
@@ -1538,6 +1740,7 @@ int codegen_module(const ParseResult *pr, const char *src_name,
             continue;
         }
         if (glen == 2 && memcmp(gname, "_G", 2) == 0) continue;  /* installed above */
+        if (!gref[gi]) continue;  /* tree-shake: library not referenced */
         BuiltinClass cls;
         if      (glen == 4 && memcmp(gname, "math",   4) == 0) cls = BLT_LIB_MATH;
         else if (glen == 6 && memcmp(gname, "string", 6) == 0) cls = BLT_LIB_STRING;
@@ -1702,8 +1905,10 @@ int codegen_module(const ParseResult *pr, const char *src_name,
     if (!c.ok) {
         snprintf(err, errlen, "%s", c.err);
         free(c.strs.bytes);
+        free(live); free(gref);
         return 0;
     }
     free(c.strs.bytes);
+    free(live); free(gref);
     return 1;
 }

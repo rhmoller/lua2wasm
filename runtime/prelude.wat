@@ -1812,7 +1812,11 @@
   (func $builtin_pairs (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
     (array.new_fixed $ArgArr 3
-      (global.get $g_builtin_next)
+      ;; Build the next closure inline rather than reading $g_builtin_next.
+      ;; This makes pairs() the sole keeper of $builtin_next live via
+      ;; ref.func, so tree-shake drops next when pairs is unused.
+      (struct.new $LuaClosure
+        (ref.func $builtin_next) (global.get $g_empty_upvals))
       (call $args_at (local.get $args) (i32.const 0))
       (ref.null any)))
 
@@ -1834,7 +1838,10 @@
   (func $builtin_ipairs (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
     (array.new_fixed $ArgArr 3
-      (global.get $g_builtin_ipairs_iter)
+      ;; Inline closure for the iter — same shape, drops $g_builtin_ipairs_iter
+      ;; from the live set when ipairs() is unreferenced.
+      (struct.new $LuaClosure
+        (ref.func $builtin_ipairs_iter) (global.get $g_empty_upvals))
       (call $args_at (local.get $args) (i32.const 0))
       (ref.i31 (i32.const 0))))
 
@@ -2942,7 +2949,10 @@
   (func $builtin_utf8_codes (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
     (array.new_fixed $ArgArr 3
-      (global.get $g_builtin_utf8_codes_iter)
+      ;; Inline closure for the iter — drops $g_builtin_utf8_codes_iter
+      ;; from the live set when utf8.codes is unreferenced.
+      (struct.new $LuaClosure
+        (ref.func $builtin_utf8_codes_iter) (global.get $g_empty_upvals))
       (call $args_at (local.get $args) (i32.const 0))
       (ref.i31 (i32.const 0))))
 

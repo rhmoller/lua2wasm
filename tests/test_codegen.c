@@ -14,7 +14,7 @@ static MunitResult test_emits_expected(const MunitParameter params[], void *fixt
 
     WatBuilder w; wat_init(&w);
     char err[256] = {0};
-    int ok = codegen_module(&r, "test", &w, err, sizeof(err));
+    int ok = codegen_module(&r, "test", 0, &w, err, sizeof(err));
     if (!ok) munit_logf(MUNIT_LOG_ERROR, "codegen: %s", err);
     munit_assert_true(ok);
 
@@ -45,7 +45,7 @@ static MunitResult test_string_in_data_segment(const MunitParameter params[], vo
 
     WatBuilder w; wat_init(&w);
     char err[256] = {0};
-    int ok = codegen_module(&r, "test", &w, err, sizeof(err));
+    int ok = codegen_module(&r, "test", 0, &w, err, sizeof(err));
     munit_assert_true(ok);
     const char *s = wat_cstr(&w);
     /* Built-in literal prefix is 51 bytes; "hello" lands somewhere after that. */
@@ -67,7 +67,7 @@ static MunitResult test_user_function_emitted(const MunitParameter params[], voi
 
     WatBuilder w; wat_init(&w);
     char err[256] = {0};
-    int ok = codegen_module(&r, "test", &w, err, sizeof(err));
+    int ok = codegen_module(&r, "test", 0, &w, err, sizeof(err));
     if (!ok) munit_logf(MUNIT_LOG_ERROR, "codegen: %s", err);
     munit_assert_true(ok);
     const char *s = wat_cstr(&w);

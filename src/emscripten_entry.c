@@ -42,8 +42,10 @@ char *lua2wasm_compile(const char *source) {
 
     wat_init(&w); have_wat = 1;
     char errbuf[256] = {0};
-    /* Playground compiles the inline buffer with no filename; use "input". */
-    if (!codegen_module(&pr, "input", &w, errbuf, sizeof(errbuf))) {
+    /* Playground compiles the inline buffer with no filename; use "input".
+     * Tree-shaking stays off for the playground — users expect _G to hold
+     * every builtin for introspection. */
+    if (!codegen_module(&pr, "input", 0, &w, errbuf, sizeof(errbuf))) {
         result = make_err("ERROR(codegen): ", errbuf);
         goto cleanup;
     }

@@ -50,8 +50,10 @@ int main(int argc, char **argv) {
     const char *out = NULL;
     const char *modules[MAX_MODULES];
     int n_modules = 0;
+    int tree_shake = 0;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) { out = argv[++i]; }
+        else if (strcmp(argv[i], "--tree-shake") == 0) { tree_shake = 1; }
         else if (strcmp(argv[i], "-m") == 0 && i + 1 < argc) {
             if (n_modules >= MAX_MODULES) {
                 fprintf(stderr, "too many -m modules (max %d)\n", MAX_MODULES);
@@ -141,7 +143,7 @@ int main(int argc, char **argv) {
     WatBuilder w;
     wat_init(&w);
     char err[256] = {0};
-    if (!codegen_module(&pr, src_name, &w, err, sizeof(err))) {
+    if (!codegen_module(&pr, src_name, tree_shake, &w, err, sizeof(err))) {
         fprintf(stderr, "%s\n", err);
         return 1;
     }
