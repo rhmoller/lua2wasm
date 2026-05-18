@@ -77,6 +77,7 @@ typedef struct LabelScope {
 /* ----- codegen context ----- */
 typedef struct {
     WatBuilder *w;
+    const ParseResult *pr;   /* for VAR_GLOBAL name lookup */
     StrPool strs;
     int next_label;
     int in_main;            /* 1 while emitting $main body, 0 inside user fn */
@@ -277,10 +278,29 @@ static void emit_string_literal(CG *c, const char *bytes, size_t len, int depth)
  * VAR_UPVAL is only emitted inside user functions (parser guarantees this:
  * main has no upvalues to capture).
  */
-static void emit_var_read(CG *c, VarKind kind, int idx, int depth) {
+/* Emit a `(struct.new $LuaString ...)` expression carrying the name of a
+ * global. Used by every global read/write — the same name is pooled once
+ * and reused at every site via $str_data offsets. */
+static void emit_global_key(CG *c, const char *name, size_t name_len) {
+    StrRef sr = strpool_add(&c->strs, name, name_len);
+    wat_appendf(c->w,
+        "(struct.new $LuaString (array.new_data $LuaArr $str_data\n"
+        "        (i32.const %zu) (i32.const %zu)))\n",
+        sr.offset, sr.len);
+}
+
+static void emit_global_read(CG *c, const char *name, size_t name_len, int depth) {
     emit_indent(c, depth);
+    wat_append(c->w, "(call $tab_get (ref.as_non_null (global.get $g_globals))\n");
+    emit_indent(c, depth + 1);
+    emit_global_key(c, name, name_len);
+    emit_indent(c, depth); wat_append(c->w, ")\n");
+}
+
+static void emit_var_read(CG *c, VarKind kind, int idx, int depth) {
     switch (kind) {
         case VAR_LOCAL:
+            emit_indent(c, depth);
             if (slot_is_boxed(c, idx)) {
                 wat_appendf(c->w, "(struct.get $Box $v (local.get $L%d))\n", idx);
             } else {
@@ -288,19 +308,24 @@ static void emit_var_read(CG *c, VarKind kind, int idx, int depth) {
             }
             break;
         case VAR_UPVAL:
+            emit_indent(c, depth);
             wat_appendf(c->w,
                 "(struct.get $Box $v (array.get $UpvalArr "
                 "(struct.get $LuaClosure $upvals (local.get $closure)) "
                 "(i32.const %d)))\n", idx);
             break;
-        case VAR_BUILTIN:
-            /* Use the unique WAT func name (sans leading $) so library
-             * builtins like `math.type` don't collide with top-level `type`. */
-            wat_appendf(c->w, "(global.get $g_%s)\n", builtin_func_name(idx) + 1);
+        case VAR_BUILTIN: {
+            /* Read via $g_globals so user reassignment is honoured. */
+            const char *name = builtin_name(idx);
+            emit_global_read(c, name, strlen(name), depth);
             break;
-        case VAR_GLOBAL:
-            wat_appendf(c->w, "(global.get $g_user_%d)\n", idx);
+        }
+        case VAR_GLOBAL: {
+            const char *name = c->pr->globals.items[idx].name;
+            size_t nl = c->pr->globals.items[idx].name_len;
+            emit_global_read(c, name, nl, depth);
             break;
+        }
     }
 }
 
@@ -349,13 +374,26 @@ static void emit_target_open(CG *c, const AssignTarget *t, int depth) {
                 emit_indent(c, depth); wat_append(c->w, "(struct.set $Box $v\n");
                 emit_box_ref(c, t->as.var.kind, t->as.var.idx, depth + 1);
                 break;
-            case VAR_GLOBAL:
-                emit_indent(c, depth);
-                wat_appendf(c->w, "(global.set $g_user_%d\n", t->as.var.idx);
-                break;
             case VAR_BUILTIN:
-                cg_error(c, "cannot assign to builtin print");
+            case VAR_GLOBAL: {
+                /* Assignment to any global (including a name that
+                 * happens to also be a builtin like `print`) routes
+                 * through $g_globals via $tab_set. */
+                const char *name;
+                size_t name_len;
+                if (t->as.var.kind == VAR_BUILTIN) {
+                    name = builtin_name(t->as.var.idx);
+                    name_len = strlen(name);
+                } else {
+                    name = c->pr->globals.items[t->as.var.idx].name;
+                    name_len = c->pr->globals.items[t->as.var.idx].name_len;
+                }
+                emit_indent(c, depth);
+                wat_append(c->w, "(call $tab_set (ref.as_non_null (global.get $g_globals))\n");
+                emit_indent(c, depth + 1);
+                emit_global_key(c, name, name_len);
                 break;
+            }
         }
     } else {
         /* User-code assignment goes through \$lua_tabset so __newindex
@@ -1047,8 +1085,13 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
                 emit_indent(c, depth); wat_append(c->w, ")\n");
             }
             for (int i = 0; i < n_names; i++) {
+                int gi = s->as.global_decl.global_idxs[i];
+                const char *gname = c->pr->globals.items[gi].name;
+                size_t gnl = c->pr->globals.items[gi].name_len;
                 emit_indent(c, depth);
-                wat_appendf(c->w, "(global.set $g_user_%d\n", s->as.global_decl.global_idxs[i]);
+                wat_append(c->w, "(call $tab_set (ref.as_non_null (global.get $g_globals))\n");
+                emit_indent(c, depth + 1);
+                emit_global_key(c, gname, gnl);
                 if (n_values == 0) {
                     emit_indent(c, depth + 1); wat_append(c->w, "(ref.null any)\n");
                 } else {
@@ -1288,7 +1331,7 @@ static void emit_user_function(CG *c, const LuaFunc *fn) {
 
 int codegen_module(const ParseResult *pr, WatBuilder *out,
                    char *err, size_t errlen) {
-    CG c = { .w = out, .ok = 1, .in_main = 1 };
+    CG c = { .w = out, .pr = pr, .ok = 1, .in_main = 1 };
     strpool_add(&c.strs, LITERAL_PREFIX, LITERAL_PREFIX_LEN);
 
     wat_append(out, "(module\n");
@@ -1313,8 +1356,12 @@ int codegen_module(const ParseResult *pr, WatBuilder *out,
             builtin_func_name(i) + 1, builtin_func_name(i));
     }
 
-    /* User-declared globals: one mutable anyref wasm global each. */
-    if (pr->globals.count) {
+    /* User-declared globals used to get a per-name $g_user_N wasm slot.
+     * Since milestone 19 they live as entries in $g_globals (the Lua _G
+     * table) and access goes through $tab_get / $tab_set. The parser
+     * still tracks the global list for name resolution, but no wasm
+     * globals are emitted for them. */
+    if (0) {
         wat_append(out, "\n  ;; --- user globals ---\n");
         for (size_t i = 0; i < pr->globals.count; i++) {
             wat_appendf(out, "  (global $g_user_%zu (mut anyref) (ref.null any))\n", i);
@@ -1372,18 +1419,57 @@ int codegen_module(const ParseResult *pr, WatBuilder *out,
         "      (struct.new $LuaString (array.new $LuaArr (i32.const 0) (i32.const 0))))\n"
         "    (global.set $fmt_buf\n"
         "      (array.new $LuaArr (i32.const 0) (i32.const 1024)))\n");
-    /* Library-table globals + the _VERSION constant. */
+    /* Create the global-environment table $g_globals. Every Lua global
+     * (user-declared, library, builtin) is installed as an entry below;
+     * codegen emits $tab_get / $tab_set against this table for every
+     * global read/write. */
+    wat_append(out, "    (global.set $g_globals (call $tab_new))\n");
+
+    /* Install every top-level builtin (print, error, pcall, ...) as a
+     * $g_globals entry. The underlying $g_<func_name> closure is the
+     * value; user reassignment via `print = 42` writes a new entry,
+     * leaving the original closure intact. */
+    for (int bi = 0; bi < nb; bi++) {
+        if (builtin_class(bi) != BLT_TOPLEVEL) continue;
+        const char *key = builtin_name(bi);
+        if (key[0] == '_') continue;   /* internal-only (e.g. _ipairs_iter) */
+        StrRef sr = strpool_add(&c.strs, key, strlen(key));
+        wat_appendf(out,
+            "    (call $tab_set (ref.as_non_null (global.get $g_globals))\n"
+            "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
+            "        (i32.const %zu) (i32.const %zu)))\n"
+            "      (global.get $g_%s))\n",
+            sr.offset, sr.len, builtin_func_name(bi) + 1);
+    }
+
+    /* Install _G as a self-reference. */
+    {
+        StrRef sr = strpool_add(&c.strs, "_G", 2);
+        wat_appendf(out,
+            "    (call $tab_set (ref.as_non_null (global.get $g_globals))\n"
+            "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
+            "        (i32.const %zu) (i32.const %zu)))\n"
+            "      (ref.as_non_null (global.get $g_globals)))\n",
+            sr.offset, sr.len);
+    }
+
+    /* Library tables + the _VERSION constant. Each library table is built
+     * locally, then installed as $g_globals.<name>. */
     for (size_t gi = 0; gi < pr->globals.count; gi++) {
         const char *gname = pr->globals.items[gi].name;
         size_t glen = pr->globals.items[gi].name_len;
-        /* _VERSION is a plain string global, not a library table. */
         if (glen == 8 && memcmp(gname, "_VERSION", 8) == 0) {
+            StrRef key = strpool_add(&c.strs, "_VERSION", 8);
             wat_appendf(out,
-                "    (global.set $g_user_%zu\n"
+                "    (call $tab_set (ref.as_non_null (global.get $g_globals))\n"
                 "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
-                "        (i32.const 68) (i32.const 7))))\n", gi);
+                "        (i32.const %zu) (i32.const %zu)))\n"
+                "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
+                "        (i32.const 68) (i32.const 7))))\n",
+                key.offset, key.len);
             continue;
         }
+        if (glen == 2 && memcmp(gname, "_G", 2) == 0) continue;  /* installed above */
         BuiltinClass cls;
         if      (glen == 4 && memcmp(gname, "math",   4) == 0) cls = BLT_LIB_MATH;
         else if (glen == 6 && memcmp(gname, "string", 6) == 0) cls = BLT_LIB_STRING;
@@ -1452,7 +1538,15 @@ int codegen_module(const ParseResult *pr, WatBuilder *out,
                 cp_key.offset, cp_key.len,
                 cp_val.offset, cp_val.len);
         }
-        wat_appendf(out, "    (global.set $g_user_%zu (local.get $tab))\n", gi);
+        {
+            StrRef name_key = strpool_add(&c.strs, gname, glen);
+            wat_appendf(out,
+                "    (call $tab_set (ref.as_non_null (global.get $g_globals))\n"
+                "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
+                "        (i32.const %zu) (i32.const %zu)))\n"
+                "      (local.get $tab))\n",
+                name_key.offset, name_key.len);
+        }
     }
     wat_append(out, "  )\n");
 

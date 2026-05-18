@@ -769,10 +769,9 @@ static Stmt *parse_ident_stmt(Parser *p) {
         set_error(p, "expression statement must be a call or assignment");
         return NULL;
     }
-    if (first->kind == EXPR_VAR && first->as.var.kind == VAR_BUILTIN) {
-        set_error(p, "cannot reassign builtin `print`");
-        return NULL;
-    }
+    /* Reassigning a builtin name (e.g. `print = my_print`) is valid Lua —
+     * the assignment writes a new entry in _G. Codegen routes it through
+     * \$g_globals just like any other global write. */
 
     AssignTarget targets[MAX_LIST];
     int n_targets = 0;
@@ -783,9 +782,6 @@ static Stmt *parse_ident_stmt(Parser *p) {
         if (!p->ok) return NULL;
         if (t->kind != EXPR_VAR && t->kind != EXPR_INDEX) {
             set_error(p, "invalid assignment target"); return NULL;
-        }
-        if (t->kind == EXPR_VAR && t->as.var.kind == VAR_BUILTIN) {
-            set_error(p, "cannot reassign builtin `print`"); return NULL;
         }
         targets[n_targets++] = expr_to_target(t);
     }
@@ -1201,6 +1197,7 @@ ParseResult parse(const TokenList *tokens, NodePool *pool) {
     globals_declare(&p, "table",    5);
     globals_declare(&p, "utf8",     4);
     globals_declare(&p, "_VERSION", 8);
+    globals_declare(&p, "_G",       2);
 
     Block main = {0};
     parse_block(&p, &main, TOK_EOF, TOK_EOF, TOK_EOF);

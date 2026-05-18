@@ -929,6 +929,12 @@
   (global $g_mkey_call      (mut (ref null $LuaString)) (ref.null $LuaString))
   (global $g_mkey_tostring  (mut (ref null $LuaString)) (ref.null $LuaString))
   (global $g_mkey_metatable (mut (ref null $LuaString)) (ref.null $LuaString))
+
+  ;; --- _G: the global-environment table ---
+  ;; Every Lua global (user-declared, library, builtin) is an entry in
+  ;; this table. \$stdlib_init populates it; codegen emits \$tab_get /
+  ;; \$tab_set against it for every global read/write.
+  (global $g_globals (mut (ref null $LuaTable)) (ref.null $LuaTable))
   (global $g_tab_str    (mut (ref null $LuaString)) (ref.null $LuaString))
   (global $g_empty_str  (mut (ref null $LuaString)) (ref.null $LuaString))
 
