@@ -2858,26 +2858,25 @@
             (then (local.set $hit (i32.const 1)) (br $done)))
           (local.set $i (i32.add (local.get $i) (i32.const 2)))
           (br $lp)))
-      ;; range a-z (only if the '-' isn't the trailing one and isn't
-      ;; immediately followed by ']'.)
-      (if (i32.and
-            (i32.lt_s (i32.add (local.get $i) (i32.const 2)) (local.get $n))
-            (i32.and
-              (i32.eq (array.get_u $LuaArr (local.get $pat)
-                        (i32.add (local.get $i) (i32.const 1)))
-                      (i32.const 45))       ;; '-'
-              (i32.ne (array.get_u $LuaArr (local.get $pat)
-                        (i32.add (local.get $i) (i32.const 2)))
-                      (i32.const 93))))     ;; not ']'
+      ;; range a-z (only if pat[i+1] == '-' AND pat[i+2] != ']'). WAT's
+      ;; i32.and isn't short-circuit, so the two reads must be guarded
+      ;; with nested if to stay in bounds near the set's closing ']'.
+      (if (i32.lt_s (i32.add (local.get $i) (i32.const 2)) (local.get $n))
         (then
-          (local.set $a (local.get $b))
-          (local.set $c (array.get_u $LuaArr (local.get $pat)
-                          (i32.add (local.get $i) (i32.const 2))))
-          (if (i32.and (i32.ge_u (local.get $byte) (local.get $a))
-                       (i32.le_u (local.get $byte) (local.get $c)))
-            (then (local.set $hit (i32.const 1)) (br $done)))
-          (local.set $i (i32.add (local.get $i) (i32.const 3)))
-          (br $lp)))
+          (if (i32.eq (array.get_u $LuaArr (local.get $pat)
+                        (i32.add (local.get $i) (i32.const 1)))
+                      (i32.const 45))                  ;; '-'
+            (then
+              (local.set $c (array.get_u $LuaArr (local.get $pat)
+                              (i32.add (local.get $i) (i32.const 2))))
+              (if (i32.ne (local.get $c) (i32.const 93))   ;; not ']'
+                (then
+                  (local.set $a (local.get $b))
+                  (if (i32.and (i32.ge_u (local.get $byte) (local.get $a))
+                               (i32.le_u (local.get $byte) (local.get $c)))
+                    (then (local.set $hit (i32.const 1)) (br $done)))
+                  (local.set $i (i32.add (local.get $i) (i32.const 3)))
+                  (br $lp)))))))
       ;; literal
       (if (i32.eq (local.get $byte) (local.get $b))
         (then (local.set $hit (i32.const 1)) (br $done)))
@@ -2938,6 +2937,188 @@
     (if (i32.eq (local.get $b) (i32.const 91))      ;; '['
       (then (return (call $match_set (local.get $byte) (local.get $pat) (local.get $ppos)))))
     (i32.eq (local.get $byte) (local.get $b)))
+
+  ;; --- Lua patterns: $match_pat core (step 2 of milestone 20) ---
+  ;;
+  ;; Recursive backtracking matcher. Walks $pat from $ppos and $sub from
+  ;; $spos. Returns the end subject-position (one past the last matched
+  ;; byte) on success, or -1 on failure. Step 2 does not yet handle
+  ;; captures, %n back-refs, %bxy, or %f[set] — those are step 3 and 5.
+  ;;
+  ;; Quantifiers (* + - ?) apply to a single matchable item:
+  ;;   literal | '.' | '%X' | '[set]'
+  ;; per Lua spec (NOT to groups, back-refs, or specials).
+  (func $match_pat
+    (param $sub (ref $LuaArr)) (param $spos i32)
+    (param $pat (ref $LuaArr)) (param $ppos i32) (result i32)
+    (local $n_pat i32) (local $n_sub i32) (local $b i32)
+    (local $item_end_pos i32) (local $quant i32) (local $next_ppos i32)
+    (local $k i32) (local $min_k i32) (local $r i32)
+    (local.set $n_pat (array.len (local.get $pat)))
+    (local.set $n_sub (array.len (local.get $sub)))
+    ;; Base: end of pattern → success.
+    (if (i32.ge_s (local.get $ppos) (local.get $n_pat))
+      (then (return (local.get $spos))))
+    (local.set $b (array.get_u $LuaArr (local.get $pat) (local.get $ppos)))
+    ;; `$` at the final pattern position → anchor-to-end.
+    (if (i32.and (i32.eq (local.get $b) (i32.const 36))            ;; '$'
+                 (i32.eq (i32.add (local.get $ppos) (i32.const 1))
+                         (local.get $n_pat)))
+      (then
+        (if (i32.eq (local.get $spos) (local.get $n_sub))
+          (then (return (local.get $spos))))
+        (return (i32.const -1))))
+    ;; Decode the matchable item ending at $item_end_pos. Read quantifier
+    ;; (if any) immediately after.
+    (local.set $item_end_pos (call $item_end (local.get $pat) (local.get $ppos)))
+    (local.set $quant (i32.const 0))
+    (if (i32.lt_s (local.get $item_end_pos) (local.get $n_pat))
+      (then
+        (local.set $b (array.get_u $LuaArr (local.get $pat) (local.get $item_end_pos)))
+        (if (i32.or (i32.eq (local.get $b) (i32.const 42))         ;; '*'
+            (i32.or (i32.eq (local.get $b) (i32.const 43))         ;; '+'
+            (i32.or (i32.eq (local.get $b) (i32.const 45))         ;; '-'
+                    (i32.eq (local.get $b) (i32.const 63)))))      ;; '?'
+          (then (local.set $quant (local.get $b))))))
+    ;; Pattern position to continue at after this item.
+    (if (i32.eqz (local.get $quant))
+      (then (local.set $next_ppos (local.get $item_end_pos)))
+      (else (local.set $next_ppos
+              (i32.add (local.get $item_end_pos) (i32.const 1)))))
+    ;; Quantifier-specific dispatch.
+    (if (i32.eq (local.get $quant) (i32.const 63))                 ;; '?'
+      (then
+        (if (i32.and (i32.lt_s (local.get $spos) (local.get $n_sub))
+                     (call $match_one_item
+                       (array.get_u $LuaArr (local.get $sub) (local.get $spos))
+                       (local.get $pat) (local.get $ppos)))
+          (then
+            (local.set $r (call $match_pat
+              (local.get $sub) (i32.add (local.get $spos) (i32.const 1))
+              (local.get $pat) (local.get $next_ppos)))
+            (if (i32.ge_s (local.get $r) (i32.const 0))
+              (then (return (local.get $r))))))
+        (return (call $match_pat (local.get $sub) (local.get $spos)
+                                  (local.get $pat) (local.get $next_ppos)))))
+    (if (i32.eq (local.get $quant) (i32.const 45))                 ;; '-' lazy
+      (then
+        (local.set $k (i32.const 0))
+        (loop $lazy
+          (local.set $r (call $match_pat
+            (local.get $sub) (i32.add (local.get $spos) (local.get $k))
+            (local.get $pat) (local.get $next_ppos)))
+          (if (i32.ge_s (local.get $r) (i32.const 0))
+            (then (return (local.get $r))))
+          (if (i32.ge_s (i32.add (local.get $spos) (local.get $k))
+                         (local.get $n_sub))
+            (then (return (i32.const -1))))
+          (if (i32.eqz (call $match_one_item
+                (array.get_u $LuaArr (local.get $sub)
+                  (i32.add (local.get $spos) (local.get $k)))
+                (local.get $pat) (local.get $ppos)))
+            (then (return (i32.const -1))))
+          (local.set $k (i32.add (local.get $k) (i32.const 1)))
+          (br $lazy))
+        (unreachable)))
+    (if (i32.or (i32.eq (local.get $quant) (i32.const 42))         ;; '*' or '+'
+                (i32.eq (local.get $quant) (i32.const 43)))
+      (then
+        ;; Count how many consecutive items match starting at $spos.
+        (local.set $k (i32.const 0))
+        (block $count_done
+          (loop $count
+            (br_if $count_done (i32.ge_s
+              (i32.add (local.get $spos) (local.get $k))
+              (local.get $n_sub)))
+            (br_if $count_done (i32.eqz (call $match_one_item
+              (array.get_u $LuaArr (local.get $sub)
+                (i32.add (local.get $spos) (local.get $k)))
+              (local.get $pat) (local.get $ppos))))
+            (local.set $k (i32.add (local.get $k) (i32.const 1)))
+            (br $count)))
+        (local.set $min_k (i32.const 0))
+        (if (i32.eq (local.get $quant) (i32.const 43))             ;; '+' needs ≥1
+          (then (local.set $min_k (i32.const 1))))
+        (if (i32.lt_s (local.get $k) (local.get $min_k))
+          (then (return (i32.const -1))))
+        ;; Try k, k-1, ..., min_k.
+        (loop $backoff
+          (local.set $r (call $match_pat
+            (local.get $sub) (i32.add (local.get $spos) (local.get $k))
+            (local.get $pat) (local.get $next_ppos)))
+          (if (i32.ge_s (local.get $r) (i32.const 0))
+            (then (return (local.get $r))))
+          (if (i32.le_s (local.get $k) (local.get $min_k))
+            (then (return (i32.const -1))))
+          (local.set $k (i32.sub (local.get $k) (i32.const 1)))
+          (br $backoff))
+        (unreachable)))
+    ;; No quantifier: match exactly once.
+    (if (i32.ge_s (local.get $spos) (local.get $n_sub))
+      (then (return (i32.const -1))))
+    (if (i32.eqz (call $match_one_item
+          (array.get_u $LuaArr (local.get $sub) (local.get $spos))
+          (local.get $pat) (local.get $ppos)))
+      (then (return (i32.const -1))))
+    (call $match_pat
+      (local.get $sub) (i32.add (local.get $spos) (i32.const 1))
+      (local.get $pat) (local.get $next_ppos)))
+
+  ;; string.find(s, pat [, init [, plain]]).
+  ;; Step 2 form: no captures, no plain flag, no %n / %bxy / %f.
+  ;; Returns (start, end) on success — 1-based positions of the first
+  ;; and last matched bytes (or end < start for an empty match at
+  ;; position start). Returns nil on no match.
+  (func $builtin_string_find (type $LuaFn)
+    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
+    (local $sub (ref $LuaArr)) (local $pat (ref $LuaArr))
+    (local $n_sub i32) (local $n_pat i32) (local $nargs i32)
+    (local $init i32) (local $anchored i32) (local $start_ppos i32)
+    (local $sp i32) (local $end i32)
+    (local.set $sub (struct.get $LuaString $bytes
+      (ref.cast (ref $LuaString) (call $args_at (local.get $args) (i32.const 0)))))
+    (local.set $pat (struct.get $LuaString $bytes
+      (ref.cast (ref $LuaString) (call $args_at (local.get $args) (i32.const 1)))))
+    (local.set $n_sub (array.len (local.get $sub)))
+    (local.set $n_pat (array.len (local.get $pat)))
+    (local.set $nargs (array.len (local.get $args)))
+    ;; init: default 1, 1-based, may be negative.
+    (local.set $init (i32.const 1))
+    (if (i32.gt_u (local.get $nargs) (i32.const 2))
+      (then (local.set $init (i32.wrap_i64
+              (call $as_int (call $args_at (local.get $args) (i32.const 2)))))))
+    (if (i32.lt_s (local.get $init) (i32.const 0))
+      (then (local.set $init (i32.add (local.get $n_sub)
+                                       (i32.add (local.get $init) (i32.const 1))))))
+    (if (i32.lt_s (local.get $init) (i32.const 1))
+      (then (local.set $init (i32.const 1))))
+    ;; If init > n_sub + 1, no match is possible — but Lua still allows
+    ;; init == n_sub + 1 (matching the empty position past the end).
+    (if (i32.gt_s (local.get $init) (i32.add (local.get $n_sub) (i32.const 1)))
+      (then (return (array.new_fixed $ArgArr 1 (ref.null any)))))
+    ;; Anchor handling: '^' at pattern position 0.
+    (local.set $start_ppos (i32.const 0))
+    (if (i32.and (i32.gt_s (local.get $n_pat) (i32.const 0))
+                 (i32.eq (array.get_u $LuaArr (local.get $pat) (i32.const 0))
+                         (i32.const 94)))   ;; '^'
+      (then (local.set $anchored (i32.const 1))
+            (local.set $start_ppos (i32.const 1))))
+    (local.set $sp (i32.sub (local.get $init) (i32.const 1)))
+    (block $search_done (loop $search
+      (local.set $end (call $match_pat
+        (local.get $sub) (local.get $sp)
+        (local.get $pat) (local.get $start_ppos)))
+      (if (i32.ge_s (local.get $end) (i32.const 0))
+        (then
+          (return (array.new_fixed $ArgArr 2
+            (call $make_int (i64.extend_i32_s
+              (i32.add (local.get $sp) (i32.const 1))))
+            (call $make_int (i64.extend_i32_s (local.get $end)))))))
+      (br_if $search_done (local.get $anchored))
+      (local.set $sp (i32.add (local.get $sp) (i32.const 1)))
+      (br_if $search_done (i32.gt_s (local.get $sp) (local.get $n_sub)))
+      (br $search)))
+    (array.new_fixed $ArgArr 1 (ref.null any)))
 
   ;; --- string library ---
   (func $builtin_string_len (type $LuaFn)

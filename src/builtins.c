@@ -67,6 +67,7 @@ static const struct {
     { "rep",    3, "$builtin_string_rep",    BLT_LIB_STRING },
     { "byte",   4, "$builtin_string_byte",   BLT_LIB_STRING },
     { "char",   4, "$builtin_string_char",   BLT_LIB_STRING },
+    { "find",   4, "$builtin_string_find",   BLT_LIB_STRING },
     /* utf8 library */
     { "char",   4, "$builtin_utf8_char",   BLT_LIB_UTF8 },
     { "len",    3, "$builtin_utf8_len",    BLT_LIB_UTF8 },
