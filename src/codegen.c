@@ -1072,23 +1072,44 @@ int codegen_module(const ParseResult *pr, WatBuilder *out,
     /* $stdlib_init: builds math/string tables from the library builtins
      * and assigns them to the corresponding $g_user_N slots. */
     wat_append(out, "\n  (func $stdlib_init (local $tab (ref $LuaTable))\n");
-    /* Initialize metamethod-name globals + the tab and empty-string statics. */
-    wat_append(out,
-        "    (global.set $g_mkey_index\n"
-        "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
-        "        (i32.const 51) (i32.const 7))))\n"
-        "    (global.set $g_mkey_add\n"
-        "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
-        "        (i32.const 58) (i32.const 5))))\n"
-        "    (global.set $g_mkey_eq\n"
-        "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
-        "        (i32.const 63) (i32.const 4))))\n"
-        "    (global.set $g_mkey_call\n"
-        "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
-        "        (i32.const 129) (i32.const 6))))\n"
+    /* Initialize the metamethod-name globals from the strpool. Keys are
+     * deduplicated by strpool_add. */
+    static const struct { const char *name; const char *key; } MKEYS[] = {
+        { "$g_mkey_index",      "__index"     },
+        { "$g_mkey_newindex",   "__newindex"  },
+        { "$g_mkey_add",        "__add"       },
+        { "$g_mkey_sub",        "__sub"       },
+        { "$g_mkey_mul",        "__mul"       },
+        { "$g_mkey_div",        "__div"       },
+        { "$g_mkey_mod",        "__mod"       },
+        { "$g_mkey_pow",        "__pow"       },
+        { "$g_mkey_unm",        "__unm"       },
+        { "$g_mkey_idiv",       "__idiv"      },
+        { "$g_mkey_concat",     "__concat"    },
+        { "$g_mkey_len",        "__len"       },
+        { "$g_mkey_eq",         "__eq"        },
+        { "$g_mkey_lt",         "__lt"        },
+        { "$g_mkey_le",         "__le"        },
+        { "$g_mkey_call",       "__call"      },
+        { "$g_mkey_tostring",   "__tostring"  },
+        { "$g_mkey_metatable",  "__metatable" },
+    };
+    for (size_t k = 0; k < sizeof(MKEYS)/sizeof(MKEYS[0]); k++) {
+        StrRef r = strpool_add(&c.strs, MKEYS[k].key, strlen(MKEYS[k].key));
+        wat_appendf(out,
+            "    (global.set %s\n"
+            "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
+            "        (i32.const %zu) (i32.const %zu))))\n",
+            MKEYS[k].name, r.offset, r.len);
+    }
+    /* "\t" used by print when joining args. */
+    StrRef tab_str = strpool_add(&c.strs, "\t", 1);
+    wat_appendf(out,
         "    (global.set $g_tab_str\n"
         "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
-        "        (i32.const 67) (i32.const 1))))\n"
+        "        (i32.const %zu) (i32.const %zu))))\n",
+        tab_str.offset, tab_str.len);
+    wat_append(out,
         "    (global.set $g_empty_str\n"
         "      (struct.new $LuaString (array.new $LuaArr (i32.const 0) (i32.const 0))))\n"
         "    (global.set $fmt_buf\n"
