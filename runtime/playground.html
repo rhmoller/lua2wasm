@@ -228,6 +228,8 @@ const luaHighlightStyle = HighlightStyle.define([
 ]);
 import createLua2WasmModule       from "../build-em/lua2wasm.js";
 import binaryen                   from "https://cdn.jsdelivr.net/npm/binaryen@121.0.0/index.js";
+import { MATH_FNS, MATH2_FNS,
+         makeHelpers }            from "./host-bindings.mjs";
 
 /* ----- fixture presets ----- */
 const PRESETS = {
@@ -666,33 +668,15 @@ function watToWasm(wat) {
   return bytes;
 }
 
-/* ----- runtime host (mirrors runtime/host.mjs) ----- */
+/* ----- runtime host ----- */
 let curInstance;
-function readLuaString(v) {
-  const n = curInstance.exports.lua_str_len(v);
-  const b = new Uint8Array(n);
-  for (let i = 0; i < n; i++) b[i] = curInstance.exports.lua_str_byte(v, i);
-  return new TextDecoder().decode(b);
-}
 function formatFloat(f) {
   if (!Number.isFinite(f)) return f === Infinity ? "inf" : f === -Infinity ? "-inf" : "nan";
   if (Number.isInteger(f)) return `${f}.0`;
   return f.toPrecision(14).replace(/\.?0+(e|$)/, "$1");
 }
-function luaToString(v) {
-  if (v === null || v === undefined) return "nil";
-  const t = curInstance.exports.lua_tag(v);
-  switch (t) {
-    case 0: return "nil";
-    case 1: return curInstance.exports.lua_get_bool(v) ? "true" : "false";
-    case 2: return String(curInstance.exports.lua_get_int(v));
-    case 3: return formatFloat(curInstance.exports.lua_get_float(v));
-    case 4: return readLuaString(v);
-    case 5: return "function";
-    case 6: return "table";
-    default: return `<tag=${t}>`;
-  }
-}
+const helpers = makeHelpers({ getInstance: () => curInstance, formatFloat });
+const { luaToString, formatSpec, parseLuaNumber } = helpers;
 
 /* ----- the run pipeline ----- */
 async function run() {
@@ -728,8 +712,6 @@ async function run() {
         default: return "";
       }
     }
-    const MATH_FNS = [Math.sin, Math.cos, Math.tan, Math.asin, Math.acos, Math.atan, Math.exp, Math.log];
-
     /* JSPI: io.read suspends the wasm caller while we wait for the user to
      * type a line into the output pane. Falls back to "return -1" (EOF) if
      * the browser lacks WebAssembly.Suspending / WebAssembly.promising. */
@@ -747,14 +729,12 @@ async function run() {
         input.autocomplete = "off";
         span.appendChild(input);
         out.appendChild(span);
-        // Make sure the prompt is visible.
         input.scrollIntoView({ block: "end" });
         input.focus();
         input.addEventListener("keydown", e => {
           if (e.key === "Enter") {
             e.preventDefault();
             const text = input.value;
-            // Freeze the prompt as plain text.
             span.replaceChildren();
             const done = document.createElement("span");
             done.className = "stdin-done";
@@ -766,16 +746,30 @@ async function run() {
       });
     }
 
-    async function readImpl() {
-      const line = await readLineUI();
-      for (let i = 0; i < line.length; i++)
-        instance.exports.fmt_buf_set(i, line.charCodeAt(i));
-      return line.length;
+    function writeBytesToFmtBuf(bytes) {
+      for (let j = 0; j < bytes.length; j++)
+        instance.exports.fmt_buf_set(j, bytes[j]);
+      return bytes.length;
     }
 
-    const readImport = hasJSPI
-      ? new WebAssembly.Suspending(readImpl)
-      : () => -1;
+    /* Mode-aware read: prompts for one line via JSPI; treats "all" as the
+     * same line (interactive stdin has no EOF without an explicit signal).
+     * mode 0 = "l" (no \n), 1 = "L" (with \n), 2 = "a" (one line), 3 = N bytes. */
+    async function readImpl(mode, count) {
+      const line = await readLineUI();
+      let s = line;
+      if (mode === 1) s = line + "\n";
+      else if (mode === 3) s = line.slice(0, count);
+      return writeBytesToFmtBuf(new TextEncoder().encode(s));
+    }
+
+    async function readNumImpl() {
+      const line = await readLineUI();
+      return helpers.parseNumberFromString(line.trim());
+    }
+
+    const readImport    = hasJSPI ? new WebAssembly.Suspending(readImpl)    : () => -1;
+    const readNumImport = hasJSPI ? new WebAssembly.Suspending(readNumImpl) : () => null;
 
     ({ instance } = await WebAssembly.instantiate(bytes, {
       host: {
@@ -786,8 +780,12 @@ async function run() {
           for (let j = 0; j < s.length; j++) instance.exports.fmt_buf_set(j, s.charCodeAt(j));
           return s.length;
         },
-        math: (kind, x) => MATH_FNS[kind](x),
-        read: readImport,
+        math:      (kind, x)    => MATH_FNS[kind](x),
+        math2:     (kind, x, y) => MATH2_FNS[kind](x, y),
+        parse_num: (s, base)    => parseLuaNumber(s, base),
+        fmt_spec:  (spec, val)  => formatSpec(spec, val),
+        read:      readImport,
+        read_num:  readNumImport,
       },
     }));
     curInstance = instance;
