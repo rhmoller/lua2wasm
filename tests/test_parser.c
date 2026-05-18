@@ -1,6 +1,7 @@
 #include "../src/lexer.h"
 #include "../src/parser.h"
 #include "../third_party/munit/munit.h"
+#include <string.h>
 
 static MunitResult test_print_sum_shape(const MunitParameter params[], void *fixture) {
     (void)params; (void)fixture;
@@ -108,12 +109,27 @@ static MunitResult test_closure_captures(const MunitParameter params[], void *fi
     return MUNIT_OK;
 }
 
+static MunitResult test_vararg_outside_vararg_rejected(const MunitParameter params[], void *fixture) {
+    (void)params; (void)fixture;
+    /* Inner function f has no `...`, so referencing `...` must error. */
+    TokenList t = lex("local function f() return ... end");
+    NodePool pool; node_pool_init(&pool);
+    ParseResult r = parse(&t, &pool);
+    munit_assert_false(r.ok);
+    munit_assert_not_null(strstr(r.error, "..."));
+    parse_result_free(&r);
+    node_pool_free(&pool);
+    tokenlist_free(&t);
+    return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
     { "/print_sum_shape",   test_print_sum_shape,   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
     { "/precedence",        test_precedence,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
     { "/local_and_assign",  test_local_and_assign,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
     { "/local_function",    test_local_function,    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
     { "/closure_captures",  test_closure_captures,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+    { "/vararg_outside_vararg", test_vararg_outside_vararg_rejected, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
     { NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 };
 

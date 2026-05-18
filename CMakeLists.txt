@@ -22,6 +22,13 @@ set(COMPILER_SOURCES
 
 add_library(lua2wasm_core STATIC ${COMPILER_SOURCES})
 target_include_directories(lua2wasm_core PUBLIC src)
+# `#embed "prelude.wat"` in codegen.c — clang's #embed search uses its own
+# --embed-dir= flag, not -I. Point it at runtime/ so both native and
+# emscripten builds find it.
+target_compile_options(lua2wasm_core PRIVATE --embed-dir=${CMAKE_SOURCE_DIR}/runtime)
+# Re-link when the embedded prelude changes.
+set_source_files_properties(src/codegen.c PROPERTIES
+    OBJECT_DEPENDS ${CMAKE_SOURCE_DIR}/runtime/prelude.wat)
 
 add_executable(lua2wasm src/main.c)
 target_link_libraries(lua2wasm PRIVATE lua2wasm_core)
@@ -210,6 +217,27 @@ add_test(
 add_test(
     NAME test_e2e_table_unpack
     COMMAND bash ${CMAKE_SOURCE_DIR}/tests/test_e2e_table_unpack.sh
+            $<TARGET_FILE:lua2wasm>
+            ${CMAKE_SOURCE_DIR}
+            ${CMAKE_BINARY_DIR}
+)
+
+add_test(
+    NAME test_host_format
+    COMMAND node --test ${CMAKE_SOURCE_DIR}/tests/test_host_format.mjs
+)
+
+add_test(
+    NAME test_e2e_nan_key
+    COMMAND bash ${CMAKE_SOURCE_DIR}/tests/test_e2e_nan_key.sh
+            $<TARGET_FILE:lua2wasm>
+            ${CMAKE_SOURCE_DIR}
+            ${CMAKE_BINARY_DIR}
+)
+
+add_test(
+    NAME test_e2e_for_step_zero
+    COMMAND bash ${CMAKE_SOURCE_DIR}/tests/test_e2e_for_step_zero.sh
             $<TARGET_FILE:lua2wasm>
             ${CMAKE_SOURCE_DIR}
             ${CMAKE_BINARY_DIR}

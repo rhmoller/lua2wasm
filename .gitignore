@@ -2,5 +2,8 @@ build/
 build-em/
 *.wasm
 *.wat
+# The embedded runtime prelude is checked-in source, not a build artifact.
+!runtime/prelude.wat
 .botface/
 .playwright-mcp/
+notes/

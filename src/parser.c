@@ -26,6 +26,12 @@
 #define MAX_FRAME_DEPTH      32
 #define MAX_FUNCS            256
 #define MAX_GLOBALS          256
+/* Per-construct list limit (params, args, names, return values, assignment
+ * targets, etc.). 250 matches Lua's documented MAXVARS / MAXPARAMS. */
+#define MAX_LIST             250
+/* Table-constructor entries — looking up data tables in real programs can be
+ * large, so allow more headroom than MAX_LIST. */
+#define MAX_TABLE_ENTRIES    1024
 
 typedef struct {
     const char *name;
@@ -342,10 +348,10 @@ static Expr *parse_primary(Parser *p) {
         }
         case TOK_LBRACE: {
             advance(p); /* { */
-            TableEntry buf[64];
+            TableEntry buf[MAX_TABLE_ENTRIES];
             int n = 0;
             while (peek(p)->kind != TOK_RBRACE && peek(p)->kind != TOK_EOF) {
-                if (n >= 64) { set_error(p, "too many entries in constructor"); return NULL; }
+                if (n >= MAX_TABLE_ENTRIES) { set_error(p, "too many entries in constructor"); return NULL; }
                 TableEntry *ent = &buf[n];
                 if (peek(p)->kind == TOK_LBRACKET) {
                     advance(p);
@@ -400,11 +406,11 @@ static Expr *parse_prefix_chain(Parser *p) {
         if (k == TOK_LPAREN) {
             int call_line = peek(p)->line;
             advance(p);
-            Expr *args_buf[16];
+            Expr *args_buf[MAX_LIST];
             size_t nargs = 0;
             if (peek(p)->kind != TOK_RPAREN) {
                 do {
-                    if (nargs >= 16) { set_error(p, "too many args"); return NULL; }
+                    if (nargs >= MAX_LIST) { set_error(p, "too many args"); return NULL; }
                     args_buf[nargs++] = parse_expr(p);
                     if (!p->ok) return NULL;
                 } while (match(p, TOK_COMMA));
@@ -465,11 +471,11 @@ static Expr *parse_prefix_chain(Parser *p) {
             if (peek(p)->kind != TOK_IDENT) { set_error(p, "expected method name after ':'"); return NULL; }
             const Token *nm = advance(p);
             expect(p, TOK_LPAREN, "(");
-            Expr *args_buf[16];
+            Expr *args_buf[MAX_LIST];
             size_t nargs = 0;
             if (peek(p)->kind != TOK_RPAREN) {
                 do {
-                    if (nargs >= 16) { set_error(p, "too many args"); return NULL; }
+                    if (nargs >= MAX_LIST) { set_error(p, "too many args"); return NULL; }
                     args_buf[nargs++] = parse_expr(p);
                     if (!p->ok) return NULL;
                 } while (match(p, TOK_COMMA));
@@ -561,20 +567,20 @@ static Stmt *parse_local(Parser *p) {
 
     /* local name [, name, ...] [= expr [, expr, ...]] */
     if (peek(p)->kind != TOK_IDENT) { set_error(p, "expected identifier after `local`"); return NULL; }
-    const Token *names_buf[16];
+    const Token *names_buf[MAX_LIST];
     int n_names = 0;
     names_buf[n_names++] = advance(p);
     while (match(p, TOK_COMMA)) {
         if (peek(p)->kind != TOK_IDENT) { set_error(p, "expected identifier"); return NULL; }
-        if (n_names >= 16) { set_error(p, "too many names in local"); return NULL; }
+        if (n_names >= MAX_LIST) { set_error(p, "too many names in local"); return NULL; }
         names_buf[n_names++] = advance(p);
     }
     /* Parse RHS values BEFORE declaring locals — Lua scoping rule. */
-    Expr *vals_buf[16];
+    Expr *vals_buf[MAX_LIST];
     int n_values = 0;
     if (match(p, TOK_ASSIGN)) {
         do {
-            if (n_values >= 16) { set_error(p, "too many values in local"); return NULL; }
+            if (n_values >= MAX_LIST) { set_error(p, "too many values in local"); return NULL; }
             vals_buf[n_values++] = parse_expr(p);
             if (!p->ok) return NULL;
         } while (match(p, TOK_COMMA));
@@ -600,7 +606,7 @@ static Stmt *parse_local(Parser *p) {
 static Stmt *parse_if(Parser *p) {
     int line = peek(p)->line;
     advance(p);
-    IfArm arms_buf[16];
+    IfArm arms_buf[MAX_LIST];
     size_t narms = 0;
     Expr *cond = parse_expr(p);
     if (!p->ok) return NULL;
@@ -622,7 +628,7 @@ static Stmt *parse_if(Parser *p) {
         parse_block(p, &b, TOK_KW_ELSE, TOK_KW_ELSEIF, TOK_KW_END);
         frame_rewind(cur_frame(p), m);
         if (!p->ok) return NULL;
-        if (narms >= 16) { set_error(p, "too many elseif arms"); return NULL; }
+        if (narms >= MAX_LIST) { set_error(p, "too many elseif arms"); return NULL; }
         arms_buf[narms++] = (IfArm){ .cond = c, .body = b };
     }
 
@@ -686,11 +692,11 @@ static int looks_like_block_end(TokKind k) {
 static Stmt *parse_return(Parser *p) {
     int line = peek(p)->line;
     advance(p);
-    Expr *vals_buf[16];
+    Expr *vals_buf[MAX_LIST];
     int n_values = 0;
     if (!looks_like_block_end(peek(p)->kind)) {
         do {
-            if (n_values >= 16) { set_error(p, "too many return values"); return NULL; }
+            if (n_values >= MAX_LIST) { set_error(p, "too many return values"); return NULL; }
             vals_buf[n_values++] = parse_expr(p);
             if (!p->ok) return NULL;
         } while (match(p, TOK_COMMA));
@@ -738,11 +744,11 @@ static Stmt *parse_ident_stmt(Parser *p) {
         return NULL;
     }
 
-    AssignTarget targets[16];
+    AssignTarget targets[MAX_LIST];
     int n_targets = 0;
     targets[n_targets++] = expr_to_target(first);
     while (match(p, TOK_COMMA)) {
-        if (n_targets >= 16) { set_error(p, "too many assignment targets"); return NULL; }
+        if (n_targets >= MAX_LIST) { set_error(p, "too many assignment targets"); return NULL; }
         Expr *t = parse_prefix_chain(p);
         if (!p->ok) return NULL;
         if (t->kind != EXPR_VAR && t->kind != EXPR_INDEX) {
@@ -755,10 +761,10 @@ static Stmt *parse_ident_stmt(Parser *p) {
     }
     expect(p, TOK_ASSIGN, "= (assignment)");
     if (!p->ok) return NULL;
-    Expr *vals_buf[16];
+    Expr *vals_buf[MAX_LIST];
     int n_values = 0;
     do {
-        if (n_values >= 16) { set_error(p, "too many values"); return NULL; }
+        if (n_values >= MAX_LIST) { set_error(p, "too many values"); return NULL; }
         vals_buf[n_values++] = parse_expr(p);
         if (!p->ok) return NULL;
     } while (match(p, TOK_COMMA));
@@ -810,19 +816,19 @@ static Stmt *parse_for(Parser *p) {
         return s;
     }
     /* generic: for k [, v, ...] in expr_list do ... end */
-    const Token *names[16];
+    const Token *names[MAX_LIST];
     int n_names = 0;
     names[n_names++] = first;
     while (match(p, TOK_COMMA)) {
         if (peek(p)->kind != TOK_IDENT) { set_error(p, "expected name"); return NULL; }
-        if (n_names >= 16) { set_error(p, "too many for-vars"); return NULL; }
+        if (n_names >= MAX_LIST) { set_error(p, "too many for-vars"); return NULL; }
         names[n_names++] = advance(p);
     }
     expect(p, TOK_KW_IN, "in");
-    Expr *exprs[16];
+    Expr *exprs[MAX_LIST];
     int n_exprs = 0;
     do {
-        if (n_exprs >= 16) { set_error(p, "too many exprs in for"); return NULL; }
+        if (n_exprs >= MAX_LIST) { set_error(p, "too many exprs in for"); return NULL; }
         exprs[n_exprs++] = parse_expr(p);
         if (!p->ok) return NULL;
     } while (match(p, TOK_COMMA));
@@ -883,12 +889,12 @@ static Stmt *parse_global(Parser *p) {
     int line = peek(p)->line;
     advance(p); /* global */
     if (peek(p)->kind != TOK_IDENT) { set_error(p, "expected identifier after `global`"); return NULL; }
-    const Token *names_buf[16];
+    const Token *names_buf[MAX_LIST];
     int n_names = 0;
     names_buf[n_names++] = advance(p);
     while (match(p, TOK_COMMA)) {
         if (peek(p)->kind != TOK_IDENT) { set_error(p, "expected identifier"); return NULL; }
-        if (n_names >= 16) { set_error(p, "too many names in global"); return NULL; }
+        if (n_names >= MAX_LIST) { set_error(p, "too many names in global"); return NULL; }
         names_buf[n_names++] = advance(p);
     }
     /* Register globals BEFORE parsing values so they can self-reference. */
@@ -898,11 +904,11 @@ static Stmt *parse_global(Parser *p) {
         if (idx < 0) { set_error(p, "too many globals"); return NULL; }
         global_idxs[i] = idx;
     }
-    Expr *vals_buf[16];
+    Expr *vals_buf[MAX_LIST];
     int n_values = 0;
     if (match(p, TOK_ASSIGN)) {
         do {
-            if (n_values >= 16) { set_error(p, "too many values"); return NULL; }
+            if (n_values >= MAX_LIST) { set_error(p, "too many values"); return NULL; }
             vals_buf[n_values++] = parse_expr(p);
             if (!p->ok) return NULL;
         } while (match(p, TOK_COMMA));

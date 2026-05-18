@@ -4,13 +4,14 @@ set -euo pipefail
 
 BIN="$1"; SRC_DIR="$2"; BUILD_DIR="$3"
 FIXTURE="$SRC_DIR/tests/fixtures/varargs.lua"
+EXPECTED_FILE="$SRC_DIR/tests/expected/varargs.txt"
 WAT="$BUILD_DIR/varargs.wat"
 WASM="$BUILD_DIR/varargs.wasm"
 
 "$BIN" "$FIXTURE" -o "$WAT"
 wasm-as --all-features -o "$WASM" "$WAT"
 
-EXPECTED=$'1\t2\t3\t4\na\tb\tc\n7\np\tq\tr\t3\n60\n0\n5\ny\tz\nnil'
+EXPECTED=$(<"$EXPECTED_FILE")
 
 OUT="$(node --experimental-wasm-exnref "$SRC_DIR/runtime/host.mjs" "$WASM")"
 if [[ "$OUT" != "$EXPECTED" ]]; then

@@ -36,6 +36,7 @@ emcc "${SRC[@]}" \
     $OPT \
     -std=c2x \
     -Isrc \
+    --embed-dir=runtime \
     -s MODULARIZE=1 \
     -s EXPORT_ES6=1 \
     -s EXPORT_NAME=createLua2WasmModule \

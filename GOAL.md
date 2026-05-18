@@ -91,6 +91,8 @@ real `return` values, and most of the standard library.
 
 - `function f(a, b) ... end` and anonymous `function ... end` expressions.
 - Multiple return values; multi-assign `a, b = f()`.
+- Varargs: `function f(...)` / `function f(a, ...)`, with `...` spliced
+  into call arguments, returns, and table constructors.
 - Upvalue capture: closures that reference enclosing locals.
 - Proper tail calls via WASM `return_call_ref`.
 - `$LuaClosure` = struct of `(funcref + upvalue array)`.

@@ -70,7 +70,16 @@ static void lex_error(Lex *L, const char *msg) {
  * past the closing quote. Allocates the decoded bytes into *out_buf. */
 static int read_string(Lex *L, char q, char **out_buf, size_t *out_len) {
     L->p++; /* skip opening quote */
-    size_t cap = 16, len = 0;
+    /* Upper-bound decoded length by distance-to-closing-quote — every escape
+     * sequence we recognize collapses to a single byte. One malloc, no realloc. */
+    const char *scan = L->p;
+    size_t cap = 0;
+    while (*scan && *scan != q && *scan != '\n') {
+        if (*scan == '\\' && scan[1]) scan++;
+        scan++; cap++;
+    }
+    if (cap == 0) cap = 1; /* malloc(0) is implementation-defined */
+    size_t len = 0;
     char *buf = malloc(cap);
     while (*L->p && *L->p != q) {
         if (*L->p == '\n') { lex_error(L, "newline in string literal"); free(buf); return 0; }
@@ -89,16 +98,22 @@ static int read_string(Lex *L, char q, char **out_buf, size_t *out_len) {
                 case 'b':  c = '\b'; break;
                 case 'f':  c = '\f'; break;
                 case 'v':  c = '\v'; break;
-                default:
-                    lex_error(L, "unknown escape sequence");
+                default: {
+                    char msg[64];
+                    unsigned char bad = (unsigned char)*L->p;
+                    if (bad >= 0x20 && bad < 0x7f)
+                        snprintf(msg, sizeof(msg), "unknown escape sequence '\\%c'", bad);
+                    else
+                        snprintf(msg, sizeof(msg), "unknown escape sequence '\\x%02x'", bad);
+                    lex_error(L, msg);
                     free(buf);
                     return 0;
+                }
             }
             L->p++;
         } else {
             c = *L->p++;
         }
-        if (len + 1 > cap) { cap *= 2; buf = realloc(buf, cap); }
         buf[len++] = c;
     }
     if (*L->p != q) { lex_error(L, "unterminated string"); free(buf); return 0; }

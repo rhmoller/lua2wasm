@@ -77,12 +77,33 @@ static MunitResult test_long_comment(const MunitParameter params[], void *fixtur
     return MUNIT_OK;
 }
 
+static MunitResult test_unterminated_string(const MunitParameter params[], void *fixture) {
+    (void)params; (void)fixture;
+    TokenList t = lex("local s = \"oops");
+    munit_assert_false(t.ok);
+    munit_assert_not_null(strstr(t.err, "unterminated string"));
+    tokenlist_free(&t);
+    return MUNIT_OK;
+}
+
+static MunitResult test_unknown_escape_reports_char(const MunitParameter params[], void *fixture) {
+    (void)params; (void)fixture;
+    TokenList t = lex("local s = \"a\\q\"");
+    munit_assert_false(t.ok);
+    /* Diagnostic must name the offending escape so users can find it. */
+    munit_assert_not_null(strstr(t.err, "\\q"));
+    tokenlist_free(&t);
+    return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
     { "/print_sum",     test_print_sum,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
     { "/keywords_ops",  test_keywords_and_ops, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
     { "/string",        test_string_literal,   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
     { "/float",         test_float_literal,    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
     { "/long_comment",  test_long_comment,     NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+    { "/unterminated_string",      test_unterminated_string,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+    { "/unknown_escape_named",     test_unknown_escape_reports_char,NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
     { NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 };
 
