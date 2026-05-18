@@ -1412,6 +1412,26 @@
       (br $lp)))
     (local.get $out))
 
+  ;; string.char(...) — builds a string from byte values (each in 0..255).
+  ;; Out-of-range values raise.
+  (func $builtin_string_char (type $LuaFn)
+    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
+    (local $n i32) (local $i i32) (local $b i64)
+    (local $out (ref $LuaArr))
+    (local.set $n (array.len (local.get $args)))
+    (local.set $out (array.new $LuaArr (i32.const 0) (local.get $n)))
+    (block $done (loop $lp
+      (br_if $done (i32.ge_s (local.get $i) (local.get $n)))
+      (local.set $b (call $as_int (call $args_at (local.get $args) (local.get $i))))
+      (if (i32.or (i64.lt_s (local.get $b) (i64.const 0))
+                  (i64.gt_s (local.get $b) (i64.const 255)))
+        (then (throw $LuaError (ref.null any))))
+      (array.set $LuaArr (local.get $out) (local.get $i)
+        (i32.wrap_i64 (local.get $b)))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br $lp)))
+    (array.new_fixed $ArgArr 1 (struct.new $LuaString (local.get $out))))
+
   ;; string.byte(s [, i [, j]]) — returns the byte values of s[i..j]
   ;; as multiple results. Defaults: i = 1, j = i. Negative indices
   ;; count from the end. Empty range returns no values.
