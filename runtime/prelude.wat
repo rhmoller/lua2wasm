@@ -1834,6 +1834,90 @@
         (return (i32.const 6))))
     (i32.const -1))
 
+  ;; Step over one UTF-8 codepoint starting at byte $p in array $bytes.
+  ;; Returns the byte width of the codepoint (1..6), or 0 if the sequence
+  ;; is invalid at $p. With $lax non-zero, accepts 5- and 6-byte lead
+  ;; bytes (Lua's extended range up to 0x7FFFFFFF) and skips the
+  ;; shortest-encoding check.
+  (func $utf8_decode_step (param $bytes (ref $LuaArr)) (param $p i32)
+                          (param $lax i32) (result i32)
+    (local $b i32) (local $cont i32) (local $n i32) (local $end i32) (local $i i32)
+    (local.set $n (array.len (local.get $bytes)))
+    (if (i32.ge_s (local.get $p) (local.get $n)) (then (return (i32.const 0))))
+    (local.set $b (array.get_u $LuaArr (local.get $bytes) (local.get $p)))
+    (if (i32.lt_u (local.get $b) (i32.const 0x80)) (then (return (i32.const 1))))
+    (if (i32.lt_u (local.get $b) (i32.const 0xC0)) (then (return (i32.const 0))))
+    (if (i32.lt_u (local.get $b) (i32.const 0xE0)) (then (local.set $cont (i32.const 1)))
+      (else (if (i32.lt_u (local.get $b) (i32.const 0xF0)) (then (local.set $cont (i32.const 2)))
+        (else (if (i32.lt_u (local.get $b) (i32.const 0xF8)) (then (local.set $cont (i32.const 3)))
+          (else (if (i32.eqz (local.get $lax))
+            (then (return (i32.const 0)))
+            (else (if (i32.lt_u (local.get $b) (i32.const 0xFC)) (then (local.set $cont (i32.const 4)))
+              (else (if (i32.lt_u (local.get $b) (i32.const 0xFE)) (then (local.set $cont (i32.const 5)))
+                (else (return (i32.const 0))))))))))))))
+    (local.set $end (i32.add (local.get $p) (i32.add (local.get $cont) (i32.const 1))))
+    (if (i32.gt_s (local.get $end) (local.get $n)) (then (return (i32.const 0))))
+    ;; verify each continuation byte is in 0x80..0xBF
+    (local.set $i (i32.add (local.get $p) (i32.const 1)))
+    (block $done (loop $lp
+      (br_if $done (i32.ge_s (local.get $i) (local.get $end)))
+      (local.set $b (array.get_u $LuaArr (local.get $bytes) (local.get $i)))
+      (if (i32.or (i32.lt_u (local.get $b) (i32.const 0x80))
+                  (i32.ge_u (local.get $b) (i32.const 0xC0)))
+        (then (return (i32.const 0))))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br $lp)))
+    (i32.add (local.get $cont) (i32.const 1)))
+
+  ;; utf8.len(s [, i [, j [, lax]]]) — count codepoints starting in [i, j].
+  ;; Returns the count, OR (nil, errpos) on the first invalid byte.
+  (func $builtin_utf8_len (type $LuaFn)
+    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
+    (local $bytes (ref $LuaArr)) (local $n i32) (local $nargs i32)
+    (local $i i32) (local $j i32) (local $lax i32)
+    (local $p i32) (local $w i32) (local $count i64)
+    (local $out (ref $ArgArr))
+    (local.set $bytes (struct.get $LuaString $bytes
+      (ref.cast (ref $LuaString) (call $args_at (local.get $args) (i32.const 0)))))
+    (local.set $n (array.len (local.get $bytes)))
+    (local.set $nargs (array.len (local.get $args)))
+    (local.set $i (i32.const 1))
+    (local.set $j (i32.const -1))
+    (if (i32.gt_u (local.get $nargs) (i32.const 1))
+      (then (local.set $i (i32.wrap_i64
+              (call $as_int (call $args_at (local.get $args) (i32.const 1)))))))
+    (if (i32.gt_u (local.get $nargs) (i32.const 2))
+      (then (local.set $j (i32.wrap_i64
+              (call $as_int (call $args_at (local.get $args) (i32.const 2)))))))
+    (if (i32.gt_u (local.get $nargs) (i32.const 3))
+      (then (local.set $lax (call $lua_truthy
+              (call $args_at (local.get $args) (i32.const 3))))))
+    ;; negative-index normalisation, then 1-based clamp
+    (if (i32.lt_s (local.get $i) (i32.const 0))
+      (then (local.set $i (i32.add (local.get $n) (i32.add (local.get $i) (i32.const 1))))))
+    (if (i32.lt_s (local.get $j) (i32.const 0))
+      (then (local.set $j (i32.add (local.get $n) (i32.add (local.get $j) (i32.const 1))))))
+    (if (i32.lt_s (local.get $i) (i32.const 1)) (then (local.set $i (i32.const 1))))
+    (if (i32.gt_s (local.get $j) (local.get $n)) (then (local.set $j (local.get $n))))
+    (local.set $p (i32.sub (local.get $i) (i32.const 1)))   ;; 0-based
+    (block $done (loop $lp
+      (br_if $done (i32.gt_s (i32.add (local.get $p) (i32.const 1)) (local.get $j)))
+      (local.set $w (call $utf8_decode_step
+        (local.get $bytes) (local.get $p) (local.get $lax)))
+      (if (i32.eqz (local.get $w))
+        (then
+          ;; invalid sequence: return (nil, 1-based position of bad byte)
+          (local.set $out (array.new $ArgArr (ref.null any) (i32.const 2)))
+          (array.set $ArgArr (local.get $out) (i32.const 0) (ref.null any))
+          (array.set $ArgArr (local.get $out) (i32.const 1)
+            (call $make_int (i64.extend_i32_s
+              (i32.add (local.get $p) (i32.const 1)))))
+          (return (local.get $out))))
+      (local.set $p (i32.add (local.get $p) (local.get $w)))
+      (local.set $count (i64.add (local.get $count) (i64.const 1)))
+      (br $lp)))
+    (array.new_fixed $ArgArr 1 (call $make_int (local.get $count))))
+
   ;; utf8.char(...) — encode each integer codepoint, concatenated.
   ;; Strict mode (Lua's default for utf8.char): codepoints must be valid
   ;; Unicode (0..0x10FFFF). We do a worst-case 4-byte pre-allocate, encode,
