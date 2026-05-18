@@ -338,14 +338,66 @@
       (then (i64.le_s (call $as_int (local.get $a)) (call $as_int (local.get $b))))
       (else (f64.le (call $as_float (local.get $a)) (call $as_float (local.get $b))))))
 
+  ;; Byte-wise lexicographic compare of two LuaStrings. Returns 1 if
+  ;; a < b, 0 otherwise (strictly less, not <=).
+  (func $str_lt (param $a anyref) (param $b anyref) (result i32)
+    (local $sa (ref $LuaArr)) (local $sb (ref $LuaArr))
+    (local $na i32) (local $nb i32) (local $i i32) (local $min i32)
+    (local $ba i32) (local $bb i32)
+    (local.set $sa (struct.get $LuaString $bytes (ref.cast (ref $LuaString) (local.get $a))))
+    (local.set $sb (struct.get $LuaString $bytes (ref.cast (ref $LuaString) (local.get $b))))
+    (local.set $na (array.len (local.get $sa)))
+    (local.set $nb (array.len (local.get $sb)))
+    (local.set $min (select (local.get $na) (local.get $nb)
+                            (i32.le_s (local.get $na) (local.get $nb))))
+    (block $done (loop $lp
+      (br_if $done (i32.ge_s (local.get $i) (local.get $min)))
+      (local.set $ba (array.get_u $LuaArr (local.get $sa) (local.get $i)))
+      (local.set $bb (array.get_u $LuaArr (local.get $sb) (local.get $i)))
+      (if (i32.lt_u (local.get $ba) (local.get $bb))
+        (then (return (i32.const 1))))
+      (if (i32.gt_u (local.get $ba) (local.get $bb))
+        (then (return (i32.const 0))))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br $lp)))
+    ;; equal up to the shorter length: a is < b iff a is shorter.
+    (i32.lt_s (local.get $na) (local.get $nb)))
+
+  ;; lua_lt / le / gt / ge — operand-type aware.
+  ;; Both numbers -> numeric compare. Both strings -> lexicographic.
+  ;; Anything else (incl. mixed types) -> Lua error.
+  ;; (TODO: __lt / __le metamethods.)
+  (func $lua_lt_raw (param $a anyref) (param $b anyref) (result i32)
+    (if (i32.and
+          (i32.or (call $is_int (local.get $a)) (call $is_float (local.get $a)))
+          (i32.or (call $is_int (local.get $b)) (call $is_float (local.get $b))))
+      (then (return (call $num_lt (local.get $a) (local.get $b)))))
+    (if (i32.and (ref.test (ref $LuaString) (local.get $a))
+                 (ref.test (ref $LuaString) (local.get $b)))
+      (then (return (call $str_lt (local.get $a) (local.get $b)))))
+    (throw $LuaError (ref.null any))
+    (i32.const 0))
+
+  (func $lua_le_raw (param $a anyref) (param $b anyref) (result i32)
+    (if (i32.and
+          (i32.or (call $is_int (local.get $a)) (call $is_float (local.get $a)))
+          (i32.or (call $is_int (local.get $b)) (call $is_float (local.get $b))))
+      (then (return (call $num_le (local.get $a) (local.get $b)))))
+    (if (i32.and (ref.test (ref $LuaString) (local.get $a))
+                 (ref.test (ref $LuaString) (local.get $b)))
+      ;; a <= b iff not (b < a)
+      (then (return (i32.eqz (call $str_lt (local.get $b) (local.get $a))))))
+    (throw $LuaError (ref.null any))
+    (i32.const 0))
+
   (func $lua_lt (param $a anyref) (param $b anyref) (result anyref)
-    (call $lua_bool_to_ref (call $num_lt (local.get $a) (local.get $b))))
+    (call $lua_bool_to_ref (call $lua_lt_raw (local.get $a) (local.get $b))))
   (func $lua_le (param $a anyref) (param $b anyref) (result anyref)
-    (call $lua_bool_to_ref (call $num_le (local.get $a) (local.get $b))))
+    (call $lua_bool_to_ref (call $lua_le_raw (local.get $a) (local.get $b))))
   (func $lua_gt (param $a anyref) (param $b anyref) (result anyref)
-    (call $lua_bool_to_ref (call $num_lt (local.get $b) (local.get $a))))
+    (call $lua_bool_to_ref (call $lua_lt_raw (local.get $b) (local.get $a))))
   (func $lua_ge (param $a anyref) (param $b anyref) (result anyref)
-    (call $lua_bool_to_ref (call $num_le (local.get $b) (local.get $a))))
+    (call $lua_bool_to_ref (call $lua_le_raw (local.get $b) (local.get $a))))
 
   ;; --- string conversion + concat ---
   (func $int_to_bytes (param $v i64) (result (ref $LuaArr))
