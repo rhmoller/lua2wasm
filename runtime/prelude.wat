@@ -1266,6 +1266,27 @@
 
   ;; table.unpack(t [, i [, j]]) -> t[i], t[i+1], ..., t[j].
   ;; Defaults: i = 1, j = #t. Returns no values when j < i.
+  ;; table.pack(...): returns { [1] = a1, ..., [n] = an, n = nargs }.
+  (func $builtin_table_pack (type $LuaFn)
+    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
+    (local $t (ref $LuaTable)) (local $n i32) (local $i i32)
+    (local $nkey (ref $LuaString))
+    (local.set $t (call $tab_new))
+    (local.set $n (array.len (local.get $args)))
+    (block $done (loop $lp
+      (br_if $done (i32.ge_s (local.get $i) (local.get $n)))
+      (call $tab_set (local.get $t)
+        (ref.i31 (i32.add (local.get $i) (i32.const 1)))
+        (call $args_at (local.get $args) (local.get $i)))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br $lp)))
+    ;; n = nargs   (key is the single-byte string "n", ASCII 110)
+    (local.set $nkey (struct.new $LuaString
+      (array.new_fixed $LuaArr 1 (i32.const 110))))
+    (call $tab_set (local.get $t) (local.get $nkey)
+      (call $make_int (i64.extend_i32_s (local.get $n))))
+    (array.new_fixed $ArgArr 1 (local.get $t)))
+
   (func $builtin_table_unpack (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
     (local $t (ref $LuaTable)) (local $i i32) (local $j i32) (local $nargs i32)
