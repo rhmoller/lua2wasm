@@ -19,6 +19,7 @@ SRC=(
     src/wat_builder.c
     src/codegen.c
     src/builtins.c
+    src/xalloc.c
     src/emscripten_entry.c
 )
 
