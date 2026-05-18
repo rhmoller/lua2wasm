@@ -388,6 +388,11 @@ static const char *binop_helper(BinOp op) {
         case BIN_LE:     return "$lua_le";
         case BIN_GT:     return "$lua_gt";
         case BIN_GE:     return "$lua_ge";
+        case BIN_BAND:   return "$lua_band";
+        case BIN_BOR:    return "$lua_bor";
+        case BIN_BXOR:   return "$lua_bxor";
+        case BIN_SHL:    return "$lua_shl";
+        case BIN_SHR:    return "$lua_shr";
         default:         return "$lua_add";
     }
 }
@@ -427,9 +432,10 @@ static void emit_unop(CG *c, const Expr *e, int depth) {
     emit_expr(c, e->as.unop.operand, depth);
     emit_indent(c, depth);
     switch (e->as.unop.op) {
-        case UN_NEG: wat_append(c->w, "(call $lua_neg)\n"); break;
-        case UN_NOT: wat_append(c->w, "(call $lua_not)\n"); break;
-        case UN_LEN: wat_append(c->w, "(call $lua_len)\n"); break;
+        case UN_NEG:  wat_append(c->w, "(call $lua_neg)\n");  break;
+        case UN_NOT:  wat_append(c->w, "(call $lua_not)\n");  break;
+        case UN_LEN:  wat_append(c->w, "(call $lua_len)\n");  break;
+        case UN_BNOT: wat_append(c->w, "(call $lua_bnot)\n"); break;
     }
 }
 
@@ -1331,6 +1337,12 @@ int codegen_module(const ParseResult *pr, WatBuilder *out,
         { "$g_mkey_pow",        "__pow"       },
         { "$g_mkey_unm",        "__unm"       },
         { "$g_mkey_idiv",       "__idiv"      },
+        { "$g_mkey_band",       "__band"      },
+        { "$g_mkey_bor",        "__bor"       },
+        { "$g_mkey_bxor",       "__bxor"      },
+        { "$g_mkey_shl",        "__shl"       },
+        { "$g_mkey_shr",        "__shr"       },
+        { "$g_mkey_bnot",       "__bnot"      },
         { "$g_mkey_concat",     "__concat"    },
         { "$g_mkey_len",        "__len"       },
         { "$g_mkey_eq",         "__eq"        },

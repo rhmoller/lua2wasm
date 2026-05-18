@@ -233,22 +233,30 @@ static int resolve_name(Parser *p, const char *name, size_t name_len,
  *   or
  *   and
  *   <  >  <=  >=  ~=  ==
+ *   |
+ *   ~        (binary xor)
+ *   &
+ *   <<  >>
  *   ..
  *   +  -
  *   *  /  //  %
- *   unary (- not #)
- *   ^   (right-assoc, higher than unary)
+ *   unary (- not # ~)
+ *   ^        (right-assoc, higher than unary)
  * ============================================================ */
 
 #define PREC_NONE   0
 #define PREC_OR     1
 #define PREC_AND    2
 #define PREC_CMP    3
-#define PREC_CONCAT 4
-#define PREC_ADD    5
-#define PREC_MUL    6
-#define PREC_UNARY  7
-#define PREC_POW    8
+#define PREC_BOR    4
+#define PREC_BXOR   5
+#define PREC_BAND   6
+#define PREC_SHIFT  7
+#define PREC_CONCAT 8
+#define PREC_ADD    9
+#define PREC_MUL    10
+#define PREC_UNARY  11
+#define PREC_POW    12
 
 static int prec_of(TokKind k) {
     switch (k) {
@@ -256,6 +264,10 @@ static int prec_of(TokKind k) {
         case TOK_KW_AND: return PREC_AND;
         case TOK_EQ: case TOK_NEQ: case TOK_LT: case TOK_LE:
         case TOK_GT: case TOK_GE: return PREC_CMP;
+        case TOK_PIPE:  return PREC_BOR;
+        case TOK_TILDE: return PREC_BXOR;
+        case TOK_AMP:   return PREC_BAND;
+        case TOK_SHL: case TOK_SHR: return PREC_SHIFT;
         case TOK_CONCAT: return PREC_CONCAT;
         case TOK_PLUS: case TOK_MINUS: return PREC_ADD;
         case TOK_STAR: case TOK_SLASH: case TOK_DSLASH: case TOK_PERCENT: return PREC_MUL;
@@ -273,6 +285,11 @@ static BinOp binop_of(TokKind k) {
         case TOK_DSLASH:  return BIN_FDIV;
         case TOK_PERCENT: return BIN_MOD;
         case TOK_CARET:   return BIN_POW;
+        case TOK_AMP:     return BIN_BAND;
+        case TOK_PIPE:    return BIN_BOR;
+        case TOK_TILDE:   return BIN_BXOR;
+        case TOK_SHL:     return BIN_SHL;
+        case TOK_SHR:     return BIN_SHR;
         case TOK_CONCAT:  return BIN_CONCAT;
         case TOK_EQ:      return BIN_EQ;
         case TOK_NEQ:     return BIN_NEQ;
@@ -513,6 +530,7 @@ static Expr *parse_unary(Parser *p) {
     if (t->kind == TOK_MINUS)        op = UN_NEG;
     else if (t->kind == TOK_KW_NOT)  op = UN_NOT;
     else if (t->kind == TOK_HASH)    op = UN_LEN;
+    else if (t->kind == TOK_TILDE)   op = UN_BNOT;
     else return parse_prefix_chain(p);
     advance(p);
     Expr *operand = parse_prec(p, PREC_UNARY);

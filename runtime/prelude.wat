@@ -260,6 +260,124 @@
     (call $arith_mm (local.get $a) (local.get $b)
       (ref.as_non_null (global.get $g_mkey_pow))))
 
+  ;; --- bitwise --------------------------------------------------------
+  ;;
+  ;; Every bit op needs operands convertible to integer, per the manual's
+  ;; "convertible to integer" rule (§3.4.3):
+  ;;   - i31 / boxed LuaInt: use as-is
+  ;;   - LuaFloat with no fractional part AND in signed-i64 range: trunc
+  ;;   - anything else: bit-op falls through to the metamethod path,
+  ;;     else raise. Two helpers:
+  ;;       $try_to_int(v)       -> 1 iff convertible
+  ;;       $as_int_unchecked(v) -> the i64 (call only after try_to_int=1)
+  (func $try_to_int (param $v anyref) (result i32)
+    (local $f f64)
+    (if (call $is_int (local.get $v)) (then (return (i32.const 1))))
+    (if (call $is_float (local.get $v))
+      (then
+        (local.set $f (call $as_float (local.get $v)))
+        (if (i32.and
+              (f64.eq (local.get $f) (f64.trunc (local.get $f)))
+              (i32.and
+                (f64.eq (local.get $f) (local.get $f))
+                (i32.and
+                  (f64.ge (local.get $f) (f64.const -9223372036854775808.0))
+                  (f64.lt (local.get $f) (f64.const  9223372036854775808.0)))))
+          (then (return (i32.const 1))))))
+    (i32.const 0))
+
+  ;; Returns the i64 representation of $v if convertible, else 0.
+  ;; (Use together with $try_to_int's flag.)
+  (func $as_int_unchecked (param $v anyref) (result i64)
+    (if (result i64) (call $is_int (local.get $v))
+      (then (call $as_int (local.get $v)))
+      (else (i64.trunc_f64_s (call $as_float (local.get $v))))))
+
+  ;; Common path: a binary bitop. Try both operands as ints; if both
+  ;; convert, run $op; else dispatch through the metamethod $key.
+  (func $bitop_band (param $a anyref) (param $b anyref) (result anyref)
+    (if (i32.and (call $try_to_int (local.get $a))
+                 (call $try_to_int (local.get $b)))
+      (then (return (call $make_int
+        (i64.and (call $as_int_unchecked (local.get $a))
+                 (call $as_int_unchecked (local.get $b)))))))
+    (call $arith_mm (local.get $a) (local.get $b)
+      (ref.as_non_null (global.get $g_mkey_band))))
+
+  (func $bitop_bor (param $a anyref) (param $b anyref) (result anyref)
+    (if (i32.and (call $try_to_int (local.get $a))
+                 (call $try_to_int (local.get $b)))
+      (then (return (call $make_int
+        (i64.or  (call $as_int_unchecked (local.get $a))
+                 (call $as_int_unchecked (local.get $b)))))))
+    (call $arith_mm (local.get $a) (local.get $b)
+      (ref.as_non_null (global.get $g_mkey_bor))))
+
+  (func $bitop_bxor (param $a anyref) (param $b anyref) (result anyref)
+    (if (i32.and (call $try_to_int (local.get $a))
+                 (call $try_to_int (local.get $b)))
+      (then (return (call $make_int
+        (i64.xor (call $as_int_unchecked (local.get $a))
+                 (call $as_int_unchecked (local.get $b)))))))
+    (call $arith_mm (local.get $a) (local.get $b)
+      (ref.as_non_null (global.get $g_mkey_bxor))))
+
+  ;; Shifts: Lua semantics — logical shifts of 64-bit unsigned, negative
+  ;; counts swap direction, |count| >= 64 yields 0.
+  (func $do_shl (param $v i64) (param $n i64) (result i64)
+    (if (i64.ge_s (local.get $n) (i64.const 64)) (then (return (i64.const 0))))
+    (if (i64.le_s (local.get $n) (i64.const -64)) (then (return (i64.const 0))))
+    (if (i64.lt_s (local.get $n) (i64.const 0))
+      (then (return (i64.shr_u (local.get $v) (i64.sub (i64.const 0) (local.get $n))))))
+    (i64.shl (local.get $v) (local.get $n)))
+
+  (func $do_shr (param $v i64) (param $n i64) (result i64)
+    (call $do_shl (local.get $v) (i64.sub (i64.const 0) (local.get $n))))
+
+  (func $bitop_shl (param $a anyref) (param $b anyref) (result anyref)
+    (if (i32.and (call $try_to_int (local.get $a))
+                 (call $try_to_int (local.get $b)))
+      (then (return (call $make_int
+        (call $do_shl (call $as_int_unchecked (local.get $a))
+                       (call $as_int_unchecked (local.get $b)))))))
+    (call $arith_mm (local.get $a) (local.get $b)
+      (ref.as_non_null (global.get $g_mkey_shl))))
+
+  (func $bitop_shr (param $a anyref) (param $b anyref) (result anyref)
+    (if (i32.and (call $try_to_int (local.get $a))
+                 (call $try_to_int (local.get $b)))
+      (then (return (call $make_int
+        (call $do_shr (call $as_int_unchecked (local.get $a))
+                       (call $as_int_unchecked (local.get $b)))))))
+    (call $arith_mm (local.get $a) (local.get $b)
+      (ref.as_non_null (global.get $g_mkey_shr))))
+
+  ;; Lua-visible names (codegen emits calls to these).
+  (func $lua_band (param $a anyref) (param $b anyref) (result anyref)
+    (call $bitop_band (local.get $a) (local.get $b)))
+  (func $lua_bor  (param $a anyref) (param $b anyref) (result anyref)
+    (call $bitop_bor  (local.get $a) (local.get $b)))
+  (func $lua_bxor (param $a anyref) (param $b anyref) (result anyref)
+    (call $bitop_bxor (local.get $a) (local.get $b)))
+  (func $lua_shl  (param $a anyref) (param $b anyref) (result anyref)
+    (call $bitop_shl  (local.get $a) (local.get $b)))
+  (func $lua_shr  (param $a anyref) (param $b anyref) (result anyref)
+    (call $bitop_shr  (local.get $a) (local.get $b)))
+
+  ;; Unary bitwise NOT: ~v.
+  (func $lua_bnot (param $a anyref) (result anyref)
+    (local $mm anyref)
+    (if (call $try_to_int (local.get $a))
+      (then (return (call $make_int
+        (i64.xor (call $as_int_unchecked (local.get $a)) (i64.const -1))))))
+    (local.set $mm (call $get_metamethod (local.get $a)
+      (ref.as_non_null (global.get $g_mkey_bnot))))
+    (if (ref.is_null (local.get $mm))
+      (then (throw $LuaError (ref.null any))))
+    (call $args_first (call $lua_call
+      (ref.cast (ref $LuaClosure) (local.get $mm))
+      (array.new_fixed $ArgArr 2 (local.get $a) (local.get $a)))))
+
   (func $lua_neg (param $a anyref) (result anyref)
     (local $mm anyref)
     (if (call $is_numlike (local.get $a))
@@ -796,6 +914,12 @@
   (global $g_mkey_pow       (mut (ref null $LuaString)) (ref.null $LuaString))
   (global $g_mkey_unm       (mut (ref null $LuaString)) (ref.null $LuaString))
   (global $g_mkey_idiv      (mut (ref null $LuaString)) (ref.null $LuaString))
+  (global $g_mkey_band      (mut (ref null $LuaString)) (ref.null $LuaString))
+  (global $g_mkey_bor       (mut (ref null $LuaString)) (ref.null $LuaString))
+  (global $g_mkey_bxor      (mut (ref null $LuaString)) (ref.null $LuaString))
+  (global $g_mkey_shl       (mut (ref null $LuaString)) (ref.null $LuaString))
+  (global $g_mkey_shr       (mut (ref null $LuaString)) (ref.null $LuaString))
+  (global $g_mkey_bnot      (mut (ref null $LuaString)) (ref.null $LuaString))
   (global $g_mkey_concat    (mut (ref null $LuaString)) (ref.null $LuaString))
   (global $g_mkey_len       (mut (ref null $LuaString)) (ref.null $LuaString))
   (global $g_mkey_eq        (mut (ref null $LuaString)) (ref.null $LuaString))

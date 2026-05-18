@@ -67,13 +67,14 @@ typedef struct {
 
 typedef enum {
     BIN_ADD, BIN_SUB, BIN_MUL, BIN_DIV, BIN_FDIV, BIN_MOD, BIN_POW,
+    BIN_BAND, BIN_BOR, BIN_BXOR, BIN_SHL, BIN_SHR,
     BIN_CONCAT,
     BIN_EQ, BIN_NEQ, BIN_LT, BIN_LE, BIN_GT, BIN_GE,
     BIN_AND, BIN_OR,
 } BinOp;
 
 typedef enum {
-    UN_NEG, UN_NOT, UN_LEN,
+    UN_NEG, UN_NOT, UN_LEN, UN_BNOT,
 } UnOp;
 
 struct Expr {
