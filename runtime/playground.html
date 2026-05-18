@@ -139,6 +139,11 @@
     <input type="checkbox" id="treeshake" style="vertical-align:middle">
     tree-shake
   </label>
+  <label style="margin-left:.25em;font-size:.85em;color:#888;cursor:pointer"
+         title="Run binaryen's -Oz pass after assembling. Big win when paired with tree-shake; modest savings alone. Costs ~100ms compile time.">
+    <input type="checkbox" id="wasmopt" style="vertical-align:middle">
+    wasm-opt -Oz
+  </label>
   <span id="status" style="color:#888"></span>
 </header>
 
@@ -669,10 +674,16 @@ function luaToWat(source) {
 /* ----- binaryen wat -> wasm ----- */
 status.textContent = "loading binaryen…";
 const bin = binaryen;     /* default export is the ready API */
+/* -Oz = optimize level 2 + shrink level 2. Set once globally; the
+ * watToWasm path opts in per call via the wasm-opt checkbox. */
+bin.setOptimizeLevel(2);
+bin.setShrinkLevel(2);
+const wasmOptCB = document.getElementById("wasmopt");
 function watToWasm(wat) {
   const mod = bin.parseText(wat);
   mod.setFeatures(bin.Features.All);
   if (!mod.validate()) throw new Error("Binaryen validation failed");
+  if (wasmOptCB && wasmOptCB.checked) mod.optimize();
   const bytes = mod.emitBinary();
   mod.dispose();
   return bytes;
