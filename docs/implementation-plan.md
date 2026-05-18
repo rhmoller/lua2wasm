@@ -380,7 +380,7 @@ Lua happens to do.
 
 ---
 
-## Milestone 21 — `string.pack` / `string.unpack` / `string.packsize` (L) — ⏳ pending
+## Milestone 21 — `string.pack` / `string.unpack` / `string.packsize` (L) — ✅ done
 
 **Goal:** binary serialization. ~500 lines reference.
 
@@ -518,12 +518,12 @@ position pending; Chrome flag-gated). When it ships:
 Quick wins:        9 → 10 → 11 → 12 → 16    ✅ done
 Polish / sharpen:  13 → 14 → 15 → 19        ✅ done
 Big language gaps: 17 → 18 → 23             ✅ 17, 18 done · ⏳ 23 pending
-Heavy stdlib:      20 → 21                  ✅ 20 done · ⏳ 21 pending
+Heavy stdlib:      20 → 21                  ✅ done
 Host integration:  22 → 24 → 25 → 26        ⏳ all pending
 Blocked:           27 (coroutines)          ⛔ awaiting stack switching
 ```
 
 The remaining "Not yet" surface in the README:
-`<const>/<close>` (23), `string.{pack,unpack,packsize}` (21), error-location
-prefix + `debug.*` (22), `os.*` / `io.open` (24), `require` (25),
-`load`/`loadfile`/`dofile` (26), coroutines (27).
+`<const>/<close>` (23), error-location prefix + `debug.*` (22),
+`os.*` / `io.open` (24), `require` (25), `load`/`loadfile`/`dofile` (26),
+coroutines (27).

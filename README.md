@@ -98,7 +98,7 @@ instructions. Anything not in this table is a compile-time error.
 | **Functions**     | N-ary arguments, multiple return values (`return a, b, c`), upvalue capture (mutable shared boxes), transitive captures, **method-call sugar `obj:m(args)`**, **paren-less single-arg call `f"x"` / `f{k=1}`**, **varargs `function f(...)` / `function f(a, ...)` with `...` spliced into call args, returns, table constructors, and multi-assign**, proper tail calls (`return f(...)` → `return_call_ref`, doesn't grow the stack)                  | —                                                                |
 | **Errors**        | `error(v)` / `pcall(f, …)` / `assert(v[, msg])` lowered to WASM exception handling (`throw $LuaError` + `try_table`)                                                                                                                                                                                            | error message annotations, tracebacks                            |
 | **Metatables**    | `setmetatable` / `getmetatable`, `__index` (table chain *and* function form, with cycle limit), `__newindex` (table chain *and* function form), `__add` `__sub` `__mul` `__div` `__mod` `__pow` `__unm` `__idiv` `__band` `__bor` `__bxor` `__shl` `__shr` `__bnot`, `__concat`, `__len`, `__eq` `__lt` `__le`, `__call`, `__tostring`, `__metatable` (protect)                                                                                                                                              | `__name`, `__close`, `__gc` (no finalizers in WasmGC), `__mode` (no weak refs in WasmGC) |
-| **Standard lib**  | `print`, `error` (`level` arg accepted; no position prefix yet), `pcall`, `xpcall`, `warn`, `assert`, `select`, `type`, `tostring`, `tonumber`, `ipairs`, `pairs`, `next`, `setmetatable`, `getmetatable`, `rawequal`, `rawlen`, `rawget`, `rawset`, `_G`, `_VERSION`; `io.{write, read}` (read supports `l L a n` + byte count + multi-format); `math.{floor, ceil, abs, sqrt, min, max, sin, cos, tan, asin, acos, atan, exp, log, pi, huge, deg, rad, fmod, modf, tointeger, type, ult, maxinteger, mininteger, random, randomseed}` (`atan`/`log` accept second arg); `string.{len, sub, format, upper, lower, reverse, rep, byte, char, find, match, gmatch, gsub}` (`format` covers all of `%s %d %i %u %o %x %X %c %q %e %E %f %F %g %G %a %A %%` with flags `- + space # 0`, width, precision; pattern subsystem covers every documented class, set, quantifier, anchor, capture, back-ref, `%bxy` balanced match, `%f[set]` frontier; gsub accepts string/table/function repl); `table.{insert, remove, concat, unpack, pack, move, create, sort}`; `utf8.{char, len, codepoint, offset, codes, charpattern}` (codes' lax flag accepted but not yet honoured) | `string.{pack, unpack, packsize}`, `os.*`, `io.open` |
+| **Standard lib**  | `print`, `error` (`level` arg accepted; no position prefix yet), `pcall`, `xpcall`, `warn`, `assert`, `select`, `type`, `tostring`, `tonumber`, `ipairs`, `pairs`, `next`, `setmetatable`, `getmetatable`, `rawequal`, `rawlen`, `rawget`, `rawset`, `_G`, `_VERSION`; `io.{write, read}` (read supports `l L a n` + byte count + multi-format); `math.{floor, ceil, abs, sqrt, min, max, sin, cos, tan, asin, acos, atan, exp, log, pi, huge, deg, rad, fmod, modf, tointeger, type, ult, maxinteger, mininteger, random, randomseed}` (`atan`/`log` accept second arg); `string.{len, sub, format, upper, lower, reverse, rep, byte, char, find, match, gmatch, gsub, pack, unpack, packsize}` (`format` covers all of `%s %d %i %u %o %x %X %c %q %e %E %f %F %g %G %a %A %%` with flags `- + space # 0`, width, precision; pattern subsystem covers every documented class, set, quantifier, anchor, capture, back-ref, `%bxy` balanced match, `%f[set]` frontier; gsub accepts string/table/function repl; pack/unpack/packsize cover every option in §6.5.2 — `< > = ! [n] b B h H l L j J T i[N] I[N] f d n c[N] z s[N] x Xop` — and round-trip byte-for-byte with reference Lua); `table.{insert, remove, concat, unpack, pack, move, create, sort}`; `utf8.{char, len, codepoint, offset, codes, charpattern}` (codes' lax flag accepted but not yet honoured) | `os.*`, `io.open` |
 | **Coroutines**    | —                                                                                                                                                                                                                                                                                                               | blocked on the WASM stack-switching proposal shipping in browsers |
 
 Browse [`tests/fixtures/`](tests/fixtures/) to see what valid programs look
@@ -247,14 +247,13 @@ flowchart LR
 Cards in roughly priority order. Open a discussion before tackling
 anything large.
 
-1. `string.{pack, unpack, packsize}` — binary serialization.
-2. `<const>` and `<close>` local attributes (the latter needs `__close` and to-be-closed scope tracking).
-3. `error(msg, level)` position prefix (currently the `level` arg is accepted but ignored); full `debug.*` would be its own milestone.
-4. `os.{clock, time, date, difftime, getenv}`, `io.open` / `io.lines` / file handles.
-5. `load` / `loadfile` / `require` — dynamic compilation; needs the compiler at runtime.
-6. Coroutines — blocked on the WASM stack-switching proposal landing in browsers.
-7. Source maps so DevTools can step from compiled WASM back into Lua.
-8. `wasm-opt` step in the build pipeline (size + speed wins for the shipped `.wasm`).
+1. `<const>` and `<close>` local attributes (the latter needs `__close` and to-be-closed scope tracking).
+2. `error(msg, level)` position prefix (currently the `level` arg is accepted but ignored); full `debug.*` would be its own milestone.
+3. `os.{clock, time, date, difftime, getenv}`, `io.open` / `io.lines` / file handles.
+4. `load` / `loadfile` / `require` — dynamic compilation; needs the compiler at runtime.
+5. Coroutines — blocked on the WASM stack-switching proposal landing in browsers.
+6. Source maps so DevTools can step from compiled WASM back into Lua.
+7. `wasm-opt` step in the build pipeline (size + speed wins for the shipped `.wasm`).
 
 ## Contributing
 

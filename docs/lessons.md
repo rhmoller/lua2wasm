@@ -341,6 +341,44 @@ Surprises during implementation (additions to the lessons later):
    doesn't work because we don't set up a metatable for strings
    yet. Documented as a separate gap, not a pattern bug.
 
+### When the design doc held up (milestone 21, string.pack)
+
+`docs/design/21-string-pack.md` proposed a 9-step plan and locked in
+three load-bearing decisions before any WAT was written:
+
+- Native sizes fixed once (`h=2`, `i/I=4`, `l/j/T=8`, `f=4`, `d/n=8`),
+  documented in the doc itself.
+- `pack` writes through a `$Builder` (grow on demand); `unpack`
+  pre-counts options to allocate one `$ArgArr` of `(N + 1)`. No
+  growing on the unpack path.
+- No bytecode compilation of the format string — interpret each call,
+  per the m20 lesson that "don't pre-compile the cheap case".
+
+The 9-step plan compressed to 6 commits in practice: steps 4 (endian)
+and 5 (alignment/`x`/`Xop`) were already operational in step 2's
+walker, so they folded into the float commit's message. Otherwise
+every step landed in one commit with its own e2e fixture and a green
+ctest before the next started.
+
+The oracle pattern from m20 paid off again: every numeric assertion
+in every fixture was diff'd against `lua5.5` on the same Lua source.
+One mismatch surfaced during step 1 (`c0` allowed in reference Lua,
+rejected by our impl) — caught before the test landed. None of the
+risk-register items bit during implementation.
+
+The cost: ~3 hours design, ~6 commits implementation. The single
+biggest unforced error was the `c0` semantics, which the doc would
+have caught if I'd thought harder about "n=0 corner" upfront. Logged.
+
+### Latent bug surfaced (hex literal wrap)
+
+While probing during step 2, I noticed `0xfedcba9876543210` evaluates
+to `0x7fffffffffffffff` in our compiler — the lexer clamps hex
+literals with the top bit set to `i64.max` instead of wrapping per
+the Lua spec. The pack fixture sidesteps the issue by using values
+in the signed-i64 range; the real fix belongs in `src/lexer.c`'s
+numeral parser. Not addressed in m21; logged as a follow-up.
+
 ## When to write a full design doc
 
 Most milestones (raw* primitives, table fillers, math fillers, utf8
@@ -351,9 +389,8 @@ for:
 - ~~**Milestone 20 — Lua patterns.**~~ Shipped. The design doc held
   up; retro is above.
 
-- **Milestone 21 — string.pack/unpack/packsize.** ~500 reference
-  lines. Format directives, alignment, endianness, length-prefixed
-  strings. Similar risk profile.
+- ~~**Milestone 21 — string.pack/unpack/packsize.**~~ Shipped. The
+  design doc held up; retro above.
 
 - ~~**Milestone 19 — `_G`, xpcall, error-with-level, warn.**~~ Shipped.
   The design doc held up; retro above.
