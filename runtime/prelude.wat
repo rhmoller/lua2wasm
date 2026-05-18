@@ -280,13 +280,33 @@
   (func $lua_not (param $a anyref) (result anyref)
     (call $lua_bool_to_ref (i32.eqz (call $lua_truthy (local.get $a)))))
 
+  ;; `#` on:
+  ;;   string -> byte length (no metamethod consulted, per spec)
+  ;;   table  -> __len if defined, else the array-border length
+  ;;   other  -> __len if defined, else error
   (func $lua_len (param $a anyref) (result anyref)
-    (if (result anyref) (ref.test (ref $LuaTable) (local.get $a))
-      (then (call $make_int (i64.extend_i32_s
-              (call $tab_len (ref.cast (ref $LuaTable) (local.get $a))))))
-      (else (call $make_int (i64.extend_i32_u
+    (local $mm anyref)
+    (if (ref.test (ref $LuaString) (local.get $a))
+      (then (return (call $make_int (i64.extend_i32_u
         (array.len (struct.get $LuaString $bytes
           (ref.cast (ref $LuaString) (local.get $a)))))))))
+    (if (ref.test (ref $LuaTable) (local.get $a))
+      (then
+        (local.set $mm (call $get_metamethod (local.get $a)
+          (ref.as_non_null (global.get $g_mkey_len))))
+        (if (ref.is_null (local.get $mm))
+          (then (return (call $make_int (i64.extend_i32_s
+            (call $tab_len (ref.cast (ref $LuaTable) (local.get $a))))))))
+        (return (call $args_first (call $lua_call
+          (ref.cast (ref $LuaClosure) (local.get $mm))
+          (array.new_fixed $ArgArr 1 (local.get $a)))))))
+    (local.set $mm (call $get_metamethod (local.get $a)
+      (ref.as_non_null (global.get $g_mkey_len))))
+    (if (ref.is_null (local.get $mm))
+      (then (throw $LuaError (ref.null any))))
+    (call $args_first (call $lua_call
+      (ref.cast (ref $LuaClosure) (local.get $mm))
+      (array.new_fixed $ArgArr 1 (local.get $a)))))
 
   ;; --- comparison ---
   (func $num_eq (param $a anyref) (param $b anyref) (result i32)
@@ -545,7 +565,8 @@
     (local $na i32) (local $nb i32)
     (if (i32.eqz (i32.and (call $is_concatable (local.get $a))
                           (call $is_concatable (local.get $b))))
-      (then (throw $LuaError (ref.null any))))
+      (then (return (call $arith_mm (local.get $a) (local.get $b)
+                      (ref.as_non_null (global.get $g_mkey_concat))))))
     (local.set $sa (struct.get $LuaString $bytes (call $lua_tostring (local.get $a))))
     (local.set $sb (struct.get $LuaString $bytes (call $lua_tostring (local.get $b))))
     (local.set $na (array.len (local.get $sa)))
