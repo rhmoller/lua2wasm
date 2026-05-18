@@ -4502,6 +4502,7 @@
     (local $sz i32) (local $n i32) (local $newpp i32)
     (local $arg_idx i32) (local $val i64) (local $pad i32)
     (local $b (ref $Builder)) (local $bbuf (ref $LuaArr)) (local $blen i32)
+    (local $fval f64)
     (local.set $endian_le (i32.const 1))
     (local.set $max_align (i32.const 1))
     (local.set $arg_idx (i32.const 1))
@@ -4568,10 +4569,42 @@
         (then (throw $LuaError (ref.null any))))
       (if (i32.eq (local.get $c) (i32.const 99))                 ;; 'c'
         (then (throw $LuaError (ref.null any))))
+      ;; Float options f/d/n. Pack via i32/i64 bit pattern.
       (if (i32.or (i32.eq (local.get $c) (i32.const 102))        ;; 'f'
                   (i32.or (i32.eq (local.get $c) (i32.const 100))   ;; 'd'
                           (i32.eq (local.get $c) (i32.const 110)))) ;; 'n'
-        (then (throw $LuaError (ref.null any))))
+        (then
+          (if (i32.eq (local.get $c) (i32.const 102))
+            (then (local.set $sz (i32.const 4)))
+            (else (local.set $sz (i32.const 8))))
+          (local.set $blen (struct.get $Builder $len (local.get $b)))
+          (local.set $pad
+            (i32.sub
+              (call $pack_align (local.get $blen)
+                                (local.get $sz) (local.get $max_align))
+              (local.get $blen)))
+          (block $pad_done_f (loop $pad_lp_f
+            (br_if $pad_done_f (i32.le_s (local.get $pad) (i32.const 0)))
+            (call $builder_append_byte (local.get $b) (i32.const 0))
+            (local.set $pad (i32.sub (local.get $pad) (i32.const 1)))
+            (br $pad_lp_f)))
+          (local.set $fval (call $as_float
+            (call $args_at (local.get $args) (local.get $arg_idx))))
+          (local.set $arg_idx (i32.add (local.get $arg_idx) (i32.const 1)))
+          (if (i32.eq (local.get $sz) (i32.const 4))
+            (then (local.set $val
+              (i64.extend_i32_u
+                (i32.reinterpret_f32 (f32.demote_f64 (local.get $fval))))))
+            (else (local.set $val (i64.reinterpret_f64 (local.get $fval)))))
+          (call $builder_reserve (local.get $b) (local.get $sz))
+          (local.set $bbuf (struct.get $Builder $arr (local.get $b)))
+          (local.set $blen (struct.get $Builder $len (local.get $b)))
+          (call $pack_write_int (local.get $bbuf) (local.get $blen)
+                                (local.get $sz) (local.get $endian_le)
+                                (local.get $val))
+          (struct.set $Builder $len (local.get $b)
+            (i32.add (local.get $blen) (local.get $sz)))
+          (br $lp)))
       ;; Integer option (signed or unsigned).
       (call $pack_opt_size (local.get $c) (local.get $bytes)
                            (local.get $ppos))
@@ -4623,7 +4656,7 @@
     (local $sz i32) (local $n i32) (local $newpp i32)
     (local $subj (ref $LuaArr)) (local $subj_len i32) (local $offset i32)
     (local $out (ref $ArgArr)) (local $out_idx i32) (local $nval i32)
-    (local $val i64)
+    (local $val i64) (local $fval f64)
     (local.set $endian_le (i32.const 1))
     (local.set $max_align (i32.const 1))
     (local.set $bytes (struct.get $LuaString $bytes
@@ -4694,10 +4727,32 @@
         (then (throw $LuaError (ref.null any))))
       (if (i32.eq (local.get $c) (i32.const 99))
         (then (throw $LuaError (ref.null any))))
+      ;; Float read f/d/n.
       (if (i32.or (i32.eq (local.get $c) (i32.const 102))
                   (i32.or (i32.eq (local.get $c) (i32.const 100))
                           (i32.eq (local.get $c) (i32.const 110))))
-        (then (throw $LuaError (ref.null any))))
+        (then
+          (if (i32.eq (local.get $c) (i32.const 102))
+            (then (local.set $sz (i32.const 4)))
+            (else (local.set $sz (i32.const 8))))
+          (local.set $offset
+            (call $pack_align (local.get $offset)
+                              (local.get $sz) (local.get $max_align)))
+          (if (i32.gt_u (i32.add (local.get $offset) (local.get $sz))
+                        (local.get $subj_len))
+            (then (throw $LuaError (ref.null any))))
+          (local.set $val (call $pack_read_int (local.get $subj)
+                                (local.get $offset) (local.get $sz)
+                                (local.get $endian_le)))
+          (local.set $offset (i32.add (local.get $offset) (local.get $sz)))
+          (if (i32.eq (local.get $sz) (i32.const 4))
+            (then (local.set $fval (f64.promote_f32
+              (f32.reinterpret_i32 (i32.wrap_i64 (local.get $val))))))
+            (else (local.set $fval (f64.reinterpret_i64 (local.get $val)))))
+          (array.set $ArgArr (local.get $out) (local.get $out_idx)
+            (call $make_float (local.get $fval)))
+          (local.set $out_idx (i32.add (local.get $out_idx) (i32.const 1)))
+          (br $lp)))
       ;; Integer read (signed or unsigned per letter).
       (call $pack_opt_size (local.get $c) (local.get $bytes)
                            (local.get $ppos))

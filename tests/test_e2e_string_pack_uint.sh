@@ -45,7 +45,6 @@ false\tnil
 false\tnil
 false\tnil
 false\tnil
-false\tnil
 false\tnil'
 
 OUT="$(node --experimental-wasm-exnref "$SRC_DIR/runtime/host.mjs" "$WASM")"

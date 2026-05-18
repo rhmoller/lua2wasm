@@ -72,7 +72,6 @@ print(pcall(string.pack, "H", 0x10000))        -- false  nil
 print(pcall(string.pack, "I3", 0x1000000))     -- false  nil
 
 -- Unsupported-yet options raise (will land in later steps).
-print(pcall(string.pack, "f", 1.0))            -- false  nil  (float → step 6)
 print(pcall(string.pack, "c4", "abcd"))        -- false  nil  (c → step 7)
 print(pcall(string.pack, "s4", "abcd"))        -- false  nil  (s → step 8)
 print(pcall(string.unpack, "z", "ab\0c"))      -- false  nil  (z → step 8)
