@@ -1390,6 +1390,46 @@
     (array.new_fixed $ArgArr 1 (call $lua_len
       (call $args_at (local.get $args) (i32.const 0)))))
 
+  ;; ASCII-only upper/lower. Shared loop: $delta is +/- 32 and $lo/$hi
+  ;; bracket the source-case byte range (inclusive).
+  (func $str_case_map
+    (param $bytes (ref $LuaArr)) (param $lo i32) (param $hi i32) (param $delta i32)
+    (result (ref $LuaArr))
+    (local $n i32) (local $i i32) (local $b i32) (local $out (ref $LuaArr))
+    (local.set $n (array.len (local.get $bytes)))
+    (local.set $out (array.new $LuaArr (i32.const 0) (local.get $n)))
+    (array.copy $LuaArr $LuaArr
+      (local.get $out)   (i32.const 0)
+      (local.get $bytes) (i32.const 0) (local.get $n))
+    (block $done (loop $lp
+      (br_if $done (i32.ge_s (local.get $i) (local.get $n)))
+      (local.set $b (array.get_u $LuaArr (local.get $out) (local.get $i)))
+      (if (i32.and (i32.ge_u (local.get $b) (local.get $lo))
+                   (i32.le_u (local.get $b) (local.get $hi)))
+        (then (array.set $LuaArr (local.get $out) (local.get $i)
+                (i32.add (local.get $b) (local.get $delta)))))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br $lp)))
+    (local.get $out))
+
+  ;; string.upper(s) — ASCII a-z -> A-Z, other bytes unchanged.
+  (func $builtin_string_upper (type $LuaFn)
+    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
+    (array.new_fixed $ArgArr 1 (struct.new $LuaString
+      (call $str_case_map
+        (struct.get $LuaString $bytes
+          (ref.cast (ref $LuaString) (call $args_at (local.get $args) (i32.const 0))))
+        (i32.const 97) (i32.const 122) (i32.const -32)))))
+
+  ;; string.lower(s) — ASCII A-Z -> a-z, other bytes unchanged.
+  (func $builtin_string_lower (type $LuaFn)
+    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
+    (array.new_fixed $ArgArr 1 (struct.new $LuaString
+      (call $str_case_map
+        (struct.get $LuaString $bytes
+          (ref.cast (ref $LuaString) (call $args_at (local.get $args) (i32.const 0))))
+        (i32.const 65) (i32.const 90) (i32.const 32)))))
+
   ;; string.sub(s, i, [j])
   (func $builtin_string_sub (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))

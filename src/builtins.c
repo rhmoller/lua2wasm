@@ -46,6 +46,8 @@ static const struct {
     { "len",    3, "$builtin_string_len",    BLT_LIB_STRING },
     { "sub",    3, "$builtin_string_sub",    BLT_LIB_STRING },
     { "format", 6, "$builtin_string_format", BLT_LIB_STRING },
+    { "upper",  5, "$builtin_string_upper",  BLT_LIB_STRING },
+    { "lower",  5, "$builtin_string_lower",  BLT_LIB_STRING },
     /* io library */
     { "write", 5, "$builtin_io_write", BLT_LIB_IO },
     { "read",  4, "$builtin_io_read",  BLT_LIB_IO },
