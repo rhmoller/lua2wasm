@@ -454,7 +454,7 @@ Out of scope for now: `os.execute`, `os.remove`, `os.rename`, `os.setlocale`,
 
 ---
 
-## Milestone 25 — Static `require` (M) — ⏳ pending
+## Milestone 25 — Static `require` (M) — ✅ done
 
 **Goal:** programs split across multiple files compile into one wasm.
 
@@ -519,7 +519,7 @@ Quick wins:        9 → 10 → 11 → 12 → 16    ✅ done
 Polish / sharpen:  13 → 14 → 15 → 19        ✅ done
 Big language gaps: 17 → 18 → 23             ✅ done (23 partial: see m23 note)
 Heavy stdlib:      20 → 21                  ✅ done
-Host integration:  22 → 24 → 25 → 26        ✅ 22 done · ⏳ 24, 25, 26 pending
+Host integration:  22 → 24 → 25 → 26        ✅ 22, 25 done · ⏳ 24, 26 pending
 Blocked:           27 (coroutines)          ⛔ awaiting stack switching
 ```
 

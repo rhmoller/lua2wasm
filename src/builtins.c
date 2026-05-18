@@ -33,6 +33,7 @@ static const struct {
      * keeps it out of user-facing lookups while still creating the
      * \$g_builtin_utf8_codes_iter global. */
     { "_utf8_codes_iter", 16, "$builtin_utf8_codes_iter", BLT_TOPLEVEL },
+    { "require", 7, "$builtin_require", BLT_TOPLEVEL },
     /* math library (installed into the `math` table) */
     { "floor", 5, "$builtin_math_floor", BLT_LIB_MATH },
     { "abs",   3, "$builtin_math_abs",   BLT_LIB_MATH },

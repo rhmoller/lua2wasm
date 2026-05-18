@@ -1545,6 +1545,33 @@ int codegen_module(const ParseResult *pr, const char *src_name,
         else if (glen == 5 && memcmp(gname, "table",  5) == 0) cls = BLT_LIB_TABLE;
         else if (glen == 4 && memcmp(gname, "utf8",   4) == 0) cls = BLT_LIB_UTF8;
         else if (glen == 5 && memcmp(gname, "debug",  5) == 0) cls = BLT_LIB_DEBUG;
+        else if (glen == 7 && memcmp(gname, "package", 7) == 0) {
+            /* Milestone 25: package = { loaded = {}, preload = {} }.
+             * No builtins live under this table; require() walks it. */
+            wat_append(out, "    (local.set $tab (call $tab_new))\n");
+            StrRef loaded_k  = strpool_add(&c.strs, "loaded",  6);
+            StrRef preload_k = strpool_add(&c.strs, "preload", 7);
+            wat_appendf(out,
+                "    (call $tab_set (local.get $tab)\n"
+                "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
+                "        (i32.const %zu) (i32.const %zu)))\n"
+                "      (call $tab_new))\n",
+                loaded_k.offset, loaded_k.len);
+            wat_appendf(out,
+                "    (call $tab_set (local.get $tab)\n"
+                "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
+                "        (i32.const %zu) (i32.const %zu)))\n"
+                "      (call $tab_new))\n",
+                preload_k.offset, preload_k.len);
+            StrRef name_key = strpool_add(&c.strs, gname, glen);
+            wat_appendf(out,
+                "    (call $tab_set (ref.as_non_null (global.get $g_globals))\n"
+                "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
+                "        (i32.const %zu) (i32.const %zu)))\n"
+                "      (local.get $tab))\n",
+                name_key.offset, name_key.len);
+            continue;
+        }
         else continue;
         wat_append(out, "    (local.set $tab (call $tab_new))\n");
         for (int bi = 0; bi < nb; bi++) {

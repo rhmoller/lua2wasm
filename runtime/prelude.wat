@@ -1849,6 +1849,123 @@
       (then (return (array.new_fixed $ArgArr 1 (local.get $guard)))))
     (array.new_fixed $ArgArr 1 (ref.as_non_null (local.get $mt))))
 
+  ;; --- require / package (milestone 25) ---
+  ;;
+  ;; require(name): walk package.loaded → package.preload to find a
+  ;; loader closure for "name". On first load, call it, cache the
+  ;; (non-nil) result in package.loaded, return it. On hit, return the
+  ;; cached value. On miss, raise.
+  ;;
+  ;; The package table itself is set up in $stdlib_init with empty
+  ;; `loaded` and `preload` subtables; codegen prepends each -m module
+  ;; as `package.preload[name] = function() ... end`, which runs at the
+  ;; start of main before user code calls require().
+  (func $builtin_require (type $LuaFn)
+    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr))
+    (result (ref $ArgArr))
+    (local $name anyref) (local $pkg (ref $LuaTable))
+    (local $loaded (ref $LuaTable)) (local $preload (ref $LuaTable))
+    (local $cached anyref) (local $loader anyref) (local $r anyref)
+    (local $key_pkg (ref $LuaString)) (local $key_loaded (ref $LuaString))
+    (local $key_preload (ref $LuaString))
+    (local.set $name (call $args_at (local.get $args) (i32.const 0)))
+    (if (i32.eqz (ref.test (ref $LuaString) (local.get $name)))
+      (then (throw $LuaError (ref.null any))))
+    ;; Fetch package, package.loaded, package.preload from _G.
+    (local.set $key_pkg (struct.new $LuaString
+      (array.new_data $LuaArr $str_data
+        (i32.const 0) (i32.const 0))))   ;; placeholder; rebuilt below
+    ;; Build the lookup keys via $int_to_bytes is overkill — easier to
+    ;; reuse $g_globals's existing dispatch by name. We allocate fresh
+    ;; $LuaStrings here (no constant slots for "package"/"loaded"/
+    ;; "preload" in the str pool yet).
+    (local.set $key_pkg (call $str_from_bytes
+      (i32.const 112) (i32.const 97) (i32.const 99) (i32.const 107)
+      (i32.const 97) (i32.const 103) (i32.const 101) (i32.const -1)))
+    (local.set $key_loaded (call $str_from_bytes
+      (i32.const 108) (i32.const 111) (i32.const 97) (i32.const 100)
+      (i32.const 101) (i32.const 100) (i32.const -1) (i32.const -1)))
+    (local.set $key_preload (call $str_from_bytes
+      (i32.const 112) (i32.const 114) (i32.const 101) (i32.const 108)
+      (i32.const 111) (i32.const 97) (i32.const 100) (i32.const -1)))
+    (local.set $pkg (ref.cast (ref $LuaTable)
+      (call $tab_get
+        (ref.as_non_null (global.get $g_globals))
+        (local.get $key_pkg))))
+    (local.set $loaded (ref.cast (ref $LuaTable)
+      (call $tab_get (local.get $pkg) (local.get $key_loaded))))
+    (local.set $preload (ref.cast (ref $LuaTable)
+      (call $tab_get (local.get $pkg) (local.get $key_preload))))
+    ;; Cached?
+    (local.set $cached (call $tab_get (local.get $loaded)
+      (ref.cast (ref $LuaString) (local.get $name))))
+    (if (i32.eqz (ref.is_null (local.get $cached)))
+      (then (return (array.new_fixed $ArgArr 1 (local.get $cached)))))
+    ;; Loader?
+    (local.set $loader (call $tab_get (local.get $preload)
+      (ref.cast (ref $LuaString) (local.get $name))))
+    (if (ref.is_null (local.get $loader))
+      (then (throw $LuaError (ref.null any))))
+    ;; Call loader(name).
+    (local.set $r (call $args_first
+      (call $lua_call_any (local.get $loader)
+        (array.new_fixed $ArgArr 1 (local.get $name))
+        (i32.const 0))))
+    ;; nil result becomes true (per Lua spec).
+    (if (ref.is_null (local.get $r))
+      (then (local.set $r (global.get $g_true))))
+    (call $tab_set (local.get $loaded)
+      (ref.cast (ref $LuaString) (local.get $name)) (local.get $r))
+    (array.new_fixed $ArgArr 1 (local.get $r)))
+
+  ;; Build a $LuaString from up to 8 ASCII byte codes; the first -1
+  ;; (i32.const -1) terminates the sequence early. Used by builtins
+  ;; that need a short literal name without consuming a strpool slot.
+  (func $str_from_bytes
+    (param $b0 i32) (param $b1 i32) (param $b2 i32) (param $b3 i32)
+    (param $b4 i32) (param $b5 i32) (param $b6 i32) (param $b7 i32)
+    (result (ref $LuaString))
+    (local $arr (ref $LuaArr)) (local $n i32)
+    ;; Count active bytes (up to first -1).
+    (local.set $n (i32.const 8))
+    (if (i32.lt_s (local.get $b7) (i32.const 0)) (then (local.set $n (i32.const 7))))
+    (if (i32.and (i32.eq (local.get $n) (i32.const 7))
+                 (i32.lt_s (local.get $b6) (i32.const 0)))
+      (then (local.set $n (i32.const 6))))
+    (if (i32.and (i32.eq (local.get $n) (i32.const 6))
+                 (i32.lt_s (local.get $b5) (i32.const 0)))
+      (then (local.set $n (i32.const 5))))
+    (if (i32.and (i32.eq (local.get $n) (i32.const 5))
+                 (i32.lt_s (local.get $b4) (i32.const 0)))
+      (then (local.set $n (i32.const 4))))
+    (if (i32.and (i32.eq (local.get $n) (i32.const 4))
+                 (i32.lt_s (local.get $b3) (i32.const 0)))
+      (then (local.set $n (i32.const 3))))
+    (if (i32.and (i32.eq (local.get $n) (i32.const 3))
+                 (i32.lt_s (local.get $b2) (i32.const 0)))
+      (then (local.set $n (i32.const 2))))
+    (if (i32.and (i32.eq (local.get $n) (i32.const 2))
+                 (i32.lt_s (local.get $b1) (i32.const 0)))
+      (then (local.set $n (i32.const 1))))
+    (local.set $arr (array.new $LuaArr (i32.const 0) (local.get $n)))
+    (if (i32.gt_s (local.get $n) (i32.const 0))
+      (then (array.set $LuaArr (local.get $arr) (i32.const 0) (local.get $b0))))
+    (if (i32.gt_s (local.get $n) (i32.const 1))
+      (then (array.set $LuaArr (local.get $arr) (i32.const 1) (local.get $b1))))
+    (if (i32.gt_s (local.get $n) (i32.const 2))
+      (then (array.set $LuaArr (local.get $arr) (i32.const 2) (local.get $b2))))
+    (if (i32.gt_s (local.get $n) (i32.const 3))
+      (then (array.set $LuaArr (local.get $arr) (i32.const 3) (local.get $b3))))
+    (if (i32.gt_s (local.get $n) (i32.const 4))
+      (then (array.set $LuaArr (local.get $arr) (i32.const 4) (local.get $b4))))
+    (if (i32.gt_s (local.get $n) (i32.const 5))
+      (then (array.set $LuaArr (local.get $arr) (i32.const 5) (local.get $b5))))
+    (if (i32.gt_s (local.get $n) (i32.const 6))
+      (then (array.set $LuaArr (local.get $arr) (i32.const 6) (local.get $b6))))
+    (if (i32.gt_s (local.get $n) (i32.const 7))
+      (then (array.set $LuaArr (local.get $arr) (i32.const 7) (local.get $b7))))
+    (struct.new $LuaString (local.get $arr)))
+
   ;; --- debug library (milestone 22) ---
   ;;
   ;; Returns a "stack traceback:\n  <src>:<line>:\n  <src>:<line>:..."
