@@ -440,6 +440,20 @@
   ;; Both numbers -> numeric compare. Both strings -> lexicographic.
   ;; Anything else (incl. mixed types) -> Lua error.
   ;; (TODO: __lt / __le metamethods.)
+  ;; Common metamethod path for < / <=: try left, then right; truthiness
+  ;; of first result is the answer. Throws if neither operand defines it.
+  (func $compare_mm (param $a anyref) (param $b anyref)
+                    (param $key (ref $LuaString)) (result i32)
+    (local $mm anyref)
+    (local.set $mm (call $get_metamethod (local.get $a) (local.get $key)))
+    (if (ref.is_null (local.get $mm))
+      (then (local.set $mm (call $get_metamethod (local.get $b) (local.get $key)))))
+    (if (ref.is_null (local.get $mm))
+      (then (throw $LuaError (ref.null any))))
+    (call $lua_truthy (call $args_first (call $lua_call
+      (ref.cast (ref $LuaClosure) (local.get $mm))
+      (array.new_fixed $ArgArr 2 (local.get $a) (local.get $b))))))
+
   (func $lua_lt_raw (param $a anyref) (param $b anyref) (result i32)
     (if (i32.and
           (i32.or (call $is_int (local.get $a)) (call $is_float (local.get $a)))
@@ -448,8 +462,8 @@
     (if (i32.and (ref.test (ref $LuaString) (local.get $a))
                  (ref.test (ref $LuaString) (local.get $b)))
       (then (return (call $str_lt (local.get $a) (local.get $b)))))
-    (throw $LuaError (ref.null any))
-    (i32.const 0))
+    (call $compare_mm (local.get $a) (local.get $b)
+      (ref.as_non_null (global.get $g_mkey_lt))))
 
   (func $lua_le_raw (param $a anyref) (param $b anyref) (result i32)
     (if (i32.and
@@ -458,10 +472,9 @@
       (then (return (call $num_le (local.get $a) (local.get $b)))))
     (if (i32.and (ref.test (ref $LuaString) (local.get $a))
                  (ref.test (ref $LuaString) (local.get $b)))
-      ;; a <= b iff not (b < a)
       (then (return (i32.eqz (call $str_lt (local.get $b) (local.get $a))))))
-    (throw $LuaError (ref.null any))
-    (i32.const 0))
+    (call $compare_mm (local.get $a) (local.get $b)
+      (ref.as_non_null (global.get $g_mkey_le))))
 
   (func $lua_lt (param $a anyref) (param $b anyref) (result anyref)
     (call $lua_bool_to_ref (call $lua_lt_raw (local.get $a) (local.get $b))))
