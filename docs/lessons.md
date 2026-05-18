@@ -77,6 +77,29 @@ prove it was set.
 (local.get $x)
 ```
 
+### Two embeddings of the same host imports
+
+The Node runner (`runtime/host.mjs`) and the in-browser playground
+(`runtime/playground.html`) each had their own copy of the host
+imports block. Every time a milestone added a new import — `math2`
+for `atan2`/`pow`, `parse_num` for `tonumber`, `fmt_spec` for the
+new `string.format`, mode-aware `read`, `read_num` — I only updated
+the Node side. The playground silently broke (and stayed broken
+until someone tried it). Symptom: `WebAssembly.instantiate(): Import
+"host" "math2": function import requires a callable`.
+
+**Fix that landed:** extracted pure-JS helpers into
+`runtime/host-bindings.mjs` as a `makeHelpers({ getInstance, formatFloat })`
+factory. Both runners import from it. Each contributes its own
+print/write/read wiring (sync stdin vs JSPI line prompt) and shares
+the rest.
+
+**Mitigation going forward:** any new `host.*` import goes into the
+factory. If a milestone adds a new import, audit BOTH host wrappers
+in the same commit. Add a follow-up smoke test of the playground
+periodically — the Node suite's clean pass doesn't tell you anything
+about the browser binding.
+
 ### Global-name collisions across builtin classes
 
 A library entry whose Lua name matches a top-level builtin
