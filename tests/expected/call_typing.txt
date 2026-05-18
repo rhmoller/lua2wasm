@@ -1,0 +1,7 @@
+false
+attempt to call a non-function value
+false
+attempt to call a non-function value
+obj
+30
+via:false

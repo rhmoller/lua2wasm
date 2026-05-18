@@ -48,6 +48,13 @@ jobs:
           source ./emsdk/emsdk_env.sh
           ./scripts/build-wasm.sh
 
+      - name: Refresh inlined presets from manifest
+        run: |
+          # Catch any presets/*.lua or fixture edit that wasn't re-bundled
+          # locally. --check is also wired into ctest; this is the last
+          # line of defence before publishing a stale playground.
+          node scripts/bundle-presets.mjs --check
+
       - name: Stage Pages bundle
         run: |
           mkdir -p dist

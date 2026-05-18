@@ -340,15 +340,13 @@ static void emit_call_array(CG *c, const Expr *e, int depth) {
         emit_indent(c, depth); wat_append(c->w, "(local.set $tmp_any\n");
         emit_expr(c, e->as.method_call.recv, depth + 1);
         emit_indent(c, depth); wat_append(c->w, ")\n");
-        emit_indent(c, depth); wat_append(c->w, "(call $lua_call\n");
-        emit_indent(c, depth + 1); wat_append(c->w, "(ref.cast (ref $LuaClosure)\n");
-        emit_indent(c, depth + 2); wat_append(c->w, "(call $tab_get\n");
-        emit_indent(c, depth + 3); wat_append(c->w, "(ref.cast (ref $LuaTable) (local.get $tmp_any))\n");
-        emit_indent(c, depth + 3);
+        emit_indent(c, depth); wat_append(c->w, "(call $lua_call_any\n");
+        emit_indent(c, depth + 1); wat_append(c->w, "(call $tab_get\n");
+        emit_indent(c, depth + 2); wat_append(c->w, "(ref.cast (ref $LuaTable) (local.get $tmp_any))\n");
+        emit_indent(c, depth + 2);
         wat_appendf(c->w,
             "(struct.new $LuaString (array.new_data $LuaArr $str_data "
             "(i32.const %zu) (i32.const %zu)))\n", sr.offset, sr.len);
-        emit_indent(c, depth + 2); wat_append(c->w, ")\n");
         emit_indent(c, depth + 1); wat_append(c->w, ")\n");
         /* args = [recv] ++ method args */
         size_t mna = e->as.method_call.nargs;
@@ -370,10 +368,8 @@ static void emit_call_array(CG *c, const Expr *e, int depth) {
         emit_indent(c, depth); wat_append(c->w, ")\n");
         return;
     }
-    emit_indent(c, depth); wat_append(c->w, "(call $lua_call\n");
-    emit_indent(c, depth + 1); wat_append(c->w, "(ref.cast (ref $LuaClosure)\n");
-    emit_expr(c, e->as.call.callee, depth + 2);
-    emit_indent(c, depth + 1); wat_append(c->w, ")\n");
+    emit_indent(c, depth); wat_append(c->w, "(call $lua_call_any\n");
+    emit_expr(c, e->as.call.callee, depth + 1);
     emit_args_array(c, e->as.call.args, e->as.call.nargs, depth + 1);
     emit_indent(c, depth); wat_append(c->w, ")\n");
 }
@@ -386,25 +382,37 @@ static void emit_call(CG *c, const Expr *e, int depth) {
 }
 
 /* Tail call: `return f(args)` lowers to a return_call_ref so deep
- * recursion doesn't grow the wasm call stack. We store the casted
- * closure in $tmp_clo so its funcref and the closure itself can both
- * be supplied without re-evaluating the callee expression. */
+ * recursion doesn't grow the wasm call stack. Fast path: if the callee
+ * really is a closure, use return_call_ref. Slow path: fall through to
+ * $lua_call_any (which walks __call metamethods and throws a typed
+ * error for non-callables); TCO is lost in that case, which is fine
+ * for a metamethod hop. */
 static void emit_tail_call(CG *c, const Expr *e, int depth) {
-    /* Eval callee once → $tmp_clo. */
-    emit_expr(c, e->as.call.callee, depth);
-    emit_indent(c, depth); wat_append(c->w, "(ref.cast (ref $LuaClosure))\n");
-    emit_indent(c, depth); wat_append(c->w, "local.set $tmp_clo\n");
-    /* return_call_ref $LuaFn closure args funcref */
-    emit_indent(c, depth); wat_append(c->w, "(return_call_ref $LuaFn\n");
-    emit_indent(c, depth + 1);
-    wat_append(c->w, "(ref.as_non_null (local.get $tmp_clo))\n");
-    /* args */
-    emit_args_array(c, e->as.call.args, e->as.call.nargs, depth + 1);
-    /* funcref */
-    emit_indent(c, depth + 1);
-    wat_append(c->w, "(struct.get $LuaClosure $code "
-                     "(ref.as_non_null (local.get $tmp_clo)))\n");
+    /* Stash callee and args once. */
+    emit_indent(c, depth); wat_append(c->w, "(local.set $tmp_any\n");
+    emit_expr(c, e->as.call.callee, depth + 1);
     emit_indent(c, depth); wat_append(c->w, ")\n");
+    emit_indent(c, depth); wat_append(c->w, "(local.set $tmp_args\n");
+    emit_args_array(c, e->as.call.args, e->as.call.nargs, depth + 1);
+    emit_indent(c, depth); wat_append(c->w, ")\n");
+    /* Fast path: real closure -> return_call_ref. */
+    emit_indent(c, depth);
+    wat_append(c->w, "(if (ref.test (ref $LuaClosure) (local.get $tmp_any))\n");
+    emit_indent(c, depth + 1); wat_append(c->w, "(then\n");
+    emit_indent(c, depth + 2);
+    wat_append(c->w, "(local.set $tmp_clo (ref.cast (ref $LuaClosure) (local.get $tmp_any)))\n");
+    emit_indent(c, depth + 2); wat_append(c->w, "(return_call_ref $LuaFn\n");
+    emit_indent(c, depth + 3);
+    wat_append(c->w, "(ref.as_non_null (local.get $tmp_clo))\n");
+    emit_indent(c, depth + 3);
+    wat_append(c->w, "(ref.as_non_null (local.get $tmp_args))\n");
+    emit_indent(c, depth + 3);
+    wat_append(c->w, "(struct.get $LuaClosure $code (ref.as_non_null (local.get $tmp_clo))))))\n");
+    /* Slow path: __call walk / typed error. */
+    emit_indent(c, depth);
+    wat_append(c->w,
+        "(return (call $lua_call_any (local.get $tmp_any) "
+        "(ref.as_non_null (local.get $tmp_args))))\n");
 }
 
 /* ----- function expression: build a closure -----
@@ -811,12 +819,12 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
 
             emit_indent(c, depth); wat_appendf(c->w, "(block $brk_%d\n", label);
             emit_indent(c, depth + 1); wat_appendf(c->w, "(loop $cont_%d\n", label);
-            /* Call iter(state, k). */
+            /* Call iter(state, k). The iterator can be any callable (a
+             * closure, or a table with __call) — go through $lua_call_any
+             * so a wrong type produces a typed error instead of a trap. */
             emit_indent(c, depth + 2); wat_append(c->w, "(local.set $tmp_args\n");
-            emit_indent(c, depth + 3); wat_append(c->w, "(call $lua_call\n");
-            emit_indent(c, depth + 4);
-            wat_append(c->w,
-                "(ref.cast (ref $LuaClosure) (local.get $for_iter_any))\n");
+            emit_indent(c, depth + 3); wat_append(c->w, "(call $lua_call_any\n");
+            emit_indent(c, depth + 4); wat_append(c->w, "(local.get $for_iter_any)\n");
             emit_indent(c, depth + 4);
             wat_append(c->w,
                 "(array.new_fixed $ArgArr 2 (local.get $for_state) (local.get $for_k))\n");
@@ -947,9 +955,12 @@ static const char PRELUDE[] = {
  *   0  nil(3)  3  true(4)  7  false(5)  12 <float>(7)
  *   19 number(6)  25 string(6)  31 table(5)  36 function(8)  44 boolean(7)
  *   51 __index(7)  58 __add(5)  63 __eq(4)  67 \t(1)  68 Lua 5.5(7) */
-/* Reserved at offset 75, length 18: "'for' step is zero" (used by $for_check_step). */
-#define LITERAL_PREFIX "niltruefalse<float>numberstringtablefunctionboolean__index__add__eq\tLua 5.5'for' step is zero"
-#define LITERAL_PREFIX_LEN 93
+/* Reserved bytes added after the historical prefix:
+ *   75, len 18: "'for' step is zero"             (used by $for_check_step)
+ *   93, len 36: "attempt to call a non-function value"  ($lua_call_any)
+ *  129, len  6: "__call"                         ($g_mkey_call) */
+#define LITERAL_PREFIX "niltruefalse<float>numberstringtablefunctionboolean__index__add__eq\tLua 5.5'for' step is zeroattempt to call a non-function value__call"
+#define LITERAL_PREFIX_LEN 135
 
 /* Emit the body of one user function. */
 static void emit_user_function(CG *c, const LuaFunc *fn) {
@@ -1067,6 +1078,9 @@ int codegen_module(const ParseResult *pr, WatBuilder *out,
         "    (global.set $g_mkey_eq\n"
         "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
         "        (i32.const 63) (i32.const 4))))\n"
+        "    (global.set $g_mkey_call\n"
+        "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
+        "        (i32.const 129) (i32.const 6))))\n"
         "    (global.set $g_tab_str\n"
         "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
         "        (i32.const 67) (i32.const 1))))\n"

@@ -1,0 +1,19 @@
+{
+  "_comment": "Source-of-truth for runtime/playground.html's PRESETS list. Edit a referenced .lua file (or this manifest), then run `node scripts/bundle-presets.mjs --write` to regenerate the inlined PRESETS block in playground.html. CI runs the same script in --check mode.",
+  "presets": [
+    { "key": "hello",      "file": "runtime/presets/hello.lua" },
+    { "key": "fact",       "file": "runtime/presets/fact.lua" },
+    { "key": "counter",    "file": "runtime/presets/counter.lua" },
+    { "key": "tables",     "file": "runtime/presets/tables.lua" },
+    { "key": "oo",         "file": "runtime/presets/oo.lua" },
+    { "key": "pcall",      "file": "runtime/presets/pcall.lua" },
+    { "key": "iter",       "file": "tests/fixtures/iterator.lua" },
+    { "key": "stdin",      "file": "tests/fixtures/io_read.lua" },
+    { "key": "forloop",    "file": "runtime/presets/forloop.lua" },
+    { "key": "s_hello",    "file": "tests/samples/hello.lua" },
+    { "key": "s_account",  "file": "tests/samples/account.lua" },
+    { "key": "s_bisect",   "file": "tests/samples/bisect.lua" },
+    { "key": "s_globals",  "file": "tests/samples/globals.lua" },
+    { "key": "tjdevries",  "file": "tests/fixtures/tjdevries.lua" }
+  ]
+}

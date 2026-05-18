@@ -229,6 +229,12 @@ add_test(
 )
 
 add_test(
+    NAME test_playground_presets_in_sync
+    COMMAND node ${CMAKE_SOURCE_DIR}/scripts/bundle-presets.mjs --check
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+)
+
+add_test(
     NAME test_e2e_nan_key
     COMMAND bash ${CMAKE_SOURCE_DIR}/tests/test_e2e_nan_key.sh
             $<TARGET_FILE:lua2wasm>
@@ -239,6 +245,22 @@ add_test(
 add_test(
     NAME test_e2e_no_capture_loop
     COMMAND bash ${CMAKE_SOURCE_DIR}/tests/test_e2e_no_capture_loop.sh
+            $<TARGET_FILE:lua2wasm>
+            ${CMAKE_SOURCE_DIR}
+            ${CMAKE_BINARY_DIR}
+)
+
+add_test(
+    NAME test_e2e_call_typing
+    COMMAND bash ${CMAKE_SOURCE_DIR}/tests/test_e2e_call_typing.sh
+            $<TARGET_FILE:lua2wasm>
+            ${CMAKE_SOURCE_DIR}
+            ${CMAKE_BINARY_DIR}
+)
+
+add_test(
+    NAME test_e2e_table_hash
+    COMMAND bash ${CMAKE_SOURCE_DIR}/tests/test_e2e_table_hash.sh
             $<TARGET_FILE:lua2wasm>
             ${CMAKE_SOURCE_DIR}
             ${CMAKE_BINARY_DIR}

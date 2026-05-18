@@ -231,14 +231,18 @@ import binaryen                   from "https://cdn.jsdelivr.net/npm/binaryen@12
 
 /* ----- fixture presets ----- */
 const PRESETS = {
-  hello: `print("hello from lua2wasm!")\nprint(1 + 2)\n`,
-  fact: `local function fact(n)
+  // AUTO-GENERATED — edit runtime/presets/manifest.json and the
+  // referenced .lua files, then run `node scripts/bundle-presets.mjs`.
+  "hello": `print("hello from lua2wasm!")
+print(1 + 2)
+`,
+  "fact": `local function fact(n)
   if n <= 1 then return 1 end
   return n * fact(n - 1)
 end
 print(fact(10))    -- 3628800
 `,
-  counter: `local function counter()
+  "counter": `local function counter()
   local n = 0
   local function tick() n = n + 1; return n end
   return tick
@@ -248,7 +252,7 @@ print(c())  -- 1
 print(c())  -- 2
 print(c())  -- 3
 `,
-  tables: `local t = {10, 20, 30, name = "alice"}
+  "tables": `local t = {10, 20, 30, name = "alice"}
 print(t[1])
 print(t.name)
 print(#t)
@@ -256,7 +260,7 @@ print(#t)
 local nested = {inner = {x = 1, y = 2}}
 print(nested.inner.x + nested.inner.y)
 `,
-  oo: `local Animal = {kind = "animal"}
+  "oo": `local Animal = {kind = "animal"}
 Animal.speak = function(self) return self.kind .. " speaks" end
 
 local Dog = setmetatable({kind = "dog"}, {__index = Animal})
@@ -270,48 +274,46 @@ end
 local v = setmetatable({x = 1, y = 2}, Vec) + setmetatable({x = 10, y = 20}, Vec)
 print(v.x); print(v.y)
 `,
-  pcall: `local function safediv(a, b)
+  "pcall": `local function safediv(a, b)
   if b == 0 then error("division by zero") end
   return a / b
 end
 print(pcall(safediv, 10, 2))   -- true 5.0
 print(pcall(safediv, 1, 0))    -- false "division by zero"
 `,
-  iter: `-- A stateful closure used as a generic-for iterator.
+  "iter": `-- A "stateful closure as iterator" — the simplest form of a generic-for
+-- iterator. numberGenerator returns a closure that captures \`start\` in a
+-- mutable upvalue; each call advances it and returns either the next number
+-- or nothing (which generic-for interprets as the end).
 local function numberGenerator(start, stop)
-  return function()
-    start = start + 1
-    if start <= stop then return start end
-  end
+    return function()
+        start = start + 1
+        if start <= stop then
+            return start
+        end
+    end
 end
 
 -- prints 2, 3, 4, 5
 for num in numberGenerator(1, 5) do
-  print(num)
+    print(num)
 end
 
--- Each call returns a fresh closure with its own captured \`start\`.
+-- A second instance has its own captured \`start\` — closures don't share.
 local g = numberGenerator(10, 12)
 print(g())   -- 11
 print(g())   -- 12
-print(g())   -- nil (terminates a generic-for)
+print(g())   -- (no values; print emits a blank line — Lua splices call returns)
 `,
-
-  stdin: `-- Reads two lines of input interactively from the output pane.
-io.write("Name? ")
-local name = io.read()
-io.write("Favourite number? ")
-local n = tonumber(io.read())
-print()                           -- blank line
-print("Hello, " .. (name or "stranger") .. "!")
-if n then
-  print("Your number squared is " .. (n * n))
-else
-  print("Not a number, oh well.")
-end
+  "stdin": `-- Exercises io.read(); the test pipes two lines of stdin.
+local first = io.read()
+local second = io.read()
+local third = io.read()        -- EOF -> nil
+print(first)
+print(second)
+print(third)
 `,
-
-  forloop: `local list = {"apple", "banana", "cherry"}
+  "forloop": `local list = {"apple", "banana", "cherry"}
 for i, v in ipairs(list) do
   print(i)
   print(v)
@@ -321,13 +323,12 @@ local sum = 0
 for i = 1, 100 do sum = sum + i end
 print(sum)   -- 5050
 `,
-
-  s_hello: `-- the first program in every language (verbatim from lua.org/extras)
+  "s_hello": `-- the first program in every language (verbatim from lua.org/extras)
 io.write("Hello world, from ",_VERSION,"!\\n")
 `,
-
-  s_account: `-- A simple example of OOP in Lua (from PiL 1, ch. 16).
--- Adapted for lua2wasm: \`global\` declarations added; rest is verbatim.
+  "s_account": `-- A simple example of OOP in Lua (from PiL 1, ch. 16).
+-- Adapted for lua2wasm: only the \`global\` declarations have been added; the
+-- rest is byte-for-byte the original from lua.org/extras.
 
 global Account = {balance = 0}
 
@@ -358,9 +359,9 @@ a:show("after deposit")
 a:withdraw(100.00)
 a:show("after withdraw")
 `,
-
-  s_bisect: `-- Bisection method for solving non-linear equations (lua.org/extras).
--- Adapted: \`global\` declarations added; rest is verbatim.
+  "s_bisect": `-- Bisection method for solving non-linear equations.
+-- Adapted for lua2wasm: globals are explicitly declared up front; everything
+-- else is byte-for-byte the original.
 
 global delta = 1e-6
 global n
@@ -389,10 +390,10 @@ end
 
 solve(f,1,2)
 `,
-
-  s_globals: `-- Adapted from lua.org/extras' globals.lua. The original walked Lua's
--- \`_G\` and used \`table.sort\`; this version walks a sample table and
--- prints keys in insertion order (which our linear-probe hash preserves).
+  "s_globals": `-- Adapted from lua.org/extras' globals.lua. The original walks Lua's \`_G\`
+-- and uses table.sort; our compiler doesn't expose either, so this walks a
+-- sample table instead and prints keys in insertion order (which our
+-- linear-probe hash table happens to preserve).
 
 local seen = {}
 
@@ -414,8 +415,7 @@ local sample = {
 }
 dump(sample, "")
 `,
-
-  tjdevries: `--[[
+  "tjdevries": `--[[
   Examples from TJ Devries: "Everything You Need To Start Writing Lua"
   https://www.youtube.com/watch?v=CuWfgiwI73Q
 --]]
@@ -573,6 +573,45 @@ local MyTable = {}
 
 function MyTable.something(self, ...) end
 function MyTable:something(...) end
+
+--[[
+local vector_mt = {}
+vector_mt.__add = function(left, right)
+  return setmetatable({
+    left[1] + right[1],
+    left[2] + right[2],
+    left[3] + right[3],
+  }, vector_mt)
+end
+
+local v1 = setmetatable({ 3, 1, 5 }, vector_mt)
+local v2 = setmetatable({ -3, 2, 2 }, vector_mt)
+local v3 = v1 + v2
+vim.print(v3[1], v3[2], v3[3])
+vim.print(v3 + v3)
+
+
+
+local fib_mt = {
+  __index = function(self, key)
+    if key < 2 then return 1 end
+    -- Update the table, to save the intermediate results
+    self[key] = self[key - 2] + self[key - 1]
+    -- Return the result
+    return self[key]
+  end
+}
+
+local fib = setmetatable({}, fib_mt)
+
+print(fib[5])
+print(fib[1000])
+
+
+
+
+
+--]]
 `,
 };
 
