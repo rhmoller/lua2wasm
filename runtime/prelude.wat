@@ -1266,6 +1266,24 @@
 
   ;; table.unpack(t [, i [, j]]) -> t[i], t[i+1], ..., t[j].
   ;; Defaults: i = 1, j = #t. Returns no values when j < i.
+  ;; table.create(nseq [, nrec]): allocates a table with pre-sized
+  ;; storage. The table starts empty (n=0); the pre-sizing means
+  ;; subsequent inserts up to nseq+nrec won't trigger a grow.
+  ;; Our table representation has one combined keys/vals array, so we
+  ;; treat both hints as a single capacity request.
+  (func $builtin_table_create (type $LuaFn)
+    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
+    (local $t (ref $LuaTable)) (local $nseq i32) (local $nrec i32) (local $cap i32)
+    (local.set $t (call $tab_new))
+    (local.set $nseq (i32.wrap_i64 (call $as_int (call $args_at (local.get $args) (i32.const 0)))))
+    (if (i32.gt_u (array.len (local.get $args)) (i32.const 1))
+      (then (local.set $nrec
+              (i32.wrap_i64 (call $as_int (call $args_at (local.get $args) (i32.const 1)))))))
+    (local.set $cap (i32.add (local.get $nseq) (local.get $nrec)))
+    (if (i32.gt_s (local.get $cap) (i32.const 0))
+      (then (call $tab_grow (local.get $t) (local.get $cap))))
+    (array.new_fixed $ArgArr 1 (local.get $t)))
+
   ;; table.move(a1, f, e, t [, a2]): copy a1[f..e] to (a2 or a1)[t..].
   ;; Returns the destination table. Handles overlap (a1 == a2 with
   ;; t in [f, e]) by choosing iteration direction.
