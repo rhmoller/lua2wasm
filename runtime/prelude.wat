@@ -157,14 +157,26 @@
     (call $make_float (f64.div (call $as_float (local.get $a))
                                (call $as_float (local.get $b)))))
 
+  ;; Floor division: q = floor(a/b). For ints, i64.div_s truncates toward
+  ;; zero, which differs from floor when signs disagree and there's a
+  ;; non-zero remainder. Same correction pattern as $lua_mod: subtract 1
+  ;; iff there's a remainder AND the operand signs disagree.
   (func $lua_fdiv (param $a anyref) (param $b anyref) (result anyref)
-    (if (result anyref)
-      (i32.and (call $is_int (local.get $a)) (call $is_int (local.get $b)))
-      (then (call $make_int (i64.div_s (call $as_int (local.get $a))
-                                       (call $as_int (local.get $b)))))
-      (else (call $make_float (f64.floor
-              (f64.div (call $as_float (local.get $a))
-                       (call $as_float (local.get $b))))))))
+    (local $ai i64) (local $bi i64) (local $q i64) (local $r i64)
+    (if (i32.and (call $is_int (local.get $a)) (call $is_int (local.get $b)))
+      (then
+        (local.set $ai (call $as_int (local.get $a)))
+        (local.set $bi (call $as_int (local.get $b)))
+        (local.set $q (i64.div_s (local.get $ai) (local.get $bi)))
+        (local.set $r (i64.rem_s (local.get $ai) (local.get $bi)))
+        (if (i32.and
+              (i64.ne (local.get $r) (i64.const 0))
+              (i64.lt_s (i64.xor (local.get $ai) (local.get $bi)) (i64.const 0)))
+          (then (local.set $q (i64.sub (local.get $q) (i64.const 1)))))
+        (return (call $make_int (local.get $q)))))
+    (call $make_float (f64.floor
+      (f64.div (call $as_float (local.get $a))
+               (call $as_float (local.get $b))))))
 
   ;; Floor modulo: a - floor(a/b)*b. Differs from truncating remainder
   ;; (i64.rem_s, C's `%`) when the operands have different signs.
