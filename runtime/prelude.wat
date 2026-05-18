@@ -395,25 +395,52 @@
     (local.get $out))
 
   (func $lua_tostring (param $v anyref) (result (ref $LuaString))
-    (if (result (ref $LuaString)) (ref.is_null (local.get $v))
-      (then (struct.new $LuaString (array.new_data $LuaArr $str_data
-               (i32.const 0) (i32.const 3))))
-      (else (if (result (ref $LuaString)) (ref.test (ref $LuaBool) (local.get $v))
-        (then (if (result (ref $LuaString))
-                  (struct.get $LuaBool $b (ref.cast (ref $LuaBool) (local.get $v)))
-          (then (struct.new $LuaString (array.new_data $LuaArr $str_data
-                  (i32.const 3) (i32.const 4))))
-          (else (struct.new $LuaString (array.new_data $LuaArr $str_data
-                  (i32.const 7) (i32.const 5))))))
-        (else (if (result (ref $LuaString)) (ref.test (ref $LuaString) (local.get $v))
-          (then (ref.cast (ref $LuaString) (local.get $v)))
-          (else (if (result (ref $LuaString)) (call $is_int (local.get $v))
-            (then (struct.new $LuaString (call $int_to_bytes (call $as_int (local.get $v)))))
-            (else (struct.new $LuaString (call $float_to_bytes (call $as_float (local.get $v)))))))))))))
+    (if (ref.is_null (local.get $v))
+      (then (return (struct.new $LuaString
+        (array.new_data $LuaArr $str_data (i32.const 0) (i32.const 3))))))
+    (if (ref.test (ref $LuaBool) (local.get $v))
+      (then (return (if (result (ref $LuaString))
+        (struct.get $LuaBool $b (ref.cast (ref $LuaBool) (local.get $v)))
+        (then (struct.new $LuaString
+          (array.new_data $LuaArr $str_data (i32.const 3) (i32.const 4))))
+        (else (struct.new $LuaString
+          (array.new_data $LuaArr $str_data (i32.const 7) (i32.const 5))))))))
+    (if (ref.test (ref $LuaString) (local.get $v))
+      (then (return (ref.cast (ref $LuaString) (local.get $v)))))
+    (if (call $is_int (local.get $v))
+      (then (return (struct.new $LuaString
+        (call $int_to_bytes (call $as_int (local.get $v)))))))
+    (if (call $is_float (local.get $v))
+      (then (return (struct.new $LuaString
+        (call $float_to_bytes (call $as_float (local.get $v)))))))
+    ;; tables and functions: short placeholder (Lua usually appends an
+    ;; address-like suffix; we don't, documented as a gap in stdlib.md).
+    ;; Data segment layout (see codegen):
+    ;;   niltruefalse<float>numberstringtablefunction...
+    ;;    0    3    7   12     19    25   31   36
+    (if (ref.test (ref $LuaTable) (local.get $v))
+      (then (return (struct.new $LuaString
+        (array.new_data $LuaArr $str_data (i32.const 31) (i32.const 5))))))   ;; "table"
+    (if (ref.test (ref $LuaClosure) (local.get $v))
+      (then (return (struct.new $LuaString
+        (array.new_data $LuaArr $str_data (i32.const 36) (i32.const 8))))))   ;; "function"
+    ;; Unknown type: nil placeholder so we never trap.
+    (struct.new $LuaString
+      (array.new_data $LuaArr $str_data (i32.const 0) (i32.const 3))))
+
+  ;; Per Lua, `..` only accepts string or number operands (TODO: __concat
+  ;; metamethod). Anything else raises.
+  (func $is_concatable (param $v anyref) (result i32)
+    (i32.or (ref.test (ref $LuaString) (local.get $v))
+            (i32.or (call $is_int (local.get $v))
+                    (call $is_float (local.get $v)))))
 
   (func $lua_concat (param $a anyref) (param $b anyref) (result anyref)
     (local $sa (ref $LuaArr)) (local $sb (ref $LuaArr)) (local $out (ref $LuaArr))
     (local $na i32) (local $nb i32)
+    (if (i32.eqz (i32.and (call $is_concatable (local.get $a))
+                          (call $is_concatable (local.get $b))))
+      (then (throw $LuaError (ref.null any))))
     (local.set $sa (struct.get $LuaString $bytes (call $lua_tostring (local.get $a))))
     (local.set $sb (struct.get $LuaString $bytes (call $lua_tostring (local.get $b))))
     (local.set $na (array.len (local.get $sa)))
@@ -819,8 +846,9 @@
       (then
         (call $host_print (call $args_at (local.get $args) (i32.const 0)))
         (return (global.get $g_empty_args))))
-    ;; Multi-arg: stringify and join with TAB on the wasm side, then print.
-    (local.set $acc (call $args_at (local.get $args) (i32.const 0)))
+    ;; Multi-arg: stringify each value (so nil/bool/table render fine
+    ;; without tripping the concat type check), then join with TAB.
+    (local.set $acc (call $lua_tostring (call $args_at (local.get $args) (i32.const 0))))
     (local.set $i (i32.const 1))
     (block $done (loop $lp
       (br_if $done (i32.ge_s (local.get $i) (local.get $n)))
@@ -828,10 +856,10 @@
         (call $lua_concat
           (call $lua_concat (local.get $acc)
                             (ref.as_non_null (global.get $g_tab_str)))
-          (call $args_at (local.get $args) (local.get $i))))
+          (call $lua_tostring (call $args_at (local.get $args) (local.get $i)))))
       (local.set $i (i32.add (local.get $i) (i32.const 1)))
       (br $lp)))
-    (call $host_print (call $lua_tostring (local.get $acc)))
+    (call $host_print (local.get $acc))
     (global.get $g_empty_args))
 
   (func $builtin_error (type $LuaFn)
@@ -989,15 +1017,17 @@
       (then
         (call $host_write_raw (call $args_at (local.get $args) (i32.const 0)))
         (return (global.get $g_empty_args))))
-    (local.set $acc (call $args_at (local.get $args) (i32.const 0)))
+    ;; Tostring each arg first so nil/bool/table render via the
+    ;; standard rules instead of tripping concat's type check.
+    (local.set $acc (call $lua_tostring (call $args_at (local.get $args) (i32.const 0))))
     (local.set $i (i32.const 1))
     (block $done (loop $lp
       (br_if $done (i32.ge_s (local.get $i) (local.get $n)))
       (local.set $acc (call $lua_concat (local.get $acc)
-                       (call $args_at (local.get $args) (local.get $i))))
+                       (call $lua_tostring (call $args_at (local.get $args) (local.get $i)))))
       (local.set $i (i32.add (local.get $i) (i32.const 1)))
       (br $lp)))
-    (call $host_write_raw (call $lua_tostring (local.get $acc)))
+    (call $host_write_raw (local.get $acc))
     (global.get $g_empty_args))
 
   ;; io.read — single-line reader. Host writes the line into $fmt_buf and
