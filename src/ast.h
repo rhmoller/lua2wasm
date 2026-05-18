@@ -139,6 +139,8 @@ typedef enum {
     STMT_REPEAT,        /* repeat ... until cond */
     STMT_BREAK,
     STMT_GLOBAL,        /* global name1 [, name2, ...] [= expr1, ...] */
+    STMT_GOTO,          /* goto NAME */
+    STMT_LABEL,         /* ::NAME:: */
 } StmtKind;
 
 struct Block {
@@ -239,6 +241,16 @@ struct Stmt {
             int n_values;
             Expr **values;
         } global_decl;
+        struct {                    /* goto NAME  /  ::NAME:: */
+            const char *name;
+            size_t name_len;
+            /* Codegen pre-pass fills these in; parser leaves them zeroed. */
+            int id;                 /* unique label id within enclosing function (STMT_LABEL) */
+            int has_forward;        /* any goto-to-this-label is before label (STMT_LABEL) */
+            int has_backward;       /* any goto-to-this-label is after label (STMT_LABEL) */
+            int target_id;          /* resolved label id (STMT_GOTO) */
+            int direction;          /* 0 forward, 1 backward (STMT_GOTO) */
+        } label;
     } as;
 };
 

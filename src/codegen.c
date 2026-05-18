@@ -59,6 +59,21 @@ static StrRef strpool_add(StrPool *p, const char *bytes, size_t len) {
     return r;
 }
 
+/* ----- label-scope stack for goto / ::label:: -----
+ *
+ * Each block that declares one or more labels pushes a LabelScope while
+ * we emit it. emit_stmt looks up `goto NAME` by walking the parent chain.
+ *
+ * The codegen runs a pre-pass that fills in Stmt.as.label.{id,target_id,
+ * direction,has_forward,has_backward} so emit_block can decide whether to
+ * wrap regions in (block …) (forward) or (loop …) (backward) wrappers. */
+typedef struct LabelScope {
+    Stmt **labels;          /* pointers to STMT_LABEL nodes in this block */
+    int n;
+    int cur_idx;            /* updated during walk: current stmt index */
+    struct LabelScope *parent;
+} LabelScope;
+
 /* ----- codegen context ----- */
 typedef struct {
     WatBuilder *w;
@@ -73,6 +88,9 @@ typedef struct {
      * before emitting either a user function body or the main chunk. */
     const unsigned char *cur_captured;
     int cur_n_locals;
+    /* goto/label state */
+    int next_label_id;      /* fresh per function body */
+    LabelScope *label_scope; /* innermost first */
     char err[256];
     int ok;
 } CG;
@@ -87,6 +105,135 @@ static void cg_error(CG *c, const char *msg) {
     if (!c->ok) return;
     c->ok = 0;
     snprintf(c->err, sizeof(c->err), "codegen: %s", msg);
+}
+
+/* ----- goto/label pre-pass -----
+ *
+ * Walks the function body to:
+ *   1. Assign each STMT_LABEL a unique id.
+ *   2. Resolve each STMT_GOTO to a target label by lexical lookup
+ *      through enclosing blocks; error if unresolved.
+ *   3. Classify direction (forward / backward) based on where the goto
+ *      sits relative to the label in the label's home block. For a goto
+ *      in an inner block, the relevant position is that of the inner
+ *      block's containing statement in the home block.
+ *   4. Set the label's has_forward / has_backward flags.
+ *
+ * Scope chain mirrors block nesting. For each block we keep a parallel
+ * array of label stmts and their block-indexes, no AST pollution.
+ */
+
+typedef struct LabelAnalysisScope {
+    Stmt *labels[64];       /* up to 64 labels per single block */
+    int label_idx[64];      /* block-index of each label */
+    int n;
+    int home_idx;           /* index in parent block of the stmt whose body is THIS block */
+    struct LabelAnalysisScope *parent;
+} LabelAnalysisScope;
+
+/* Resolve a goto. Returns the matching label stmt and writes the goto's
+ * effective position in the label's home block to *out_home_idx; returns
+ * NULL on miss. */
+static Stmt *la_lookup(LabelAnalysisScope *scope, const char *name, size_t len,
+                       int goto_cur_in_inner, int *out_home_idx,
+                       int *out_label_block_idx) {
+    int eff_idx = goto_cur_in_inner;
+    for (LabelAnalysisScope *s = scope; s; s = s->parent) {
+        for (int i = 0; i < s->n; i++) {
+            Stmt *lab = s->labels[i];
+            if (lab->as.label.name_len == len &&
+                memcmp(lab->as.label.name, name, len) == 0) {
+                *out_home_idx = eff_idx;
+                *out_label_block_idx = s->label_idx[i];
+                return lab;
+            }
+        }
+        eff_idx = s->home_idx;
+    }
+    return NULL;
+}
+
+static void la_block(CG *c, const Block *b, LabelAnalysisScope *parent,
+                     int home_idx_in_parent);
+
+static void la_recurse_stmt(CG *c, Stmt *s, LabelAnalysisScope *scope, int idx) {
+    switch (s->kind) {
+    case STMT_DO:      la_block(c, &s->as.do_stmt.body,    scope, idx); break;
+    case STMT_WHILE:   la_block(c, &s->as.while_stmt.body, scope, idx); break;
+    case STMT_REPEAT:  la_block(c, &s->as.repeat.body,     scope, idx); break;
+    case STMT_FOR_NUM: la_block(c, &s->as.for_num.body,    scope, idx); break;
+    case STMT_FOR_GEN: la_block(c, &s->as.for_gen.body,    scope, idx); break;
+    case STMT_IF:
+        for (size_t i = 0; i < s->as.if_stmt.narms; i++)
+            la_block(c, &s->as.if_stmt.arms[i].body, scope, idx);
+        if (s->as.if_stmt.has_else)
+            la_block(c, &s->as.if_stmt.else_body, scope, idx);
+        break;
+    /* STMT_LOCAL_FUNC and inline function expressions start a fresh
+     * label namespace; emit_user_function runs the pre-pass on those
+     * separately when it descends. */
+    default: break;
+    }
+}
+
+static void la_block(CG *c, const Block *b, LabelAnalysisScope *parent, int home_idx) {
+    LabelAnalysisScope scope = { .n = 0, .home_idx = home_idx, .parent = parent };
+    /* Pass 1: collect labels, dedup, assign ids. */
+    for (size_t i = 0; i < b->count; i++) {
+        Stmt *st = b->items[i];
+        if (st->kind != STMT_LABEL) continue;
+        if (scope.n >= 64) {
+            cg_error(c, "too many labels in one block (limit 64)");
+            return;
+        }
+        for (int j = 0; j < scope.n; j++) {
+            Stmt *prev = scope.labels[j];
+            if (prev->as.label.name_len == st->as.label.name_len &&
+                memcmp(prev->as.label.name, st->as.label.name,
+                       st->as.label.name_len) == 0) {
+                char msg[128];
+                int n = (int)(st->as.label.name_len < 80 ? st->as.label.name_len : 80);
+                snprintf(msg, sizeof(msg),
+                    "label '%.*s' already defined in this block",
+                    n, st->as.label.name);
+                cg_error(c, msg);
+                return;
+            }
+        }
+        st->as.label.id = c->next_label_id++;
+        st->as.label.has_forward = 0;
+        st->as.label.has_backward = 0;
+        scope.labels[scope.n] = st;
+        scope.label_idx[scope.n] = (int)i;
+        scope.n++;
+    }
+    /* Pass 2: resolve gotos in this block, recurse into nested blocks. */
+    for (size_t i = 0; i < b->count; i++) {
+        Stmt *st = b->items[i];
+        if (st->kind == STMT_GOTO) {
+            int home_idx_of_goto, label_idx_in_home;
+            Stmt *lab = la_lookup(&scope, st->as.label.name, st->as.label.name_len,
+                                  (int)i, &home_idx_of_goto, &label_idx_in_home);
+            if (!lab) {
+                char msg[128];
+                int n = (int)(st->as.label.name_len < 80 ? st->as.label.name_len : 80);
+                snprintf(msg, sizeof(msg),
+                    "no visible label '%.*s' for goto", n, st->as.label.name);
+                cg_error(c, msg);
+                return;
+            }
+            st->as.label.target_id = lab->as.label.id;
+            if (home_idx_of_goto < label_idx_in_home) {
+                st->as.label.direction = 0; /* forward */
+                lab->as.label.has_forward = 1;
+            } else {
+                st->as.label.direction = 1; /* backward */
+                lab->as.label.has_backward = 1;
+            }
+        } else if (st->kind != STMT_LABEL) {
+            la_recurse_stmt(c, st, &scope, (int)i);
+        }
+    }
 }
 
 static void emit_indent(CG *c, int depth) {
@@ -715,6 +862,19 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
             break;
         }
 
+        case STMT_GOTO: {
+            emit_indent(c, depth);
+            wat_appendf(c->w, "br $lbl_%d_%s\n",
+                s->as.label.target_id,
+                s->as.label.direction == 0 ? "fwd" : "back");
+            break;
+        }
+
+        case STMT_LABEL:
+            /* Wrappers are emitted by emit_block; the label statement
+             * itself produces no code at its position. */
+            break;
+
         case STMT_FOR_NUM: {
             int label = c->next_label++;
             c->break_labels[c->break_depth++] = label;
@@ -942,7 +1102,87 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
 }
 
 static void emit_block(CG *c, const Block *b, int depth) {
-    for (size_t i = 0; i < b->count; i++) emit_stmt(c, b->items[i], depth);
+    /* Fast path: no labels in this block, no wrappers needed. */
+    int has_labels = 0;
+    for (size_t i = 0; i < b->count; i++) {
+        if (b->items[i]->kind == STMT_LABEL) { has_labels = 1; break; }
+    }
+    if (!has_labels) {
+        for (size_t i = 0; i < b->count; i++) emit_stmt(c, b->items[i], depth);
+        return;
+    }
+
+    /* Slow path: emit nested (block $lbl_N_fwd …) wrappers for each
+     * forward-targeted label (outer = later in source), and (loop
+     * $lbl_N_back …) wrappers starting at each backward-targeted label
+     * (outer = earlier in source).
+     *
+     * Cross-label overlap (forward to a later label, backward to an
+     * earlier one) is not representable in structured WAT without
+     * dispatch; we error if it would arise.
+     */
+    struct { int id; int idx; int fwd; int back; } labs[64];
+    int nlabs = 0;
+    for (size_t i = 0; i < b->count; i++) {
+        const Stmt *st = b->items[i];
+        if (st->kind == STMT_LABEL) {
+            labs[nlabs].id = st->as.label.id;
+            labs[nlabs].idx = (int)i;
+            labs[nlabs].fwd = st->as.label.has_forward;
+            labs[nlabs].back = st->as.label.has_backward;
+            nlabs++;
+        }
+    }
+    for (int i = 0; i < nlabs; i++) {
+        for (int j = 0; j < nlabs; j++) {
+            if (labs[i].fwd && labs[j].back && labs[i].idx > labs[j].idx) {
+                cg_error(c,
+                    "overlapping forward+backward labels in one block cannot "
+                    "currently be lowered to structured WAT; refactor or split");
+                return;
+            }
+        }
+    }
+
+    /* Open forward blocks for ALL forward-targeted labels in REVERSE
+     * source order — last label's block is outermost. */
+    int extra_depth = 0;
+    for (int i = nlabs - 1; i >= 0; i--) {
+        if (!labs[i].fwd) continue;
+        emit_indent(c, depth + extra_depth);
+        wat_appendf(c->w, "(block $lbl_%d_fwd\n", labs[i].id);
+        extra_depth++;
+    }
+
+    int back_open_count = 0;   /* loop_back wrappers currently open */
+    for (size_t i = 0; i < b->count; i++) {
+        Stmt *st = b->items[i];
+        if (st->kind == STMT_LABEL) {
+            /* Close this label's forward block if any. */
+            if (st->as.label.has_forward) {
+                extra_depth--;
+                emit_indent(c, depth + extra_depth);
+                wat_append(c->w, ")\n");
+            }
+            /* Open this label's backward loop if any; it stays open
+             * until end-of-block. */
+            if (st->as.label.has_backward) {
+                emit_indent(c, depth + extra_depth);
+                wat_appendf(c->w, "(loop $lbl_%d_back\n", st->as.label.id);
+                extra_depth++;
+                back_open_count++;
+            }
+            continue;
+        }
+        emit_stmt(c, st, depth + extra_depth);
+    }
+
+    /* Close all backward loops opened so far. */
+    for (int i = 0; i < back_open_count; i++) {
+        extra_depth--;
+        emit_indent(c, depth + extra_depth);
+        wat_append(c->w, ")\n");
+    }
 }
 
 /* ============================================================
@@ -1021,7 +1261,12 @@ static void emit_user_function(CG *c, const LuaFunc *fn) {
 
     int was_in_main = c->in_main;
     c->in_main = 0;
-    emit_block(c, &fn->body, 2);
+    /* Reset the label-id counter per function (labels are function-local). */
+    int saved_next_id = c->next_label_id;
+    c->next_label_id = 0;
+    la_block(c, &fn->body, NULL, -1);
+    if (c->ok) emit_block(c, &fn->body, 2);
+    c->next_label_id = saved_next_id;
     c->in_main = was_in_main;
 
     /* Default trailing return — empty results array. */
@@ -1229,7 +1474,9 @@ int codegen_module(const ParseResult *pr, WatBuilder *out,
         wat_append(out, "    (local $for_k anyref)\n");
         wat_append(out, "    (call $stdlib_init)\n");
 
-        emit_block(&c, &pr->main_body, 2);
+        c.next_label_id = 0;
+        la_block(&c, &pr->main_body, NULL, -1);
+        if (c.ok) emit_block(&c, &pr->main_body, 2);
 
         wat_append(out, "  )\n");
     }

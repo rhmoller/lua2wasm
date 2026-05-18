@@ -897,6 +897,39 @@ static Stmt *parse_break(Parser *p) {
     return s;
 }
 
+static Stmt *parse_goto(Parser *p) {
+    int line = peek(p)->line;
+    advance(p); /* goto */
+    if (peek(p)->kind != TOK_IDENT) {
+        set_error(p, "expected identifier after `goto`");
+        return NULL;
+    }
+    const Token *nm = advance(p);
+    Stmt *s = stmt_new(p->pool, STMT_GOTO, line);
+    s->as.label.name = nm->start;
+    s->as.label.name_len = nm->len;
+    return s;
+}
+
+static Stmt *parse_label(Parser *p) {
+    int line = peek(p)->line;
+    advance(p); /* :: */
+    if (peek(p)->kind != TOK_IDENT) {
+        set_error(p, "expected identifier inside `::...::`");
+        return NULL;
+    }
+    const Token *nm = advance(p);
+    if (peek(p)->kind != TOK_DBLCOLON) {
+        set_error(p, "expected `::` after label name");
+        return NULL;
+    }
+    advance(p);
+    Stmt *s = stmt_new(p->pool, STMT_LABEL, line);
+    s->as.label.name = nm->start;
+    s->as.label.name_len = nm->len;
+    return s;
+}
+
 static Stmt *parse_global(Parser *p) {
     int line = peek(p)->line;
     advance(p); /* global */
@@ -1030,6 +1063,8 @@ static Stmt *parse_stmt(Parser *p) {
         case TOK_KW_FOR:    return parse_for(p);
         case TOK_KW_REPEAT: return parse_repeat(p);
         case TOK_KW_BREAK:  return parse_break(p);
+        case TOK_KW_GOTO:   return parse_goto(p);
+        case TOK_DBLCOLON:  return parse_label(p);
         case TOK_IDENT: {
             /* `global x ...` is parsed as if `global` were a keyword, but we
              * keep it as a normal identifier in the lexer for backward-compat
