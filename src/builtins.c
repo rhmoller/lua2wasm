@@ -42,6 +42,8 @@ static const struct {
     { "atan",  4, "$builtin_math_atan",  BLT_LIB_MATH },
     { "exp",   3, "$builtin_math_exp",   BLT_LIB_MATH },
     { "log",   3, "$builtin_math_log",   BLT_LIB_MATH },
+    { "deg",   3, "$builtin_math_deg",   BLT_LIB_MATH },
+    { "rad",   3, "$builtin_math_rad",   BLT_LIB_MATH },
     /* string library */
     { "len",    3, "$builtin_string_len",    BLT_LIB_STRING },
     { "sub",    3, "$builtin_string_sub",    BLT_LIB_STRING },

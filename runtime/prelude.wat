@@ -1148,6 +1148,22 @@
   (func $builtin_math_log  (type $LuaFn) (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
     (call $math_via_host (i32.const 7) (local.get $args)))
 
+  ;; math.deg(x) — radians to degrees.
+  (func $builtin_math_deg (type $LuaFn)
+    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
+    (array.new_fixed $ArgArr 1
+      (call $make_float
+        (f64.mul (call $as_float (call $args_at (local.get $args) (i32.const 0)))
+                 (f64.const 57.29577951308232)))))   ;; 180 / pi
+
+  ;; math.rad(x) — degrees to radians.
+  (func $builtin_math_rad (type $LuaFn)
+    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
+    (array.new_fixed $ArgArr 1
+      (call $make_float
+        (f64.mul (call $as_float (call $args_at (local.get $args) (i32.const 0)))
+                 (f64.const 0.017453292519943295))))) ;; pi / 180
+
   (func $builtin_math_ceil (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
     (local $v anyref)
