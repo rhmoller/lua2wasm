@@ -775,6 +775,7 @@ async function run() {
       host: {
         print:     v => logLine(luaToString(v)),
         write_raw: v => { out.appendChild(document.createTextNode(luaToString(v))); },
+        warn:      v => logLine("Lua warning: " + luaToString(v), "err"),
         fmt: (kind, i, f, prec) => {
           const s = formatScalar(kind, i, f, prec);
           for (let j = 0; j < s.length; j++) instance.exports.fmt_buf_set(j, s.charCodeAt(j));

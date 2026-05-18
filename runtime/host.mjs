@@ -76,6 +76,7 @@ function hostReadNum() {
     host: {
         print:     (v) => { process.stdout.write(luaToString(v) + "\n"); },
         write_raw: (v) => { process.stdout.write(luaToString(v)); },
+        warn:      (v) => { process.stderr.write("Lua warning: " + luaToString(v) + "\n"); },
         fmt:       (kind, i, f, prec) => {
             const s = formatScalar(kind, i, f, prec);
             for (let j = 0; j < s.length; j++) instance.exports.fmt_buf_set(j, s.charCodeAt(j));

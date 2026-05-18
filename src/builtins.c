@@ -11,6 +11,8 @@ static const struct {
     { "print",    5, "$builtin_print",    BLT_TOPLEVEL },
     { "error",    5, "$builtin_error",    BLT_TOPLEVEL },
     { "pcall",    5, "$builtin_pcall",    BLT_TOPLEVEL },
+    { "xpcall",   6, "$builtin_xpcall",   BLT_TOPLEVEL },
+    { "warn",     4, "$builtin_warn",     BLT_TOPLEVEL },
     { "type",     4, "$builtin_type",     BLT_TOPLEVEL },
     { "tostring", 8, "$builtin_tostring", BLT_TOPLEVEL },
     { "tonumber", 8, "$builtin_tonumber", BLT_TOPLEVEL },

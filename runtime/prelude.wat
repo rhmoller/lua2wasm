@@ -37,6 +37,7 @@
 
   (import "host" "print" (func $host_print (param anyref)))
   (import "host" "write_raw" (func $host_write_raw (param anyref)))
+  (import "host" "warn"  (func $host_warn  (param anyref)))
   ;; host_fmt: format one value into the shared $fmt_buf scratch array.
   ;;   kind: 0 = %d (i_val)   1 = unused (s handled wasm-side)
   ;;         2 = %g (f_val + prec)   3 = %f   4 = %e   5 = %x (i_val)
@@ -1245,6 +1246,90 @@
     ;; catch path: stack has the error anyref
     (local.set $err)
     (array.new_fixed $ArgArr 2 (global.get $g_false) (local.get $err)))
+
+  ;; xpcall(f, msgh, ...): like pcall, but on error calls msgh(err) and
+  ;; uses its first return value as the error returned. If msgh itself
+  ;; throws, the new error replaces the original.
+  (func $builtin_xpcall (type $LuaFn)
+    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
+    (local $callee (ref $LuaClosure)) (local $msgh (ref $LuaClosure))
+    (local $f_args (ref $ArgArr))
+    (local $n_total i32) (local $n_fargs i32) (local $i i32)
+    (local $err anyref) (local $results (ref $ArgArr)) (local $r2 (ref $ArgArr))
+    (local $handled anyref)
+    (local.set $n_total (array.len (local.get $args)))
+    (if (i32.lt_s (local.get $n_total) (i32.const 2))
+      (then (throw $LuaError (ref.null any))))
+    (local.set $callee
+      (ref.cast (ref $LuaClosure) (array.get $ArgArr (local.get $args) (i32.const 0))))
+    (local.set $msgh
+      (ref.cast (ref $LuaClosure) (array.get $ArgArr (local.get $args) (i32.const 1))))
+    (local.set $n_fargs (i32.sub (local.get $n_total) (i32.const 2)))
+    (local.set $f_args (array.new $ArgArr (ref.null any) (local.get $n_fargs)))
+    (block $copied (loop $cp
+      (br_if $copied (i32.ge_s (local.get $i) (local.get $n_fargs)))
+      (array.set $ArgArr (local.get $f_args) (local.get $i)
+        (array.get $ArgArr (local.get $args)
+          (i32.add (local.get $i) (i32.const 2))))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br $cp)))
+    (block $catch_err (result anyref)
+      (local.set $results
+        (try_table (result (ref $ArgArr)) (catch $LuaError $catch_err)
+          (call $lua_call (local.get $callee) (local.get $f_args))))
+      ;; success: prepend true.
+      (local.set $r2 (array.new $ArgArr (ref.null any)
+        (i32.add (array.len (local.get $results)) (i32.const 1))))
+      (array.set $ArgArr (local.get $r2) (i32.const 0) (global.get $g_true))
+      (array.copy $ArgArr $ArgArr (local.get $r2) (i32.const 1)
+        (local.get $results) (i32.const 0) (array.len (local.get $results)))
+      (return (local.get $r2)))
+    ;; error path: stack has $err.
+    (local.set $err)
+    ;; Call msgh(err) — itself wrapped so its throw doesn't escape xpcall.
+    (block $msgh_throw (result anyref)
+      (local.set $handled (call $args_first
+        (try_table (result (ref $ArgArr)) (catch $LuaError $msgh_throw)
+          (call $lua_call (local.get $msgh)
+            (array.new_fixed $ArgArr 1 (local.get $err))))))
+      (return (array.new_fixed $ArgArr 2 (global.get $g_false) (local.get $handled))))
+    ;; msgh threw: stack has its own error value.
+    (local.set $handled)
+    (array.new_fixed $ArgArr 2 (global.get $g_false) (local.get $handled)))
+
+  ;; warn(...): hand a concatenated string to the host. Accepts (and
+  ;; silently ignores) the "@on"/"@off" control messages.
+  (func $builtin_warn (type $LuaFn)
+    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
+    (local $n i32) (local $i i32) (local $acc anyref) (local $first anyref)
+    (local $bytes (ref $LuaArr))
+    (local.set $n (array.len (local.get $args)))
+    (if (i32.eqz (local.get $n)) (then (return (global.get $g_empty_args))))
+    ;; Drop control messages "@on" and "@off" silently when they appear
+    ;; as a sole string argument; this matches reference Lua's no-op
+    ;; behaviour for those when warnings are already in the user's
+    ;; chosen mode.
+    (local.set $first (call $args_at (local.get $args) (i32.const 0)))
+    (if (i32.and (i32.eq (local.get $n) (i32.const 1))
+                 (ref.test (ref $LuaString) (local.get $first)))
+      (then
+        (local.set $bytes (struct.get $LuaString $bytes
+          (ref.cast (ref $LuaString) (local.get $first))))
+        (if (i32.and (i32.ge_s (array.len (local.get $bytes)) (i32.const 1))
+                     (i32.eq (array.get_u $LuaArr (local.get $bytes) (i32.const 0))
+                             (i32.const 64)))   ;; '@'
+          (then (return (global.get $g_empty_args))))))
+    ;; Concatenate all args (each tostring'd) and hand to host_warn.
+    (local.set $acc (call $lua_tostring (call $args_at (local.get $args) (i32.const 0))))
+    (local.set $i (i32.const 1))
+    (block $done (loop $lp
+      (br_if $done (i32.ge_s (local.get $i) (local.get $n)))
+      (local.set $acc (call $lua_concat (local.get $acc)
+        (call $lua_tostring (call $args_at (local.get $args) (local.get $i)))))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br $lp)))
+    (call $host_warn (local.get $acc))
+    (global.get $g_empty_args))
 
   ;; --- additional top-level builtins ---
   (func $builtin_assert (type $LuaFn)
