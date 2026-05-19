@@ -1692,6 +1692,13 @@ int codegen_module(const ParseResult *pr, const char *src_name,
 
     wat_append(out, "(module\n");
     wat_append(out, PRELUDE);
+    /* Section markers — purely cosmetic, but the playground's WAT viewer
+     * splits the file by `;; @@SECTION:name@@` lines so users can collapse
+     * the 5000-line runtime/stdlib block and focus on what their code
+     * actually compiled to. Each emitted region from here on opens with
+     * one of these markers; everything before the first marker is the
+     * embedded prelude. */
+    wat_append(out, "\n  ;; @@SECTION:stdlib-bindings@@\n");
 
     int nb = builtin_count();
     unsigned char *live = calloc((size_t)nb, 1);
@@ -2075,7 +2082,8 @@ int codegen_module(const ParseResult *pr, const char *src_name,
     }
     wat_append(out, "  )\n");
 
-    wat_append(out, "\n  ;; --- user functions ---\n");
+    wat_append(out, "\n  ;; @@SECTION:user-code@@\n");
+    wat_append(out, "  ;; --- user functions ---\n");
 
     for (size_t i = 0; i < pr->funcs.count; i++) {
         emit_user_function(&c, pr->funcs.items[i]);
@@ -2131,6 +2139,7 @@ int codegen_module(const ParseResult *pr, const char *src_name,
     }
 
     /* Data segment */
+    wat_append(out, "\n  ;; @@SECTION:data@@\n");
     wat_append(out, "  (data $str_data \"");
     for (size_t i = 0; i < c.strs.used; i++) {
         unsigned char b = (unsigned char)c.strs.bytes[i];

@@ -118,6 +118,45 @@
   #out::-webkit-scrollbar-corner {
     background: transparent;
   }
+
+  /* WAT viewer: codegen tags each region with `;; @@SECTION:name@@`;
+     showWat() splits on those and emits one of these per section. The
+     runtime regions collapse by default since they're ~5000 lines of
+     shared infrastructure that doesn't change with the user's code. */
+  .wat-section { margin: 0 0 .25em 0; }
+  .wat-section > summary {
+    list-style: none;
+    cursor: pointer; user-select: none;
+    padding: .25em .6em; margin: 0;
+    background: var(--ctp-surface0); color: var(--ctp-subtext1);
+    border-radius: 4px;
+    font: 12px/1.4 system-ui, sans-serif;
+    display: flex; align-items: center; gap: .6em;
+  }
+  .wat-section > summary::-webkit-details-marker { display: none; }
+  .wat-section > summary::before {
+    content: "▸"; display: inline-block; width: 1em;
+    color: var(--ctp-overlay1); transition: transform .1s;
+  }
+  .wat-section[open] > summary::before { transform: rotate(90deg); }
+  .wat-section > summary .wat-name { color: var(--ctp-text); font-weight: 500; }
+  .wat-section > summary .wat-meta { color: var(--ctp-overlay1); font-size: 11px; margin-left: auto; }
+  .wat-section > pre {
+    margin: 0; padding: .4em .8em;
+    background: var(--ctp-base); color: var(--ctp-subtext1);
+    border-left: 2px solid var(--ctp-surface1);
+    border-radius: 0 0 4px 4px;
+    overflow-x: auto;
+    font: 12px/1.45 "JetBrains Mono", ui-monospace, monospace;
+  }
+  /* Highlight the "user code" section — that's the part the dev cares about. */
+  .wat-section[data-section="user-code"] > summary {
+    background: var(--ctp-surface1);
+  }
+  .wat-section[data-section="user-code"] > pre {
+    border-left-color: var(--ctp-sapphire);
+    color: var(--ctp-text);
+  }
   .err  { color: var(--ctp-red); }
   .info { color: var(--ctp-overlay1); }
   .stdin-prompt { color: var(--ctp-sapphire); }
@@ -846,12 +885,62 @@ async function run() {
   logLine(`\n— compiled in ${(t1-t0).toFixed(1)} ms · assembled ${(t2-t1).toFixed(1)} ms · ran ${(t3-t2).toFixed(1)} ms · ${bytes.byteLength} B`, "info");
 }
 
+/* Map a `@@SECTION:NAME@@` tag to a UI label + collapsed-by-default flag.
+ * `prelude` is implicit — anything before the first marker. */
+const WAT_SECTIONS = {
+  "prelude":          { label: "runtime · prelude",          collapsed: true  },
+  "stdlib-bindings":  { label: "runtime · stdlib bindings",  collapsed: true  },
+  "user-code":        { label: "your code",                  collapsed: false },
+  "data":             { label: "string pool",                collapsed: true  },
+};
+const SECTION_RE = /^\s*;; @@SECTION:([\w-]+)@@\s*$/;
+
+/* Split a WAT string into [{ name, body }] segments, in document order.
+ * Anything before the first marker is the "prelude" segment. */
+function splitWatSections(wat) {
+  const out = [];
+  const lines = wat.split("\n");
+  let curName = "prelude";
+  let curStart = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const m = SECTION_RE.exec(lines[i]);
+    if (!m) continue;
+    out.push({ name: curName, body: lines.slice(curStart, i).join("\n") });
+    curName = m[1];
+    curStart = i + 1;        /* drop the marker line itself */
+  }
+  out.push({ name: curName, body: lines.slice(curStart).join("\n") });
+  return out;
+}
+
 async function showWat() {
   clearOut();
+  let wat;
   try {
-    const wat = luaToWat(editor.state.doc.toString());
-    logLine(wat);
-  } catch (e) { logLine("ERROR: " + e, "err"); }
+    wat = luaToWat(editor.state.doc.toString());
+  } catch (e) {
+    logLine("ERROR: " + e, "err");
+    return;
+  }
+  if (wat.startsWith("ERROR")) { logLine(wat, "err"); return; }
+  for (const seg of splitWatSections(wat)) {
+    const cfg = WAT_SECTIONS[seg.name] ?? { label: seg.name, collapsed: true };
+    const lineCount = seg.body ? seg.body.split("\n").length : 0;
+    const det = document.createElement("details");
+    det.className = "wat-section";
+    det.dataset.section = seg.name;
+    if (!cfg.collapsed) det.open = true;
+    const sum = document.createElement("summary");
+    sum.innerHTML = `<span class="wat-name"></span><span class="wat-meta"></span>`;
+    sum.querySelector(".wat-name").textContent = cfg.label;
+    sum.querySelector(".wat-meta").textContent =
+      `${lineCount.toLocaleString()} line${lineCount === 1 ? "" : "s"}`;
+    det.appendChild(sum);
+    const pre = document.createElement("pre");
+    pre.textContent = seg.body;
+    det.appendChild(pre);
+    out.appendChild(det);
+  }
 }
 
 /* Re-entrancy guard so two near-simultaneous triggers (e.g. clicking Run
