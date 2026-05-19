@@ -3892,10 +3892,30 @@
     (local $sp i32) (local $end i32) (local $ncaps i32)
     (local $plain i32)
     (local $caps (ref $CapArr)) (local $out (ref $ArgArr)) (local $i i32)
+    (local $arg0 anyref) (local $arg1 anyref)
+    (local.set $arg0 (call $args_at (local.get $args) (i32.const 0)))
+    (local.set $arg1 (call $args_at (local.get $args) (i32.const 1)))
+    ;; Guard arg types instead of trapping on ref.cast. Per Lua spec,
+    ;; string.find errors when its first two args aren't strings — we
+    ;; reuse the "non-function value" message slot as a generic "bad
+    ;; argument" placeholder (the file:line in the prefix is what users
+    ;; actually grep for).
+    (if (i32.or (i32.eqz (ref.test (ref $LuaString) (local.get $arg0)))
+                (i32.eqz (ref.test (ref $LuaString) (local.get $arg1))))
+      (then (throw $LuaError (call $prefix_error_msg
+        (ref.as_non_null (global.get $g_src_name))
+        (if (result i32) (i32.gt_s (global.get $call_depth) (i32.const 0))
+          (then (array.get $LineArr
+                  (ref.as_non_null (global.get $call_lines))
+                  (i32.sub (global.get $call_depth) (i32.const 1))))
+          (else (i32.const 0)))
+        (struct.new $LuaString
+          (array.new_data $LuaArr $str_data
+            (i32.const 93) (i32.const 36)))))))
     (local.set $sub (struct.get $LuaString $bytes
-      (ref.cast (ref $LuaString) (call $args_at (local.get $args) (i32.const 0)))))
+      (ref.cast (ref $LuaString) (local.get $arg0))))
     (local.set $pat (struct.get $LuaString $bytes
-      (ref.cast (ref $LuaString) (call $args_at (local.get $args) (i32.const 1)))))
+      (ref.cast (ref $LuaString) (local.get $arg1))))
     (local.set $n_sub (array.len (local.get $sub)))
     (local.set $n_pat (array.len (local.get $pat)))
     (local.set $nargs (array.len (local.get $args)))
