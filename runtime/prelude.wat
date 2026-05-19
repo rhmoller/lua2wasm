@@ -3430,7 +3430,7 @@
           (local.get $bytes) (i32.sub (local.get $prev) (i32.const 1))
           (i32.const 0)))
         (if (i32.eqz (local.get $w))
-          (then (throw $LuaError (ref.null any))))
+          (then (call $throw_lit (i32.const 190) (i32.const 18))))   ;; "invalid UTF-8 code"
         (local.set $p (i32.add (i32.sub (local.get $prev) (i32.const 1))
                                 (local.get $w)))))
     (if (i32.ge_s (local.get $p) (local.get $n_bytes))
@@ -3438,7 +3438,7 @@
     (local.set $w (call $utf8_decode_step
       (local.get $bytes) (local.get $p) (i32.const 0)))
     (if (i32.eqz (local.get $w))
-      (then (throw $LuaError (ref.null any))))
+      (then (call $throw_lit (i32.const 190) (i32.const 18))))   ;; "invalid UTF-8 code"
     (local.set $out (array.new $ArgArr (ref.null any) (i32.const 2)))
     (array.set $ArgArr (local.get $out) (i32.const 0)
       (call $make_int (i64.extend_i32_s

@@ -351,12 +351,26 @@ TokenList lex(const char *source) {
                 t.kind = TOK_FLOAT;
                 /* strtod handles both decimal and C99 hex floats (0x1.8p3). */
                 t.f_val = strtod(tmp, NULL);
+            } else if (is_hex) {
+                /* Hex int literals wrap mod 2^64 per Lua 5.5: even a
+                 * 26-digit literal denotes an integer (its low 64 bits).
+                 * strtoll saturates at LLONG_MAX, so accumulate digits
+                 * ourselves in a u64 and reinterpret. */
+                t.kind = TOK_INT;
+                unsigned long long acc = 0;
+                for (size_t k = 2; k < n; k++) {  /* skip "0x" prefix */
+                    unsigned c2 = (unsigned char)tmp[k];
+                    unsigned d = c2 <= '9' ? c2 - '0'
+                               : c2 <= 'F' ? c2 - 'A' + 10
+                               :             c2 - 'a' + 10;
+                    acc = (acc << 4) | d;
+                }
+                t.i_val = (long long)acc;
             } else {
                 t.kind = TOK_INT;
                 /* Lua has no octal integer syntax — a leading zero is just
-                 * a decimal digit. Pass base 10 for plain integers; only
-                 * use the 0x branch via base 16 when we actually saw it. */
-                t.i_val = strtoll(tmp, NULL, is_hex ? 16 : 10);
+                 * a decimal digit. */
+                t.i_val = strtoll(tmp, NULL, 10);
             }
             push_tok(&v, t);
             continue;
