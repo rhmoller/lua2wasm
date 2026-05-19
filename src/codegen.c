@@ -866,7 +866,15 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
         case STMT_RETURN: {
             int n_values = s->as.return_stmt.n_values;
             if (c->in_main) {
-                /* main: chunk-return value ignored, no return type. */
+                /* $main is exported with no result, so the chunk's return
+                 * value can't be surfaced to the host — but we still have
+                 * to evaluate the expressions so their side effects fire
+                 * (e.g. `return print("hi")`). Drop each result after
+                 * evaluation, then exit. */
+                for (int i = 0; i < n_values; i++) {
+                    emit_expr(c, s->as.return_stmt.values[i], depth);
+                    emit_indent(c, depth); wat_append(c->w, "drop\n");
+                }
                 emit_indent(c, depth); wat_append(c->w, "return\n");
                 break;
             }
