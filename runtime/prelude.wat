@@ -93,6 +93,29 @@
   (import "host" "parse_num"
     (func $host_parse_num (param anyref) (param i32) (result anyref)))
 
+  ;; --- os shims: thin wrappers over the host environment. ---
+  ;; host_os_time: current wall-clock time, in unix seconds.
+  (import "host" "os_time" (func $host_os_time (result i64)))
+  ;; host_os_clock: CPU time used by the process, in seconds.
+  (import "host" "os_clock" (func $host_os_clock (result f64)))
+  ;; host_os_getenv: $name is a $LuaString; writes the env value into
+  ;; $fmt_buf and returns its length, or -1 if the variable is unset.
+  (import "host" "os_getenv"
+    (func $host_os_getenv (param anyref) (result i32)))
+  ;; host_os_exit: terminate the host process with $code (0 if no code
+  ;; was supplied — caller passes $has_code=0 in that case).
+  (import "host" "os_exit"
+    (func $host_os_exit (param i32) (param i32)))
+  ;; host_os_date: format a time per a strftime-ish string. When $fmt is
+  ;; null, defaults to "%c". When $has_time is 0, uses the current time.
+  ;; The result is written into $fmt_buf and its length returned. A
+  ;; return value of -1 signals "this format requested a table" — i.e.
+  ;; "*t" or "!*t"; in that case the host has packed 9 i32 fields into
+  ;; the first 36 bytes of $fmt_buf (year, month, day, hour, min, sec,
+  ;; wday, yday, isdst — each LE).
+  (import "host" "os_date"
+    (func $host_os_date (param anyref) (param i64) (param i32) (result i32)))
+
   ;; --- singletons ---
   (global $g_true  (ref $LuaBool) (struct.new $LuaBool (i32.const 1)))
   (global $g_false (ref $LuaBool) (struct.new $LuaBool (i32.const 0)))
@@ -2407,6 +2430,150 @@
       (ref.null any)
       (ref.as_non_null (global.get $g_empty_str))
       (ref.i31 (i32.const 0))))
+
+  ;; --- os library: minimal shims over the JS host. ---
+  ;; The host owns the actual concept of "now" and the environment; these
+  ;; builtins just convert between Lua values and the host's contract.
+
+  (func $builtin_os_time (type $LuaFn)
+    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
+    ;; The full Lua spec accepts an optional table {year, month, …} and
+    ;; converts it to a unix timestamp. The light shim ignores any arg
+    ;; and just returns the current time, which is enough to keep code
+    ;; like `math.randomseed(os.time())` working.
+    (array.new_fixed $ArgArr 1 (call $make_int (call $host_os_time))))
+
+  (func $builtin_os_clock (type $LuaFn)
+    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
+    (array.new_fixed $ArgArr 1 (call $make_float (call $host_os_clock))))
+
+  (func $builtin_os_getenv (type $LuaFn)
+    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
+    (local $written i32)
+    (if (i32.eqz (array.len (local.get $args)))
+      (then (throw $LuaError (ref.null any))))
+    (local.set $written
+      (call $host_os_getenv (call $args_at (local.get $args) (i32.const 0))))
+    (if (i32.lt_s (local.get $written) (i32.const 0))
+      (then (return (array.new_fixed $ArgArr 1 (ref.null any)))))
+    (array.new_fixed $ArgArr 1 (call $fmt_buf_to_str (local.get $written))))
+
+  (func $builtin_os_exit (type $LuaFn)
+    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
+    (local $a anyref) (local $code i32) (local $has i32)
+    (if (i32.gt_s (array.len (local.get $args)) (i32.const 0))
+      (then
+        (local.set $a (call $args_at (local.get $args) (i32.const 0)))
+        (if (ref.is_null (local.get $a))
+          (then (local.set $code (i32.const 0)))
+          (else
+            (if (ref.test (ref $LuaBool) (local.get $a))
+              (then (local.set $code
+                      (i32.sub (i32.const 1)
+                               (struct.get $LuaBool $b
+                                 (ref.cast (ref $LuaBool) (local.get $a))))))
+              (else (local.set $code
+                      (i32.wrap_i64 (call $as_int (local.get $a))))))))
+        (local.set $has (i32.const 1))))
+    (call $host_os_exit (local.get $code) (local.get $has))
+    ;; Host never returns; satisfy the type checker.
+    (global.get $g_empty_args))
+
+  ;; os.date([fmt [, time]]) — formats $time per a strftime-ish $fmt.
+  ;; When the format is "*t" or "!*t", $host_os_date returns -1 after
+  ;; packing 9 i32 fields into $fmt_buf (year/month/day/hour/min/sec/
+  ;; wday/yday/isdst, each LE). We then materialize the table; the dst
+  ;; field is decoded as boolean.
+  (func $builtin_os_date (type $LuaFn)
+    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
+    (local $fmt anyref) (local $tv anyref) (local $time i64)
+    (local $has_time i32) (local $written i32) (local $buf (ref $LuaArr))
+    (local $tab (ref $LuaTable))
+    (if (i32.gt_s (array.len (local.get $args)) (i32.const 0))
+      (then (local.set $fmt (call $args_at (local.get $args) (i32.const 0)))))
+    (if (i32.gt_s (array.len (local.get $args)) (i32.const 1))
+      (then
+        (local.set $tv (call $args_at (local.get $args) (i32.const 1)))
+        (if (i32.eqz (ref.is_null (local.get $tv)))
+          (then
+            (local.set $time (call $as_int (local.get $tv)))
+            (local.set $has_time (i32.const 1))))))
+    (local.set $written
+      (call $host_os_date (local.get $fmt) (local.get $time)
+                          (local.get $has_time)))
+    (if (i32.ge_s (local.get $written) (i32.const 0))
+      (then
+        (return (array.new_fixed $ArgArr 1
+          (call $fmt_buf_to_str (local.get $written))))))
+    ;; Table case: read 9 LE i32s from $fmt_buf.
+    (local.set $buf (ref.as_non_null (global.get $fmt_buf)))
+    (local.set $tab (call $tab_new))
+    (call $tab_set (local.get $tab)
+      (struct.new $LuaString
+        (array.new_data $LuaArr $str_data (i32.const 306) (i32.const 4)))
+      (call $make_int (i64.extend_i32_s
+        (call $os_date_buf_field (local.get $buf) (i32.const 0)))))
+    (call $tab_set (local.get $tab)
+      (struct.new $LuaString
+        (array.new_data $LuaArr $str_data (i32.const 310) (i32.const 5)))
+      (call $make_int (i64.extend_i32_s
+        (call $os_date_buf_field (local.get $buf) (i32.const 1)))))
+    (call $tab_set (local.get $tab)
+      (struct.new $LuaString
+        (array.new_data $LuaArr $str_data (i32.const 315) (i32.const 3)))
+      (call $make_int (i64.extend_i32_s
+        (call $os_date_buf_field (local.get $buf) (i32.const 2)))))
+    (call $tab_set (local.get $tab)
+      (struct.new $LuaString
+        (array.new_data $LuaArr $str_data (i32.const 318) (i32.const 4)))
+      (call $make_int (i64.extend_i32_s
+        (call $os_date_buf_field (local.get $buf) (i32.const 3)))))
+    (call $tab_set (local.get $tab)
+      (struct.new $LuaString
+        (array.new_data $LuaArr $str_data (i32.const 322) (i32.const 3)))
+      (call $make_int (i64.extend_i32_s
+        (call $os_date_buf_field (local.get $buf) (i32.const 4)))))
+    (call $tab_set (local.get $tab)
+      (struct.new $LuaString
+        (array.new_data $LuaArr $str_data (i32.const 325) (i32.const 3)))
+      (call $make_int (i64.extend_i32_s
+        (call $os_date_buf_field (local.get $buf) (i32.const 5)))))
+    (call $tab_set (local.get $tab)
+      (struct.new $LuaString
+        (array.new_data $LuaArr $str_data (i32.const 328) (i32.const 4)))
+      (call $make_int (i64.extend_i32_s
+        (call $os_date_buf_field (local.get $buf) (i32.const 6)))))
+    (call $tab_set (local.get $tab)
+      (struct.new $LuaString
+        (array.new_data $LuaArr $str_data (i32.const 332) (i32.const 4)))
+      (call $make_int (i64.extend_i32_s
+        (call $os_date_buf_field (local.get $buf) (i32.const 7)))))
+    (call $tab_set (local.get $tab)
+      (struct.new $LuaString
+        (array.new_data $LuaArr $str_data (i32.const 336) (i32.const 5)))
+      (call $lua_bool_to_ref
+        (call $os_date_buf_field (local.get $buf) (i32.const 8))))
+    (array.new_fixed $ArgArr 1 (local.get $tab)))
+
+  ;; Reassembles the i32 at field index $idx (0..8) from the 4-byte LE
+  ;; window starting at offset $idx*4 in $buf.
+  (func $os_date_buf_field
+    (param $buf (ref $LuaArr)) (param $idx i32) (result i32)
+    (local $o i32)
+    (local.set $o (i32.mul (local.get $idx) (i32.const 4)))
+    (i32.or
+      (i32.or
+        (array.get_u $LuaArr (local.get $buf) (local.get $o))
+        (i32.shl (array.get_u $LuaArr (local.get $buf)
+                   (i32.add (local.get $o) (i32.const 1)))
+                 (i32.const 8)))
+      (i32.or
+        (i32.shl (array.get_u $LuaArr (local.get $buf)
+                   (i32.add (local.get $o) (i32.const 2)))
+                 (i32.const 16))
+        (i32.shl (array.get_u $LuaArr (local.get $buf)
+                   (i32.add (local.get $o) (i32.const 3)))
+                 (i32.const 24)))))
 
   ;; --- math library ---
   (func $builtin_math_floor (type $LuaFn)

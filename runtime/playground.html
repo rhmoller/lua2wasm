@@ -803,7 +803,8 @@ function watToWasm(wat) {
 /* ----- runtime host ----- */
 let curInstance;
 const helpers = makeHelpers({ getInstance: () => curInstance, formatFloat });
-const { luaToString, formatSpec, parseLuaNumber } = helpers;
+const { luaToString, formatSpec, parseLuaNumber, osDate, osGetenv } = helpers;
+const runStartCPU = performance.now();
 
 /* ----- the run pipeline ----- */
 async function run() {
@@ -899,6 +900,17 @@ async function run() {
         fmt_spec:  (spec, val)  => formatSpec(spec, val),
         read:      readImport,
         read_num:  readNumImport,
+        os_time:   ()                    => BigInt(Math.floor(Date.now() / 1000)),
+        os_clock:  ()                    => (performance.now() - runStartCPU) / 1000,
+        os_getenv: (name)                => osGetenv(name),
+        os_exit:   (code, hasCode)       => {
+          /* Browser: no real process to exit. Surface the requested code
+           * to the run log and abort the rest of the program via an
+           * uncatchable JS throw — the run handler turns it into an
+           * error line so users see what happened. */
+          throw new Error("os.exit(" + (hasCode ? code : 0) + ")");
+        },
+        os_date:   (fmt, time, hasTime)  => osDate(fmt, time, hasTime),
       },
     }));
     curInstance = instance;

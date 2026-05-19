@@ -13,7 +13,14 @@ if (!wasmPath) {
 
 let instance;
 const helpers = makeHelpers({ getInstance: () => instance, formatFloat });
-const { luaToString, formatSpec, parseLuaNumber } = helpers;
+const { luaToString, formatSpec, parseLuaNumber, osDate, osGetenv } = helpers;
+
+// Optional override for deterministic tests: if LUA2WASM_TEST_TIME is set
+// (decimal unix seconds), `os.time()` and the implicit `os.date()` "now"
+// will both use that value instead of Date.now().
+const FROZEN_TIME = process.env.LUA2WASM_TEST_TIME
+    ? BigInt(process.env.LUA2WASM_TEST_TIME) : null;
+const cpuStart = process.cpuUsage();
 
 const bytes = await readFile(wasmPath);
 
@@ -88,6 +95,16 @@ function hostReadNum() {
         fmt_spec:  (spec, val)    => formatSpec(spec, val),
         read:      (mode, count)  => hostRead(mode, count),
         read_num:  ()             => hostReadNum(),
+        os_time:   ()             => FROZEN_TIME ?? BigInt(Math.floor(Date.now() / 1000)),
+        os_clock:  ()             => {
+            const u = process.cpuUsage(cpuStart);
+            return (u.user + u.system) / 1e6;
+        },
+        os_getenv: (name)         => osGetenv(name),
+        os_exit:   (code, hasCode) => process.exit(hasCode ? code : 0),
+        os_date:   (fmt, time, hasTime) => osDate(fmt,
+            (!hasTime && FROZEN_TIME !== null) ? FROZEN_TIME : time,
+            hasTime || FROZEN_TIME !== null),
     },
 }));
 try {

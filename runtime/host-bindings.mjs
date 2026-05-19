@@ -36,10 +36,16 @@ export function makeHelpers({ getInstance, formatFloat }) {
         }
     }
 
+    // Guard against pathologically large host strings (long PATH, big
+    // os.date format expansions) that would walk off the end of $fmt_buf.
+    // Truncating is the right move — the buffer is sized generously and
+    // anything bigger is almost certainly junk we'd rather not propagate.
+    const FMT_BUF_CAP = 16384;
     function writeFmtBuf(s) {
         const bytes = new TextEncoder().encode(s);
-        for (let i = 0; i < bytes.length; i++) exp().fmt_buf_set(i, bytes[i]);
-        return bytes.length;
+        const n = Math.min(bytes.length, FMT_BUF_CAP);
+        for (let i = 0; i < n; i++) exp().fmt_buf_set(i, bytes[i]);
+        return n;
     }
 
     function applyPad(body, flags, width) {
@@ -257,12 +263,95 @@ export function makeHelpers({ getInstance, formatFloat }) {
         return null;
     }
 
+    // os.date format: a tiny strftime subset, plus the special "*t" form.
+    // The "*t" case writes 9 LE i32 fields into $fmt_buf and signals the
+    // table-return path by returning -1; everything else writes the
+    // rendered string into $fmt_buf and returns its byte length.
+    function osDate(fmtRef, time, hasTime) {
+        const utc = (s) => s.startsWith("!") ? [true, s.slice(1)] : [false, s];
+        const fmtStr = fmtRef === null || fmtRef === undefined
+            ? "%c" : readLuaString(fmtRef);
+        const [useUTC, body] = utc(fmtStr);
+        const dt = hasTime ? new Date(Number(time) * 1000) : new Date();
+        const get = (kind) => {
+            switch (kind) {
+                case "Y": return useUTC ? dt.getUTCFullYear()  : dt.getFullYear();
+                case "m": return useUTC ? dt.getUTCMonth() + 1 : dt.getMonth() + 1;
+                case "d": return useUTC ? dt.getUTCDate()      : dt.getDate();
+                case "H": return useUTC ? dt.getUTCHours()     : dt.getHours();
+                case "M": return useUTC ? dt.getUTCMinutes()   : dt.getMinutes();
+                case "S": return useUTC ? dt.getUTCSeconds()   : dt.getSeconds();
+                case "w": return useUTC ? dt.getUTCDay()       : dt.getDay();
+            }
+            return 0;
+        };
+        const yday = () => {
+            const y = useUTC ? dt.getUTCFullYear() : dt.getFullYear();
+            const start = useUTC ? Date.UTC(y, 0, 1) : new Date(y, 0, 1).getTime();
+            const now = useUTC ? Date.UTC(y, dt.getUTCMonth(), dt.getUTCDate())
+                               : new Date(y, dt.getMonth(), dt.getDate()).getTime();
+            return Math.floor((now - start) / 86400000) + 1;
+        };
+        if (body === "*t") {
+            const fields = [
+                get("Y"), get("m"), get("d"),
+                get("H"), get("M"), get("S"),
+                get("w") + 1,  // Lua wday: 1=Sun..7=Sat (JS: 0..6)
+                yday(),
+                // No DST info in a portable JS Date; report false for UTC,
+                // otherwise infer by comparing offset against January.
+                useUTC ? 0
+                       : (dt.getTimezoneOffset() <
+                          new Date(dt.getFullYear(), 0, 1).getTimezoneOffset()
+                          ? 1 : 0),
+            ];
+            for (let i = 0; i < fields.length; i++) {
+                const v = fields[i] | 0;
+                const o = i * 4;
+                exp().fmt_buf_set(o,     v        & 0xff);
+                exp().fmt_buf_set(o + 1, (v >>> 8)  & 0xff);
+                exp().fmt_buf_set(o + 2, (v >>> 16) & 0xff);
+                exp().fmt_buf_set(o + 3, (v >>> 24) & 0xff);
+            }
+            return -1;
+        }
+        const pad2 = (n) => n < 10 ? "0" + n : "" + n;
+        const out = body.replace(/%(.)/g, (_, c) => {
+            switch (c) {
+                case "Y": return "" + get("Y");
+                case "y": return pad2(get("Y") % 100);
+                case "m": return pad2(get("m"));
+                case "d": return pad2(get("d"));
+                case "H": return pad2(get("H"));
+                case "M": return pad2(get("M"));
+                case "S": return pad2(get("S"));
+                case "j": return pad2(yday()).padStart(3, "0");
+                case "w": return "" + get("w");
+                case "p": return get("H") < 12 ? "AM" : "PM";
+                case "c": return dt.toString();
+                case "x": return useUTC ? dt.toUTCString().slice(0, 16) : dt.toDateString();
+                case "X": return pad2(get("H")) + ":" + pad2(get("M")) + ":" + pad2(get("S"));
+                case "%": return "%";
+                default:  return "%" + c;
+            }
+        });
+        return writeFmtBuf(out);
+    }
+
+    function osGetenv(nameRef) {
+        const v = process?.env?.[readLuaString(nameRef)];
+        if (v === undefined) return -1;
+        return writeFmtBuf(v);
+    }
+
     return {
         readLuaString,
         luaToString,
         writeFmtBuf,
         formatSpec,
         parseLuaNumber,
+        osDate,
+        osGetenv,
         // Convenience for parse-number-from-a-string-buffer:
         parseNumberFromString(text) {
             const s = text.trim();

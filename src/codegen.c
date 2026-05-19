@@ -1417,9 +1417,18 @@ static const char PRELUDE[] = {
  *  237, len 24: "attempt to index a value"       ($lua_tabset, $lua_index)
  *  261, len 18: "table index is nil"             ($builtin_rawset, $tab_set)
  *  279, len 18: "table index is NaN"             ($builtin_rawset, $tab_set)
- *  297, len  9: "too large"                      ($builtin_string_rep) */
-#define LITERAL_PREFIX "niltruefalse<float>numberstringtablefunctionboolean__index__add__eq\tLua 5.5'for' step is zeroattempt to call a non-function value__callmodule '' not loadedvalue out of rangedata does not fitinvalid UTF-8 codeattempt to perform arithmeticattempt to index a valuetable index is niltable index is NaNtoo large"
-#define LITERAL_PREFIX_LEN 306
+ *  297, len  9: "too large"                      ($builtin_string_rep)
+ *  306, len  4: "year"   } os.date("*t") field names, in struct-style
+ *  310, len  5: "month"  } order so $builtin_os_date can index into
+ *  315, len  3: "day"    } $str_data at fixed offsets when building
+ *  318, len  4: "hour"   } the result table.
+ *  322, len  3: "min"
+ *  325, len  3: "sec"
+ *  328, len  4: "wday"
+ *  332, len  4: "yday"
+ *  336, len  5: "isdst" */
+#define LITERAL_PREFIX "niltruefalse<float>numberstringtablefunctionboolean__index__add__eq\tLua 5.5'for' step is zeroattempt to call a non-function value__callmodule '' not loadedvalue out of rangedata does not fitinvalid UTF-8 codeattempt to perform arithmeticattempt to index a valuetable index is niltable index is NaNtoo largeyearmonthdayhourminsecwdayydayisdst"
+#define LITERAL_PREFIX_LEN 341
 
 /* Emit the body of one user function. */
 static void emit_user_function(CG *c, const LuaFunc *fn) {
@@ -1654,6 +1663,7 @@ static int class_for_global(const char *name, size_t name_len) {
     if (name_len == 5 && memcmp(name, "table", 5) == 0)  return BLT_LIB_TABLE;
     if (name_len == 4 && memcmp(name, "utf8", 4) == 0)   return BLT_LIB_UTF8;
     if (name_len == 5 && memcmp(name, "debug", 5) == 0)  return BLT_LIB_DEBUG;
+    if (name_len == 2 && memcmp(name, "os", 2) == 0)     return BLT_LIB_OS;
     return -1;
 }
 
@@ -1814,7 +1824,7 @@ int codegen_module(const ParseResult *pr, const char *src_name,
         "    (global.set $g_empty_str\n"
         "      (struct.new $LuaString (array.new $LuaArr (i32.const 0) (i32.const 0))))\n"
         "    (global.set $fmt_buf\n"
-        "      (array.new $LuaArr (i32.const 0) (i32.const 1024)))\n"
+        "      (array.new $LuaArr (i32.const 0) (i32.const 16384)))\n"
         "    (global.set $call_lines\n"
         "      (array.new $LineArr (i32.const 0) (i32.const 256)))\n");
     /* Source name used by error() and debug.traceback. */
@@ -1902,6 +1912,7 @@ int codegen_module(const ParseResult *pr, const char *src_name,
         else if (glen == 5 && memcmp(gname, "table",  5) == 0) cls = BLT_LIB_TABLE;
         else if (glen == 4 && memcmp(gname, "utf8",   4) == 0) cls = BLT_LIB_UTF8;
         else if (glen == 5 && memcmp(gname, "debug",  5) == 0) cls = BLT_LIB_DEBUG;
+        else if (glen == 2 && memcmp(gname, "os",     2) == 0) cls = BLT_LIB_OS;
         else if (glen == 7 && memcmp(gname, "package", 7) == 0) {
             /* Milestone 25: package = { loaded = {}, preload = {} }.
              * No builtins live under this table; require() walks it.
@@ -1944,12 +1955,11 @@ int codegen_module(const ParseResult *pr, const char *src_name,
                 name_key.offset, name_key.len);
             continue;
         }
-        else if ((glen == 2 && memcmp(gname, "os", 2) == 0) ||
-                 (glen == 9 && memcmp(gname, "coroutine", 9) == 0)) {
+        else if (glen == 9 && memcmp(gname, "coroutine", 9) == 0) {
             /* Empty stub library — no functions installed. Enough to
-             * satisfy `require "os" == os` style identity checks and to
-             * keep `type(os) == "table"` happy; tests that actually call
-             * an os.* or coroutine.* function will still trip later. */
+             * satisfy `require "coroutine" == coroutine` style identity
+             * checks and to keep `type(coroutine) == "table"` happy;
+             * any actual coroutine.* call still trips later. */
             wat_append(out, "    (local.set $tab (call $tab_new))\n");
             StrRef name_key = strpool_add(&c.strs, gname, glen);
             wat_appendf(out,

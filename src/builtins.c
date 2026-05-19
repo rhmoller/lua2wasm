@@ -104,6 +104,13 @@ static const struct {
     { "getmetatable", 12, "$builtin_debug_getmetatable", BLT_LIB_DEBUG },
     { "setmetatable", 12, "$builtin_debug_setmetatable", BLT_LIB_DEBUG },
     { "gethook",      7, "$builtin_debug_gethook",      BLT_LIB_DEBUG },
+    /* os library — minimal shims. The host owns wall-clock time,
+     * environment variables, and process termination. */
+    { "time",   4, "$builtin_os_time",   BLT_LIB_OS },
+    { "clock",  5, "$builtin_os_clock",  BLT_LIB_OS },
+    { "date",   4, "$builtin_os_date",   BLT_LIB_OS },
+    { "getenv", 6, "$builtin_os_getenv", BLT_LIB_OS },
+    { "exit",   4, "$builtin_os_exit",   BLT_LIB_OS },
 };
 
 #define N (sizeof(BUILTINS)/sizeof(BUILTINS[0]))
