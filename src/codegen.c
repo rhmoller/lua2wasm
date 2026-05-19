@@ -204,9 +204,16 @@ static void la_block(CG *c, const Block *b, LabelAnalysisScope *parent, int home
         st->as.label.id = c->next_label_id++;
         st->as.label.has_forward = 0;
         st->as.label.has_backward = 0;
+        st->as.label.segment_idx = scope.n + 1; /* 1-based; segment 0 is "before any label" */
         scope.labels[scope.n] = st;
         scope.label_idx[scope.n] = (int)i;
         scope.n++;
+    }
+    /* All labels in this block share the same dispatch-block id: by
+     * convention the id of the first label declared in the block. */
+    int block_dispatch_id = scope.n > 0 ? scope.labels[0]->as.label.id : -1;
+    for (int i = 0; i < scope.n; i++) {
+        scope.labels[i]->as.label.block_dispatch_id = block_dispatch_id;
     }
     /* Pass 2: resolve gotos in this block, recurse into nested blocks. */
     for (size_t i = 0; i < b->count; i++) {
@@ -224,6 +231,8 @@ static void la_block(CG *c, const Block *b, LabelAnalysisScope *parent, int home
                 return;
             }
             st->as.label.target_id = lab->as.label.id;
+            st->as.label.block_dispatch_id = lab->as.label.block_dispatch_id;
+            st->as.label.target_segment_idx = lab->as.label.segment_idx;
             if (home_idx_of_goto < label_idx_in_home) {
                 st->as.label.direction = 0; /* forward */
                 lab->as.label.has_forward = 1;
@@ -916,10 +925,14 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
         }
 
         case STMT_GOTO: {
+            /* Dispatch lowering: set the target block's $next, then re-enter
+             * its dispatch loop. The local and label are function-scoped, so
+             * this works from inside arbitrarily nested blocks/loops. */
             emit_indent(c, depth);
-            wat_appendf(c->w, "br $lbl_%d_%s\n",
-                s->as.label.target_id,
-                s->as.label.direction == 0 ? "fwd" : "back");
+            wat_appendf(c->w, "(local.set $next_%d (i32.const %d))\n",
+                s->as.label.block_dispatch_id, s->as.label.target_segment_idx);
+            emit_indent(c, depth);
+            wat_appendf(c->w, "(br $dispatch_%d)\n", s->as.label.block_dispatch_id);
             break;
         }
 
@@ -1198,6 +1211,41 @@ static void emit_close_calls(CG *c, const int *slots, int n, int depth) {
     }
 }
 
+/* Emit a goto-able block as a dispatch table:
+ *
+ *   (block $exit_BID
+ *     (loop  $dispatch_BID
+ *       (block $seg_BID_N
+ *         …
+ *         (block $seg_BID_1
+ *           (block $seg_BID_0
+ *             (br_table $seg_BID_0 $seg_BID_1 … $seg_BID_N $exit_BID
+ *                       (local.get $next_BID))
+ *           )
+ *           <segment 0 body>
+ *           (local.set $next_BID 1) (br $dispatch_BID)
+ *         )
+ *         <segment 1 body>
+ *         (local.set $next_BID 2) (br $dispatch_BID)
+ *       )
+ *       …
+ *       <segment N body>
+ *       (br $exit_BID)
+ *     )
+ *   )
+ *
+ * Where BID is the block's dispatch id (= id of the first label declared
+ * in it). Segments are: segment 0 = the stmts before the first label;
+ * segment k (1..N) = the stmts at label k (after the label itself). A
+ * goto to a label in this block becomes
+ *     (local.set $next_BID K) (br $dispatch_BID)
+ * — and the same shape works for jumps OUT of nested blocks because the
+ * $next_BID local is function-scoped and $dispatch_BID is just a label
+ * br can traverse through.
+ *
+ * This handles every label graph including interleaved forward+backward
+ * scopes (the original cross-label-overlap case the old nested-blocks
+ * lowering had to bail out on). */
 static void emit_block(CG *c, const Block *b, int depth) {
     /* Fast path: no labels in this block, no wrappers needed. */
     int has_labels = 0;
@@ -1212,78 +1260,120 @@ static void emit_block(CG *c, const Block *b, int depth) {
         return;
     }
 
-    /* Slow path: emit nested (block $lbl_N_fwd …) wrappers for each
-     * forward-targeted label (outer = later in source), and (loop
-     * $lbl_N_back …) wrappers starting at each backward-targeted label
-     * (outer = earlier in source).
-     *
-     * Cross-label overlap (forward to a later label, backward to an
-     * earlier one) is not representable in structured WAT without
-     * dispatch; we error if it would arise.
-     */
-    struct { int id; int idx; int fwd; int back; } labs[64];
-    int nlabs = 0;
+    /* Compute segment boundaries: seg_start[k] = index of the first stmt
+     * in segment k (k = 0..N). Segment 0 starts at 0; segment k>=1 starts
+     * at the position AFTER the k-th label statement. */
+    int seg_start[65];                          /* up to 64 labels + sentinel */
+    int N = 0;
+    int bid = -1;
+    seg_start[0] = 0;
+    for (size_t i = 0; i < b->count; i++) {
+        Stmt *st = b->items[i];
+        if (st->kind != STMT_LABEL) continue;
+        if (N == 0) bid = st->as.label.block_dispatch_id;
+        N++;
+        if (N >= 64) { cg_error(c, "too many labels in one block (limit 64)"); return; }
+        seg_start[N] = (int)i + 1;
+    }
+    int seg_end_N = (int)b->count;              /* end of segment N */
+
+    /* Reset the dispatch state on entry: $next_BID is a function-scoped
+     * local, so a previous entry (e.g. a previous iteration of an
+     * enclosing for-loop) would otherwise leave us pointing at the wrong
+     * segment. */
+    emit_indent(c, depth);
+    wat_appendf(c->w, "(local.set $next_%d (i32.const 0))\n", bid);
+    /* Outer (block $exit_BID) — natural fall-through and gotos exit here. */
+    emit_indent(c, depth);
+    wat_appendf(c->w, "(block $exit_%d\n", bid);
+    /* Dispatch loop — backward jumps go through here. */
+    emit_indent(c, depth + 1);
+    wat_appendf(c->w, "(loop $dispatch_%d\n", bid);
+
+    /* Open N+1 nested (block $seg_BID_k …) from outermost (k=N) to innermost (k=0). */
+    for (int k = N; k >= 0; k--) {
+        emit_indent(c, depth + 2 + (N - k));
+        wat_appendf(c->w, "(block $seg_%d_%d\n", bid, k);
+    }
+    /* Innermost: the br_table. Targets in order: seg_0, seg_1, …, seg_N, exit. */
+    emit_indent(c, depth + 3 + N);
+    wat_append(c->w, "(br_table");
+    for (int k = 0; k <= N; k++) wat_appendf(c->w, " $seg_%d_%d", bid, k);
+    wat_appendf(c->w, " $exit_%d (local.get $next_%d))\n", bid, bid);
+    /* Close the innermost block ($seg_BID_0). */
+    emit_indent(c, depth + 2 + N);
+    wat_append(c->w, ")\n");
+
+    /* Emit segment 0..N bodies. After each segment's closing paren of its
+     * own (block) wrapper, we are at depth = depth + 2 + (N-k) — i.e. for
+     * segment k we sit "between" the close of $seg_BID_k and the close of
+     * $seg_BID_{k+1}. */
+    for (int k = 0; k <= N; k++) {
+        int body_depth = depth + 2 + (N - k);
+        int start = seg_start[k];
+        int end = (k < N) ? seg_start[k + 1] - 1 /* skip the label stmt */
+                          : seg_end_N;
+        for (int i = start; i < end; i++) {
+            Stmt *st = b->items[i];
+            if (st->kind == STMT_LABEL) continue; /* labels are markers, not code */
+            emit_stmt(c, st, body_depth);
+        }
+        if (k < N) {
+            /* Fall through to segment k+1 by re-entering the dispatch. */
+            emit_indent(c, body_depth);
+            wat_appendf(c->w, "(local.set $next_%d (i32.const %d))\n", bid, k + 1);
+            emit_indent(c, body_depth);
+            wat_appendf(c->w, "(br $dispatch_%d)\n", bid);
+            /* Close the surrounding $seg_BID_{k+1} block now that this
+             * segment's body is complete. */
+            emit_indent(c, body_depth - 1);
+            wat_append(c->w, ")\n");
+        } else {
+            /* Last segment: natural exit from the dispatched block. */
+            emit_indent(c, body_depth);
+            wat_appendf(c->w, "(br $exit_%d)\n", bid);
+        }
+    }
+    /* Close the loop and outer block. */
+    emit_indent(c, depth + 1);
+    wat_append(c->w, ")\n");
+    emit_indent(c, depth);
+    wat_append(c->w, ")\n");
+    emit_close_calls(c, close_slots, n_close, depth);
+}
+
+/* Walk a block body collecting dispatch ids of every block-with-labels.
+ * Output is the set of distinct ids (no duplicates because each block's
+ * dispatch id is uniquely the id of its first label). */
+static void collect_dispatch_ids(const Block *b, int *out, int *n, int cap);
+static void collect_dispatch_ids_stmt(const Stmt *s, int *out, int *n, int cap) {
+    switch (s->kind) {
+    case STMT_DO:      collect_dispatch_ids(&s->as.do_stmt.body,    out, n, cap); break;
+    case STMT_WHILE:   collect_dispatch_ids(&s->as.while_stmt.body, out, n, cap); break;
+    case STMT_REPEAT:  collect_dispatch_ids(&s->as.repeat.body,     out, n, cap); break;
+    case STMT_FOR_NUM: collect_dispatch_ids(&s->as.for_num.body,    out, n, cap); break;
+    case STMT_FOR_GEN: collect_dispatch_ids(&s->as.for_gen.body,    out, n, cap); break;
+    case STMT_IF:
+        for (size_t i = 0; i < s->as.if_stmt.narms; i++)
+            collect_dispatch_ids(&s->as.if_stmt.arms[i].body, out, n, cap);
+        if (s->as.if_stmt.has_else)
+            collect_dispatch_ids(&s->as.if_stmt.else_body, out, n, cap);
+        break;
+    default: break;
+    }
+}
+static void collect_dispatch_ids(const Block *b, int *out, int *n, int cap) {
+    /* Find the first label in this block (if any) — its id is the dispatch id. */
     for (size_t i = 0; i < b->count; i++) {
         const Stmt *st = b->items[i];
         if (st->kind == STMT_LABEL) {
-            labs[nlabs].id = st->as.label.id;
-            labs[nlabs].idx = (int)i;
-            labs[nlabs].fwd = st->as.label.has_forward;
-            labs[nlabs].back = st->as.label.has_backward;
-            nlabs++;
+            if (*n < cap) out[(*n)++] = st->as.label.block_dispatch_id;
+            break;
         }
     }
-    for (int i = 0; i < nlabs; i++) {
-        for (int j = 0; j < nlabs; j++) {
-            if (labs[i].fwd && labs[j].back && labs[i].idx > labs[j].idx) {
-                cg_error(c,
-                    "overlapping forward+backward labels in one block cannot "
-                    "currently be lowered to structured WAT; refactor or split");
-                return;
-            }
-        }
-    }
-
-    /* Open forward blocks for ALL forward-targeted labels in REVERSE
-     * source order — last label's block is outermost. */
-    int extra_depth = 0;
-    for (int i = nlabs - 1; i >= 0; i--) {
-        if (!labs[i].fwd) continue;
-        emit_indent(c, depth + extra_depth);
-        wat_appendf(c->w, "(block $lbl_%d_fwd\n", labs[i].id);
-        extra_depth++;
-    }
-
-    int back_open_count = 0;   /* loop_back wrappers currently open */
     for (size_t i = 0; i < b->count; i++) {
-        Stmt *st = b->items[i];
-        if (st->kind == STMT_LABEL) {
-            /* Close this label's forward block if any. */
-            if (st->as.label.has_forward) {
-                extra_depth--;
-                emit_indent(c, depth + extra_depth);
-                wat_append(c->w, ")\n");
-            }
-            /* Open this label's backward loop if any; it stays open
-             * until end-of-block. */
-            if (st->as.label.has_backward) {
-                emit_indent(c, depth + extra_depth);
-                wat_appendf(c->w, "(loop $lbl_%d_back\n", st->as.label.id);
-                extra_depth++;
-                back_open_count++;
-            }
-            continue;
-        }
-        emit_stmt(c, st, depth + extra_depth);
+        collect_dispatch_ids_stmt(b->items[i], out, n, cap);
     }
-
-    /* Close all backward loops opened so far. */
-    for (int i = 0; i < back_open_count; i++) {
-        extra_depth--;
-        emit_indent(c, depth + extra_depth);
-        wat_append(c->w, ")\n");
-    }
-    emit_close_calls(c, close_slots, n_close, depth);
 }
 
 /* ============================================================
@@ -1321,6 +1411,12 @@ static void emit_user_function(CG *c, const LuaFunc *fn) {
     c->cur_captured = fn->captured;
     c->cur_n_locals = fn->n_locals;
 
+    /* Run the label pre-pass NOW so block_dispatch_id is populated on
+     * every label and goto before we emit the $next_BID i32 locals. */
+    int saved_next_id_pre = c->next_label_id;
+    c->next_label_id = 0;
+    la_block(c, &fn->body, NULL, -1);
+
     for (int i = 0; i < fn->n_locals; i++) {
         if (fn->captured && fn->captured[i]) {
             wat_appendf(w, "    (local $L%d (ref $Box))\n", i);
@@ -1340,6 +1436,16 @@ static void emit_user_function(CG *c, const LuaFunc *fn) {
     if (fn->is_vararg) {
         /* Non-null: prologue always writes $varargs before first use. */
         wat_append(w, "    (local $varargs (ref $ArgArr))\n");
+    }
+    /* Pre-pass found these; emit one i32 local per dispatch block in this
+     * function so STMT_GOTO can target them and emit_block can read them
+     * in br_table. Default-zero i32 ⇒ first dispatch lands in segment 0. */
+    {
+        int bids[128]; int n = 0;
+        collect_dispatch_ids(&fn->body, bids, &n, 128);
+        for (int i = 0; i < n; i++) {
+            wat_appendf(w, "    (local $next_%d i32)\n", bids[i]);
+        }
     }
 
     /* Param extraction: each declared parameter takes args[i] (nil if missing). */
@@ -1362,12 +1468,8 @@ static void emit_user_function(CG *c, const LuaFunc *fn) {
 
     int was_in_main = c->in_main;
     c->in_main = 0;
-    /* Reset the label-id counter per function (labels are function-local). */
-    int saved_next_id = c->next_label_id;
-    c->next_label_id = 0;
-    la_block(c, &fn->body, NULL, -1);
     if (c->ok) emit_block(c, &fn->body, 2);
-    c->next_label_id = saved_next_id;
+    c->next_label_id = saved_next_id_pre;
     c->in_main = was_in_main;
 
     /* Default trailing return — empty results array. */
@@ -1861,6 +1963,11 @@ int codegen_module(const ParseResult *pr, const char *src_name,
         wat_append(out, "  (func $main (export \"main\")\n");
         c.cur_captured = pr->main_captured;
         c.cur_n_locals = pr->main_n_locals;
+        /* Pre-pass before locals: dispatch ids must be assigned so the
+         * $next_BID i32 locals can be declared up-front. */
+        c.next_label_id = 0;
+        la_block(&c, &pr->main_body, NULL, -1);
+
         for (int i = 0; i < pr->main_n_locals; i++) {
             if (pr->main_captured && pr->main_captured[i]) {
                 wat_appendf(out, "    (local $L%d (ref $Box))\n", i);
@@ -1877,10 +1984,15 @@ int codegen_module(const ParseResult *pr, const char *src_name,
         wat_append(out, "    (local $for_iter_any anyref)\n");
         wat_append(out, "    (local $for_state anyref)\n");
         wat_append(out, "    (local $for_k anyref)\n");
+        {
+            int bids[128]; int n = 0;
+            collect_dispatch_ids(&pr->main_body, bids, &n, 128);
+            for (int i = 0; i < n; i++) {
+                wat_appendf(out, "    (local $next_%d i32)\n", bids[i]);
+            }
+        }
         wat_append(out, "    (call $stdlib_init)\n");
 
-        c.next_label_id = 0;
-        la_block(&c, &pr->main_body, NULL, -1);
         if (c.ok) emit_block(&c, &pr->main_body, 2);
 
         wat_append(out, "  )\n");

@@ -246,12 +246,22 @@ struct Stmt {
         struct {                    /* goto NAME  /  ::NAME:: */
             const char *name;
             size_t name_len;
-            /* Codegen pre-pass fills these in; parser leaves them zeroed. */
-            int id;                 /* unique label id within enclosing function (STMT_LABEL) */
-            int has_forward;        /* any goto-to-this-label is before label (STMT_LABEL) */
-            int has_backward;       /* any goto-to-this-label is after label (STMT_LABEL) */
-            int target_id;          /* resolved label id (STMT_GOTO) */
-            int direction;          /* 0 forward, 1 backward (STMT_GOTO) */
+            /* Codegen pre-pass fills these in; parser leaves them zeroed.
+             * Two lowerings live here:
+             *  - Nested-blocks (id/has_forward/has_backward/target_id/direction)
+             *    was the original scheme; superseded by dispatch lowering.
+             *  - Dispatch (segment_idx/block_dispatch_id/target_segment_idx)
+             *    handles any label graph including interleaving forward+backward
+             *    scopes by emitting a per-block (loop $dispatch_BID) wrapping
+             *    nested (block)s, with a br_table on an i32 local $next_BID. */
+            int id;                       /* (STMT_LABEL) unique label id */
+            int has_forward;              /* (STMT_LABEL) legacy field */
+            int has_backward;             /* (STMT_LABEL) legacy field */
+            int target_id;                /* (STMT_GOTO)  legacy field */
+            int direction;                /* (STMT_GOTO)  legacy field */
+            int segment_idx;              /* (STMT_LABEL) 1..N, position in block's label list */
+            int block_dispatch_id;        /* (STMT_LABEL or STMT_GOTO) id of the enclosing dispatch block */
+            int target_segment_idx;       /* (STMT_GOTO)  segment number to land at */
         } label;
     } as;
 };
