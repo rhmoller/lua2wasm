@@ -6,7 +6,7 @@ WAT="$BUILD_DIR/table_pack.wat"
 WASM="$BUILD_DIR/table_pack.wasm"
 
 "$BIN" "$FIXTURE" -o "$WAT"
-wasm-as --all-features -o "$WASM" "$WAT"
+wasm-as --all-features --disable-custom-descriptors -o "$WASM" "$WAT"
 
 EXPECTED=$'3\t10\t20\t30
 0\tnil

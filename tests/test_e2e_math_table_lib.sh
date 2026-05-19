@@ -4,7 +4,7 @@ BIN="$1"; SRC_DIR="$2"; BUILD_DIR="$3"
 FIXTURE="$SRC_DIR/tests/fixtures/math_table_lib.lua"
 WAT="$BUILD_DIR/math_table_lib.wat"; WASM="$BUILD_DIR/math_table_lib.wasm"
 "$BIN" "$FIXTURE" -o "$WAT"
-wasm-as --all-features -o "$WASM" "$WAT"
+wasm-as --all-features --disable-custom-descriptors -o "$WASM" "$WAT"
 
 EXPECTED="4
 -1

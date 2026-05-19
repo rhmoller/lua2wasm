@@ -4,7 +4,7 @@ BIN="$1"; SRC_DIR="$2"; BUILD_DIR="$3"
 FIXTURE="$SRC_DIR/tests/fixtures/iterator.lua"
 WAT="$BUILD_DIR/iterator.wat"; WASM="$BUILD_DIR/iterator.wasm"
 "$BIN" "$FIXTURE" -o "$WAT"
-wasm-as --all-features -o "$WASM" "$WAT"
+wasm-as --all-features --disable-custom-descriptors -o "$WASM" "$WAT"
 # Trailing print(g()) emits an empty line — bash command substitution
 # strips trailing newlines from OUT, so the expected ends at "12".
 EXPECTED="2

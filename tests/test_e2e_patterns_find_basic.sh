@@ -6,7 +6,7 @@ WAT="$BUILD_DIR/patterns_find_basic.wat"
 WASM="$BUILD_DIR/patterns_find_basic.wasm"
 
 "$BIN" "$FIXTURE" -o "$WAT"
-wasm-as --all-features -o "$WASM" "$WAT"
+wasm-as --all-features --disable-custom-descriptors -o "$WASM" "$WAT"
 
 EXPECTED=$'2\t4
 nil

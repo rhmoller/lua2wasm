@@ -5,7 +5,7 @@ FIXTURE="$SRC_DIR/tests/fixtures/method_sugar.lua"
 WAT="$BUILD_DIR/method_sugar.wat"; WASM="$BUILD_DIR/method_sugar.wasm"
 
 "$BIN" "$FIXTURE" -o "$WAT"
-wasm-as --all-features -o "$WASM" "$WAT"
+wasm-as --all-features --disable-custom-descriptors -o "$WASM" "$WAT"
 
 EXPECTED="hi, world
 yo, there

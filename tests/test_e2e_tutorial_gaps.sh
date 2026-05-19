@@ -4,7 +4,7 @@ BIN="$1"; SRC_DIR="$2"; BUILD_DIR="$3"
 FIXTURE="$SRC_DIR/tests/fixtures/tutorial_gaps.lua"
 WAT="$BUILD_DIR/tutorial_gaps.wat"; WASM="$BUILD_DIR/tutorial_gaps.wasm"
 "$BIN" "$FIXTURE" -o "$WAT"
-wasm-as --all-features -o "$WASM" "$WAT"
+wasm-as --all-features --disable-custom-descriptors -o "$WASM" "$WAT"
 EXPECTED="true
 0.0
 1.0

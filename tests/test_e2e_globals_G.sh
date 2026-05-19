@@ -6,7 +6,7 @@ WAT="$BUILD_DIR/globals_G.wat"
 WASM="$BUILD_DIR/globals_G.wasm"
 
 "$BIN" "$FIXTURE" -o "$WAT"
-wasm-as --all-features -o "$WASM" "$WAT"
+wasm-as --all-features --disable-custom-descriptors -o "$WASM" "$WAT"
 
 EXPECTED=$'true
 table

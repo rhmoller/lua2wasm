@@ -6,7 +6,7 @@ WAT="$BUILD_DIR/hex_literals.wat"
 WASM="$BUILD_DIR/hex_literals.wasm"
 
 "$BIN" "$FIXTURE" -o "$WAT"
-wasm-as --all-features -o "$WASM" "$WAT"
+wasm-as --all-features --disable-custom-descriptors -o "$WASM" "$WAT"
 
 EXPECTED="255
 255

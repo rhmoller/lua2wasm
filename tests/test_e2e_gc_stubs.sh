@@ -6,7 +6,7 @@ WAT="$BUILD_DIR/gc_stubs.wat"
 WASM="$BUILD_DIR/gc_stubs.wasm"
 
 "$BIN" "$FIXTURE" -o "$WAT"
-wasm-as --all-features -o "$WASM" "$WAT"
+wasm-as --all-features --disable-custom-descriptors -o "$WASM" "$WAT"
 
 EXPECTED="0
 0.0

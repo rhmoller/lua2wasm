@@ -6,7 +6,7 @@ WAT="$BUILD_DIR/builtins_basic.wat"
 WASM="$BUILD_DIR/builtins_basic.wasm"
 
 "$BIN" "$FIXTURE" -o "$WAT"
-wasm-as --all-features -o "$WASM" "$WAT"
+wasm-as --all-features --disable-custom-descriptors -o "$WASM" "$WAT"
 
 EXPECTED="Lua 5.5
 42

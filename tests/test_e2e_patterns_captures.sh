@@ -6,7 +6,7 @@ WAT="$BUILD_DIR/patterns_captures.wat"
 WASM="$BUILD_DIR/patterns_captures.wasm"
 
 "$BIN" "$FIXTURE" -o "$WAT"
-wasm-as --all-features -o "$WASM" "$WAT"
+wasm-as --all-features --disable-custom-descriptors -o "$WASM" "$WAT"
 
 EXPECTED=$'1\t11\thello\tworld
 1\t3\ta\tb\tc

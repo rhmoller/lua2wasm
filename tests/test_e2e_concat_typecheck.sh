@@ -6,7 +6,7 @@ WAT="$BUILD_DIR/concat_typecheck.wat"
 WASM="$BUILD_DIR/concat_typecheck.wasm"
 
 "$BIN" "$FIXTURE" -o "$WAT"
-wasm-as --all-features -o "$WASM" "$WAT"
+wasm-as --all-features --disable-custom-descriptors -o "$WASM" "$WAT"
 
 EXPECTED=$'ab
 a1

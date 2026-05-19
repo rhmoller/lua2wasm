@@ -6,7 +6,7 @@ WAT="$BUILD_DIR/local_prefix_attr.wat"
 WASM="$BUILD_DIR/local_prefix_attr.wasm"
 
 "$BIN" "$FIXTURE" -o "$WAT"
-wasm-as --all-features -o "$WASM" "$WAT"
+wasm-as --all-features --disable-custom-descriptors -o "$WASM" "$WAT"
 
 EXPECTED="10	20
 30	40"

@@ -6,7 +6,7 @@ WAT="$BUILD_DIR/global_const_decl.wat"
 WASM="$BUILD_DIR/global_const_decl.wasm"
 
 "$BIN" "$FIXTURE" -o "$WAT"
-wasm-as --all-features -o "$WASM" "$WAT"
+wasm-as --all-features --disable-custom-descriptors -o "$WASM" "$WAT"
 
 EXPECTED="1	2	10	20"
 OUT="$(node --experimental-wasm-exnref "$SRC_DIR/runtime/host.mjs" "$WASM")"

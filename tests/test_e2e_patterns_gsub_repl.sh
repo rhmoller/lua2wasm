@@ -6,7 +6,7 @@ WAT="$BUILD_DIR/patterns_gsub_repl.wat"
 WASM="$BUILD_DIR/patterns_gsub_repl.wasm"
 
 "$BIN" "$FIXTURE" -o "$WAT"
-wasm-as --all-features -o "$WASM" "$WAT"
+wasm-as --all-features --disable-custom-descriptors -o "$WASM" "$WAT"
 
 EXPECTED=$'onetwothree\t3
 12XYZ\t5

@@ -4,7 +4,7 @@ BIN="$1"; SRC_DIR="$2"; BUILD_DIR="$3"
 FIXTURE="$SRC_DIR/tests/fixtures/implicit_globals.lua"
 WAT="$BUILD_DIR/implicit_globals.wat"; WASM="$BUILD_DIR/implicit_globals.wasm"
 "$BIN" "$FIXTURE" -o "$WAT"
-wasm-as --all-features -o "$WASM" "$WAT"
+wasm-as --all-features --disable-custom-descriptors -o "$WASM" "$WAT"
 
 EXPECTED="42
 hi, world

@@ -6,7 +6,7 @@ WAT="$BUILD_DIR/fdiv_floor.wat"
 WASM="$BUILD_DIR/fdiv_floor.wasm"
 
 "$BIN" "$FIXTURE" -o "$WAT"
-wasm-as --all-features -o "$WASM" "$WAT"
+wasm-as --all-features --disable-custom-descriptors -o "$WASM" "$WAT"
 
 EXPECTED="2
 -3

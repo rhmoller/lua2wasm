@@ -6,7 +6,7 @@ WAT="$BUILD_DIR/string_pack_int.wat"
 WASM="$BUILD_DIR/string_pack_int.wasm"
 
 "$BIN" "$FIXTURE" -o "$WAT"
-wasm-as --all-features -o "$WASM" "$WAT"
+wasm-as --all-features --disable-custom-descriptors -o "$WASM" "$WAT"
 
 EXPECTED=$'0\t2
 -1\t2

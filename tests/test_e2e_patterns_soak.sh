@@ -6,7 +6,7 @@ WAT="$BUILD_DIR/patterns_soak.wat"
 WASM="$BUILD_DIR/patterns_soak.wasm"
 
 "$BIN" "$FIXTURE" -o "$WAT"
-wasm-as --all-features -o "$WASM" "$WAT"
+wasm-as --all-features --disable-custom-descriptors -o "$WASM" "$WAT"
 
 EXPECTED=$'Hello
 123

@@ -6,7 +6,7 @@ WAT="$BUILD_DIR/math_atan_log.wat"
 WASM="$BUILD_DIR/math_atan_log.wasm"
 
 "$BIN" "$FIXTURE" -o "$WAT"
-wasm-as --all-features -o "$WASM" "$WAT"
+wasm-as --all-features --disable-custom-descriptors -o "$WASM" "$WAT"
 
 EXPECTED="3.1415926535898
 0.0

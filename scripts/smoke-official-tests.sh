@@ -37,7 +37,7 @@ run_one() {
         stages+=("compile"); files+=("$base"); firstlines+=("$(head -n1 "$log")")
         return
     fi
-    if ! timeout "$PER_FILE_TIMEOUT" wasm-as --all-features -o "$wasm" "$wat" >"$log" 2>&1; then
+    if ! timeout "$PER_FILE_TIMEOUT" wasm-as --all-features --disable-custom-descriptors -o "$wasm" "$wat" >"$log" 2>&1; then
         stages+=("assemble"); files+=("$base"); firstlines+=("$(head -n1 "$log")")
         return
     fi

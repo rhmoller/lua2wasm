@@ -6,7 +6,7 @@ WAT="$BUILD_DIR/string_rep.wat"
 WASM="$BUILD_DIR/string_rep.wasm"
 
 "$BIN" "$FIXTURE" -o "$WAT"
-wasm-as --all-features -o "$WASM" "$WAT"
+wasm-as --all-features --disable-custom-descriptors -o "$WASM" "$WAT"
 
 EXPECTED="ababab
 ab-ab-ab

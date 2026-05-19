@@ -14,7 +14,7 @@ WASM="$BUILD_DIR/print_sum.wasm"
 
 # Binaryen's wasm-as supports the modern GC text format; the wabt shipped on
 # Arch (1.0.39) still rejects `anyref` and recursive `(ref null $t)` refs.
-wasm-as --all-features -o "$WASM" "$WAT"
+wasm-as --all-features --disable-custom-descriptors -o "$WASM" "$WAT"
 
 OUT="$(node --experimental-wasm-exnref "$SRC_DIR/runtime/host.mjs" "$WASM")"
 if [[ "$OUT" != "3" ]]; then

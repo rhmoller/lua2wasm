@@ -6,7 +6,7 @@ WAT="$BUILD_DIR/compare_typecheck.wat"
 WASM="$BUILD_DIR/compare_typecheck.wasm"
 
 "$BIN" "$FIXTURE" -o "$WAT"
-wasm-as --all-features -o "$WASM" "$WAT"
+wasm-as --all-features --disable-custom-descriptors -o "$WASM" "$WAT"
 
 EXPECTED=$'true
 false

@@ -6,7 +6,7 @@ WAT="$BUILD_DIR/milestone25.wat"
 WASM="$BUILD_DIR/milestone25.wasm"
 
 "$BIN" "$DIR/main.lua" -m "$DIR/util.lua" -m "$DIR/wrap.lua" -o "$WAT"
-wasm-as --all-features -o "$WASM" "$WAT"
+wasm-as --all-features --disable-custom-descriptors -o "$WASM" "$WAT"
 
 EXPECTED=$'OK!
 abab

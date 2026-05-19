@@ -6,7 +6,7 @@ WAT="$BUILD_DIR/table_sort.wat"
 WASM="$BUILD_DIR/table_sort.wasm"
 
 "$BIN" "$FIXTURE" -o "$WAT"
-wasm-as --all-features -o "$WASM" "$WAT"
+wasm-as --all-features --disable-custom-descriptors -o "$WASM" "$WAT"
 
 EXPECTED="1,1,2,3,3,4,5,5,6,9
 9,6,5,5,4,3,3,2,1,1

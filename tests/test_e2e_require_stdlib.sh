@@ -6,7 +6,7 @@ WAT="$BUILD_DIR/require_stdlib.wat"
 WASM="$BUILD_DIR/require_stdlib.wasm"
 
 "$BIN" "$FIXTURE" -o "$WAT"
-wasm-as --all-features -o "$WASM" "$WAT"
+wasm-as --all-features --disable-custom-descriptors -o "$WASM" "$WAT"
 
 EXPECTED="ok"
 OUT="$(node --experimental-wasm-exnref "$SRC_DIR/runtime/host.mjs" "$WASM")"

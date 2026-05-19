@@ -9,7 +9,7 @@ WAT="$BUILD_DIR/varargs.wat"
 WASM="$BUILD_DIR/varargs.wasm"
 
 "$BIN" "$FIXTURE" -o "$WAT"
-wasm-as --all-features -o "$WASM" "$WAT"
+wasm-as --all-features --disable-custom-descriptors -o "$WASM" "$WAT"
 
 EXPECTED=$(<"$EXPECTED_FILE")
 

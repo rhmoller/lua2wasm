@@ -6,7 +6,7 @@ WAT="$BUILD_DIR/paren_stmt.wat"
 WASM="$BUILD_DIR/paren_stmt.wasm"
 
 "$BIN" "$FIXTURE" -o "$WAT"
-wasm-as --all-features -o "$WASM" "$WAT"
+wasm-as --all-features --disable-custom-descriptors -o "$WASM" "$WAT"
 
 EXPECTED="hello world
 hello again"

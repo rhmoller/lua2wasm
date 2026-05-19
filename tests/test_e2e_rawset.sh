@@ -6,7 +6,7 @@ WAT="$BUILD_DIR/rawset.wat"
 WASM="$BUILD_DIR/rawset.wasm"
 
 "$BIN" "$FIXTURE" -o "$WAT"
-wasm-as --all-features -o "$WASM" "$WAT"
+wasm-as --all-features --disable-custom-descriptors -o "$WASM" "$WAT"
 
 EXPECTED=$'1\t2
 one\ttwo

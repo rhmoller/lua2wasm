@@ -6,7 +6,7 @@ WAT="$BUILD_DIR/string_escapes.wat"
 WASM="$BUILD_DIR/string_escapes.wasm"
 
 "$BIN" "$FIXTURE" -o "$WAT"
-wasm-as --all-features -o "$WASM" "$WAT"
+wasm-as --all-features --disable-custom-descriptors -o "$WASM" "$WAT"
 
 EXPECTED=$'3
 10

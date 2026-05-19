@@ -6,7 +6,7 @@ WAT="$BUILD_DIR/io_read_full.wat"
 WASM="$BUILD_DIR/io_read_full.wasm"
 
 "$BIN" "$FIXTURE" -o "$WAT"
-wasm-as --all-features -o "$WASM" "$WAT"
+wasm-as --all-features --disable-custom-descriptors -o "$WASM" "$WAT"
 
 EXPECTED=$'first
 second

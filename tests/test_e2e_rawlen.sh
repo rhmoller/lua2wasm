@@ -6,7 +6,7 @@ WAT="$BUILD_DIR/rawlen.wat"
 WASM="$BUILD_DIR/rawlen.wasm"
 
 "$BIN" "$FIXTURE" -o "$WAT"
-wasm-as --all-features -o "$WASM" "$WAT"
+wasm-as --all-features --disable-custom-descriptors -o "$WASM" "$WAT"
 
 EXPECTED="0
 5

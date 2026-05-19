@@ -6,7 +6,7 @@ WAT="$BUILD_DIR/math_random.wat"
 WASM="$BUILD_DIR/math_random.wasm"
 
 "$BIN" "$FIXTURE" -o "$WAT"
-wasm-as --all-features -o "$WASM" "$WAT"
+wasm-as --all-features --disable-custom-descriptors -o "$WASM" "$WAT"
 
 EXPECTED=$'true\ttrue\ttrue
 true

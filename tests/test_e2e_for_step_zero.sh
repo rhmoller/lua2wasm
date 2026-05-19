@@ -7,7 +7,7 @@ WAT="$BUILD_DIR/for_step_zero.wat"
 WASM="$BUILD_DIR/for_step_zero.wasm"
 
 "$BIN" "$FIXTURE" -o "$WAT"
-wasm-as --all-features -o "$WASM" "$WAT"
+wasm-as --all-features --disable-custom-descriptors -o "$WASM" "$WAT"
 
 EXPECTED="false
 'for' step is zero"

@@ -10,7 +10,7 @@ run_sample() {
     local wat="$BUILD_DIR/sample_$name.wat"
     local wasm="$BUILD_DIR/sample_$name.wasm"
     "$BIN" "$lua" -o "$wat"
-    wasm-as --all-features -o "$wasm" "$wat"
+    wasm-as --all-features --disable-custom-descriptors -o "$wasm" "$wat"
     local got
     got="$(node --experimental-wasm-exnref "$SRC_DIR/runtime/host.mjs" "$wasm")"
     if [[ "$got" != "$expected" ]]; then

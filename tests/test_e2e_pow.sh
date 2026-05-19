@@ -6,7 +6,7 @@ WAT="$BUILD_DIR/pow.wat"
 WASM="$BUILD_DIR/pow.wasm"
 
 "$BIN" "$FIXTURE" -o "$WAT"
-wasm-as --all-features -o "$WASM" "$WAT"
+wasm-as --all-features --disable-custom-descriptors -o "$WASM" "$WAT"
 
 EXPECTED="1024.0
 1.0

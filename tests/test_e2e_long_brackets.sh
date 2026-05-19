@@ -6,7 +6,7 @@ WAT="$BUILD_DIR/long_brackets.wat"
 WASM="$BUILD_DIR/long_brackets.wasm"
 
 "$BIN" "$FIXTURE" -o "$WAT"
-wasm-as --all-features -o "$WASM" "$WAT"
+wasm-as --all-features --disable-custom-descriptors -o "$WASM" "$WAT"
 
 EXPECTED=" plain 
 2

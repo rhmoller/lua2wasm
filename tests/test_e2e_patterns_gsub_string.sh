@@ -6,7 +6,7 @@ WAT="$BUILD_DIR/patterns_gsub_string.wat"
 WASM="$BUILD_DIR/patterns_gsub_string.wasm"
 
 "$BIN" "$FIXTURE" -o "$WAT"
-wasm-as --all-features -o "$WASM" "$WAT"
+wasm-as --all-features --disable-custom-descriptors -o "$WASM" "$WAT"
 
 EXPECTED=$'hell0 w0rld\t2
 hell0 world\t1

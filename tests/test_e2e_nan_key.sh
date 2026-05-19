@@ -7,7 +7,7 @@ WAT="$BUILD_DIR/nan_key.wat"
 WASM="$BUILD_DIR/nan_key.wasm"
 
 "$BIN" "$FIXTURE" -o "$WAT"
-wasm-as --all-features -o "$WASM" "$WAT"
+wasm-as --all-features --disable-custom-descriptors -o "$WASM" "$WAT"
 
 EXPECTED="true
 nil

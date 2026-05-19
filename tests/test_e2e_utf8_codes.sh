@@ -6,7 +6,7 @@ WAT="$BUILD_DIR/utf8_codes.wat"
 WASM="$BUILD_DIR/utf8_codes.wasm"
 
 "$BIN" "$FIXTURE" -o "$WAT"
-wasm-as --all-features -o "$WASM" "$WAT"
+wasm-as --all-features --disable-custom-descriptors -o "$WASM" "$WAT"
 
 EXPECTED=$'1\t97
 2\t233

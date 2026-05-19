@@ -6,7 +6,7 @@ WAT="$BUILD_DIR/metamethods_arith.wat"
 WASM="$BUILD_DIR/metamethods_arith.wasm"
 
 "$BIN" "$FIXTURE" -o "$WAT"
-wasm-as --all-features -o "$WASM" "$WAT"
+wasm-as --all-features --disable-custom-descriptors -o "$WASM" "$WAT"
 
 EXPECTED=$'add\tadd
 sub\tsub

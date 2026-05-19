@@ -6,7 +6,7 @@ WAT="$BUILD_DIR/math_deg_rad.wat"
 WASM="$BUILD_DIR/math_deg_rad.wasm"
 
 "$BIN" "$FIXTURE" -o "$WAT"
-wasm-as --all-features -o "$WASM" "$WAT"
+wasm-as --all-features --disable-custom-descriptors -o "$WASM" "$WAT"
 
 EXPECTED="180.0
 90.0

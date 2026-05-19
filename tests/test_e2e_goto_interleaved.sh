@@ -6,7 +6,7 @@ WAT="$BUILD_DIR/goto_interleaved.wat"
 WASM="$BUILD_DIR/goto_interleaved.wasm"
 
 "$BIN" "$FIXTURE" -o "$WAT"
-wasm-as --all-features -o "$WASM" "$WAT"
+wasm-as --all-features --disable-custom-descriptors -o "$WASM" "$WAT"
 
 EXPECTED="1	2	5	4	nil"
 OUT="$(node --experimental-wasm-exnref "$SRC_DIR/runtime/host.mjs" "$WASM")"

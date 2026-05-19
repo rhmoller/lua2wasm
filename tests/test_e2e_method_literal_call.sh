@@ -6,7 +6,7 @@ WAT="$BUILD_DIR/method_literal_call.wat"
 WASM="$BUILD_DIR/method_literal_call.wasm"
 
 "$BIN" "$FIXTURE" -o "$WAT"
-wasm-as --all-features -o "$WASM" "$WAT"
+wasm-as --all-features --disable-custom-descriptors -o "$WASM" "$WAT"
 
 EXPECTED="hello world
 value"

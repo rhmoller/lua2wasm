@@ -7,7 +7,7 @@ WAT="$BUILD_DIR/milestone8.wat"
 WASM="$BUILD_DIR/milestone8.wasm"
 
 "$BIN" "$FIXTURE" -o "$WAT"
-wasm-as --all-features -o "$WASM" "$WAT"
+wasm-as --all-features --disable-custom-descriptors -o "$WASM" "$WAT"
 
 EXPECTED="dog
 dog speaks

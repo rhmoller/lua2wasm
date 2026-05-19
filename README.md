@@ -29,7 +29,7 @@ cmake --build build
 # 2. Compile a Lua program to a .wasm module
 echo 'print("hello from " .. "lua2wasm")' > /tmp/hello.lua
 ./build/lua2wasm /tmp/hello.lua -o /tmp/hello.wat
-wasm-as --all-features -o /tmp/hello.wasm /tmp/hello.wat
+wasm-as --all-features --disable-custom-descriptors -o /tmp/hello.wasm /tmp/hello.wat
 
 # 3. Run it
 node --experimental-wasm-exnref runtime/host.mjs /tmp/hello.wasm
@@ -187,7 +187,7 @@ Requirements (required vs optional):
 
 ```sh
 ./build/lua2wasm input.lua -o output.wat
-wasm-as --all-features -o output.wasm output.wat
+wasm-as --all-features --disable-custom-descriptors -o output.wasm output.wat
 ```
 
 Run under Node:

@@ -6,7 +6,7 @@ WAT="$BUILD_DIR/table_move.wat"
 WASM="$BUILD_DIR/table_move.wasm"
 
 "$BIN" "$FIXTURE" -o "$WAT"
-wasm-as --all-features -o "$WASM" "$WAT"
+wasm-as --all-features --disable-custom-descriptors -o "$WASM" "$WAT"
 
 EXPECTED=$'10,20,30,10,20,30
 1,2,3,tail

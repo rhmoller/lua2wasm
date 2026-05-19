@@ -10,7 +10,7 @@ WAT="$BUILD_DIR/milestone3b.wat"
 WASM="$BUILD_DIR/milestone3b.wasm"
 
 "$BIN" "$FIXTURE" -o "$WAT"
-wasm-as --all-features -o "$WASM" "$WAT"
+wasm-as --all-features --disable-custom-descriptors -o "$WASM" "$WAT"
 
 EXPECTED="10
 20

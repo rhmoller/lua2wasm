@@ -6,7 +6,7 @@ WAT="$BUILD_DIR/metamethods_ni_ts_mt.wat"
 WASM="$BUILD_DIR/metamethods_ni_ts_mt.wasm"
 
 "$BIN" "$FIXTURE" -o "$WAT"
-wasm-as --all-features -o "$WASM" "$WAT"
+wasm-as --all-features --disable-custom-descriptors -o "$WASM" "$WAT"
 
 EXPECTED=$'<v=42>
 <v=42>

@@ -9,7 +9,7 @@ WAT="$BUILD_DIR/table_unpack.wat"
 WASM="$BUILD_DIR/table_unpack.wasm"
 
 "$BIN" "$FIXTURE" -o "$WAT"
-wasm-as --all-features -o "$WASM" "$WAT"
+wasm-as --all-features --disable-custom-descriptors -o "$WASM" "$WAT"
 
 EXPECTED=$(<"$EXPECTED_FILE")
 

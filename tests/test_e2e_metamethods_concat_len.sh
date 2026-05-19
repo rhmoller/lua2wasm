@@ -6,7 +6,7 @@ WAT="$BUILD_DIR/metamethods_concat_len.wat"
 WASM="$BUILD_DIR/metamethods_concat_len.wasm"
 
 "$BIN" "$FIXTURE" -o "$WAT"
-wasm-as --all-features -o "$WASM" "$WAT"
+wasm-as --all-features --disable-custom-descriptors -o "$WASM" "$WAT"
 
 EXPECTED=$'A:x
 A:table

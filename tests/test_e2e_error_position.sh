@@ -6,7 +6,7 @@ WAT="$BUILD_DIR/error_position.wat"
 WASM="$BUILD_DIR/error_position.wasm"
 
 "$BIN" "$FIXTURE" -o "$WAT"
-wasm-as --all-features -o "$WASM" "$WAT"
+wasm-as --all-features --disable-custom-descriptors -o "$WASM" "$WAT"
 
 EXPECTED=$'false\terror_position:4: plain
 false\tno prefix
