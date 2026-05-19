@@ -125,7 +125,7 @@ local variable_arguments = function(...)
 	for i, v in ipairs({ ... }) do
 		print(i, v)
 	end
-	--  return unpack(arguments)
+	return table.unpack(arguments)
 end
 
 print("===================")
@@ -157,7 +157,6 @@ local MyTable = {}
 function MyTable.something(self, ...) end
 function MyTable:something(...) end
 
---[[
 local vector_mt = {}
 vector_mt.__add = function(left, right)
   return setmetatable({
@@ -170,8 +169,8 @@ end
 local v1 = setmetatable({ 3, 1, 5 }, vector_mt)
 local v2 = setmetatable({ -3, 2, 2 }, vector_mt)
 local v3 = v1 + v2
-vim.print(v3[1], v3[2], v3[3])
-vim.print(v3 + v3)
+print(v3[1], v3[2], v3[3])
+print(v3 + v3)
 
 
 
@@ -189,9 +188,3 @@ local fib = setmetatable({}, fib_mt)
 
 print(fib[5])
 print(fib[1000])
-
-
-
-
-
---]]
