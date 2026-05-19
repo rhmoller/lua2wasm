@@ -84,6 +84,40 @@
     background: var(--ctp-crust); color: var(--ctp-text);
     white-space: pre-wrap;
   }
+
+  /* Scrollbars: blend into the Catppuccin Mocha surface tones rather
+     than the browser default light-on-dark.
+     Firefox honours scrollbar-color; Chromium/Safari use the webkit
+     pseudo-elements. Both target the editor (.cm-scroller) and the
+     output panel (#out). */
+  .cm-scroller, #out {
+    scrollbar-width: thin;
+    scrollbar-color: var(--ctp-surface1) transparent;
+  }
+  .cm-scroller::-webkit-scrollbar,
+  #out::-webkit-scrollbar {
+    width: 10px; height: 10px;
+  }
+  .cm-scroller::-webkit-scrollbar-track,
+  #out::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  .cm-scroller::-webkit-scrollbar-thumb,
+  #out::-webkit-scrollbar-thumb {
+    background: var(--ctp-surface1);
+    border: 2px solid transparent;       /* fakes inset padding around the thumb */
+    border-radius: 6px;
+    background-clip: padding-box;
+  }
+  .cm-scroller::-webkit-scrollbar-thumb:hover,
+  #out::-webkit-scrollbar-thumb:hover {
+    background: var(--ctp-surface2);
+    background-clip: padding-box;
+  }
+  .cm-scroller::-webkit-scrollbar-corner,
+  #out::-webkit-scrollbar-corner {
+    background: transparent;
+  }
   .err  { color: var(--ctp-red); }
   .info { color: var(--ctp-overlay1); }
   .stdin-prompt { color: var(--ctp-sapphire); }
