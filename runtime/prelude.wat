@@ -746,10 +746,9 @@
 
   ;; lua_lt / le / gt / ge — operand-type aware.
   ;; Both numbers -> numeric compare. Both strings -> lexicographic.
-  ;; Anything else (incl. mixed types) -> Lua error.
-  ;; (TODO: __lt / __le metamethods.)
-  ;; Common metamethod path for < / <=: try left, then right; truthiness
-  ;; of first result is the answer. Throws if neither operand defines it.
+  ;; Anything else (incl. mixed types) -> __lt / __le metamethod, else
+  ;; Lua error. Tries the left operand's metamethod first, then the
+  ;; right; the truthiness of the first result is the answer.
   (func $compare_mm (param $a anyref) (param $b anyref)
                     (param $key (ref $LuaString)) (result i32)
     (local $mm anyref)
