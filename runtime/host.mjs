@@ -99,8 +99,19 @@ try {
     const tag = instance.exports && instance.exports.LuaError;
     if (tag && e instanceof WebAssembly.Exception && e.is(tag)) {
         const payload = e.getArg(tag, 0);
-        const msg = payload === null || payload === undefined
-                      ? "(nil error)" : luaToString(payload);
+        let msg;
+        if (payload === null || payload === undefined) {
+            /* Internal throw site with no message (e.g. argument-type
+             * errors deep in the builtins). Recover the throw-site line
+             * from the call-frame stack so the user at least knows where
+             * to look. */
+            const line = instance.exports.lua_error_line?.() ?? 0;
+            const srcRef = instance.exports.lua_src_name?.();
+            const src = srcRef ? luaToString(srcRef) : "?";
+            msg = line ? `${src}:${line}: (nil error)` : "(nil error)";
+        } else {
+            msg = luaToString(payload);
+        }
         process.stderr.write("lua: " + msg + "\n");
         process.exit(1);
     }

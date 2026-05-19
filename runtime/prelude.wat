@@ -5461,3 +5461,19 @@
   (func (export "fmt_buf_set") (param $i i32) (param $b i32)
     (array.set $LuaArr (ref.as_non_null (global.get $fmt_buf))
       (local.get $i) (local.get $b)))
+
+  ;; Error-context probes for the host's uncaught-exception path. On a
+  ;; thrown $LuaError the call-frame stack is left intact (pop is skipped
+  ;; on throw), so reading the topmost frame here yields the source line
+  ;; at the throw site — useful even when the payload is nil.
+  (func (export "lua_error_line") (result i32)
+    (if (result i32)
+        (i32.and
+          (i32.gt_s (global.get $call_depth) (i32.const 0))
+          (i32.eqz (ref.is_null (global.get $call_lines))))
+      (then (array.get $LineArr
+              (ref.as_non_null (global.get $call_lines))
+              (i32.sub (global.get $call_depth) (i32.const 1))))
+      (else (i32.const 0))))
+  (func (export "lua_src_name") (result anyref)
+    (global.get $g_src_name))

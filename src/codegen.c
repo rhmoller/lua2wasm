@@ -1962,6 +1962,69 @@ int codegen_module(const ParseResult *pr, const char *src_name,
                 name_key.offset, name_key.len);
         }
     }
+
+    /* Make each stdlib library visible through `require "<name>"` by
+     * registering it in `package.loaded`. The library tables have just
+     * been installed in _G above; here we walk _G again, look up
+     * package.loaded once, and forward each library reference into it. */
+    {
+        static const char *LIB_NAMES[] = {
+            "math", "string", "io", "table", "utf8", "debug", "package",
+        };
+        int need_any = 0;
+        for (size_t li = 0; li < sizeof(LIB_NAMES) / sizeof(LIB_NAMES[0]); li++) {
+            size_t llen = strlen(LIB_NAMES[li]);
+            for (size_t gi = 0; gi < pr->globals.count; gi++) {
+                if (pr->globals.items[gi].name_len == llen &&
+                    memcmp(pr->globals.items[gi].name, LIB_NAMES[li], llen) == 0 &&
+                    gref[gi]) {
+                    need_any = 1; break;
+                }
+            }
+            if (need_any) break;
+        }
+        /* Only emit the bridge code when package itself was built —
+         * otherwise the (ref.cast (ref $LuaTable) ...) would trap. */
+        int have_package = 0;
+        for (size_t gi = 0; gi < pr->globals.count; gi++) {
+            if (pr->globals.items[gi].name_len == 7 &&
+                memcmp(pr->globals.items[gi].name, "package", 7) == 0 &&
+                gref[gi]) { have_package = 1; break; }
+        }
+        if (need_any && have_package) {
+            StrRef pkg_k    = strpool_add(&c.strs, "package", 7);
+            StrRef loaded_k = strpool_add(&c.strs, "loaded",  6);
+            wat_appendf(out,
+                "    (local.set $tab (ref.cast (ref $LuaTable)\n"
+                "      (call $tab_get\n"
+                "        (ref.cast (ref $LuaTable) (call $tab_get\n"
+                "          (ref.as_non_null (global.get $g_globals))\n"
+                "          (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
+                "            (i32.const %zu) (i32.const %zu)))))\n"
+                "        (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
+                "          (i32.const %zu) (i32.const %zu))))))\n",
+                pkg_k.offset, pkg_k.len, loaded_k.offset, loaded_k.len);
+            for (size_t li = 0; li < sizeof(LIB_NAMES) / sizeof(LIB_NAMES[0]); li++) {
+                size_t llen = strlen(LIB_NAMES[li]);
+                int gi_found = -1;
+                for (size_t gi = 0; gi < pr->globals.count; gi++) {
+                    if (pr->globals.items[gi].name_len == llen &&
+                        memcmp(pr->globals.items[gi].name, LIB_NAMES[li], llen) == 0 &&
+                        gref[gi]) { gi_found = (int)gi; break; }
+                }
+                if (gi_found < 0) continue;
+                StrRef name_k = strpool_add(&c.strs, LIB_NAMES[li], llen);
+                wat_appendf(out,
+                    "    (call $tab_set (local.get $tab)\n"
+                    "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
+                    "        (i32.const %zu) (i32.const %zu)))\n"
+                    "      (call $tab_get (ref.as_non_null (global.get $g_globals))\n"
+                    "        (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
+                    "          (i32.const %zu) (i32.const %zu)))))\n",
+                    name_k.offset, name_k.len, name_k.offset, name_k.len);
+            }
+        }
+    }
     wat_append(out, "  )\n");
 
     wat_append(out, "\n  ;; --- user functions ---\n");
