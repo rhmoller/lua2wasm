@@ -71,11 +71,14 @@ static void lex_error(Lex *L, const char *msg) {
  * past the closing quote. Allocates the decoded bytes into *out_buf. */
 static int read_string(Lex *L, char q, char **out_buf, size_t *out_len) {
     L->p++; /* skip opening quote */
-    /* Upper-bound decoded length by distance-to-closing-quote — every escape
-     * sequence we recognize collapses to a single byte. One malloc, no realloc. */
+    /* Upper-bound decoded length by distance-to-closing-quote. Don't stop at
+     * '\n': `\z` legally skips over newlines, and an unescaped newline is
+     * caught (with a clear error) by the real decode loop below. Stopping at
+     * '\n' here under-counted the cap on multi-line `\z` strings and the
+     * decoder then overran the buffer. */
     const char *scan = L->p;
     size_t cap = 0;
-    while (*scan && *scan != q && *scan != '\n') {
+    while (*scan && *scan != q) {
         if (*scan == '\\' && scan[1]) scan++;
         scan++; cap++;
     }
@@ -282,6 +285,14 @@ static void skip_long_comment(Lex *L, int level) {
 TokenList lex(const char *source) {
     TokVec v = {0};
     Lex L = { .p = source, .line = 1, .ok = 1 };
+
+    /* Stock Lua silently skips a leading line that starts with '#'
+     * — used for both Unix shebangs (`#!/usr/bin/env lua`) and the
+     * occasional "special comment on first line" marker in test files.
+     * The newline itself is left in place so line numbers stay accurate. */
+    if (*L.p == '#') {
+        while (*L.p && *L.p != '\n') L.p++;
+    }
 
     while (*L.p && L.ok) {
         char c = *L.p;
