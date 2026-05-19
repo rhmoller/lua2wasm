@@ -316,8 +316,10 @@ TokenList lex(const char *source) {
         if (isdigit((unsigned char)c)) {
             const char *s = L.p;
             int is_float = 0;
+            int is_hex = 0;
             /* Hex literal: 0x... or 0X... */
             if (c == '0' && (L.p[1] == 'x' || L.p[1] == 'X')) {
+                is_hex = 1;
                 L.p += 2;
                 while (isxdigit((unsigned char)*L.p)) L.p++;
                 if (*L.p == '.') {
@@ -351,8 +353,10 @@ TokenList lex(const char *source) {
                 t.f_val = strtod(tmp, NULL);
             } else {
                 t.kind = TOK_INT;
-                /* strtoll with base 0 auto-detects 0x prefix. */
-                t.i_val = strtoll(tmp, NULL, 0);
+                /* Lua has no octal integer syntax — a leading zero is just
+                 * a decimal digit. Pass base 10 for plain integers; only
+                 * use the 0x branch via base 16 when we actually saw it. */
+                t.i_val = strtoll(tmp, NULL, is_hex ? 16 : 10);
             }
             push_tok(&v, t);
             continue;
