@@ -164,6 +164,20 @@
   (func $is_numlike (param $v anyref) (result i32)
     (i32.or (call $is_int (local.get $v)) (call $is_float (local.get $v))))
 
+  ;; Coerce a value to its numeric form for an arithmetic operation:
+  ;; numbers pass through, strings are parsed per Lua's tonumber rules,
+  ;; everything else yields nil. Callers fall back to the metamethod
+  ;; path when this returns nil for either operand. The original (un-
+  ;; coerced) value must still be passed to arith_mm so the metamethod
+  ;; sees what the user actually wrote.
+  (func $coerce_num (param $v anyref) (result anyref)
+    (if (result anyref) (call $is_numlike (local.get $v))
+      (then (local.get $v))
+      (else
+        (if (result anyref) (ref.test (ref $LuaString) (local.get $v))
+          (then (call $host_parse_num (local.get $v) (i32.const 0)))
+          (else (ref.null any))))))
+
   ;; Try a binary arithmetic metamethod: lookup $key on a, then b.
   ;; Returns the metamethod's first result if found; throws otherwise.
   (func $arith_mm (param $a anyref) (param $b anyref)
@@ -179,43 +193,55 @@
       (array.new_fixed $ArgArr 2 (local.get $a) (local.get $b)))))
 
   (func $lua_add (param $a anyref) (param $b anyref) (result anyref)
-    (if (i32.and (call $is_numlike (local.get $a)) (call $is_numlike (local.get $b)))
+    (local $ca anyref) (local $cb anyref)
+    (local.set $ca (call $coerce_num (local.get $a)))
+    (local.set $cb (call $coerce_num (local.get $b)))
+    (if (i32.and (call $is_numlike (local.get $ca)) (call $is_numlike (local.get $cb)))
       (then
-        (if (i32.and (call $is_int (local.get $a)) (call $is_int (local.get $b)))
-          (then (return (call $make_int (i64.add (call $as_int (local.get $a))
-                                                  (call $as_int (local.get $b)))))))
-        (return (call $make_float (f64.add (call $as_float (local.get $a))
-                                            (call $as_float (local.get $b)))))))
+        (if (i32.and (call $is_int (local.get $ca)) (call $is_int (local.get $cb)))
+          (then (return (call $make_int (i64.add (call $as_int (local.get $ca))
+                                                  (call $as_int (local.get $cb)))))))
+        (return (call $make_float (f64.add (call $as_float (local.get $ca))
+                                            (call $as_float (local.get $cb)))))))
     (call $arith_mm (local.get $a) (local.get $b)
       (ref.as_non_null (global.get $g_mkey_add))))
 
   (func $lua_sub (param $a anyref) (param $b anyref) (result anyref)
-    (if (i32.and (call $is_numlike (local.get $a)) (call $is_numlike (local.get $b)))
+    (local $ca anyref) (local $cb anyref)
+    (local.set $ca (call $coerce_num (local.get $a)))
+    (local.set $cb (call $coerce_num (local.get $b)))
+    (if (i32.and (call $is_numlike (local.get $ca)) (call $is_numlike (local.get $cb)))
       (then
-        (if (i32.and (call $is_int (local.get $a)) (call $is_int (local.get $b)))
-          (then (return (call $make_int (i64.sub (call $as_int (local.get $a))
-                                                  (call $as_int (local.get $b)))))))
-        (return (call $make_float (f64.sub (call $as_float (local.get $a))
-                                            (call $as_float (local.get $b)))))))
+        (if (i32.and (call $is_int (local.get $ca)) (call $is_int (local.get $cb)))
+          (then (return (call $make_int (i64.sub (call $as_int (local.get $ca))
+                                                  (call $as_int (local.get $cb)))))))
+        (return (call $make_float (f64.sub (call $as_float (local.get $ca))
+                                            (call $as_float (local.get $cb)))))))
     (call $arith_mm (local.get $a) (local.get $b)
       (ref.as_non_null (global.get $g_mkey_sub))))
 
   (func $lua_mul (param $a anyref) (param $b anyref) (result anyref)
-    (if (i32.and (call $is_numlike (local.get $a)) (call $is_numlike (local.get $b)))
+    (local $ca anyref) (local $cb anyref)
+    (local.set $ca (call $coerce_num (local.get $a)))
+    (local.set $cb (call $coerce_num (local.get $b)))
+    (if (i32.and (call $is_numlike (local.get $ca)) (call $is_numlike (local.get $cb)))
       (then
-        (if (i32.and (call $is_int (local.get $a)) (call $is_int (local.get $b)))
-          (then (return (call $make_int (i64.mul (call $as_int (local.get $a))
-                                                  (call $as_int (local.get $b)))))))
-        (return (call $make_float (f64.mul (call $as_float (local.get $a))
-                                            (call $as_float (local.get $b)))))))
+        (if (i32.and (call $is_int (local.get $ca)) (call $is_int (local.get $cb)))
+          (then (return (call $make_int (i64.mul (call $as_int (local.get $ca))
+                                                  (call $as_int (local.get $cb)))))))
+        (return (call $make_float (f64.mul (call $as_float (local.get $ca))
+                                            (call $as_float (local.get $cb)))))))
     (call $arith_mm (local.get $a) (local.get $b)
       (ref.as_non_null (global.get $g_mkey_mul))))
 
   ;; / always yields float (Lua 5.4/5.5)
   (func $lua_div (param $a anyref) (param $b anyref) (result anyref)
-    (if (i32.and (call $is_numlike (local.get $a)) (call $is_numlike (local.get $b)))
-      (then (return (call $make_float (f64.div (call $as_float (local.get $a))
-                                                (call $as_float (local.get $b)))))))
+    (local $ca anyref) (local $cb anyref)
+    (local.set $ca (call $coerce_num (local.get $a)))
+    (local.set $cb (call $coerce_num (local.get $b)))
+    (if (i32.and (call $is_numlike (local.get $ca)) (call $is_numlike (local.get $cb)))
+      (then (return (call $make_float (f64.div (call $as_float (local.get $ca))
+                                                (call $as_float (local.get $cb)))))))
     (call $arith_mm (local.get $a) (local.get $b)
       (ref.as_non_null (global.get $g_mkey_div))))
 
@@ -225,10 +251,13 @@
   ;; iff there's a remainder AND the operand signs disagree.
   (func $lua_fdiv (param $a anyref) (param $b anyref) (result anyref)
     (local $ai i64) (local $bi i64) (local $q i64) (local $r i64)
-    (if (i32.and (call $is_int (local.get $a)) (call $is_int (local.get $b)))
+    (local $ca anyref) (local $cb anyref)
+    (local.set $ca (call $coerce_num (local.get $a)))
+    (local.set $cb (call $coerce_num (local.get $b)))
+    (if (i32.and (call $is_int (local.get $ca)) (call $is_int (local.get $cb)))
       (then
-        (local.set $ai (call $as_int (local.get $a)))
-        (local.set $bi (call $as_int (local.get $b)))
+        (local.set $ai (call $as_int (local.get $ca)))
+        (local.set $bi (call $as_int (local.get $cb)))
         (local.set $q (i64.div_s (local.get $ai) (local.get $bi)))
         (local.set $r (i64.rem_s (local.get $ai) (local.get $bi)))
         (if (i32.and
@@ -236,10 +265,10 @@
               (i64.lt_s (i64.xor (local.get $ai) (local.get $bi)) (i64.const 0)))
           (then (local.set $q (i64.sub (local.get $q) (i64.const 1)))))
         (return (call $make_int (local.get $q)))))
-    (if (i32.and (call $is_numlike (local.get $a)) (call $is_numlike (local.get $b)))
+    (if (i32.and (call $is_numlike (local.get $ca)) (call $is_numlike (local.get $cb)))
       (then (return (call $make_float (f64.floor
-        (f64.div (call $as_float (local.get $a))
-                 (call $as_float (local.get $b))))))))
+        (f64.div (call $as_float (local.get $ca))
+                 (call $as_float (local.get $cb))))))))
     (call $arith_mm (local.get $a) (local.get $b)
       (ref.as_non_null (global.get $g_mkey_idiv))))
 
@@ -251,20 +280,23 @@
   (func $lua_mod (param $a anyref) (param $b anyref) (result anyref)
     (local $ai i64) (local $bi i64) (local $r i64)
     (local $af f64) (local $bf f64)
-    (if (i32.and (call $is_int (local.get $a)) (call $is_int (local.get $b)))
+    (local $ca anyref) (local $cb anyref)
+    (local.set $ca (call $coerce_num (local.get $a)))
+    (local.set $cb (call $coerce_num (local.get $b)))
+    (if (i32.and (call $is_int (local.get $ca)) (call $is_int (local.get $cb)))
       (then
-        (local.set $ai (call $as_int (local.get $a)))
-        (local.set $bi (call $as_int (local.get $b)))
+        (local.set $ai (call $as_int (local.get $ca)))
+        (local.set $bi (call $as_int (local.get $cb)))
         (local.set $r  (i64.rem_s (local.get $ai) (local.get $bi)))
         (if (i32.and
               (i64.ne (local.get $r) (i64.const 0))
               (i64.lt_s (i64.xor (local.get $ai) (local.get $bi)) (i64.const 0)))
           (then (local.set $r (i64.add (local.get $r) (local.get $bi)))))
         (return (call $make_int (local.get $r)))))
-    (if (i32.and (call $is_numlike (local.get $a)) (call $is_numlike (local.get $b)))
+    (if (i32.and (call $is_numlike (local.get $ca)) (call $is_numlike (local.get $cb)))
       (then
-        (local.set $af (call $as_float (local.get $a)))
-        (local.set $bf (call $as_float (local.get $b)))
+        (local.set $af (call $as_float (local.get $ca)))
+        (local.set $bf (call $as_float (local.get $cb)))
         (return (call $make_float
           (f64.sub (local.get $af)
                    (f64.mul (f64.floor (f64.div (local.get $af) (local.get $bf)))
@@ -276,11 +308,14 @@
   ;; non-integer exponents (2^0.5), negative exponents (2^-1), and
   ;; mixed-sign edge cases (NaN, inf, 0^0) all match IEEE-754 pow.
   (func $lua_pow (param $a anyref) (param $b anyref) (result anyref)
-    (if (i32.and (call $is_numlike (local.get $a)) (call $is_numlike (local.get $b)))
+    (local $ca anyref) (local $cb anyref)
+    (local.set $ca (call $coerce_num (local.get $a)))
+    (local.set $cb (call $coerce_num (local.get $b)))
+    (if (i32.and (call $is_numlike (local.get $ca)) (call $is_numlike (local.get $cb)))
       (then (return (call $make_float
         (call $host_math2 (i32.const 1)
-          (call $as_float (local.get $a))
-          (call $as_float (local.get $b)))))))
+          (call $as_float (local.get $ca))
+          (call $as_float (local.get $cb)))))))
     (call $arith_mm (local.get $a) (local.get $b)
       (ref.as_non_null (global.get $g_mkey_pow))))
 
@@ -403,12 +438,13 @@
       (array.new_fixed $ArgArr 2 (local.get $a) (local.get $a)))))
 
   (func $lua_neg (param $a anyref) (result anyref)
-    (local $mm anyref)
-    (if (call $is_numlike (local.get $a))
+    (local $mm anyref) (local $ca anyref)
+    (local.set $ca (call $coerce_num (local.get $a)))
+    (if (call $is_numlike (local.get $ca))
       (then
-        (if (call $is_int (local.get $a))
-          (then (return (call $make_int (i64.sub (i64.const 0) (call $as_int (local.get $a)))))))
-        (return (call $make_float (f64.neg (call $as_float (local.get $a)))))))
+        (if (call $is_int (local.get $ca))
+          (then (return (call $make_int (i64.sub (i64.const 0) (call $as_int (local.get $ca)))))))
+        (return (call $make_float (f64.neg (call $as_float (local.get $ca)))))))
     (local.set $mm (call $get_metamethod (local.get $a)
       (ref.as_non_null (global.get $g_mkey_unm))))
     (if (ref.is_null (local.get $mm))

@@ -1826,7 +1826,9 @@ int codegen_module(const ParseResult *pr, const char *src_name,
             sr.offset, sr.len, builtin_func_name(bi) + 1);
     }
 
-    /* Install _G as a self-reference. */
+    /* Install _G as a self-reference. _ENV is the per-function "environment"
+     * upvalue in Lua 5.4+; we don't implement that machinery, so we alias
+     * it to _G — close enough for tests that just need _ENV to exist. */
     {
         StrRef sr = strpool_add(&c.strs, "_G", 2);
         wat_appendf(out,
@@ -1835,6 +1837,13 @@ int codegen_module(const ParseResult *pr, const char *src_name,
             "        (i32.const %zu) (i32.const %zu)))\n"
             "      (ref.as_non_null (global.get $g_globals)))\n",
             sr.offset, sr.len);
+        StrRef env = strpool_add(&c.strs, "_ENV", 4);
+        wat_appendf(out,
+            "    (call $tab_set (ref.as_non_null (global.get $g_globals))\n"
+            "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
+            "        (i32.const %zu) (i32.const %zu)))\n"
+            "      (ref.as_non_null (global.get $g_globals)))\n",
+            env.offset, env.len);
     }
 
     /* Library tables + the _VERSION constant. Each library table is built
