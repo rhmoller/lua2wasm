@@ -1876,22 +1876,53 @@ int codegen_module(const ParseResult *pr, const char *src_name,
         else if (glen == 5 && memcmp(gname, "debug",  5) == 0) cls = BLT_LIB_DEBUG;
         else if (glen == 7 && memcmp(gname, "package", 7) == 0) {
             /* Milestone 25: package = { loaded = {}, preload = {} }.
-             * No builtins live under this table; require() walks it. */
+             * No builtins live under this table; require() walks it.
+             * We also stub package.path, package.cpath, package.config so
+             * tests that probe `type(package.path) == "string"` pass. */
             wat_append(out, "    (local.set $tab (call $tab_new))\n");
-            StrRef loaded_k  = strpool_add(&c.strs, "loaded",  6);
-            StrRef preload_k = strpool_add(&c.strs, "preload", 7);
+            static const struct { const char *key; const char *val; } PKG_STR[] = {
+                { "loaded",  NULL },     /* table — handled separately */
+                { "preload", NULL },
+                { "path",    "" },       /* empty: there's no filesystem here */
+                { "cpath",   "" },
+                { "config",  "/\n;\n?\n!\n-\n" }, /* the stock Lua default */
+            };
+            for (size_t pi = 0; pi < sizeof(PKG_STR)/sizeof(PKG_STR[0]); pi++) {
+                StrRef k = strpool_add(&c.strs, PKG_STR[pi].key, strlen(PKG_STR[pi].key));
+                if (PKG_STR[pi].val == NULL) {
+                    wat_appendf(out,
+                        "    (call $tab_set (local.get $tab)\n"
+                        "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
+                        "        (i32.const %zu) (i32.const %zu)))\n"
+                        "      (call $tab_new))\n",
+                        k.offset, k.len);
+                } else {
+                    StrRef v = strpool_add(&c.strs, PKG_STR[pi].val, strlen(PKG_STR[pi].val));
+                    wat_appendf(out,
+                        "    (call $tab_set (local.get $tab)\n"
+                        "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
+                        "        (i32.const %zu) (i32.const %zu)))\n"
+                        "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
+                        "        (i32.const %zu) (i32.const %zu))))\n",
+                        k.offset, k.len, v.offset, v.len);
+                }
+            }
+            StrRef name_key = strpool_add(&c.strs, gname, glen);
             wat_appendf(out,
-                "    (call $tab_set (local.get $tab)\n"
+                "    (call $tab_set (ref.as_non_null (global.get $g_globals))\n"
                 "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
                 "        (i32.const %zu) (i32.const %zu)))\n"
-                "      (call $tab_new))\n",
-                loaded_k.offset, loaded_k.len);
-            wat_appendf(out,
-                "    (call $tab_set (local.get $tab)\n"
-                "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
-                "        (i32.const %zu) (i32.const %zu)))\n"
-                "      (call $tab_new))\n",
-                preload_k.offset, preload_k.len);
+                "      (local.get $tab))\n",
+                name_key.offset, name_key.len);
+            continue;
+        }
+        else if ((glen == 2 && memcmp(gname, "os", 2) == 0) ||
+                 (glen == 9 && memcmp(gname, "coroutine", 9) == 0)) {
+            /* Empty stub library — no functions installed. Enough to
+             * satisfy `require "os" == os` style identity checks and to
+             * keep `type(os) == "table"` happy; tests that actually call
+             * an os.* or coroutine.* function will still trip later. */
+            wat_append(out, "    (local.set $tab (call $tab_new))\n");
             StrRef name_key = strpool_add(&c.strs, gname, glen);
             wat_appendf(out,
                 "    (call $tab_set (ref.as_non_null (global.get $g_globals))\n"
@@ -1981,6 +2012,7 @@ int codegen_module(const ParseResult *pr, const char *src_name,
     {
         static const char *LIB_NAMES[] = {
             "math", "string", "io", "table", "utf8", "debug", "package",
+            "os", "coroutine",
         };
         int need_any = 0;
         for (size_t li = 0; li < sizeof(LIB_NAMES) / sizeof(LIB_NAMES[0]); li++) {

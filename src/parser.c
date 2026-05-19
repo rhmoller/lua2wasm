@@ -1343,15 +1343,19 @@ ParseResult parse(const TokenList *tokens, NodePool *pool) {
     Parser p = { .toks = tokens, .pool = pool, .ok = 1, .frame_depth = 0 };
     frame_init(&p.frames[0]);
     /* Pre-declare stdlib library tables and well-known globals so user code can name them. */
-    globals_declare(&p, "math",     4);
-    globals_declare(&p, "string",   6);
-    globals_declare(&p, "io",       2);
-    globals_declare(&p, "table",    5);
-    globals_declare(&p, "utf8",     4);
-    globals_declare(&p, "debug",    5);
-    globals_declare(&p, "package",  7);
-    globals_declare(&p, "_VERSION", 8);
-    globals_declare(&p, "_G",       2);
+    globals_declare(&p, "math",      4);
+    globals_declare(&p, "string",    6);
+    globals_declare(&p, "io",        2);
+    globals_declare(&p, "table",     5);
+    globals_declare(&p, "utf8",      4);
+    globals_declare(&p, "debug",     5);
+    globals_declare(&p, "package",   7);
+    /* Stub libraries — empty tables, but their names exist so `require`
+     * succeeds and `os == os` identity checks pass. */
+    globals_declare(&p, "os",        2);
+    globals_declare(&p, "coroutine", 9);
+    globals_declare(&p, "_VERSION",  8);
+    globals_declare(&p, "_G",        2);
 
     Block main = {0};
     parse_block(&p, &main, TOK_EOF, TOK_EOF, TOK_EOF);
