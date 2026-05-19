@@ -34,6 +34,12 @@ static const struct {
      * \$g_builtin_utf8_codes_iter global. */
     { "_utf8_codes_iter", 16, "$builtin_utf8_codes_iter", BLT_TOPLEVEL },
     { "require", 7, "$builtin_require", BLT_TOPLEVEL },
+    /* Stubs for names common in the upstream test suite. lua2wasm leans
+     * on the host (V8/SpiderMonkey) GC and has no runtime compiler, so
+     * these can't do their real jobs — but returning spec-shaped values
+     * keeps programs that probe for these names from blowing up. */
+    { "collectgarbage", 14, "$builtin_collectgarbage", BLT_TOPLEVEL },
+    { "load",           4,  "$builtin_load",           BLT_TOPLEVEL },
     /* math library (installed into the `math` table) */
     { "floor", 5, "$builtin_math_floor", BLT_LIB_MATH },
     { "abs",   3, "$builtin_math_abs",   BLT_LIB_MATH },
@@ -97,6 +103,7 @@ static const struct {
     { "traceback",    9, "$builtin_debug_traceback",    BLT_LIB_DEBUG },
     { "getmetatable", 12, "$builtin_debug_getmetatable", BLT_LIB_DEBUG },
     { "setmetatable", 12, "$builtin_debug_setmetatable", BLT_LIB_DEBUG },
+    { "gethook",      7, "$builtin_debug_gethook",      BLT_LIB_DEBUG },
 };
 
 #define N (sizeof(BUILTINS)/sizeof(BUILTINS[0]))

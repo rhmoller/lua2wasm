@@ -1392,9 +1392,11 @@ static const char PRELUDE[] = {
 /* Reserved bytes added after the historical prefix:
  *   75, len 18: "'for' step is zero"             (used by $for_check_step)
  *   93, len 36: "attempt to call a non-function value"  ($lua_call_any)
- *  129, len  6: "__call"                         ($g_mkey_call) */
-#define LITERAL_PREFIX "niltruefalse<float>numberstringtablefunctionboolean__index__add__eq\tLua 5.5'for' step is zeroattempt to call a non-function value__call"
-#define LITERAL_PREFIX_LEN 135
+ *  129, len  6: "__call"                         ($g_mkey_call)
+ *  135, len  8: "module '"                       ($builtin_require)
+ *  143, len 12: "' not loaded"                   ($builtin_require) */
+#define LITERAL_PREFIX "niltruefalse<float>numberstringtablefunctionboolean__index__add__eq\tLua 5.5'for' step is zeroattempt to call a non-function value__callmodule '' not loaded"
+#define LITERAL_PREFIX_LEN 155
 
 /* Emit the body of one user function. */
 static void emit_user_function(CG *c, const LuaFunc *fn) {

@@ -1203,8 +1203,12 @@
       (local.set $mm (call $get_metamethod (local.get $v)
                        (ref.as_non_null (global.get $g_mkey_call))))
       (if (ref.is_null (local.get $mm))
-        (then (throw $LuaError (struct.new $LuaString
-          (array.new_data $LuaArr $str_data (i32.const 93) (i32.const 36))))))
+        (then (throw $LuaError
+          (call $prefix_error_msg
+            (ref.as_non_null (global.get $g_src_name))
+            (local.get $line)
+            (struct.new $LuaString
+              (array.new_data $LuaArr $str_data (i32.const 93) (i32.const 36)))))))
       ;; Prepend the original callee so __call sees `self`.
       (local.set $args (call $merge_args
         (array.new_fixed $ArgArr 1 (local.get $v))
@@ -1212,8 +1216,12 @@
       (local.set $v (local.get $mm))
       (local.set $i (i32.add (local.get $i) (i32.const 1)))
       (br_if $resolve (i32.lt_s (local.get $i) (i32.const 200))))
-    (throw $LuaError (struct.new $LuaString
-      (array.new_data $LuaArr $str_data (i32.const 93) (i32.const 36)))))
+    (throw $LuaError
+      (call $prefix_error_msg
+        (ref.as_non_null (global.get $g_src_name))
+        (local.get $line)
+        (struct.new $LuaString
+          (array.new_data $LuaArr $str_data (i32.const 93) (i32.const 36))))))
 
   (func $args_first (param $args (ref $ArgArr)) (result anyref)
     (if (result anyref) (i32.eqz (array.len (local.get $args)))
@@ -1897,6 +1905,7 @@
     (local $cached anyref) (local $loader anyref) (local $r anyref)
     (local $key_pkg (ref $LuaString)) (local $key_loaded (ref $LuaString))
     (local $key_preload (ref $LuaString))
+    (local $err anyref) (local $idx i32)
     (local.set $name (call $args_at (local.get $args) (i32.const 0)))
     (if (i32.eqz (ref.test (ref $LuaString) (local.get $name)))
       (then (throw $LuaError (ref.null any))))
@@ -1934,7 +1943,25 @@
     (local.set $loader (call $tab_get (local.get $preload)
       (ref.cast (ref $LuaString) (local.get $name))))
     (if (ref.is_null (local.get $loader))
-      (then (throw $LuaError (ref.null any))))
+      (then
+        ;; Build "module '<name>' not loaded" and prefix with caller's
+        ;; source line so the user sees what's missing and where.
+        (local.set $err (call $lua_concat
+          (call $lua_concat
+            (struct.new $LuaString (array.new_data $LuaArr $str_data
+              (i32.const 135) (i32.const 8)))
+            (local.get $name))
+          (struct.new $LuaString (array.new_data $LuaArr $str_data
+            (i32.const 143) (i32.const 12)))))
+        (local.set $idx (i32.sub (global.get $call_depth) (i32.const 1)))
+        (if (i32.ge_s (local.get $idx) (i32.const 0))
+          (then (local.set $err (call $prefix_error_msg
+            (ref.as_non_null (global.get $g_src_name))
+            (array.get $LineArr
+              (ref.as_non_null (global.get $call_lines))
+              (local.get $idx))
+            (ref.cast (ref $LuaString) (local.get $err))))))
+        (throw $LuaError (local.get $err))))
     ;; Call loader(name).
     (local.set $r (call $args_first
       (call $lua_call_any (local.get $loader)
@@ -1946,6 +1973,52 @@
     (call $tab_set (local.get $loaded)
       (ref.cast (ref $LuaString) (local.get $name)) (local.get $r))
     (array.new_fixed $ArgArr 1 (local.get $r)))
+
+  ;; collectgarbage(opt[, arg]): lua2wasm has no managed GC of its own
+  ;; (the host's collector owns every value), so this is a stub. It
+  ;; dispatches on opt's length+first-byte to give back the shape Lua
+  ;; programs expect: "count" → 0.0, "isrunning" → true, everything
+  ;; else (including nil/"collect"/"stop"/"step"/"setpause"/"generational")
+  ;; → integer 0. Enough to satisfy the boilerplate the upstream test
+  ;; suite sprinkles around its real GC tests.
+  (func $builtin_collectgarbage (type $LuaFn)
+    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
+    (local $opt anyref) (local $b (ref $LuaArr)) (local $blen i32) (local $b0 i32)
+    (local.set $opt (call $args_at (local.get $args) (i32.const 0)))
+    (if (i32.eqz (ref.test (ref $LuaString) (local.get $opt)))
+      (then (return (array.new_fixed $ArgArr 1 (ref.i31 (i32.const 0))))))
+    (local.set $b
+      (struct.get $LuaString $bytes (ref.cast (ref $LuaString) (local.get $opt))))
+    (local.set $blen (array.len (local.get $b)))
+    (if (i32.gt_s (local.get $blen) (i32.const 0))
+      (then (local.set $b0 (array.get_u $LuaArr (local.get $b) (i32.const 0)))))
+    ;; "count" → 0.0
+    (if (i32.and (i32.eq (local.get $blen) (i32.const 5))
+                 (i32.eq (local.get $b0) (i32.const 99)))   ;; 'c'
+      (then (return (array.new_fixed $ArgArr 1
+              (struct.new $LuaFloat (f64.const 0))))))
+    ;; "isrunning" → true
+    (if (i32.and (i32.eq (local.get $blen) (i32.const 9))
+                 (i32.eq (local.get $b0) (i32.const 105)))  ;; 'i'
+      (then (return (array.new_fixed $ArgArr 1 (global.get $g_true)))))
+    (array.new_fixed $ArgArr 1 (ref.i31 (i32.const 0))))
+
+  ;; load(chunk[, name[, mode[, env]]]): no runtime compiler available
+  ;; in lua2wasm — code is AOT-compiled to wasm. Return (nil, errmsg) to
+  ;; match the on-syntax-error contract; callers in the form
+  ;;     local f, err = load(s); if not f then …
+  ;; see the error string and take their failure branch.
+  (func $builtin_load (type $LuaFn)
+    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
+    ;; $str_from_bytes caps at 8 bytes, so we can only return a short
+    ;; sentinel message — but `type(err) == "string"` is what callers
+    ;; actually probe, so this is enough.
+    (array.new_fixed $ArgArr 2
+      (ref.null any)
+      (call $str_from_bytes
+        (i32.const 110) (i32.const 111) (i32.const 32)                    ;; "no "
+        (i32.const 108) (i32.const 111) (i32.const 97) (i32.const 100)    ;; "load"
+        (i32.const -1))))
 
   ;; Build a $LuaString from up to 8 ASCII byte codes; the first -1
   ;; (i32.const -1) terminates the sequence early. Used by builtins
@@ -2092,6 +2165,17 @@
       (else (struct.set $LuaTable $meta (local.get $t)
         (ref.cast (ref $LuaTable) (local.get $mt)))))
     (array.new_fixed $ArgArr 1 (local.get $t)))
+
+  ;; debug.gethook(): no debug hooks are installed in lua2wasm, so we
+  ;; return (nil, "", 0) — the same shape stock Lua returns when no
+  ;; hook is set. Some tests probe this to decide whether to run hook-
+  ;; dependent paths; with nil they take the no-hook branch.
+  (func $builtin_debug_gethook (type $LuaFn)
+    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
+    (array.new_fixed $ArgArr 3
+      (ref.null any)
+      (ref.as_non_null (global.get $g_empty_str))
+      (ref.i31 (i32.const 0))))
 
   ;; --- math library ---
   (func $builtin_math_floor (type $LuaFn)

@@ -1,27 +1,24 @@
 #!/usr/bin/env bash
 set -euo pipefail
 BIN="$1"; SRC_DIR="$2"; BUILD_DIR="$3"
-DIR="$SRC_DIR/tests/fixtures/milestone25"
-WAT="$BUILD_DIR/milestone25.wat"
-WASM="$BUILD_DIR/milestone25.wasm"
+FIXTURE="$SRC_DIR/tests/fixtures/gc_stubs.lua"
+WAT="$BUILD_DIR/gc_stubs.wat"
+WASM="$BUILD_DIR/gc_stubs.wasm"
 
-"$BIN" "$DIR/main.lua" -m "$DIR/util.lua" -m "$DIR/wrap.lua" -o "$WAT"
+"$BIN" "$FIXTURE" -o "$WAT"
 wasm-as --all-features -o "$WASM" "$WAT"
 
-EXPECTED=$'OK!
-abab
+EXPECTED="0
+0.0
 true
-=== HELLO ===!
-xyxy
-false\tmain:50: module \'nope\' not loaded
-table
-table
-table
-true'
-
+0
+0
+nil		0
+nil	string"
 OUT="$(node --experimental-wasm-exnref "$SRC_DIR/runtime/host.mjs" "$WASM")"
 if [[ "$OUT" != "$EXPECTED" ]]; then
     echo "FAIL: output mismatch" >&2
     diff <(echo "$EXPECTED") <(echo "$OUT") >&2 || true
     exit 1
 fi
+echo "ok: gc_stubs matches"

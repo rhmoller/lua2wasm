@@ -560,6 +560,14 @@ add_test(
 )
 
 add_test(
+    NAME test_e2e_gc_stubs
+    COMMAND bash ${CMAKE_SOURCE_DIR}/tests/test_e2e_gc_stubs.sh
+            $<TARGET_FILE:lua2wasm>
+            ${CMAKE_SOURCE_DIR}
+            ${CMAKE_BINARY_DIR}
+)
+
+add_test(
     NAME test_e2e_bitwise
     COMMAND bash ${CMAKE_SOURCE_DIR}/tests/test_e2e_bitwise.sh
             $<TARGET_FILE:lua2wasm>
