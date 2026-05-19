@@ -1465,6 +1465,19 @@ static void emit_user_function(CG *c, const LuaFunc *fn) {
             "    (local.set $varargs (call $args_slice "
             "(local.get $args) (i32.const %d)))\n", fn->n_params);
     }
+    /* Eager-initialise every captured local that isn't a parameter to a
+     * placeholder $Box. Lua semantics guarantees a local's declaration
+     * runs before any reference, but with dispatch-table goto lowering
+     * the wasm validator can't always prove that statically. A placeholder
+     * keeps the slot non-null; the real `local x = …` statement replaces
+     * the box, and any closure captured at that point holds the fresh
+     * one — no observable difference from the old eager-only-on-decl scheme. */
+    for (int i = fn->n_params; i < fn->n_locals; i++) {
+        if (fn->captured && fn->captured[i]) {
+            wat_appendf(w,
+                "    (local.set $L%d (struct.new $Box (ref.null any)))\n", i);
+        }
+    }
 
     int was_in_main = c->in_main;
     c->in_main = 0;
@@ -1992,6 +2005,14 @@ int codegen_module(const ParseResult *pr, const char *src_name,
             }
         }
         wat_append(out, "    (call $stdlib_init)\n");
+        /* Eager-init captured locals — see emit_user_function for the
+         * rationale; main has no params, so every captured slot needs it. */
+        for (int i = 0; i < pr->main_n_locals; i++) {
+            if (pr->main_captured && pr->main_captured[i]) {
+                wat_appendf(out,
+                    "    (local.set $L%d (struct.new $Box (ref.null any)))\n", i);
+            }
+        }
 
         if (c.ok) emit_block(&c, &pr->main_body, 2);
 
