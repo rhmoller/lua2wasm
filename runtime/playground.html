@@ -339,7 +339,18 @@ const catppuccinTheme = EditorView.theme({
   ".cm-panels.cm-panels-bottom": { borderTop:    "2px solid " + CTP.surface0 },
   ".cm-searchMatch":         { backgroundColor: CTP.surface2, color: CTP.text },
   ".cm-searchMatch.cm-searchMatch-selected": { backgroundColor: CTP.surface2 },
-  ".cm-activeLine":          { backgroundColor: CTP.mantle },
+  /* Tint the active line via a pseudo-element behind CodeMirror's
+     selection layer (drawSelection paints it at z-index -2, below
+     .cm-content). An opaque line background would sit in the content
+     layer and hide the selection on whichever line holds the selection
+     head — e.g. drag-selecting upward left the top line looking
+     unselected. z-index -3 keeps the tint below the selection so both
+     coexist. */
+  ".cm-activeLine":          { position: "relative" },
+  ".cm-activeLine::before": {
+    content: '""', position: "absolute", inset: "0",
+    backgroundColor: CTP.mantle, zIndex: "-3", pointerEvents: "none",
+  },
   ".cm-selectionMatch":      { backgroundColor: CTP.surface1 },
   ".cm-matchingBracket, .cm-nonmatchingBracket": {
     backgroundColor: CTP.surface1, outline: "1px solid " + CTP.overlay0,
