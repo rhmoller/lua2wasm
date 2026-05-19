@@ -5192,6 +5192,38 @@
         (i64.shr_s (i64.shl (local.get $val) (local.get $shift))
                    (local.get $shift)))))
 
+  ;; For unpack with $sz > 8 bytes: only the low 8 bytes are assembled
+  ;; into $val by $pack_read_int. The remaining (sz-8) bytes must match
+  ;; the expected sign-fill so the original number fits in i64:
+  ;;   unsigned  → all extras must be 0x00
+  ;;   signed    → all extras must equal 0xFF if $val's sign bit is set,
+  ;;               else 0x00.
+  ;; Throws "data does not fit" on mismatch. No-op when $sz <= 8.
+  (func $pack_check_fit
+    (param $buf (ref $LuaArr)) (param $off i32) (param $sz i32)
+    (param $le i32) (param $is_signed i32) (param $val i64)
+    (local $i i32) (local $fill i32) (local $bidx i32) (local $byte i32)
+    (if (i32.le_s (local.get $sz) (i32.const 8)) (then (return)))
+    (if (i32.and (local.get $is_signed)
+                 (i32.wrap_i64
+                   (i64.shr_u (local.get $val) (i64.const 63))))
+      (then (local.set $fill (i32.const 0xff)))
+      (else (local.set $fill (i32.const 0))))
+    (local.set $i (i32.const 8))
+    (block $done (loop $lp
+      (br_if $done (i32.ge_s (local.get $i) (local.get $sz)))
+      (if (local.get $le)
+        (then (local.set $bidx (i32.add (local.get $off) (local.get $i))))
+        (else (local.set $bidx
+                (i32.add (local.get $off)
+                  (i32.sub (i32.sub (local.get $sz) (i32.const 1))
+                           (local.get $i))))))
+      (local.set $byte (array.get_u $LuaArr (local.get $buf) (local.get $bidx)))
+      (if (i32.ne (local.get $byte) (local.get $fill))
+        (then (call $throw_lit (i32.const 173) (i32.const 17))))   ;; "data does not fit"
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br $lp))))
+
   ;; 1 iff $c is one of the signed integer option letters
   ;; (b, h, i, j, l). All other ints (B H I J L T) are unsigned;
   ;; configurations and non-int options are filtered by the walker
@@ -5734,6 +5766,10 @@
       (local.set $val (call $pack_read_int (local.get $subj)
                             (local.get $offset) (local.get $sz)
                             (local.get $endian_le)))
+      (call $pack_check_fit (local.get $subj) (local.get $offset)
+                            (local.get $sz) (local.get $endian_le)
+                            (call $pack_opt_is_signed (local.get $c))
+                            (local.get $val))
       (if (call $pack_opt_is_signed (local.get $c))
         (then (local.set $val (call $pack_signext (local.get $val) (local.get $sz)))))
       (local.set $offset (i32.add (local.get $offset) (local.get $sz)))
