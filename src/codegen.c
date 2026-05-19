@@ -298,6 +298,19 @@ static void emit_global_key(CG *c, const char *name, size_t name_len) {
         sr.offset, sr.len);
 }
 
+/* `(call $tab_set (local.get $tgt) "key" (global.get $g_<glob>))` — the
+ * shape used everywhere stdlib_init wires a builtin closure into a
+ * library table or a sub-table like a file handle. */
+static void emit_tab_set_global(WatBuilder *out, const char *tgt,
+                                StrRef key, const char *glob) {
+    wat_appendf(out,
+        "    (call $tab_set (local.get %s)\n"
+        "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
+        "        (i32.const %zu) (i32.const %zu)))\n"
+        "      (global.get $g_%s))\n",
+        tgt, key.offset, key.len, glob);
+}
+
 static void emit_global_read(CG *c, const char *name, size_t name_len, int depth) {
     emit_indent(c, depth);
     wat_append(c->w, "(call $tab_get (ref.as_non_null (global.get $g_globals))\n");
@@ -1991,12 +2004,7 @@ int codegen_module(const ParseResult *pr, const char *src_name,
             if (key[0] == '_') continue;
             size_t key_len = strlen(key);
             StrRef sr = strpool_add(&c.strs, key, key_len);
-            wat_appendf(out,
-                "    (call $tab_set (local.get $tab)\n"
-                "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
-                "        (i32.const %zu) (i32.const %zu)))\n"
-                "      (global.get $g_%s))\n",
-                sr.offset, sr.len, builtin_func_name(bi) + 1);
+            emit_tab_set_global(out, "$tab", sr, builtin_func_name(bi) + 1);
         }
         /* Plain-value constants for the math library. */
         if (cls == BLT_LIB_MATH) {
@@ -2037,51 +2045,29 @@ int codegen_module(const ParseResult *pr, const char *src_name,
          * ($g_io_handle_{write,err_write,read,noop}) are live and
          * ready to use. */
         if (cls == BLT_LIB_IO) {
+            /* `method_glob == NULL` selects the read method on stdin;
+             * the rest take a writer matching the handle's stream. */
             static const struct {
-                const char *handle;     /* "stdout" / "stderr" / "stdin" */
+                const char *handle;
                 size_t      handle_len;
-                const char *write_glob; /* "io_handle_write" / "io_handle_err_write" / NULL */
-                int         is_stdin;   /* installs a `read` method instead of `write` */
+                const char *method_glob;
             } HANDLES[] = {
-                { "stdout", 6, "io_handle_write",     0 },
-                { "stderr", 6, "io_handle_err_write", 0 },
-                { "stdin",  5, NULL,                  1 },
+                { "stdout", 6, "io_handle_write"     },
+                { "stderr", 6, "io_handle_err_write" },
+                { "stdin",  5, NULL                  },
             };
-            StrRef wkey  = strpool_add(&c.strs, "write", 5);
-            StrRef rkey  = strpool_add(&c.strs, "read",  4);
-            StrRef ckey  = strpool_add(&c.strs, "close", 5);
-            StrRef fkey  = strpool_add(&c.strs, "flush", 5);
+            StrRef wkey = strpool_add(&c.strs, "write", 5);
+            StrRef rkey = strpool_add(&c.strs, "read",  4);
+            StrRef ckey = strpool_add(&c.strs, "close", 5);
+            StrRef fkey = strpool_add(&c.strs, "flush", 5);
             for (size_t hi = 0; hi < sizeof(HANDLES)/sizeof(HANDLES[0]); hi++) {
-                wat_append(out,
-                    "    (local.set $h (call $tab_new))\n");
-                if (HANDLES[hi].is_stdin) {
-                    wat_appendf(out,
-                        "    (call $tab_set (local.get $h)\n"
-                        "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
-                        "        (i32.const %zu) (i32.const %zu)))\n"
-                        "      (global.get $g_io_handle_read))\n",
-                        rkey.offset, rkey.len);
-                } else {
-                    wat_appendf(out,
-                        "    (call $tab_set (local.get $h)\n"
-                        "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
-                        "        (i32.const %zu) (i32.const %zu)))\n"
-                        "      (global.get $g_%s))\n",
-                        wkey.offset, wkey.len, HANDLES[hi].write_glob);
-                }
-                /* close / flush as no-ops on the standard streams. */
-                wat_appendf(out,
-                    "    (call $tab_set (local.get $h)\n"
-                    "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
-                    "        (i32.const %zu) (i32.const %zu)))\n"
-                    "      (global.get $g_io_handle_noop))\n",
-                    ckey.offset, ckey.len);
-                wat_appendf(out,
-                    "    (call $tab_set (local.get $h)\n"
-                    "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
-                    "        (i32.const %zu) (i32.const %zu)))\n"
-                    "      (global.get $g_io_handle_noop))\n",
-                    fkey.offset, fkey.len);
+                wat_append(out, "    (local.set $h (call $tab_new))\n");
+                if (HANDLES[hi].method_glob)
+                    emit_tab_set_global(out, "$h", wkey, HANDLES[hi].method_glob);
+                else
+                    emit_tab_set_global(out, "$h", rkey, "io_handle_read");
+                emit_tab_set_global(out, "$h", ckey, "io_handle_noop");
+                emit_tab_set_global(out, "$h", fkey, "io_handle_noop");
                 StrRef hkey = strpool_add(&c.strs, HANDLES[hi].handle,
                                           HANDLES[hi].handle_len);
                 wat_appendf(out,

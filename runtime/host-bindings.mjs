@@ -36,10 +36,8 @@ export function makeHelpers({ getInstance, formatFloat }) {
         }
     }
 
-    // Guard against pathologically large host strings (long PATH, big
-    // os.date format expansions) that would walk off the end of $fmt_buf.
-    // Truncating is the right move — the buffer is sized generously and
-    // anything bigger is almost certainly junk we'd rather not propagate.
+    // Must match the $fmt_buf size in stdlib_init; truncating beyond
+    // it is safer than walking off the end of the GC array.
     const FMT_BUF_CAP = 16384;
     function writeFmtBuf(s) {
         const bytes = new TextEncoder().encode(s);

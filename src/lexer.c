@@ -19,6 +19,10 @@ static void push_tok(TokVec *v, Token t) {
     v->items[v->count++] = t;
 }
 
+static unsigned hex_val(int c) {
+    return (unsigned)(isdigit(c) ? c - '0' : (c | 32) - 'a' + 10);
+}
+
 typedef struct { const char *kw; TokKind kind; } Keyword;
 static const Keyword KEYWORDS[] = {
     { "and",      TOK_KW_AND },
@@ -110,9 +114,7 @@ static int read_string(Lex *L, char q, char **out_buf, size_t *out_len) {
                     lex_error(L, "hexadecimal digit expected after '\\x'");
                     free(buf); return 0;
                 }
-                int hi = L->p[0]; int lo = L->p[1];
-                int v = ((isdigit(hi) ? hi - '0' : (hi | 32) - 'a' + 10) << 4)
-                      |  (isdigit(lo) ? lo - '0' : (lo | 32) - 'a' + 10);
+                int v = (hex_val(L->p[0]) << 4) | hex_val(L->p[1]);
                 c = (char)v;
                 L->p += 2;
                 break;
@@ -149,9 +151,7 @@ static int read_string(Lex *L, char q, char **out_buf, size_t *out_len) {
                 unsigned long cp = 0;
                 int seen = 0;
                 while (isxdigit((unsigned char)*L->p)) {
-                    int d = *L->p;
-                    d = isdigit(d) ? d - '0' : (d | 32) - 'a' + 10;
-                    cp = (cp << 4) | (unsigned)d;
+                    cp = (cp << 4) | hex_val(*L->p);
                     if (cp > 0x7FFFFFFFu) {
                         lex_error(L, "UTF-8 value too large in '\\u{...}'");
                         free(buf); return 0;
@@ -352,18 +352,13 @@ TokenList lex(const char *source) {
                 /* strtod handles both decimal and C99 hex floats (0x1.8p3). */
                 t.f_val = strtod(tmp, NULL);
             } else if (is_hex) {
-                /* Hex int literals wrap mod 2^64 per Lua 5.5: even a
-                 * 26-digit literal denotes an integer (its low 64 bits).
-                 * strtoll saturates at LLONG_MAX, so accumulate digits
-                 * ourselves in a u64 and reinterpret. */
+                /* Hex int literals wrap mod 2^64 per Lua 5.5: a 26-digit
+                 * literal denotes its low 64 bits. strtoll saturates at
+                 * LLONG_MAX, so accumulate ourselves in a u64. */
                 t.kind = TOK_INT;
                 unsigned long long acc = 0;
                 for (size_t k = 2; k < n; k++) {  /* skip "0x" prefix */
-                    unsigned c2 = (unsigned char)tmp[k];
-                    unsigned d = c2 <= '9' ? c2 - '0'
-                               : c2 <= 'F' ? c2 - 'A' + 10
-                               :             c2 - 'a' + 10;
-                    acc = (acc << 4) | d;
+                    acc = (acc << 4) | hex_val((unsigned char)tmp[k]);
                 }
                 t.i_val = (long long)acc;
             } else {

@@ -127,12 +127,8 @@
   ;; Scratch byte buffer that host_fmt writes into (set up by stdlib_init).
   (global $fmt_buf (mut (ref null $LuaArr)) (ref.null $LuaArr))
 
-  ;; collectgarbage mode bookkeeping. There's no real Lua GC behind this
-  ;; — the host VM owns memory — but the spec contract for
-  ;; collectgarbage("incremental" | "generational") is to *return the
-  ;; previous mode* before switching, and some test suites rely on that
-  ;; round-trip even when neither mode does anything observable.
-  ;; 0 = incremental (default), 1 = generational.
+  ;; Remembered for collectgarbage's switch-and-return-previous spec
+  ;; (0 = incremental, 1 = generational). Neither mode does any work.
   (global $g_gc_mode (mut i32) (i32.const 0))
 
   ;; Call-frame line stack. Doubled on overflow by $push_call_frame.
@@ -1983,52 +1979,42 @@
       (br $loop)))
     (local.get $out))
 
-  ;; File-handle methods. lua2wasm doesn't model file objects properly —
-  ;; the host owns stdin/stdout/stderr — but tests that use
-  ;; `io.stdout:write(...)` or `io.stderr:write(...)` only care that the
-  ;; method exists, ignores `self`, and writes to the matching stream.
-  ;; The handles built in $stdlib_init dispatch to these three methods.
+  ;; File-handle methods over the host's stdio. The standard streams
+  ;; don't have file objects to back them — the methods just route to
+  ;; the right host import and return `self` so chains keep working.
 
-  (func $io_handle_write (type $LuaFn)
-    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
+  ;; Tostring + concat args[$start..]; returns null if no args remain.
+  (func $io_concat_from (param $args (ref $ArgArr)) (param $start i32) (result anyref)
     (local $n i32) (local $i i32) (local $acc anyref)
     (local.set $n (array.len (local.get $args)))
-    ;; arg 0 is `self` (the file table); skip it.
-    (if (i32.le_s (local.get $n) (i32.const 1))
-      (then (return (array.new_fixed $ArgArr 1
-                      (call $args_at (local.get $args) (i32.const 0))))))
+    (if (i32.ge_s (local.get $start) (local.get $n))
+      (then (return (ref.null any))))
     (local.set $acc (call $lua_tostring
-      (call $args_at (local.get $args) (i32.const 1))))
-    (local.set $i (i32.const 2))
+      (call $args_at (local.get $args) (local.get $start))))
+    (local.set $i (i32.add (local.get $start) (i32.const 1)))
     (block $done (loop $lp
       (br_if $done (i32.ge_s (local.get $i) (local.get $n)))
       (local.set $acc (call $lua_concat (local.get $acc)
         (call $lua_tostring (call $args_at (local.get $args) (local.get $i)))))
       (local.set $i (i32.add (local.get $i) (i32.const 1)))
       (br $lp)))
-    (call $host_write_raw (local.get $acc))
-    ;; Per spec, file:write returns the file itself so chaining works:
-    ;;   io.stdout:write("a"):write("b")
+    (local.get $acc))
+
+  (func $io_handle_write (type $LuaFn)
+    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
+    (local $acc anyref)
+    (local.set $acc (call $io_concat_from (local.get $args) (i32.const 1)))
+    (if (i32.eqz (ref.is_null (local.get $acc)))
+      (then (call $host_write_raw (local.get $acc))))
     (array.new_fixed $ArgArr 1
       (call $args_at (local.get $args) (i32.const 0))))
 
   (func $io_handle_err_write (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
-    (local $n i32) (local $i i32) (local $acc anyref)
-    (local.set $n (array.len (local.get $args)))
-    (if (i32.le_s (local.get $n) (i32.const 1))
-      (then (return (array.new_fixed $ArgArr 1
-                      (call $args_at (local.get $args) (i32.const 0))))))
-    (local.set $acc (call $lua_tostring
-      (call $args_at (local.get $args) (i32.const 1))))
-    (local.set $i (i32.const 2))
-    (block $done (loop $lp
-      (br_if $done (i32.ge_s (local.get $i) (local.get $n)))
-      (local.set $acc (call $lua_concat (local.get $acc)
-        (call $lua_tostring (call $args_at (local.get $args) (local.get $i)))))
-      (local.set $i (i32.add (local.get $i) (i32.const 1)))
-      (br $lp)))
-    (call $host_write_err (local.get $acc))
+    (local $acc anyref)
+    (local.set $acc (call $io_concat_from (local.get $args) (i32.const 1)))
+    (if (i32.eqz (ref.is_null (local.get $acc)))
+      (then (call $host_write_err (local.get $acc))))
     (array.new_fixed $ArgArr 1
       (call $args_at (local.get $args) (i32.const 0))))
 
@@ -2583,20 +2569,22 @@
   (func $builtin_os_exit (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
     (local $a anyref) (local $code i32) (local $has i32)
-    (if (i32.gt_s (array.len (local.get $args)) (i32.const 0))
+    (if (i32.eqz (array.len (local.get $args)))
       (then
-        (local.set $a (call $args_at (local.get $args) (i32.const 0)))
-        (if (ref.is_null (local.get $a))
-          (then (local.set $code (i32.const 0)))
-          (else
-            (if (ref.test (ref $LuaBool) (local.get $a))
-              (then (local.set $code
-                      (i32.sub (i32.const 1)
-                               (struct.get $LuaBool $b
-                                 (ref.cast (ref $LuaBool) (local.get $a))))))
-              (else (local.set $code
-                      (i32.wrap_i64 (call $as_int (local.get $a))))))))
-        (local.set $has (i32.const 1))))
+        (call $host_os_exit (i32.const 0) (i32.const 0))
+        (return (global.get $g_empty_args))))
+    (local.set $has (i32.const 1))
+    (local.set $a (call $args_at (local.get $args) (i32.const 0)))
+    ;; nil → 0; boolean → (true ? 0 : 1); integer → wrap to i32.
+    (if (ref.test (ref $LuaBool) (local.get $a))
+      (then (local.set $code
+              (i32.sub (i32.const 1)
+                       (struct.get $LuaBool $b
+                         (ref.cast (ref $LuaBool) (local.get $a))))))
+      (else
+        (if (i32.eqz (ref.is_null (local.get $a)))
+          (then (local.set $code
+                  (i32.wrap_i64 (call $as_int (local.get $a))))))))
     (call $host_os_exit (local.get $code) (local.get $has))
     ;; Host never returns; satisfy the type checker.
     (global.get $g_empty_args))
@@ -2630,72 +2618,36 @@
     ;; Table case: read 9 LE i32s from $fmt_buf.
     (local.set $buf (ref.as_non_null (global.get $fmt_buf)))
     (local.set $tab (call $tab_new))
-    (call $tab_set (local.get $tab)
-      (struct.new $LuaString
-        (array.new_data $LuaArr $str_data (i32.const 306) (i32.const 4)))
-      (call $make_int (i64.extend_i32_s
-        (call $os_date_buf_field (local.get $buf) (i32.const 0)))))
-    (call $tab_set (local.get $tab)
-      (struct.new $LuaString
-        (array.new_data $LuaArr $str_data (i32.const 310) (i32.const 5)))
-      (call $make_int (i64.extend_i32_s
-        (call $os_date_buf_field (local.get $buf) (i32.const 1)))))
-    (call $tab_set (local.get $tab)
-      (struct.new $LuaString
-        (array.new_data $LuaArr $str_data (i32.const 315) (i32.const 3)))
-      (call $make_int (i64.extend_i32_s
-        (call $os_date_buf_field (local.get $buf) (i32.const 2)))))
-    (call $tab_set (local.get $tab)
-      (struct.new $LuaString
-        (array.new_data $LuaArr $str_data (i32.const 318) (i32.const 4)))
-      (call $make_int (i64.extend_i32_s
-        (call $os_date_buf_field (local.get $buf) (i32.const 3)))))
-    (call $tab_set (local.get $tab)
-      (struct.new $LuaString
-        (array.new_data $LuaArr $str_data (i32.const 322) (i32.const 3)))
-      (call $make_int (i64.extend_i32_s
-        (call $os_date_buf_field (local.get $buf) (i32.const 4)))))
-    (call $tab_set (local.get $tab)
-      (struct.new $LuaString
-        (array.new_data $LuaArr $str_data (i32.const 325) (i32.const 3)))
-      (call $make_int (i64.extend_i32_s
-        (call $os_date_buf_field (local.get $buf) (i32.const 5)))))
-    (call $tab_set (local.get $tab)
-      (struct.new $LuaString
-        (array.new_data $LuaArr $str_data (i32.const 328) (i32.const 4)))
-      (call $make_int (i64.extend_i32_s
-        (call $os_date_buf_field (local.get $buf) (i32.const 6)))))
-    (call $tab_set (local.get $tab)
-      (struct.new $LuaString
-        (array.new_data $LuaArr $str_data (i32.const 332) (i32.const 4)))
-      (call $make_int (i64.extend_i32_s
-        (call $os_date_buf_field (local.get $buf) (i32.const 7)))))
+    (call $os_date_set_int (local.get $tab) (local.get $buf) (i32.const 306) (i32.const 4) (i32.const 0))
+    (call $os_date_set_int (local.get $tab) (local.get $buf) (i32.const 310) (i32.const 5) (i32.const 1))
+    (call $os_date_set_int (local.get $tab) (local.get $buf) (i32.const 315) (i32.const 3) (i32.const 2))
+    (call $os_date_set_int (local.get $tab) (local.get $buf) (i32.const 318) (i32.const 4) (i32.const 3))
+    (call $os_date_set_int (local.get $tab) (local.get $buf) (i32.const 322) (i32.const 3) (i32.const 4))
+    (call $os_date_set_int (local.get $tab) (local.get $buf) (i32.const 325) (i32.const 3) (i32.const 5))
+    (call $os_date_set_int (local.get $tab) (local.get $buf) (i32.const 328) (i32.const 4) (i32.const 6))
+    (call $os_date_set_int (local.get $tab) (local.get $buf) (i32.const 332) (i32.const 4) (i32.const 7))
     (call $tab_set (local.get $tab)
       (struct.new $LuaString
         (array.new_data $LuaArr $str_data (i32.const 336) (i32.const 5)))
       (call $lua_bool_to_ref
-        (call $os_date_buf_field (local.get $buf) (i32.const 8))))
+        (i32.wrap_i64 (call $pack_read_int (local.get $buf)
+                        (i32.const 32) (i32.const 4) (i32.const 1)))))
     (array.new_fixed $ArgArr 1 (local.get $tab)))
 
-  ;; Reassembles the i32 at field index $idx (0..8) from the 4-byte LE
-  ;; window starting at offset $idx*4 in $buf.
-  (func $os_date_buf_field
-    (param $buf (ref $LuaArr)) (param $idx i32) (result i32)
-    (local $o i32)
-    (local.set $o (i32.mul (local.get $idx) (i32.const 4)))
-    (i32.or
-      (i32.or
-        (array.get_u $LuaArr (local.get $buf) (local.get $o))
-        (i32.shl (array.get_u $LuaArr (local.get $buf)
-                   (i32.add (local.get $o) (i32.const 1)))
-                 (i32.const 8)))
-      (i32.or
-        (i32.shl (array.get_u $LuaArr (local.get $buf)
-                   (i32.add (local.get $o) (i32.const 2)))
-                 (i32.const 16))
-        (i32.shl (array.get_u $LuaArr (local.get $buf)
-                   (i32.add (local.get $o) (i32.const 3)))
-                 (i32.const 24)))))
+  ;; Set $tab[<key in $str_data at key_off..key_off+key_len>] to the LE
+  ;; i32 packed at index $idx (offset $idx*4) of $buf. Used by os.date
+  ;; "*t" to materialize its 8 integer fields; the boolean isdst field
+  ;; takes a different builder so isn't routed through here.
+  (func $os_date_set_int
+    (param $tab (ref $LuaTable)) (param $buf (ref $LuaArr))
+    (param $key_off i32) (param $key_len i32) (param $idx i32)
+    (call $tab_set (local.get $tab)
+      (struct.new $LuaString
+        (array.new_data $LuaArr $str_data (local.get $key_off) (local.get $key_len)))
+      (call $make_int
+        (call $pack_read_int (local.get $buf)
+          (i32.mul (local.get $idx) (i32.const 4))
+          (i32.const 4) (i32.const 1)))))
 
   ;; os.execute([command]) — minimal stub. With no command, the spec
   ;; lets us report "a shell is available" by returning a truthy value;

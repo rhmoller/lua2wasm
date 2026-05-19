@@ -829,7 +829,10 @@ function watToWasm(wat) {
 let curInstance;
 const helpers = makeHelpers({ getInstance: () => curInstance, formatFloat });
 const { luaToString, formatSpec, parseLuaNumber, osDate, osGetenv } = helpers;
-const runStartCPU = performance.now();
+/* Lua's os.clock spec asks for "an approximation of CPU time"; in the
+ * browser the closest cheap monotonic reading is performance.now() since
+ * the page loaded. We subtract this baseline at every call. */
+const clockEpochMs = performance.now();
 
 /* ----- the run pipeline ----- */
 async function run() {
@@ -927,7 +930,7 @@ async function run() {
         read:      readImport,
         read_num:  readNumImport,
         os_time:   ()                    => BigInt(Math.floor(Date.now() / 1000)),
-        os_clock:  ()                    => (performance.now() - runStartCPU) / 1000,
+        os_clock:  ()                    => (performance.now() - clockEpochMs) / 1000,
         os_getenv: (name)                => osGetenv(name),
         os_exit:   (code, hasCode)       => {
           /* Browser: no real process to exit. Surface the requested code
@@ -1193,17 +1196,20 @@ window.addEventListener("keydown", e => {
   const GUTTER_PX = 6;
   const STORAGE_KEY = "lua2wasm.splitLeftPct";
 
-  /* Restore a previously chosen split. */
-  const saved = parseFloat(localStorage.getItem(STORAGE_KEY));
-  if (Number.isFinite(saved) && saved > 5 && saved < 95) {
-    mainEl.style.setProperty("--split-left", saved.toFixed(2) + "%");
-  }
-
+  /* setSplit only touches the CSS variable. localStorage is written
+   * once per drag from the pointerup handler — fast drags would
+   * otherwise hit it 60+ times per second, which is slow and
+   * contended across same-origin tabs. */
+  let currentPct = 50;
   function setSplit(pct) {
     pct = Math.max(8, Math.min(92, pct));
+    currentPct = pct;
     mainEl.style.setProperty("--split-left", pct.toFixed(2) + "%");
-    localStorage.setItem(STORAGE_KEY, pct.toFixed(2));
   }
+
+  /* Restore a previously chosen split. */
+  const saved = parseFloat(localStorage.getItem(STORAGE_KEY));
+  if (Number.isFinite(saved) && saved > 5 && saved < 95) setSplit(saved);
 
   splitter.addEventListener("pointerdown", (e) => {
     e.preventDefault();
@@ -1212,43 +1218,50 @@ window.addEventListener("keydown", e => {
     document.body.classList.add("splitter-dragging");
 
     const rect = mainEl.getBoundingClientRect();
+    /* requestAnimationFrame coalesces pointer events: each frame
+     * applies at most one CSS update, even if 4-5 pointermoves
+     * arrive in between. CodeMirror's relayout is the heaviest
+     * downstream cost; not running it per-event makes the drag
+     * feel smoother under load. */
+    let pendingX = null, raf = 0;
+    const flush = () => {
+      raf = 0;
+      const x = pendingX - rect.left - GUTTER_PX / 2;
+      setSplit((x / rect.width) * 100);
+    };
     const onMove = (ev) => {
-      /* Cursor X relative to <main>, minus half the gutter so the bar
-       * tracks the pointer rather than its leading edge. */
-      const x = ev.clientX - rect.left - GUTTER_PX / 2;
-      const pct = (x / rect.width) * 100;
-      setSplit(pct);
+      pendingX = ev.clientX;
+      if (!raf) raf = requestAnimationFrame(flush);
     };
     const onUp = (ev) => {
+      if (raf) { cancelAnimationFrame(raf); flush(); }
       splitter.releasePointerCapture(ev.pointerId);
       splitter.classList.remove("dragging");
       document.body.classList.remove("splitter-dragging");
       splitter.removeEventListener("pointermove", onMove);
       splitter.removeEventListener("pointerup", onUp);
       splitter.removeEventListener("pointercancel", onUp);
+      localStorage.setItem(STORAGE_KEY, currentPct.toFixed(2));
     };
     splitter.addEventListener("pointermove", onMove);
     splitter.addEventListener("pointerup", onUp);
     splitter.addEventListener("pointercancel", onUp);
   });
 
-  /* Double-click resets to 50/50. */
   splitter.addEventListener("dblclick", () => {
     mainEl.style.removeProperty("--split-left");
+    currentPct = 50;
     localStorage.removeItem(STORAGE_KEY);
   });
 
-  /* Keyboard support: Left/Right arrows shift by 2% when the splitter
-   * is focused, Home/End jump to extremes. */
   splitter.addEventListener("keydown", (e) => {
-    const cur = parseFloat(
-      getComputedStyle(mainEl).getPropertyValue("--split-left")) || 50;
     const step = e.shiftKey ? 10 : 2;
-    if (e.key === "ArrowLeft")  setSplit(cur - step);
-    else if (e.key === "ArrowRight") setSplit(cur + step);
+    if (e.key === "ArrowLeft")  setSplit(currentPct - step);
+    else if (e.key === "ArrowRight") setSplit(currentPct + step);
     else if (e.key === "Home")  setSplit(15);
     else if (e.key === "End")   setSplit(85);
     else return;
+    localStorage.setItem(STORAGE_KEY, currentPct.toFixed(2));
     e.preventDefault();
   });
 })();
