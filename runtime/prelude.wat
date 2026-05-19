@@ -258,6 +258,15 @@
       (then
         (local.set $ai (call $as_int (local.get $ca)))
         (local.set $bi (call $as_int (local.get $cb)))
+        ;; Match reference Lua: divisor 0 is an error; divisor -1 returns
+        ;; (0 - ai) so the wasm trap on INT64_MIN/-1 ("divide result
+        ;; unrepresentable") never fires. Subtraction in wasm wraps, so
+        ;; INT64_MIN // -1 → INT64_MIN, exactly like real-Lua's overflow.
+        (if (i64.eqz (local.get $bi))
+          (then (throw $LuaError (ref.null any))))
+        (if (i64.eq (local.get $bi) (i64.const -1))
+          (then (return (call $make_int
+            (i64.sub (i64.const 0) (local.get $ai))))))
         (local.set $q (i64.div_s (local.get $ai) (local.get $bi)))
         (local.set $r (i64.rem_s (local.get $ai) (local.get $bi)))
         (if (i32.and
@@ -287,6 +296,13 @@
       (then
         (local.set $ai (call $as_int (local.get $ca)))
         (local.set $bi (call $as_int (local.get $cb)))
+        ;; Divisor 0 → spec error; divisor -1 short-circuits to 0 (i64.rem_s
+        ;; on INT64_MIN/-1 doesn't trap on every engine but is implementation-
+        ;; defined; explicit short-circuit is portable).
+        (if (i64.eqz (local.get $bi))
+          (then (throw $LuaError (ref.null any))))
+        (if (i64.eq (local.get $bi) (i64.const -1))
+          (then (return (call $make_int (i64.const 0)))))
         (local.set $r  (i64.rem_s (local.get $ai) (local.get $bi)))
         (if (i32.and
               (i64.ne (local.get $r) (i64.const 0))
@@ -1814,6 +1830,20 @@
   (func $builtin_type (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
     (local $v anyref) (local $bytes (ref null $LuaArr)) (local $b (ref null $LuaString))
+    ;; type() with no args is a `bad argument #1` error per the spec, not
+    ;; an implicit nil. assert(not pcall(type)) in the upstream suite
+    ;; relies on this.
+    (if (i32.eqz (array.len (local.get $args)))
+      (then (throw $LuaError (call $prefix_error_msg
+        (ref.as_non_null (global.get $g_src_name))
+        (if (result i32) (i32.gt_s (global.get $call_depth) (i32.const 0))
+          (then (array.get $LineArr
+                  (ref.as_non_null (global.get $call_lines))
+                  (i32.sub (global.get $call_depth) (i32.const 1))))
+          (else (i32.const 0)))
+        (struct.new $LuaString
+          (array.new_data $LuaArr $str_data
+            (i32.const 93) (i32.const 36)))))))
     (local.set $v (call $args_at (local.get $args) (i32.const 0)))
     ;; pick canonical type-name bytes via existing $str_data offsets if any;
     ;; otherwise materialize on the fly. We just store the names inline.
@@ -1886,12 +1916,10 @@
 
   (func $builtin_pairs (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
+    ;; Use the singleton next closure so `pairs(t) == pairs(t)` returns
+    ;; the same iterator both times — same identity contract as ipairs.
     (array.new_fixed $ArgArr 3
-      ;; Build the next closure inline rather than reading $g_builtin_next.
-      ;; This makes pairs() the sole keeper of $builtin_next live via
-      ;; ref.func, so tree-shake drops next when pairs is unused.
-      (struct.new $LuaClosure
-        (ref.func $builtin_next) (global.get $g_empty_upvals))
+      (global.get $g_builtin_next)
       (call $args_at (local.get $args) (i32.const 0))
       (ref.null any)))
 
@@ -1899,12 +1927,16 @@
   ;; key and t[next_k], or empty when t[next_k] is nil.
   (func $builtin_ipairs_iter (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
-    (local $t (ref $LuaTable)) (local $k i32) (local $v anyref) (local $kref anyref)
+    (local $t (ref $LuaTable)) (local $k i64) (local $v anyref) (local $kref anyref)
     (local.set $t (ref.cast (ref $LuaTable) (call $args_at (local.get $args) (i32.const 0))))
-    (local.set $k (i32.add
-      (i31.get_s (ref.cast (ref i31) (call $args_at (local.get $args) (i32.const 1))))
-      (i32.const 1)))
-    (local.set $kref (ref.i31 (local.get $k)))
+    ;; prev_k may be a boxed $LuaInt when it doesn't fit in i31. Use
+    ;; $as_int (which handles both reps) and i64 arithmetic so overflow
+    ;; wraps the same way reference Lua does — nextvar.lua probes this
+    ;; with math.maxinteger.
+    (local.set $k (i64.add
+      (call $as_int (call $args_at (local.get $args) (i32.const 1)))
+      (i64.const 1)))
+    (local.set $kref (call $make_int (local.get $k)))
     (local.set $v (call $tab_get (local.get $t) (local.get $kref)))
     (if (ref.is_null (local.get $v))
       (then (return (global.get $g_empty_args))))
@@ -1912,11 +1944,10 @@
 
   (func $builtin_ipairs (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
+    ;; Return the singleton iter closure so `ipairs{} == ipairs{}` holds
+    ;; (reference Lua promises the iterator function is always the same).
     (array.new_fixed $ArgArr 3
-      ;; Inline closure for the iter — same shape, drops $g_builtin_ipairs_iter
-      ;; from the live set when ipairs() is unreferenced.
-      (struct.new $LuaClosure
-        (ref.func $builtin_ipairs_iter) (global.get $g_empty_upvals))
+      (global.get $g_builtin_ipairs_iter)
       (call $args_at (local.get $args) (i32.const 0))
       (ref.i31 (i32.const 0))))
 
@@ -2075,6 +2106,21 @@
     (if (i32.and (i32.eq (local.get $blen) (i32.const 9))
                  (i32.eq (local.get $b0) (i32.const 105)))  ;; 'i'
       (then (return (array.new_fixed $ArgArr 1 (global.get $g_true)))))
+    ;; "generational" / "incremental" → previous mode. We're always
+    ;; "incremental" (the host GC's perspective, since there is no Lua
+    ;; GC mode to actually switch).
+    (if (i32.or
+          (i32.and (i32.eq (local.get $blen) (i32.const 12))
+                   (i32.eq (local.get $b0) (i32.const 103)))  ;; 'g'enerational
+          (i32.and (i32.eq (local.get $blen) (i32.const 11))
+                   (i32.eq (local.get $b0) (i32.const 105)))) ;; 'i'ncremental
+      (then (return (array.new_fixed $ArgArr 1
+              (struct.new $LuaString
+                (array.new_fixed $LuaArr 11
+                  (i32.const 105) (i32.const 110) (i32.const 99)    ;; i,n,c
+                  (i32.const 114) (i32.const 101) (i32.const 109)   ;; r,e,m
+                  (i32.const 101) (i32.const 110) (i32.const 116)   ;; e,n,t
+                  (i32.const 97)  (i32.const 108)))))))             ;; a,l
     (array.new_fixed $ArgArr 1 (ref.i31 (i32.const 0))))
 
   ;; load(chunk[, name[, mode[, env]]]): no runtime compiler available
@@ -2355,7 +2401,15 @@
     (local $out (ref $ArgArr)) (local $head anyref)
     (local.set $x (call $as_float (call $args_at (local.get $args) (i32.const 0))))
     (local.set $ip (f64.trunc (local.get $x)))
-    (local.set $fp (f64.sub (local.get $x) (local.get $ip)))
+    ;; Naive `x - ip` is NaN when x is ±inf (inf - inf). Reference Lua
+    ;; (and IEEE-754 libm modf) returns ±0 for the fractional part when
+    ;; x is infinite. For NaN we propagate NaN through both outputs.
+    (if (f64.ne (local.get $ip) (local.get $ip))           ;; NaN
+      (then (local.set $fp (local.get $x)))                ;; propagate NaN
+      (else
+        (if (f64.eq (f64.abs (local.get $ip)) (f64.const inf))
+          (then (local.set $fp (f64.const 0)))
+          (else (local.set $fp (f64.sub (local.get $x) (local.get $ip)))))))
     ;; Integral as int if representable: |ip| < 2^63 and ip == ip (not NaN).
     (if (i32.and
           (f64.eq (local.get $ip) (local.get $ip))
@@ -4895,15 +4949,23 @@
   (func $pack_write_int
     (param $buf (ref $LuaArr)) (param $off i32) (param $n i32)
     (param $le i32) (param $val i64)
-    (local $i i32) (local $b i32)
+    (local $i i32) (local $b i32) (local $sign_byte i32)
+    ;; For sizes > 8, the bytes past byte 7 carry the sign-extension of
+    ;; $val: 0x00 for non-negative, 0xFF for negative. This matches both
+    ;; signed pack of a negative i64 (two's-complement extension) and
+    ;; unsigned pack (which guarantees $val ≥ 0, so the extension is 0).
+    (if (i64.lt_s (local.get $val) (i64.const 0))
+      (then (local.set $sign_byte (i32.const 0xff))))
     (block $done (loop $lp
       (br_if $done (i32.ge_s (local.get $i) (local.get $n)))
-      (local.set $b (i32.and
-        (i32.wrap_i64
-          (i64.shr_u (local.get $val)
-                     (i64.extend_i32_u
-                       (i32.mul (local.get $i) (i32.const 8)))))
-        (i32.const 0xff)))
+      (if (i32.lt_s (local.get $i) (i32.const 8))
+        (then (local.set $b (i32.and
+                (i32.wrap_i64
+                  (i64.shr_u (local.get $val)
+                             (i64.extend_i32_u
+                               (i32.mul (local.get $i) (i32.const 8)))))
+                (i32.const 0xff))))
+        (else (local.set $b (local.get $sign_byte))))
       (if (local.get $le)
         (then (array.set $LuaArr (local.get $buf)
                 (i32.add (local.get $off) (local.get $i)) (local.get $b)))
@@ -4921,8 +4983,15 @@
     (param $buf (ref $LuaArr)) (param $off i32) (param $n i32)
     (param $le i32) (result i64)
     (local $i i32) (local $val i64) (local $b i32) (local $idx i32)
+    ;; Only the first 8 bytes contribute to the assembled i64. Any
+    ;; further bytes are sign/zero-extension that the size-vs-fit check
+    ;; in the caller ($pack_check_fit / pack_fits_signed/unsigned)
+    ;; validates separately. Reading past byte 7 here would `shl` by
+    ;; >= 64, whose result is unspecified across wasm engines and was
+    ;; ORing the low byte back in on V8.
     (block $done (loop $lp
       (br_if $done (i32.ge_s (local.get $i) (local.get $n)))
+      (br_if $done (i32.ge_s (local.get $i) (i32.const 8)))
       (if (local.get $le)
         (then (local.set $idx (i32.add (local.get $off) (local.get $i))))
         (else (local.set $idx
