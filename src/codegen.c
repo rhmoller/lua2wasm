@@ -1426,9 +1426,15 @@ static const char PRELUDE[] = {
  *  325, len  3: "sec"
  *  328, len  4: "wday"
  *  332, len  4: "yday"
- *  336, len  5: "isdst" */
-#define LITERAL_PREFIX "niltruefalse<float>numberstringtablefunctionboolean__index__add__eq\tLua 5.5'for' step is zeroattempt to call a non-function value__callmodule '' not loadedvalue out of rangedata does not fitinvalid UTF-8 codeattempt to perform arithmeticattempt to index a valuetable index is niltable index is NaNtoo largeyearmonthdayhourminsecwdayydayisdst"
-#define LITERAL_PREFIX_LEN 341
+ *  336, len  5: "isdst"
+ *  341, len 14: "table overflow"                  ($tab_grow size guard)
+ *  355, len 13: "out of limits"                   (pack size/align validation)
+ *  368, len 12: "missing size"                    (pack 'c' missing [N])
+ *  380, len 22: "variable-length format"          (packsize on 's'/'z')
+ *  402, len 14: "not power of 2"                  (pack '!N' validation)
+ *  416, len 14: "invalid format"                  (packsize 'c' overflow) */
+#define LITERAL_PREFIX "niltruefalse<float>numberstringtablefunctionboolean__index__add__eq\tLua 5.5'for' step is zeroattempt to call a non-function value__callmodule '' not loadedvalue out of rangedata does not fitinvalid UTF-8 codeattempt to perform arithmeticattempt to index a valuetable index is niltable index is NaNtoo largeyearmonthdayhourminsecwdayydayisdsttable overflowout of limitsmissing sizevariable-length formatnot power of 2invalid format"
+#define LITERAL_PREFIX_LEN 430
 
 /* Emit the body of one user function. */
 static void emit_user_function(CG *c, const LuaFunc *fn) {
@@ -1775,7 +1781,9 @@ int codegen_module(const ParseResult *pr, const char *src_name,
 
     /* $stdlib_init: builds math/string tables from the library builtins
      * and assigns them to the corresponding $g_user_N slots. */
-    wat_append(out, "\n  (func $stdlib_init (local $tab (ref $LuaTable))\n");
+    wat_append(out, "\n  (func $stdlib_init"
+                    " (local $tab (ref $LuaTable))"
+                    " (local $h (ref $LuaTable))\n");
     /* Initialize the metamethod-name globals from the strpool. Keys are
      * deduplicated by strpool_add. */
     static const struct { const char *name; const char *key; } MKEYS[] = {
@@ -1975,6 +1983,12 @@ int codegen_module(const ParseResult *pr, const char *src_name,
         for (int bi = 0; bi < nb; bi++) {
             if (builtin_class(bi) != cls) continue;
             const char *key = builtin_lib_key(bi);
+            /* Leading-underscore names are internal helpers (e.g. the
+             * io file-handle methods). They get live-marked + closure
+             * globals like any other builtin, but we don't expose them
+             * as table keys on the library — codegen installs them
+             * elsewhere on the right host objects. */
+            if (key[0] == '_') continue;
             size_t key_len = strlen(key);
             StrRef sr = strpool_add(&c.strs, key, key_len);
             wat_appendf(out,
@@ -2014,6 +2028,69 @@ int codegen_module(const ParseResult *pr, const char *src_name,
                 "        (i32.const %zu) (i32.const %zu)))\n"
                 "      (call $make_int (i64.const -9223372036854775808)))\n",
                 mini_key.offset, mini_key.len);
+        }
+        /* io.stdout / io.stderr / io.stdin: build a sub-table per
+         * stream, populated with the relevant file-handle methods. The
+         * methods themselves were registered as leading-underscore
+         * entries in builtins.c so the standard install loop above
+         * skipped them, but their closure globals
+         * ($g_io_handle_{write,err_write,read,noop}) are live and
+         * ready to use. */
+        if (cls == BLT_LIB_IO) {
+            static const struct {
+                const char *handle;     /* "stdout" / "stderr" / "stdin" */
+                size_t      handle_len;
+                const char *write_glob; /* "io_handle_write" / "io_handle_err_write" / NULL */
+                int         is_stdin;   /* installs a `read` method instead of `write` */
+            } HANDLES[] = {
+                { "stdout", 6, "io_handle_write",     0 },
+                { "stderr", 6, "io_handle_err_write", 0 },
+                { "stdin",  5, NULL,                  1 },
+            };
+            StrRef wkey  = strpool_add(&c.strs, "write", 5);
+            StrRef rkey  = strpool_add(&c.strs, "read",  4);
+            StrRef ckey  = strpool_add(&c.strs, "close", 5);
+            StrRef fkey  = strpool_add(&c.strs, "flush", 5);
+            for (size_t hi = 0; hi < sizeof(HANDLES)/sizeof(HANDLES[0]); hi++) {
+                wat_append(out,
+                    "    (local.set $h (call $tab_new))\n");
+                if (HANDLES[hi].is_stdin) {
+                    wat_appendf(out,
+                        "    (call $tab_set (local.get $h)\n"
+                        "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
+                        "        (i32.const %zu) (i32.const %zu)))\n"
+                        "      (global.get $g_io_handle_read))\n",
+                        rkey.offset, rkey.len);
+                } else {
+                    wat_appendf(out,
+                        "    (call $tab_set (local.get $h)\n"
+                        "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
+                        "        (i32.const %zu) (i32.const %zu)))\n"
+                        "      (global.get $g_%s))\n",
+                        wkey.offset, wkey.len, HANDLES[hi].write_glob);
+                }
+                /* close / flush as no-ops on the standard streams. */
+                wat_appendf(out,
+                    "    (call $tab_set (local.get $h)\n"
+                    "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
+                    "        (i32.const %zu) (i32.const %zu)))\n"
+                    "      (global.get $g_io_handle_noop))\n",
+                    ckey.offset, ckey.len);
+                wat_appendf(out,
+                    "    (call $tab_set (local.get $h)\n"
+                    "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
+                    "        (i32.const %zu) (i32.const %zu)))\n"
+                    "      (global.get $g_io_handle_noop))\n",
+                    fkey.offset, fkey.len);
+                StrRef hkey = strpool_add(&c.strs, HANDLES[hi].handle,
+                                          HANDLES[hi].handle_len);
+                wat_appendf(out,
+                    "    (call $tab_set (local.get $tab)\n"
+                    "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
+                    "        (i32.const %zu) (i32.const %zu)))\n"
+                    "      (local.get $h))\n",
+                    hkey.offset, hkey.len);
+            }
         }
         /* utf8.charpattern: the Lua-pattern string that matches one
          * UTF-8 codepoint. Binary content; strpool_add and data-segment

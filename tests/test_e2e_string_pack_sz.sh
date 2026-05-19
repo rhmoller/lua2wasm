@@ -29,8 +29,8 @@ hi\t5
 5\t7\thi\t9\t6
 9
 1\tX\t10
-false\tnil
-false\tnil
+false\tstring_pack_sz:54: variable-length format
+false\tstring_pack_sz:55: variable-length format
 6
 ab\t52719\t7'
 

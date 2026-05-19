@@ -22,7 +22,7 @@ true
 7\txyz\t9\t6
 false\tnil
 7\tabc\t8\t6
-false\tnil'
+false\tstring_pack_c:44: missing size'
 
 OUT="$(node --experimental-wasm-exnref "$SRC_DIR/runtime/host.mjs" "$WASM")"
 if [[ "$OUT" != "$EXPECTED" ]]; then

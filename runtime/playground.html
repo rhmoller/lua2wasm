@@ -888,6 +888,7 @@ async function run() {
       host: {
         print:     v => logLine(luaToString(v)),
         write_raw: v => { out.appendChild(document.createTextNode(luaToString(v))); },
+        write_err: v => logLine(luaToString(v), "err"),
         warn:      v => logLine("Lua warning: " + luaToString(v), "err"),
         fmt: (kind, i, f, prec) => {
           const s = formatScalar(kind, i, f, prec);

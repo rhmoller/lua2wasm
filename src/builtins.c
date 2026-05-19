@@ -90,6 +90,14 @@ static const struct {
     /* io library */
     { "write", 5, "$builtin_io_write", BLT_LIB_IO },
     { "read",  4, "$builtin_io_read",  BLT_LIB_IO },
+    /* File-handle methods. Leading underscore keeps the standard io-table
+     * install loop from registering them as io._* keys; codegen emits a
+     * dedicated installation step that wires them onto the three stdio
+     * handles (io.stdout, io.stderr, io.stdin). */
+    { "_handle_write",     13, "$io_handle_write",     BLT_LIB_IO },
+    { "_handle_err_write", 17, "$io_handle_err_write", BLT_LIB_IO },
+    { "_handle_read",      12, "$io_handle_read",      BLT_LIB_IO },
+    { "_handle_noop",      12, "$io_handle_noop",      BLT_LIB_IO },
     /* table library */
     { "insert", 6, "$builtin_table_insert", BLT_LIB_TABLE },
     { "remove", 6, "$builtin_table_remove", BLT_LIB_TABLE },
@@ -106,11 +114,12 @@ static const struct {
     { "gethook",      7, "$builtin_debug_gethook",      BLT_LIB_DEBUG },
     /* os library — minimal shims. The host owns wall-clock time,
      * environment variables, and process termination. */
-    { "time",   4, "$builtin_os_time",   BLT_LIB_OS },
-    { "clock",  5, "$builtin_os_clock",  BLT_LIB_OS },
-    { "date",   4, "$builtin_os_date",   BLT_LIB_OS },
-    { "getenv", 6, "$builtin_os_getenv", BLT_LIB_OS },
-    { "exit",   4, "$builtin_os_exit",   BLT_LIB_OS },
+    { "time",    4, "$builtin_os_time",    BLT_LIB_OS },
+    { "clock",   5, "$builtin_os_clock",   BLT_LIB_OS },
+    { "date",    4, "$builtin_os_date",    BLT_LIB_OS },
+    { "getenv",  6, "$builtin_os_getenv",  BLT_LIB_OS },
+    { "exit",    4, "$builtin_os_exit",    BLT_LIB_OS },
+    { "execute", 7, "$builtin_os_execute", BLT_LIB_OS },
 };
 
 #define N (sizeof(BUILTINS)/sizeof(BUILTINS[0]))

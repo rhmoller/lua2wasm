@@ -48,18 +48,18 @@ EXPECTED=$'1
 9
 16
 5
-false\tnil
-false\tnil
-false\tnil
-false\tnil
-false\tnil
-false\tnil
-false\tnil
-false\tnil
-false\tnil
+false\tstring_packsize:66: variable-length format
+false\tstring_packsize:67: variable-length format
+false\tstring_packsize:68: variable-length format
+false\tstring_packsize:69: variable-length format
+false\tstring_packsize:72: out of limits
+false\tstring_packsize:73: out of limits
+false\tstring_packsize:76: out of limits
+false\tstring_packsize:77: out of limits
+false\tstring_packsize:80: missing size
 0
 2
-false\tnil
+false\tstring_packsize:85: not power of 2
 false\tnil'
 
 OUT="$(node --experimental-wasm-exnref "$SRC_DIR/runtime/host.mjs" "$WASM")"
