@@ -503,11 +503,38 @@
       (array.new_fixed $ArgArr 1 (local.get $a)))))
 
   ;; --- comparison ---
+  ;; Equality on the numeric type pair. The mixed int-vs-float case can't
+  ;; just promote both to f64 and use f64.eq: an i64 outside ±2^53 loses
+  ;; precision in the conversion, so e.g. 9007199254740993 (int) would
+  ;; compare equal to 2.0^53 (float). Convert the float to int if and only
+  ;; if it has no fractional part AND fits in signed i64; otherwise the
+  ;; values are unequal by construction.
   (func $num_eq (param $a anyref) (param $b anyref) (result i32)
-    (if (result i32)
-      (i32.and (call $is_int (local.get $a)) (call $is_int (local.get $b)))
-      (then (i64.eq (call $as_int (local.get $a)) (call $as_int (local.get $b))))
-      (else (f64.eq (call $as_float (local.get $a)) (call $as_float (local.get $b))))))
+    (local $fa f64) (local $fb f64) (local $ia i64) (local $ib i64)
+    (if (i32.and (call $is_int (local.get $a)) (call $is_int (local.get $b)))
+      (then (return (i64.eq (call $as_int (local.get $a))
+                            (call $as_int (local.get $b))))))
+    (if (i32.and (call $is_float (local.get $a)) (call $is_float (local.get $b)))
+      (then (return (f64.eq (call $as_float (local.get $a))
+                            (call $as_float (local.get $b))))))
+    ;; Mixed: arrange (int, float) into ($ia, $fa) regardless of order.
+    (if (call $is_int (local.get $a))
+      (then (local.set $ia (call $as_int (local.get $a)))
+            (local.set $fa (call $as_float (local.get $b))))
+      (else (local.set $ia (call $as_int (local.get $b)))
+            (local.set $fa (call $as_float (local.get $a)))))
+    ;; NaN never equals anything (incl. itself).
+    (if (f64.ne (local.get $fa) (local.get $fa)) (then (return (i32.const 0))))
+    ;; Fractional part must be zero.
+    (if (f64.ne (local.get $fa) (f64.floor (local.get $fa)))
+      (then (return (i32.const 0))))
+    ;; Float must fit in signed-i64 range. Use ±2^63 bounds.
+    (if (i32.or
+          (f64.lt (local.get $fa) (f64.const -9223372036854775808.0))
+          (f64.ge (local.get $fa) (f64.const  9223372036854775808.0)))
+      (then (return (i32.const 0))))
+    (local.set $ib (i64.trunc_f64_s (local.get $fa)))
+    (i64.eq (local.get $ia) (local.get $ib)))
 
   (func $str_eq (param $a anyref) (param $b anyref) (result i32)
     (local $sa (ref $LuaArr)) (local $sb (ref $LuaArr))
@@ -593,17 +620,74 @@
                              (ref.cast (ref null eq) (local.get $b))))))
     (i32.const 0))
 
+  ;; Mixed int-vs-float ordering: a naive f64.lt((f64)i, f) loses precision
+  ;; when i exceeds ±2^53 (e.g. maxint=2^63-1 rounds up to 2^63 and would
+  ;; compare equal to 2.0^63). For correctness we split into cases by the
+  ;; float's relationship to the i64 range and the integral part of f.
+  (func $int_lt_float (param $i i64) (param $f f64) (result i32)
+    (if (f64.ne (local.get $f) (local.get $f)) (then (return (i32.const 0))))   ;; NaN
+    (if (f64.ge (local.get $f) (f64.const  9223372036854775808.0))
+      (then (return (i32.const 1))))   ;; any i64 < 2^63 ≤ f
+    (if (f64.lt (local.get $f) (f64.const -9223372036854775808.0))
+      (then (return (i32.const 0))))   ;; any i64 ≥ -2^63 > f impossible
+    ;; f is in [-2^63, 2^63). If f has no fractional part, compare as ints.
+    ;; Otherwise i < f iff i ≤ floor(f).
+    (if (f64.eq (local.get $f) (f64.floor (local.get $f)))
+      (then (return (i64.lt_s (local.get $i) (i64.trunc_f64_s (local.get $f))))))
+    (i64.le_s (local.get $i) (i64.trunc_f64_s (f64.floor (local.get $f)))))
+
+  (func $float_lt_int (param $f f64) (param $i i64) (result i32)
+    (if (f64.ne (local.get $f) (local.get $f)) (then (return (i32.const 0))))
+    (if (f64.lt (local.get $f) (f64.const -9223372036854775808.0))
+      (then (return (i32.const 1))))   ;; f < -2^63 ≤ i
+    (if (f64.ge (local.get $f) (f64.const  9223372036854775808.0))
+      (then (return (i32.const 0))))   ;; f ≥ 2^63 > i impossible
+    ;; f has no fractional part → compare as ints. Else f < i iff ceil(f) ≤ i.
+    (if (f64.eq (local.get $f) (f64.floor (local.get $f)))
+      (then (return (i64.lt_s (i64.trunc_f64_s (local.get $f)) (local.get $i)))))
+    (i64.le_s (i64.trunc_f64_s (f64.ceil (local.get $f))) (local.get $i)))
+
+  (func $int_le_float (param $i i64) (param $f f64) (result i32)
+    (if (f64.ne (local.get $f) (local.get $f)) (then (return (i32.const 0))))
+    (if (f64.ge (local.get $f) (f64.const  9223372036854775808.0))
+      (then (return (i32.const 1))))
+    (if (f64.lt (local.get $f) (f64.const -9223372036854775808.0))
+      (then (return (i32.const 0))))
+    ;; i ≤ f iff i ≤ floor(f) (works regardless of f having a fractional part).
+    (i64.le_s (local.get $i) (i64.trunc_f64_s (f64.floor (local.get $f)))))
+
+  (func $float_le_int (param $f f64) (param $i i64) (result i32)
+    (if (f64.ne (local.get $f) (local.get $f)) (then (return (i32.const 0))))
+    (if (f64.lt (local.get $f) (f64.const -9223372036854775808.0))
+      (then (return (i32.const 1))))
+    (if (f64.ge (local.get $f) (f64.const  9223372036854775808.0))
+      (then (return (i32.const 0))))
+    ;; f ≤ i iff ceil(f) ≤ i.
+    (i64.le_s (i64.trunc_f64_s (f64.ceil (local.get $f))) (local.get $i)))
+
   (func $num_lt (param $a anyref) (param $b anyref) (result i32)
-    (if (result i32)
-      (i32.and (call $is_int (local.get $a)) (call $is_int (local.get $b)))
-      (then (i64.lt_s (call $as_int (local.get $a)) (call $as_int (local.get $b))))
-      (else (f64.lt (call $as_float (local.get $a)) (call $as_float (local.get $b))))))
+    (if (i32.and (call $is_int (local.get $a)) (call $is_int (local.get $b)))
+      (then (return (i64.lt_s (call $as_int (local.get $a))
+                              (call $as_int (local.get $b))))))
+    (if (i32.and (call $is_float (local.get $a)) (call $is_float (local.get $b)))
+      (then (return (f64.lt (call $as_float (local.get $a))
+                            (call $as_float (local.get $b))))))
+    (if (call $is_int (local.get $a))
+      (then (return (call $int_lt_float
+        (call $as_int (local.get $a)) (call $as_float (local.get $b))))))
+    (call $float_lt_int (call $as_float (local.get $a)) (call $as_int (local.get $b))))
 
   (func $num_le (param $a anyref) (param $b anyref) (result i32)
-    (if (result i32)
-      (i32.and (call $is_int (local.get $a)) (call $is_int (local.get $b)))
-      (then (i64.le_s (call $as_int (local.get $a)) (call $as_int (local.get $b))))
-      (else (f64.le (call $as_float (local.get $a)) (call $as_float (local.get $b))))))
+    (if (i32.and (call $is_int (local.get $a)) (call $is_int (local.get $b)))
+      (then (return (i64.le_s (call $as_int (local.get $a))
+                              (call $as_int (local.get $b))))))
+    (if (i32.and (call $is_float (local.get $a)) (call $is_float (local.get $b)))
+      (then (return (f64.le (call $as_float (local.get $a))
+                            (call $as_float (local.get $b))))))
+    (if (call $is_int (local.get $a))
+      (then (return (call $int_le_float
+        (call $as_int (local.get $a)) (call $as_float (local.get $b))))))
+    (call $float_le_int (call $as_float (local.get $a)) (call $as_int (local.get $b))))
 
   ;; Byte-wise lexicographic compare of two LuaStrings. Returns 1 if
   ;; a < b, 0 otherwise (strictly less, not <=).
@@ -3002,6 +3086,7 @@
   (func $utf8_decode_step (param $bytes (ref $LuaArr)) (param $p i32)
                           (param $lax i32) (result i32)
     (local $b i32) (local $cont i32) (local $n i32) (local $end i32) (local $i i32)
+    (local $width i32) (local $cp i32)
     (local.set $n (array.len (local.get $bytes)))
     (if (i32.ge_s (local.get $p) (local.get $n)) (then (return (i32.const 0))))
     (local.set $b (array.get_u $LuaArr (local.get $bytes) (local.get $p)))
@@ -3027,7 +3112,19 @@
         (then (return (i32.const 0))))
       (local.set $i (i32.add (local.get $i) (i32.const 1)))
       (br $lp)))
-    (i32.add (local.get $cont) (i32.const 1)))
+    (local.set $width (i32.add (local.get $cont) (i32.const 1)))
+    ;; In strict mode (lax=0), also reject codepoints above U+10FFFF and
+    ;; UTF-16 surrogates (U+D800..U+DFFF) — both are unassignable in
+    ;; valid UTF-8 even though their byte patterns are well-formed.
+    (if (i32.eqz (local.get $lax))
+      (then
+        (local.set $cp (call $utf8_assemble (local.get $bytes) (local.get $p) (local.get $width)))
+        (if (i32.gt_u (local.get $cp) (i32.const 0x10FFFF))
+          (then (return (i32.const 0))))
+        (if (i32.and (i32.ge_u (local.get $cp) (i32.const 0xD800))
+                     (i32.le_u (local.get $cp) (i32.const 0xDFFF)))
+          (then (return (i32.const 0))))))
+    (local.get $width))
 
   ;; Given a known-valid UTF-8 sequence of $width bytes at position $p,
   ;; assemble and return the codepoint. Width 1..6.
@@ -3448,9 +3545,11 @@
                                        (i32.le_u (local.get $byte) (i32.const 90))))
                               (i32.and (i32.ge_u (local.get $byte) (i32.const 97))
                                        (i32.le_u (local.get $byte) (i32.const 122))))))))
-                        (else
-                          ;; Unrecognized class letter — literal compare.
-                          (return (i32.eq (local.get $byte) (local.get $letter)))))))))))))))))))))))
+                        (else (if (i32.eq (local.get $lo) (i32.const 122)) ;; 'z'
+                          (then (local.set $hit (i32.eqz (local.get $byte))))
+                          (else
+                            ;; Unrecognized class letter — literal compare.
+                            (return (i32.eq (local.get $byte) (local.get $letter)))))))))))))))))))))))))
     (if (local.get $neg)
       (then (return (i32.eqz (local.get $hit)))))
     (local.get $hit))
