@@ -187,7 +187,7 @@
     (if (ref.is_null (local.get $mm))
       (then (local.set $mm (call $get_metamethod (local.get $b) (local.get $key)))))
     (if (ref.is_null (local.get $mm))
-      (then (throw $LuaError (ref.null any))))
+      (then (call $throw_lit (i32.const 208) (i32.const 29))))   ;; "attempt to perform arithmetic"
     (call $args_first (call $lua_call
       (ref.cast (ref $LuaClosure) (local.get $mm))
       (array.new_fixed $ArgArr 2 (local.get $a) (local.get $b)))))
@@ -448,7 +448,7 @@
     (local.set $mm (call $get_metamethod (local.get $a)
       (ref.as_non_null (global.get $g_mkey_bnot))))
     (if (ref.is_null (local.get $mm))
-      (then (throw $LuaError (ref.null any))))
+      (then (call $throw_lit (i32.const 208) (i32.const 29))))   ;; "attempt to perform arithmetic"
     (call $args_first (call $lua_call
       (ref.cast (ref $LuaClosure) (local.get $mm))
       (array.new_fixed $ArgArr 2 (local.get $a) (local.get $a)))))
@@ -464,7 +464,7 @@
     (local.set $mm (call $get_metamethod (local.get $a)
       (ref.as_non_null (global.get $g_mkey_unm))))
     (if (ref.is_null (local.get $mm))
-      (then (throw $LuaError (ref.null any))))
+      (then (call $throw_lit (i32.const 208) (i32.const 29))))   ;; "attempt to perform arithmetic"
     ;; Per spec the metamethod is called with (a, a) for backward-compat.
     (call $args_first (call $lua_call
       (ref.cast (ref $LuaClosure) (local.get $mm))
@@ -497,7 +497,7 @@
     (local.set $mm (call $get_metamethod (local.get $a)
       (ref.as_non_null (global.get $g_mkey_len))))
     (if (ref.is_null (local.get $mm))
-      (then (throw $LuaError (ref.null any))))
+      (then (call $throw_lit (i32.const 237) (i32.const 24))))   ;; "attempt to index a value" (closest available)
     (call $args_first (call $lua_call
       (ref.cast (ref $LuaClosure) (local.get $mm))
       (array.new_fixed $ArgArr 1 (local.get $a)))))
@@ -1216,7 +1216,7 @@
       ;; value's metatable (rare; objects with __index/__newindex but no
       ;; backing table). For now require a table.
       (if (i32.eqz (ref.test (ref $LuaTable) (local.get $v)))
-        (then (throw $LuaError (ref.null any))))
+        (then (call $throw_lit (i32.const 237) (i32.const 24))))   ;; "attempt to index a value"
       (local.set $t (ref.cast (ref $LuaTable) (local.get $v)))
       ;; If key is already present, raw-set (no MM consulted).
       (if (i32.ge_s (call $tab_find (local.get $t) (local.get $k)) (i32.const 0))
@@ -1511,6 +1511,33 @@
       (local.get $msg_b) (i32.const 0) (array.len (local.get $msg_b)))
     (struct.new $LuaString (local.get $out)))
 
+  ;; Throw a $LuaError carrying "<src>:<line>: <msg>", where <line> is
+  ;; the topmost active call frame's source position — i.e. the
+  ;; builtin's caller in user code. The frame stack is left intact on
+  ;; throw paths (we skip pop), so this works wherever an internal
+  ;; error needs to surface to user code.
+  (func $throw_at_top (param $msg (ref $LuaString))
+    (local $idx i32) (local $err (ref $LuaString))
+    (local.set $err (local.get $msg))
+    (local.set $idx (i32.sub (global.get $call_depth) (i32.const 1)))
+    (if (i32.ge_s (local.get $idx) (i32.const 0))
+      (then (local.set $err (call $prefix_error_msg
+        (ref.as_non_null (global.get $g_src_name))
+        (array.get $LineArr
+          (ref.as_non_null (global.get $call_lines))
+          (local.get $idx))
+        (local.get $msg)))))
+    (throw $LuaError (local.get $err)))
+
+  ;; Same, but the message is a string-pool literal addressed by
+  ;; (offset, length). Saves the boilerplate at the ~dozen sites that
+  ;; just want to throw a fixed error and let prefix_error_msg attach
+  ;; the file:line.
+  (func $throw_lit (param $off i32) (param $len i32)
+    (call $throw_at_top
+      (struct.new $LuaString
+        (array.new_data $LuaArr $str_data (local.get $off) (local.get $len)))))
+
   (func $builtin_error (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
     (local $msg anyref) (local $level i32) (local $idx i32)
@@ -1745,15 +1772,15 @@
     (local.set $t (call $args_at (local.get $args) (i32.const 0)))
     (local.set $k (call $args_at (local.get $args) (i32.const 1)))
     (if (i32.eqz (ref.test (ref $LuaTable) (local.get $t)))
-      (then (throw $LuaError (ref.null any))))
+      (then (call $throw_lit (i32.const 237) (i32.const 24))))   ;; "attempt to index a value"
     (if (ref.is_null (local.get $k))
-      (then (throw $LuaError (ref.null any))))
+      (then (call $throw_lit (i32.const 261) (i32.const 18))))   ;; "table index is nil"
     ;; NaN check: a float key whose value != itself.
     (if (call $is_float (local.get $k))
       (then
         (local.set $f (call $as_float (local.get $k)))
         (if (f64.ne (local.get $f) (local.get $f))
-          (then (throw $LuaError (ref.null any))))))
+          (then (call $throw_lit (i32.const 279) (i32.const 18))))))   ;; "table index is NaN"
     (call $tab_set
       (ref.cast (ref $LuaTable) (local.get $t))
       (local.get $k)
@@ -3191,7 +3218,8 @@
       (br_if $done1 (i32.gt_s (i32.add (local.get $p) (i32.const 1)) (local.get $j)))
       (local.set $w (call $utf8_decode_step
         (local.get $bytes) (local.get $p) (local.get $lax)))
-      (if (i32.eqz (local.get $w)) (then (throw $LuaError (ref.null any))))
+      (if (i32.eqz (local.get $w))
+        (then (call $throw_lit (i32.const 190) (i32.const 18))))   ;; "invalid UTF-8 code"
       (local.set $p (i32.add (local.get $p) (local.get $w)))
       (local.set $count (i32.add (local.get $count) (i32.const 1)))
       (br $lp1)))
@@ -4678,7 +4706,7 @@
       (local.set $b (call $as_int (call $args_at (local.get $args) (local.get $i))))
       (if (i32.or (i64.lt_s (local.get $b) (i64.const 0))
                   (i64.gt_s (local.get $b) (i64.const 255)))
-        (then (throw $LuaError (ref.null any))))
+        (then (call $throw_lit (i32.const 155) (i32.const 18))))   ;; "value out of range"
       (array.set $LuaArr (local.get $out) (local.get $i)
         (i32.wrap_i64 (local.get $b)))
       (local.set $i (i32.add (local.get $i) (i32.const 1)))
@@ -4746,9 +4774,25 @@
               (ref.cast (ref $LuaString) (call $args_at (local.get $args) (i32.const 2)))))))
     (local.set $slen (array.len (local.get $sb)))
     (local.set $plen (array.len (local.get $pb)))
+    ;; Reject silly-large rep counts: $n is wrapped to i32 above, so a
+    ;; math.maxinteger or other huge value would silently arrive as a
+    ;; negative or low-bit count. Catch the original i64 BEFORE wrapping.
+    (if (i64.gt_s
+          (call $as_int (call $args_at (local.get $args) (i32.const 1)))
+          (i64.const 0x7fffffff))
+      (then (call $throw_lit (i32.const 297) (i32.const 9))))   ;; "too large"
     (if (i32.le_s (local.get $n) (i32.const 0))
       (then (return (array.new_fixed $ArgArr 1
               (struct.new $LuaString (array.new $LuaArr (i32.const 0) (i32.const 0)))))))
+    ;; Guard the i32 multiplication too — if $n * ($slen + $plen) would
+    ;; overflow i32 we'd allocate the wrong-size buffer. Nested if to
+    ;; short-circuit around the div_u when $slen is zero (i32.and is
+    ;; eager, not short-circuit).
+    (if (i32.gt_s (local.get $slen) (i32.const 0))
+      (then
+        (if (i32.gt_s (local.get $n)
+                      (i32.div_u (i32.const 0x7fffffff) (local.get $slen)))
+          (then (call $throw_lit (i32.const 297) (i32.const 9))))))   ;; "too large"
     (local.set $total
       (i32.add
         (i32.mul (local.get $n) (local.get $slen))
@@ -5475,10 +5519,10 @@
       (if (call $pack_opt_is_signed (local.get $c))
         (then
           (if (i32.eqz (call $pack_fits_signed (local.get $val) (local.get $sz)))
-            (then (throw $LuaError (ref.null any)))))
+            (then (call $throw_lit (i32.const 173) (i32.const 17)))))     ;; "data does not fit"
         (else
           (if (i32.eqz (call $pack_fits_unsigned (local.get $val) (local.get $sz)))
-            (then (throw $LuaError (ref.null any))))))
+            (then (call $throw_lit (i32.const 173) (i32.const 17))))))    ;; "data does not fit"
       ;; Write into the builder, then advance its $len.
       (call $builder_reserve (local.get $b) (local.get $sz))
       (local.set $bbuf (struct.get $Builder $arr (local.get $b)))

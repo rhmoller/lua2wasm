@@ -1409,9 +1409,17 @@ static const char PRELUDE[] = {
  *   93, len 36: "attempt to call a non-function value"  ($lua_call_any)
  *  129, len  6: "__call"                         ($g_mkey_call)
  *  135, len  8: "module '"                       ($builtin_require)
- *  143, len 12: "' not loaded"                   ($builtin_require) */
-#define LITERAL_PREFIX "niltruefalse<float>numberstringtablefunctionboolean__index__add__eq\tLua 5.5'for' step is zeroattempt to call a non-function value__callmodule '' not loaded"
-#define LITERAL_PREFIX_LEN 155
+ *  143, len 12: "' not loaded"                   ($builtin_require)
+ *  155, len 18: "value out of range"             ($builtin_string_char, …)
+ *  173, len 17: "data does not fit"              ($builtin_string_unpack)
+ *  190, len 18: "invalid UTF-8 code"             ($builtin_utf8_codepoint, …)
+ *  208, len 29: "attempt to perform arithmetic" ($arith_mm)
+ *  237, len 24: "attempt to index a value"       ($lua_tabset, $lua_index)
+ *  261, len 18: "table index is nil"             ($builtin_rawset, $tab_set)
+ *  279, len 18: "table index is NaN"             ($builtin_rawset, $tab_set)
+ *  297, len  9: "too large"                      ($builtin_string_rep) */
+#define LITERAL_PREFIX "niltruefalse<float>numberstringtablefunctionboolean__index__add__eq\tLua 5.5'for' step is zeroattempt to call a non-function value__callmodule '' not loadedvalue out of rangedata does not fitinvalid UTF-8 codeattempt to perform arithmeticattempt to index a valuetable index is niltable index is NaNtoo large"
+#define LITERAL_PREFIX_LEN 306
 
 /* Emit the body of one user function. */
 static void emit_user_function(CG *c, const LuaFunc *fn) {

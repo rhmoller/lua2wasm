@@ -39,10 +39,10 @@ EXPECTED=$'1
 7\t255\t9
 5
 1\t9\t6
-false\tnil
-false\tnil
-false\tnil
-false\tnil'
+false\tstring_pack_uint:69: data does not fit
+false\tstring_pack_uint:70: data does not fit
+false\tstring_pack_uint:71: data does not fit
+false\tstring_pack_uint:72: data does not fit'
 
 OUT="$(node --experimental-wasm-exnref "$SRC_DIR/runtime/host.mjs" "$WASM")"
 if [[ "$OUT" != "$EXPECTED" ]]; then

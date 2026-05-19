@@ -43,10 +43,10 @@ EXPECTED=$'0
 2
 4
 -4
-false\tnil
-false\tnil
-false\tnil
-false\tnil
+false\tbitwise:64: attempt to perform arithmetic
+false\tbitwise:65: attempt to perform arithmetic
+false\tbitwise:66: attempt to perform arithmetic
+false\tbitwise:67: attempt to perform arithmetic
 band\tband
 bor\tbor
 bxor\tbxor

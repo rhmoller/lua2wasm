@@ -13,12 +13,12 @@ a1
 1a
 12
 1.5x
-false\tnil
-false\tnil
-false\tnil
-false\tnil
-false\tnil
-false\tnil
+false\tconcat_typecheck:12: attempt to perform arithmetic
+false\tconcat_typecheck:13: attempt to perform arithmetic
+false\tconcat_typecheck:14: attempt to perform arithmetic
+false\tconcat_typecheck:15: attempt to perform arithmetic
+false\tconcat_typecheck:16: attempt to perform arithmetic
+false\tconcat_typecheck:17: attempt to perform arithmetic
 nil
 true\tnil\tfalse
 table\tnil'

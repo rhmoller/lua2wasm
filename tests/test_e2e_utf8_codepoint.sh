@@ -18,8 +18,8 @@ EXPECTED=$'65
 128512
 97\t233\t9731\t128512
 hello
-false\tnil
-false\tnil
+false\tutf8_codepoint:25: invalid UTF-8 code
+false\tutf8_codepoint:28: invalid UTF-8 code
 0'
 
 OUT="$(node --experimental-wasm-exnref "$SRC_DIR/runtime/host.mjs" "$WASM")"

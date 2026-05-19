@@ -21,8 +21,8 @@ add
 2
 2
 true
-false\tnil
-false\tnil'
+false\tmetamethods_arith:40: attempt to perform arithmetic
+false\tmetamethods_arith:41: attempt to perform arithmetic'
 
 OUT="$(node --experimental-wasm-exnref "$SRC_DIR/runtime/host.mjs" "$WASM")"
 if [[ "$OUT" != "$EXPECTED" ]]; then

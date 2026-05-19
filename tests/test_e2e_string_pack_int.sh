@@ -29,12 +29,12 @@ EXPECTED=$'0\t2
 255\t255\t255\t254
 -2\t5
 -1\t200\t-1000\t5
-false\tnil
-false\tnil
-false\tnil
-false\tnil
-false\tnil
-false\tnil
+false\tstring_pack_int:41: data does not fit
+false\tstring_pack_int:42: data does not fit
+false\tstring_pack_int:43: data does not fit
+false\tstring_pack_int:44: data does not fit
+false\tstring_pack_int:45: data does not fit
+false\tstring_pack_int:46: data does not fit
 8\t-1\t-2\t9'
 
 OUT="$(node --experimental-wasm-exnref "$SRC_DIR/runtime/host.mjs" "$WASM")"

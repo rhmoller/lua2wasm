@@ -18,8 +18,8 @@ hi 42
 5
 0
 3
-false\tnil
-false\tnil'
+false\tmetamethods_concat_len:39: attempt to index a value
+false\tmetamethods_concat_len:40: attempt to perform arithmetic'
 
 OUT="$(node --experimental-wasm-exnref "$SRC_DIR/runtime/host.mjs" "$WASM")"
 if [[ "$OUT" != "$EXPECTED" ]]; then
