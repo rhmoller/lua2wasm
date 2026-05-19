@@ -101,15 +101,38 @@
   button:hover, select:hover { background: var(--ctp-surface1); border-color: var(--ctp-surface2); }
   button[disabled] { opacity: .4; cursor: default; }
   main {
-    display: grid; grid-template-columns: 1fr 1fr; min-height: 0;
+    /* Two flexible columns with a draggable splitter between them. The
+       JS sets --split-left (a percent like "42%") on pointermove; the
+       fr units fall back to the initial 50/50 split before any drag. */
+    display: grid;
+    grid-template-columns: minmax(160px, var(--split-left, 1fr))
+                           6px
+                           minmax(160px, 1fr);
+    min-height: 0;
     border-bottom: 1px solid var(--ctp-surface0);
   }
   #editor-host {
-    overflow: auto; border-right: 1px solid var(--ctp-surface0);
+    overflow: auto;
     background: var(--ctp-base);
   }
   .cm-editor   { height: 100%; }
   .cm-scroller { font: 13px/1.5 "JetBrains Mono", ui-monospace, monospace; }
+  #splitter {
+    background: var(--ctp-surface0);
+    cursor: col-resize;
+    /* Widen the hit target without enlarging the visible bar — a
+       transparent pseudo-element extends the grabbable area to ~10px. */
+    position: relative;
+    touch-action: none;
+  }
+  #splitter::before {
+    content: ""; position: absolute; inset: 0 -3px;
+  }
+  #splitter:hover,
+  #splitter.dragging { background: var(--ctp-surface1); }
+  /* While dragging: kill text selection across the whole window and
+     keep the resize cursor regardless of what the pointer is over. */
+  body.splitter-dragging { cursor: col-resize; user-select: none; }
   #out {
     margin: 0; padding: 1em; overflow: auto;
     font: 13px/1.5 ui-monospace, monospace;
@@ -279,6 +302,8 @@
 
 <main>
   <div id="editor-host"></div>
+  <div id="splitter" role="separator" aria-orientation="vertical"
+       tabindex="0" aria-label="Resize panels"></div>
   <pre id="out"></pre>
 </main>
 
@@ -1156,5 +1181,76 @@ window.addEventListener("keydown", e => {
     triggerRun();
   }
 }, true);
+
+/* Draggable splitter between the editor and the output panel. The
+ * gutter pixel column is fixed at 6px in the grid template; this code
+ * just updates a CSS custom property on <main> so the left track
+ * grows/shrinks by the cursor's horizontal delta. The right track
+ * inherits the rest via its 1fr unit. */
+(function setupSplitter() {
+  const mainEl   = document.querySelector("main");
+  const splitter = document.getElementById("splitter");
+  const GUTTER_PX = 6;
+  const STORAGE_KEY = "lua2wasm.splitLeftPct";
+
+  /* Restore a previously chosen split. */
+  const saved = parseFloat(localStorage.getItem(STORAGE_KEY));
+  if (Number.isFinite(saved) && saved > 5 && saved < 95) {
+    mainEl.style.setProperty("--split-left", saved.toFixed(2) + "%");
+  }
+
+  function setSplit(pct) {
+    pct = Math.max(8, Math.min(92, pct));
+    mainEl.style.setProperty("--split-left", pct.toFixed(2) + "%");
+    localStorage.setItem(STORAGE_KEY, pct.toFixed(2));
+  }
+
+  splitter.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    splitter.setPointerCapture(e.pointerId);
+    splitter.classList.add("dragging");
+    document.body.classList.add("splitter-dragging");
+
+    const rect = mainEl.getBoundingClientRect();
+    const onMove = (ev) => {
+      /* Cursor X relative to <main>, minus half the gutter so the bar
+       * tracks the pointer rather than its leading edge. */
+      const x = ev.clientX - rect.left - GUTTER_PX / 2;
+      const pct = (x / rect.width) * 100;
+      setSplit(pct);
+    };
+    const onUp = (ev) => {
+      splitter.releasePointerCapture(ev.pointerId);
+      splitter.classList.remove("dragging");
+      document.body.classList.remove("splitter-dragging");
+      splitter.removeEventListener("pointermove", onMove);
+      splitter.removeEventListener("pointerup", onUp);
+      splitter.removeEventListener("pointercancel", onUp);
+    };
+    splitter.addEventListener("pointermove", onMove);
+    splitter.addEventListener("pointerup", onUp);
+    splitter.addEventListener("pointercancel", onUp);
+  });
+
+  /* Double-click resets to 50/50. */
+  splitter.addEventListener("dblclick", () => {
+    mainEl.style.removeProperty("--split-left");
+    localStorage.removeItem(STORAGE_KEY);
+  });
+
+  /* Keyboard support: Left/Right arrows shift by 2% when the splitter
+   * is focused, Home/End jump to extremes. */
+  splitter.addEventListener("keydown", (e) => {
+    const cur = parseFloat(
+      getComputedStyle(mainEl).getPropertyValue("--split-left")) || 50;
+    const step = e.shiftKey ? 10 : 2;
+    if (e.key === "ArrowLeft")  setSplit(cur - step);
+    else if (e.key === "ArrowRight") setSplit(cur + step);
+    else if (e.key === "Home")  setSplit(15);
+    else if (e.key === "End")   setSplit(85);
+    else return;
+    e.preventDefault();
+  });
+})();
 </script>
 </html>
