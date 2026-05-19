@@ -157,6 +157,17 @@
     border-left-color: var(--ctp-sapphire);
     color: var(--ctp-text);
   }
+
+  /* WAT syntax tokens — palette mirrors the editor's Lua highlighter so
+     keywords/strings/comments/numbers all look the same on both sides. */
+  .wat-comment  { color: var(--ctp-overlay1); font-style: italic; }
+  .wat-string   { color: var(--ctp-green); }
+  .wat-number   { color: var(--ctp-peach); }
+  .wat-keyword  { color: var(--ctp-mauve); }          /* func, param, result, etc. */
+  .wat-instr    { color: var(--ctp-blue); }           /* local.get, call, br_table, etc. */
+  .wat-type     { color: var(--ctp-yellow); }         /* i32, f64, anyref, … */
+  .wat-ident    { color: var(--ctp-rosewater); }      /* $name */
+  .wat-paren    { color: var(--ctp-overlay2); }
   .err  { color: var(--ctp-red); }
   .info { color: var(--ctp-overlay1); }
   .stdin-prompt { color: var(--ctp-sapphire); }
@@ -885,6 +896,117 @@ async function run() {
   logLine(`\n— compiled in ${(t1-t0).toFixed(1)} ms · assembled ${(t2-t1).toFixed(1)} ms · ran ${(t3-t2).toFixed(1)} ms · ${bytes.byteLength} B`, "info");
 }
 
+/* ----- WAT syntax highlighting -----
+ * Lightweight tokeniser: one regex pass over the source emits HTML
+ * with classed spans. We bucket tokens into seven classes (comment,
+ * string, number, keyword, instr, type, ident, paren); everything
+ * else falls through as plain text. Keyword sets are static — WAT
+ * doesn't change underneath us — so a Set lookup is O(1) per word. */
+
+const WAT_TYPES = new Set([
+  "i32", "i64", "f32", "f64", "v128",
+  "anyref", "eqref", "i31ref", "structref", "arrayref", "funcref",
+  "externref", "nullref", "noneref", "nofuncref", "noexternref",
+  "ref", "null", "any", "eq", "i31", "struct", "array", "func", "extern",
+]);
+
+/* Top-level S-expression heads (declarations + structural keywords). */
+const WAT_KEYWORDS = new Set([
+  "module", "type", "import", "export", "func", "param", "result",
+  "local", "global", "table", "memory", "data", "elem", "start",
+  "rec", "sub", "field", "mut", "ref", "null", "exact",
+  "then", "else", "tag", "try", "try_table", "catch", "catch_all", "rethrow",
+  "block", "loop", "if",
+]);
+
+/* Instructions. Not exhaustive (~700 in the spec), but covers everything
+ * the lua2wasm codegen and prelude actually emit. */
+const WAT_INSTRS = new Set([
+  "unreachable", "nop", "drop", "select", "return", "return_call",
+  "return_call_ref", "return_call_indirect",
+  "call", "call_ref", "call_indirect", "br", "br_if", "br_table", "br_on_null", "br_on_non_null",
+  "br_on_cast", "br_on_cast_fail", "throw", "throw_ref",
+  "local.get", "local.set", "local.tee",
+  "global.get", "global.set",
+  "table.get", "table.set", "table.size", "table.grow", "table.fill", "table.copy", "table.init",
+  "memory.size", "memory.grow", "memory.fill", "memory.copy", "memory.init",
+  "ref.null", "ref.is_null", "ref.as_non_null", "ref.func", "ref.eq", "ref.test", "ref.cast", "ref.i31",
+  "i31.get_s", "i31.get_u",
+  "struct.new", "struct.new_default", "struct.get", "struct.get_s", "struct.get_u", "struct.set",
+  "array.new", "array.new_default", "array.new_fixed", "array.new_data", "array.new_elem",
+  "array.get", "array.get_s", "array.get_u", "array.set", "array.len", "array.fill", "array.copy", "array.init_data",
+  "i32.const", "i64.const", "f32.const", "f64.const",
+  "i32.eqz", "i32.eq", "i32.ne", "i32.lt_s", "i32.lt_u", "i32.gt_s", "i32.gt_u",
+  "i32.le_s", "i32.le_u", "i32.ge_s", "i32.ge_u",
+  "i64.eqz", "i64.eq", "i64.ne", "i64.lt_s", "i64.lt_u", "i64.gt_s", "i64.gt_u",
+  "i64.le_s", "i64.le_u", "i64.ge_s", "i64.ge_u",
+  "f32.eq", "f32.ne", "f32.lt", "f32.gt", "f32.le", "f32.ge",
+  "f64.eq", "f64.ne", "f64.lt", "f64.gt", "f64.le", "f64.ge",
+  "i32.add", "i32.sub", "i32.mul", "i32.div_s", "i32.div_u", "i32.rem_s", "i32.rem_u",
+  "i32.and", "i32.or", "i32.xor", "i32.shl", "i32.shr_s", "i32.shr_u", "i32.rotl", "i32.rotr",
+  "i32.clz", "i32.ctz", "i32.popcnt",
+  "i64.add", "i64.sub", "i64.mul", "i64.div_s", "i64.div_u", "i64.rem_s", "i64.rem_u",
+  "i64.and", "i64.or", "i64.xor", "i64.shl", "i64.shr_s", "i64.shr_u", "i64.rotl", "i64.rotr",
+  "i64.clz", "i64.ctz", "i64.popcnt",
+  "f32.add", "f32.sub", "f32.mul", "f32.div", "f32.abs", "f32.neg", "f32.sqrt",
+  "f32.floor", "f32.ceil", "f32.trunc", "f32.nearest", "f32.min", "f32.max", "f32.copysign",
+  "f64.add", "f64.sub", "f64.mul", "f64.div", "f64.abs", "f64.neg", "f64.sqrt",
+  "f64.floor", "f64.ceil", "f64.trunc", "f64.nearest", "f64.min", "f64.max", "f64.copysign",
+  "i32.wrap_i64",
+  "i32.trunc_f32_s", "i32.trunc_f32_u", "i32.trunc_f64_s", "i32.trunc_f64_u",
+  "i64.extend_i32_s", "i64.extend_i32_u",
+  "i64.trunc_f32_s", "i64.trunc_f32_u", "i64.trunc_f64_s", "i64.trunc_f64_u",
+  "f32.convert_i32_s", "f32.convert_i32_u", "f32.convert_i64_s", "f32.convert_i64_u",
+  "f64.convert_i32_s", "f64.convert_i32_u", "f64.convert_i64_s", "f64.convert_i64_u",
+  "f32.demote_f64", "f64.promote_f32",
+  "i32.reinterpret_f32", "i64.reinterpret_f64", "f32.reinterpret_i32", "f64.reinterpret_i64",
+]);
+
+/* One token at a time. Order matters: comments / strings BEFORE generic
+ * word tokens so embedded keywords inside a comment don't get classed.
+ *   ;; line comment
+ *   "string"  (with backslash escapes)
+ *   parens
+ *   $identifier
+ *   numbers (hex / float / exponent / signed)
+ *   bare word (keyword | instr | type | other) */
+const TOK_RE = new RegExp([
+  /(;;[^\n]*)/.source,                              // 1: line comment
+  /("(?:\\.|[^"\\])*")/.source,                     // 2: string
+  /([()])/.source,                                  // 3: paren
+  /(\$[\w.$\-]+)/.source,                           // 4: $identifier
+  /(-?0[xX][0-9a-fA-F_]+(?:\.[0-9a-fA-F_]+)?(?:[pP][+-]?\d+)?)/.source, // 5: hex
+  /(-?\d[\d_]*(?:\.[\d_]+)?(?:[eE][+-]?\d+)?)/.source,                  // 6: dec
+  /([A-Za-z_][\w.]*)/.source,                       // 7: word
+].join("|"), "g");
+
+const ESC = { "&": "&amp;", "<": "&lt;", ">": "&gt;" };
+const esc = s => s.replace(/[&<>]/g, c => ESC[c]);
+
+function highlightWat(src) {
+  let out = "";
+  let last = 0;
+  src.replace(TOK_RE, (m, cmt, str, par, id, hex, dec, word, off) => {
+    if (off > last) out += esc(src.slice(last, off));
+    last = off + m.length;
+    if (cmt)  out += `<span class="wat-comment">${esc(cmt)}</span>`;
+    else if (str)  out += `<span class="wat-string">${esc(str)}</span>`;
+    else if (par)  out += `<span class="wat-paren">${par}</span>`;
+    else if (id)   out += `<span class="wat-ident">${esc(id)}</span>`;
+    else if (hex || dec) out += `<span class="wat-number">${esc(hex || dec)}</span>`;
+    else if (word) {
+      const cls =
+        WAT_INSTRS.has(word)   ? "wat-instr"   :
+        WAT_KEYWORDS.has(word) ? "wat-keyword" :
+        WAT_TYPES.has(word)    ? "wat-type"    : null;
+      out += cls ? `<span class="${cls}">${word}</span>` : word;
+    }
+    return m;
+  });
+  if (last < src.length) out += esc(src.slice(last));
+  return out;
+}
+
 /* Map a `@@SECTION:NAME@@` tag to a UI label + collapsed-by-default flag.
  * `prelude` is implicit — anything before the first marker. */
 const WAT_SECTIONS = {
@@ -937,7 +1059,7 @@ async function showWat() {
       `${lineCount.toLocaleString()} line${lineCount === 1 ? "" : "s"}`;
     det.appendChild(sum);
     const pre = document.createElement("pre");
-    pre.textContent = seg.body;
+    pre.innerHTML = highlightWat(seg.body);
     det.appendChild(pre);
     out.appendChild(det);
   }
