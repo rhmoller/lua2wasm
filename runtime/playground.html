@@ -3,9 +3,12 @@
 <meta charset="utf-8">
 <title>lua2wasm playground</title>
 <style>
-  /* Catppuccin Mocha palette.
-     https://github.com/catppuccin/catppuccin */
-  :root {
+  /* Catppuccin palettes (https://github.com/catppuccin/catppuccin).
+     Two flavours wired to the same variable names so the rest of the
+     stylesheet — and the CodeMirror theme below — only references
+     --ctp-* and just follows whichever block is active. Mocha is the
+     default; setting `data-theme="light"` on <html> swaps to Latte. */
+  :root, html[data-theme="dark"] {
     color-scheme: dark;
     --ctp-rosewater: #f5e0dc;
     --ctp-flamingo:  #f2cdcd;
@@ -33,6 +36,35 @@
     --ctp-base:      #1e1e2e;
     --ctp-mantle:    #181825;
     --ctp-crust:     #11111b;
+  }
+  html[data-theme="light"] {
+    color-scheme: light;
+    --ctp-rosewater: #dc8a78;
+    --ctp-flamingo:  #dd7878;
+    --ctp-pink:      #ea76cb;
+    --ctp-mauve:     #8839ef;
+    --ctp-red:       #d20f39;
+    --ctp-maroon:    #e64553;
+    --ctp-peach:     #fe640b;
+    --ctp-yellow:    #df8e1d;
+    --ctp-green:     #40a02b;
+    --ctp-teal:      #179299;
+    --ctp-sky:       #04a5e5;
+    --ctp-sapphire:  #209fb5;
+    --ctp-blue:      #1e66f5;
+    --ctp-lavender:  #7287fd;
+    --ctp-text:      #4c4f69;
+    --ctp-subtext1:  #5c5f77;
+    --ctp-subtext0:  #6c6f85;
+    --ctp-overlay2:  #7c7f93;
+    --ctp-overlay1:  #8c8fa1;
+    --ctp-overlay0:  #9ca0b0;
+    --ctp-surface2:  #acb0be;
+    --ctp-surface1:  #bcc0cc;
+    --ctp-surface0:  #ccd0da;
+    --ctp-base:      #eff1f5;
+    --ctp-mantle:    #e6e9ef;
+    --ctp-crust:     #dce0e8;
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; margin: 0; }
@@ -229,6 +261,10 @@
     wasm-opt -Oz
   </label>
   <span id="status" style="color:#888"></span>
+  <button id="theme-toggle" style="margin-left:auto"
+          title="Toggle Catppuccin Mocha (dark) / Latte (light)">
+    <span class="theme-icon">🌙</span>
+  </button>
 </header>
 
 <aside id="intro">
@@ -256,17 +292,12 @@ import { StreamLanguage, HighlightStyle,
 import { lua as luaMode }                      from "https://esm.sh/@codemirror/legacy-modes@6.4.0/mode/lua";
 import { tags as t }                           from "https://esm.sh/@lezer/highlight@1.2.1";
 
-/* ---- Catppuccin Mocha syntax theme + editor chrome ---- */
-const CTP = {
-  rosewater: "#f5e0dc", flamingo: "#f2cdcd", pink: "#f5c2e7", mauve: "#cba6f7",
-  red: "#f38ba8", maroon: "#eba0ac", peach: "#fab387", yellow: "#f9e2af",
-  green: "#a6e3a1", teal: "#94e2d5", sky: "#89dceb", sapphire: "#74c7ec",
-  blue: "#89b4fa", lavender: "#b4befe",
-  text: "#cdd6f4", subtext1: "#bac2de", subtext0: "#a6adc8",
-  overlay2: "#9399b2", overlay1: "#7f849c", overlay0: "#6c7086",
-  surface2: "#585b70", surface1: "#45475a", surface0: "#313244",
-  base: "#1e1e2e", mantle: "#181825", crust: "#11111b",
-};
+/* ---- Catppuccin theme via CSS variables ----
+ * The actual color values live in the :root / [data-theme] blocks at
+ * the top of this file. Pointing the CodeMirror theme at the same
+ * --ctp-* vars means a theme toggle just flips html[data-theme]; the
+ * editor follows along without rebuilding any extension. */
+const CTP = new Proxy({}, { get: (_, k) => `var(--ctp-${String(k)})` });
 
 const catppuccinTheme = EditorView.theme({
   "&":               { color: CTP.text, backgroundColor: CTP.base },
@@ -1076,6 +1107,27 @@ const triggerRun = async () => {
 const runBtn = document.getElementById("run");
 runBtn.onclick = triggerRun;
 document.getElementById("showwat").onclick = showWat;
+/* ----- light/dark theme toggle -----
+ * First-load preference order: localStorage > prefers-color-scheme > dark.
+ * Toggling flips html[data-theme]; the rest of the UI (and the editor,
+ * via CSS-var-backed theme constants) updates automatically. */
+const THEME_KEY = "lua2wasm.theme";
+const themeBtn  = document.getElementById("theme-toggle");
+const themeIcon = themeBtn.querySelector(".theme-icon");
+function applyTheme(t) {
+  document.documentElement.dataset.theme = t;
+  themeIcon.textContent = t === "light" ? "☀️" : "🌙";
+}
+const stored = localStorage.getItem(THEME_KEY);
+const initialTheme = stored
+  ?? (window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
+applyTheme(initialTheme);
+themeBtn.addEventListener("click", () => {
+  const next = document.documentElement.dataset.theme === "light" ? "dark" : "light";
+  applyTheme(next);
+  localStorage.setItem(THEME_KEY, next);
+});
+
 runBtn.disabled = false;
 status.textContent = "ready (Ctrl/Cmd+Enter to run)";
 
