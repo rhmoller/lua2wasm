@@ -60,6 +60,10 @@ jobs:
           mkdir -p dist
           cp build-em/lua2wasm.js   dist/lua2wasm.js
           cp build-em/lua2wasm.wasm dist/lua2wasm.wasm
+          # playground.html imports these via relative path; they must
+          # sit alongside index.html in the flat dist.
+          cp runtime/host-bindings.mjs dist/host-bindings.mjs
+          cp runtime/format.mjs        dist/format.mjs
           # Rewrite relative import so dist is flat:
           #   "../build-em/lua2wasm.js" → "./lua2wasm.js"
           sed 's|\.\./build-em/lua2wasm\.js|./lua2wasm.js|' \
