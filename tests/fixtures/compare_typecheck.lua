@@ -1,8 +1,9 @@
 -- Relational operators <, <=, >, >= accept:
 --   - two numbers (int or float, freely mixed)
 --   - two strings (byte-wise lexicographic)
--- Anything else (incl. cross-type number-vs-string) raises a catchable error.
--- (TODO: __lt / __le metamethods.)
+--   - anything with a matching __lt / __le metamethod
+-- Anything else (incl. cross-type number-vs-string with no metamethod)
+-- raises a catchable error.
 
 -- Number comparisons.
 print(1 < 2)             -- true

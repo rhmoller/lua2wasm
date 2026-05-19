@@ -885,8 +885,9 @@
     (struct.new $LuaString
       (array.new_data $LuaArr $str_data (i32.const 0) (i32.const 3))))
 
-  ;; Per Lua, `..` only accepts string or number operands (TODO: __concat
-  ;; metamethod). Anything else raises.
+  ;; Per Lua, `..` only accepts string or number operands directly;
+  ;; anything else falls through to $arith_mm with $g_mkey_concat in
+  ;; $lua_concat below.
   (func $is_concatable (param $v anyref) (result i32)
     (i32.or (ref.test (ref $LuaString) (local.get $v))
             (i32.or (call $is_int (local.get $v))
