@@ -538,18 +538,21 @@ static void emit_args_array(CG *c, Expr **args, size_t nargs, int depth) {
 static void emit_call_array(CG *c, const Expr *e, int depth) {
     if (e->kind == EXPR_METHOD_CALL) {
         /* obj:m(args). Evaluate receiver once into $tmp_any, look up the
-         * method via tab_get, then call with receiver prepended. */
+         * method via $lua_index (which redirects strings through the
+         * `string` library), then call with receiver prepended. */
         StrRef sr = strpool_add(&c->strs, e->as.method_call.method, e->as.method_call.method_len);
         emit_indent(c, depth); wat_append(c->w, "(local.set $tmp_any\n");
         emit_expr(c, e->as.method_call.recv, depth + 1);
         emit_indent(c, depth); wat_append(c->w, ")\n");
         emit_indent(c, depth); wat_append(c->w, "(call $lua_call_any\n");
-        emit_indent(c, depth + 1); wat_append(c->w, "(call $tab_get\n");
-        emit_indent(c, depth + 2); wat_append(c->w, "(ref.cast (ref $LuaTable) (local.get $tmp_any))\n");
+        emit_indent(c, depth + 1); wat_append(c->w, "(call $lua_index\n");
+        emit_indent(c, depth + 2); wat_append(c->w, "(local.get $tmp_any)\n");
         emit_indent(c, depth + 2);
         wat_appendf(c->w,
             "(struct.new $LuaString (array.new_data $LuaArr $str_data "
             "(i32.const %zu) (i32.const %zu)))\n", sr.offset, sr.len);
+        emit_indent(c, depth + 2);
+        wat_appendf(c->w, "(i32.const %d)\n", e->line);
         emit_indent(c, depth + 1); wat_append(c->w, ")\n");
         /* args = [recv] ++ method args */
         size_t mna = e->as.method_call.nargs;
@@ -654,11 +657,15 @@ static void emit_function_expr(CG *c, const LuaFunc *fn, int depth) {
 
 /* ----- table operations ----- */
 static void emit_index_expr(CG *c, const Expr *e, int depth) {
-    emit_indent(c, depth); wat_append(c->w, "(call $tab_get\n");
-    emit_indent(c, depth + 1); wat_append(c->w, "(ref.cast (ref $LuaTable)\n");
-    emit_expr(c, e->as.index.table, depth + 2);
-    emit_indent(c, depth + 1); wat_append(c->w, ")\n");
+    /* `t[k]`. Use the runtime $lua_index helper instead of an inline
+     * (ref.cast (ref $LuaTable) …) so that strings transparently route
+     * through the string library and other-typed receivers throw a
+     * Lua-shaped error with a source line. */
+    emit_indent(c, depth); wat_append(c->w, "(call $lua_index\n");
+    emit_expr(c, e->as.index.table, depth + 1);
     emit_expr(c, e->as.index.key, depth + 1);
+    emit_indent(c, depth + 1);
+    wat_appendf(c->w, "(i32.const %d)\n", e->line);
     emit_indent(c, depth); wat_append(c->w, ")\n");
 }
 

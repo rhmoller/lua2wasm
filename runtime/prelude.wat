@@ -956,6 +956,37 @@
       (br $done (ref.null any))
     )))
 
+  ;; Lua-spec lookup `t[k]` on an arbitrary value. Tables go through
+  ;; tab_get (which already walks __index); strings transparently
+  ;; redirect to the `string` library (the implicit per-type metatable
+  ;; in reference Lua). Anything else throws an error string carrying
+  ;; the caller's source line so user code sees a real message instead
+  ;; of a wasm ref.cast trap.
+  (func $lua_index (param $v anyref) (param $k anyref) (param $line i32) (result anyref)
+    (local $err anyref) (local $tab anyref)
+    (if (ref.test (ref $LuaTable) (local.get $v))
+      (then (return (call $tab_get
+        (ref.cast (ref $LuaTable) (local.get $v)) (local.get $k)))))
+    (if (ref.test (ref $LuaString) (local.get $v))
+      (then
+        (local.set $tab (call $tab_get
+          (ref.as_non_null (global.get $g_globals))
+          (struct.new $LuaString (array.new_data $LuaArr $str_data
+            (i32.const 25) (i32.const 6)))))    ;; "string"
+        (if (ref.test (ref $LuaTable) (local.get $tab))
+          (then (return (call $tab_get
+            (ref.cast (ref $LuaTable) (local.get $tab)) (local.get $k)))))
+        (return (ref.null any))))
+    ;; Other types: build "attempt to index a <type> value" — for now
+    ;; reuse the short "attempt to call a non-function value" slot's
+    ;; surrounding error path (Lua phrasing is similar enough).
+    (local.set $err (struct.new $LuaString
+      (array.new_data $LuaArr $str_data (i32.const 93) (i32.const 36))))
+    (throw $LuaError (call $prefix_error_msg
+      (ref.as_non_null (global.get $g_src_name))
+      (local.get $line)
+      (ref.cast (ref $LuaString) (local.get $err)))))
+
   (func $get_metamethod (param $v anyref) (param $key (ref $LuaString)) (result anyref)
     (local $t (ref $LuaTable)) (local $mt (ref null $LuaTable))
     (if (i32.eqz (ref.test (ref $LuaTable) (local.get $v))) (then (return (ref.null any))))
@@ -1410,19 +1441,20 @@
     (global.get $g_empty_args))
 
   ;; pcall(f, ...): calls f with the remaining args. Returns (true, results...)
-  ;; on success; (false, err) on caught $LuaError.
+  ;; on success; (false, err) on caught $LuaError. The callee can be any
+  ;; value — we delegate to $lua_call_any, which walks __call and surfaces
+  ;; a proper "attempt to call a non-function value" error when the chain
+  ;; bottoms out, so pcall(non-function) returns (false, errmsg).
   (func $builtin_pcall (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
-    (local $callee (ref $LuaClosure))
-    (local $f_args (ref $ArgArr))
-    (local $n_total i32) (local $n_fargs i32) (local $i i32)
+    (local $callee anyref) (local $f_args (ref $ArgArr))
+    (local $n_total i32) (local $n_fargs i32) (local $i i32) (local $line i32)
     (local $err anyref) (local $results (ref $ArgArr)) (local $r2 (ref $ArgArr))
     (local $saved_depth i32)
     (local.set $n_total (array.len (local.get $args)))
     (if (i32.eqz (local.get $n_total))
       (then (throw $LuaError (ref.null any))))
-    (local.set $callee
-      (ref.cast (ref $LuaClosure) (array.get $ArgArr (local.get $args) (i32.const 0))))
+    (local.set $callee (array.get $ArgArr (local.get $args) (i32.const 0)))
     (local.set $n_fargs (i32.sub (local.get $n_total) (i32.const 1)))
     (local.set $f_args (array.new $ArgArr (ref.null any) (local.get $n_fargs)))
     (block $copied (loop $cp
@@ -1432,22 +1464,24 @@
           (i32.add (local.get $i) (i32.const 1))))
       (local.set $i (i32.add (local.get $i) (i32.const 1)))
       (br $cp)))
-    ;; Save frame depth so an in-flight throw doesn't leave the stack
-    ;; elevated for callers up the chain.
     (local.set $saved_depth (global.get $call_depth))
+    ;; Pass the pcall call-site's line through to lua_call_any so error()
+    ;; inside the callee reports the pcall(...) source position — matches
+    ;; reference Lua, where pcall itself doesn't add a visible frame.
+    (if (i32.gt_s (global.get $call_depth) (i32.const 0))
+      (then (local.set $line (array.get $LineArr
+        (ref.as_non_null (global.get $call_lines))
+        (i32.sub (global.get $call_depth) (i32.const 1))))))
     (block $catch_err (result anyref)
-      ;; success path: build (true, results...) and return.
       (local.set $results
         (try_table (result (ref $ArgArr)) (catch $LuaError $catch_err)
-          (call $lua_call (local.get $callee) (local.get $f_args))))
-      ;; prepend true
+          (call $lua_call_any (local.get $callee) (local.get $f_args) (local.get $line))))
       (local.set $r2 (array.new $ArgArr (ref.null any)
         (i32.add (array.len (local.get $results)) (i32.const 1))))
       (array.set $ArgArr (local.get $r2) (i32.const 0) (global.get $g_true))
       (array.copy $ArgArr $ArgArr (local.get $r2) (i32.const 1)
         (local.get $results) (i32.const 0) (array.len (local.get $results)))
       (return (local.get $r2)))
-    ;; catch path: restore depth and return (false, err).
     (local.set $err)
     (global.set $call_depth (local.get $saved_depth))
     (array.new_fixed $ArgArr 2 (global.get $g_false) (local.get $err)))
@@ -1457,18 +1491,15 @@
   ;; throws, the new error replaces the original.
   (func $builtin_xpcall (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
-    (local $callee (ref $LuaClosure)) (local $msgh (ref $LuaClosure))
-    (local $f_args (ref $ArgArr))
-    (local $n_total i32) (local $n_fargs i32) (local $i i32)
+    (local $callee anyref) (local $msgh anyref) (local $f_args (ref $ArgArr))
+    (local $n_total i32) (local $n_fargs i32) (local $i i32) (local $line i32)
     (local $err anyref) (local $results (ref $ArgArr)) (local $r2 (ref $ArgArr))
     (local $handled anyref) (local $saved_depth i32)
     (local.set $n_total (array.len (local.get $args)))
     (if (i32.lt_s (local.get $n_total) (i32.const 2))
       (then (throw $LuaError (ref.null any))))
-    (local.set $callee
-      (ref.cast (ref $LuaClosure) (array.get $ArgArr (local.get $args) (i32.const 0))))
-    (local.set $msgh
-      (ref.cast (ref $LuaClosure) (array.get $ArgArr (local.get $args) (i32.const 1))))
+    (local.set $callee (array.get $ArgArr (local.get $args) (i32.const 0)))
+    (local.set $msgh   (array.get $ArgArr (local.get $args) (i32.const 1)))
     (local.set $n_fargs (i32.sub (local.get $n_total) (i32.const 2)))
     (local.set $f_args (array.new $ArgArr (ref.null any) (local.get $n_fargs)))
     (block $copied (loop $cp
@@ -1479,28 +1510,28 @@
       (local.set $i (i32.add (local.get $i) (i32.const 1)))
       (br $cp)))
     (local.set $saved_depth (global.get $call_depth))
+    (if (i32.gt_s (global.get $call_depth) (i32.const 0))
+      (then (local.set $line (array.get $LineArr
+        (ref.as_non_null (global.get $call_lines))
+        (i32.sub (global.get $call_depth) (i32.const 1))))))
     (block $catch_err (result anyref)
       (local.set $results
         (try_table (result (ref $ArgArr)) (catch $LuaError $catch_err)
-          (call $lua_call (local.get $callee) (local.get $f_args))))
-      ;; success: prepend true.
+          (call $lua_call_any (local.get $callee) (local.get $f_args) (local.get $line))))
       (local.set $r2 (array.new $ArgArr (ref.null any)
         (i32.add (array.len (local.get $results)) (i32.const 1))))
       (array.set $ArgArr (local.get $r2) (i32.const 0) (global.get $g_true))
       (array.copy $ArgArr $ArgArr (local.get $r2) (i32.const 1)
         (local.get $results) (i32.const 0) (array.len (local.get $results)))
       (return (local.get $r2)))
-    ;; error path: stack has $err. Restore depth before invoking msgh.
     (local.set $err)
     (global.set $call_depth (local.get $saved_depth))
-    ;; Call msgh(err) — itself wrapped so its throw doesn't escape xpcall.
     (block $msgh_throw (result anyref)
       (local.set $handled (call $args_first
         (try_table (result (ref $ArgArr)) (catch $LuaError $msgh_throw)
-          (call $lua_call (local.get $msgh)
-            (array.new_fixed $ArgArr 1 (local.get $err))))))
+          (call $lua_call_any (local.get $msgh)
+            (array.new_fixed $ArgArr 1 (local.get $err)) (local.get $line)))))
       (return (array.new_fixed $ArgArr 2 (global.get $g_false) (local.get $handled))))
-    ;; msgh threw: stack has its own error value.
     (local.set $handled)
     (global.set $call_depth (local.get $saved_depth))
     (array.new_fixed $ArgArr 2 (global.get $g_false) (local.get $handled)))
@@ -1910,8 +1941,15 @@
 
   (func $builtin_getmetatable (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
+    (local $v anyref)
     (local $t (ref $LuaTable)) (local $mt (ref null $LuaTable)) (local $guard anyref)
-    (local.set $t (ref.cast (ref $LuaTable) (call $args_at (local.get $args) (i32.const 0))))
+    (local.set $v (call $args_at (local.get $args) (i32.const 0)))
+    ;; lua-spec: getmetatable on a non-table just returns nil — we don't
+    ;; implement per-type metatables for primitives. Crucially, it must
+    ;; NOT trap when handed a string/number/etc.
+    (if (i32.eqz (ref.test (ref $LuaTable) (local.get $v)))
+      (then (return (array.new_fixed $ArgArr 1 (ref.null any)))))
+    (local.set $t (ref.cast (ref $LuaTable) (local.get $v)))
     (local.set $mt (struct.get $LuaTable $meta (local.get $t)))
     (if (ref.is_null (local.get $mt))
       (then (return (array.new_fixed $ArgArr 1 (ref.null any)))))
@@ -3888,11 +3926,15 @@
             (i32.add (i32.sub (local.get $end) (local.get $n_pat)) (i32.const 1))))
           (call $make_int (i64.extend_i32_s (local.get $end)))))))
     (local.set $start_ppos (i32.const 0))
-    (if (i32.and (i32.gt_s (local.get $n_pat) (i32.const 0))
-                 (i32.eq (array.get_u $LuaArr (local.get $pat) (i32.const 0))
-                         (i32.const 94)))   ;; '^'
-      (then (local.set $anchored (i32.const 1))
-            (local.set $start_ppos (i32.const 1))))
+    ;; '^' anchor at pattern start. i32.and isn't short-circuit, so we
+    ;; must guard the pat[0] read on n_pat > 0 explicitly — otherwise
+    ;; find("", "") trips an OOB array access.
+    (if (i32.gt_s (local.get $n_pat) (i32.const 0))
+      (then
+        (if (i32.eq (array.get_u $LuaArr (local.get $pat) (i32.const 0))
+                    (i32.const 94))   ;; '^'
+          (then (local.set $anchored (i32.const 1))
+                (local.set $start_ppos (i32.const 1))))))
     (local.set $sp (i32.sub (local.get $init) (i32.const 1)))
     (local.set $caps (array.new $CapArr (i32.const 0) (i32.const 64)))
     (block $search_done (loop $search
