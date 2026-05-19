@@ -1660,30 +1660,28 @@ static void compute_live_set(const ParseResult *pr, int n_builtins,
         }
     }
 
-    /* Internal cross-references baked into the prelude:
-     *   pairs        -> next       (via $g_builtin_next)
-     *   ipairs       -> _ipairs_iter
-     *   utf8.codes   -> _utf8_codes_iter
-     * If we don't mark these, the live builtin's body won't validate
-     * for lack of the global it references. */
-    int idx_pairs = -1, idx_next = -1, idx_ipairs = -1, idx_ipairs_iter = -1;
-    int idx_u8codes = -1, idx_u8codes_iter = -1;
+    /* Internal cross-references baked into the prelude. The bodies of
+     * pairs/ipairs/utf8.codes read \$g_builtin_next /
+     * \$g_builtin_ipairs_iter / \$g_builtin_utf8_codes_iter as singleton
+     * iterator closures so callers get identity-stable iterators. Those
+     * globals only exist when their builtin is live, and the prelude
+     * body is always present in the binary (we don't drop unused
+     * prelude funcs), so wasm-as would reject an unresolved global.
+     *
+     * Force these three "iterator" builtins live unconditionally so the
+     * singleton globals + their elem declares are always emitted,
+     * independent of whether the user actually calls pairs/ipairs/codes.
+     * The size cost is one closure each. */
     for (int i = 0; i < n_builtins; i++) {
         const char *n = builtin_name(i);
         BuiltinClass c = builtin_class(i);
-        if (c == BLT_TOPLEVEL) {
-            if (strcmp(n, "pairs") == 0)             idx_pairs = i;
-            else if (strcmp(n, "next") == 0)         idx_next = i;
-            else if (strcmp(n, "ipairs") == 0)       idx_ipairs = i;
-            else if (strcmp(n, "_ipairs_iter") == 0) idx_ipairs_iter = i;
-            else if (strcmp(n, "_utf8_codes_iter") == 0) idx_u8codes_iter = i;
-        } else if (c == BLT_LIB_UTF8 && strcmp(n, "codes") == 0) {
-            idx_u8codes = i;
+        if (c == BLT_TOPLEVEL &&
+            (strcmp(n, "next") == 0 ||
+             strcmp(n, "_ipairs_iter") == 0 ||
+             strcmp(n, "_utf8_codes_iter") == 0)) {
+            live[i] = 1;
         }
     }
-    if (idx_pairs >= 0 && live[idx_pairs] && idx_next >= 0) live[idx_next] = 1;
-    if (idx_ipairs >= 0 && live[idx_ipairs] && idx_ipairs_iter >= 0) live[idx_ipairs_iter] = 1;
-    if (idx_u8codes >= 0 && live[idx_u8codes] && idx_u8codes_iter >= 0) live[idx_u8codes_iter] = 1;
 }
 
 int codegen_module(const ParseResult *pr, const char *src_name,
