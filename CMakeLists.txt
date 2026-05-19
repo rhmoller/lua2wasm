@@ -464,6 +464,62 @@ add_test(
 )
 
 add_test(
+    NAME test_e2e_global_const_decl
+    COMMAND bash ${CMAKE_SOURCE_DIR}/tests/test_e2e_global_const_decl.sh
+            $<TARGET_FILE:lua2wasm>
+            ${CMAKE_SOURCE_DIR}
+            ${CMAKE_BINARY_DIR}
+)
+
+add_test(
+    NAME test_e2e_paren_stmt
+    COMMAND bash ${CMAKE_SOURCE_DIR}/tests/test_e2e_paren_stmt.sh
+            $<TARGET_FILE:lua2wasm>
+            ${CMAKE_SOURCE_DIR}
+            ${CMAKE_BINARY_DIR}
+)
+
+add_test(
+    NAME test_e2e_method_literal_call
+    COMMAND bash ${CMAKE_SOURCE_DIR}/tests/test_e2e_method_literal_call.sh
+            $<TARGET_FILE:lua2wasm>
+            ${CMAKE_SOURCE_DIR}
+            ${CMAKE_BINARY_DIR}
+)
+
+add_test(
+    NAME test_e2e_vararg_typed
+    COMMAND bash ${CMAKE_SOURCE_DIR}/tests/test_e2e_vararg_typed.sh
+            $<TARGET_FILE:lua2wasm>
+            ${CMAKE_SOURCE_DIR}
+            ${CMAKE_BINARY_DIR}
+)
+
+add_test(
+    NAME test_e2e_local_prefix_attr
+    COMMAND bash ${CMAKE_SOURCE_DIR}/tests/test_e2e_local_prefix_attr.sh
+            $<TARGET_FILE:lua2wasm>
+            ${CMAKE_SOURCE_DIR}
+            ${CMAKE_BINARY_DIR}
+)
+
+add_test(
+    NAME test_e2e_global_per_name_attr
+    COMMAND bash ${CMAKE_SOURCE_DIR}/tests/test_e2e_global_per_name_attr.sh
+            $<TARGET_FILE:lua2wasm>
+            ${CMAKE_SOURCE_DIR}
+            ${CMAKE_BINARY_DIR}
+)
+
+add_test(
+    NAME test_e2e_global_function_decl
+    COMMAND bash ${CMAKE_SOURCE_DIR}/tests/test_e2e_global_function_decl.sh
+            $<TARGET_FILE:lua2wasm>
+            ${CMAKE_SOURCE_DIR}
+            ${CMAKE_BINARY_DIR}
+)
+
+add_test(
     NAME test_e2e_goto_label
     COMMAND bash ${CMAKE_SOURCE_DIR}/tests/test_e2e_goto_label.sh
             $<TARGET_FILE:lua2wasm>

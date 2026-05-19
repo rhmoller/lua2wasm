@@ -318,6 +318,7 @@ static Expr *parse_expr(Parser *p);
 static Expr *parse_prec(Parser *p, int min_prec);
 static LuaFunc *parse_function_body(Parser *p, int line);
 static LuaFunc *parse_function_body_ex(Parser *p, int line, int with_self);
+static Stmt *parse_function_stmt(Parser *p);
 
 static Expr *parse_primary(Parser *p) {
     const Token *t = peek(p);
@@ -505,22 +506,35 @@ static Expr *parse_prefix_chain(Parser *p) {
             call->as.call.args[0] = arg;
             e = call;
         } else if (k == TOK_COLON) {
-            /* method call: recv:name(args) */
+            /* method call: recv:name(args) | recv:name "str" | recv:name {tbl} */
             int line = peek(p)->line;
             advance(p); /* : */
             if (peek(p)->kind != TOK_IDENT) { set_error(p, "expected method name after ':'"); return NULL; }
             const Token *nm = advance(p);
-            expect(p, TOK_LPAREN, "(");
             Expr *args_buf[MAX_LIST];
             size_t nargs = 0;
-            if (peek(p)->kind != TOK_RPAREN) {
-                do {
-                    if (nargs >= MAX_LIST) { set_error(p, "too many args"); return NULL; }
-                    args_buf[nargs++] = parse_expr(p);
-                    if (!p->ok) return NULL;
-                } while (match(p, TOK_COMMA));
+            TokKind ak = peek(p)->kind;
+            if (ak == TOK_STRING) {
+                const Token *st = advance(p);
+                Expr *arg = expr_new(p->pool, EXPR_STRING, st->line);
+                arg->as.s.bytes = st->str_buf;
+                arg->as.s.len = st->str_len;
+                args_buf[nargs++] = arg;
+            } else if (ak == TOK_LBRACE) {
+                Expr *arg = parse_primary(p);
+                if (!p->ok) return NULL;
+                args_buf[nargs++] = arg;
+            } else {
+                expect(p, TOK_LPAREN, "(");
+                if (peek(p)->kind != TOK_RPAREN) {
+                    do {
+                        if (nargs >= MAX_LIST) { set_error(p, "too many args"); return NULL; }
+                        args_buf[nargs++] = parse_expr(p);
+                        if (!p->ok) return NULL;
+                    } while (match(p, TOK_COMMA));
+                }
+                expect(p, TOK_RPAREN, ")");
             }
-            expect(p, TOK_RPAREN, ")");
             Expr *mc = expr_new(p->pool, EXPR_METHOD_CALL, line);
             mc->as.method_call.recv = e;
             mc->as.method_call.method = nm->start;
@@ -606,14 +620,31 @@ static Stmt *parse_local(Parser *p) {
         return s;
     }
 
-    /* local name[<attr>] [, name[<attr>], ...] [= expr [, expr, ...]]
+    /* local [<attr>] name[<attr>] [, name[<attr>], ...] [= expr, ...]
      * Attributes (Lua 5.4+): <const> rejects later assignment at compile
-     * time; <close> registers the value for __close on scope exit. */
+     * time; <close> registers the value for __close on scope exit.
+     * Lua 5.5 added the prefix form `local <attr> n1, n2` to apply the
+     * same attribute to every name (per-name attribute still wins). */
+    int default_attrib = 0;
+    if (peek(p)->kind == TOK_LT) {
+        advance(p); /* < */
+        if (peek(p)->kind != TOK_IDENT) {
+            set_error(p, "expected attribute name after '<'"); return NULL;
+        }
+        const Token *a = advance(p);
+        if (a->len == 5 && memcmp(a->start, "const", 5) == 0)
+            default_attrib = 1;
+        else if (a->len == 5 && memcmp(a->start, "close", 5) == 0)
+            default_attrib = 2;
+        else { set_error(p, "unknown local attribute"); return NULL; }
+        if (!match(p, TOK_GT)) { set_error(p, "expected '>' after attribute"); return NULL; }
+    }
     if (peek(p)->kind != TOK_IDENT) { set_error(p, "expected identifier after `local`"); return NULL; }
     const Token *names_buf[MAX_LIST];
     int attribs_buf[MAX_LIST] = {0};
     int n_names = 0;
     names_buf[n_names++] = advance(p);
+    attribs_buf[n_names - 1] = default_attrib;
     /* Optional <attrib> immediately after the name. */
     if (peek(p)->kind == TOK_LT) {
         advance(p);
@@ -632,6 +663,7 @@ static Stmt *parse_local(Parser *p) {
         if (peek(p)->kind != TOK_IDENT) { set_error(p, "expected identifier"); return NULL; }
         if (n_names >= MAX_LIST) { set_error(p, "too many names in local"); return NULL; }
         names_buf[n_names++] = advance(p);
+        attribs_buf[n_names - 1] = default_attrib;
         if (peek(p)->kind == TOK_LT) {
             advance(p);
             if (peek(p)->kind != TOK_IDENT) {
@@ -1010,17 +1042,61 @@ static Stmt *parse_label(Parser *p) {
     return s;
 }
 
+/* Consume an `<attribute>` (after seeing TOK_LT). Returns 1 on success.
+ * The attribute name is parsed but not interpreted — `const`-ness on
+ * globals is not yet enforced. */
+static int consume_attribute(Parser *p) {
+    advance(p); /* < */
+    if (peek(p)->kind != TOK_IDENT) {
+        set_error(p, "expected attribute name after '<'"); return 0;
+    }
+    advance(p); /* attribute name */
+    if (!match(p, TOK_GT)) {
+        set_error(p, "expected '>' after attribute"); return 0;
+    }
+    return 1;
+}
+
 static Stmt *parse_global(Parser *p) {
     int line = peek(p)->line;
     advance(p); /* global */
+
+    /* `global function name(...) ... end` — combined declaration.
+     * Equivalent to `global name; name = function(...) ... end`. The
+     * regular function-statement parser auto-declares the name as a
+     * global on first reference, so we just hand off without consuming
+     * the `function` keyword. */
+    if (peek(p)->kind == TOK_KW_FUNCTION) {
+        return parse_function_stmt(p);
+    }
+
+    /* Optional prefix `<attr>` — `global <const> ...`. Parser-accepted,
+     * not enforced yet. */
+    if (peek(p)->kind == TOK_LT) {
+        if (!consume_attribute(p)) return NULL;
+    }
+
+    /* Wildcard form: `global <const> *` (or even `global *`) — declare
+     * all unlisted names as globals. We treat it as a no-op marker. */
+    if (match(p, TOK_STAR)) {
+        return NULL; /* parse_block ignores NULL — no AST node needed */
+    }
+
     if (peek(p)->kind != TOK_IDENT) { set_error(p, "expected identifier after `global`"); return NULL; }
     const Token *names_buf[MAX_LIST];
     int n_names = 0;
     names_buf[n_names++] = advance(p);
+    /* Per-name attribute after the first name. */
+    if (peek(p)->kind == TOK_LT) {
+        if (!consume_attribute(p)) return NULL;
+    }
     while (match(p, TOK_COMMA)) {
         if (peek(p)->kind != TOK_IDENT) { set_error(p, "expected identifier"); return NULL; }
         if (n_names >= MAX_LIST) { set_error(p, "too many names in global"); return NULL; }
         names_buf[n_names++] = advance(p);
+        if (peek(p)->kind == TOK_LT) {
+            if (!consume_attribute(p)) return NULL;
+        }
     }
     /* Register globals BEFORE parsing values so they can self-reference. */
     int *global_idxs = node_pool_alloc(p->pool, sizeof(int) * n_names);
@@ -1145,6 +1221,11 @@ static Stmt *parse_stmt(Parser *p) {
         case TOK_KW_BREAK:  return parse_break(p);
         case TOK_KW_GOTO:   return parse_goto(p);
         case TOK_DBLCOLON:  return parse_label(p);
+        case TOK_LPAREN:
+            /* `(prefixexp)(args)` or `(prefixexp):method(args)` are valid
+             * statements — `parse_ident_stmt` already walks a prefix chain
+             * via `parse_prefix_chain`, which handles a paren-grouped primary. */
+            return parse_ident_stmt(p);
         case TOK_IDENT: {
             /* `global x ...` is parsed as if `global` were a keyword, but we
              * keep it as a normal identifier in the lexer for backward-compat
@@ -1215,6 +1296,11 @@ static LuaFunc *parse_function_body_ex(Parser *p, int line, int with_self) {
             if (peek(p)->kind == TOK_ELLIPSIS) {
                 advance(p);
                 cur_frame(p)->is_vararg = 1;
+                /* Lua 5.5 "named vararg": `...name` binds the varargs to
+                 * `name` as a table. Parser accepts the identifier; full
+                 * binding semantics are not yet implemented (the body sees
+                 * the regular `...` form but `name` resolves to nil). */
+                if (peek(p)->kind == TOK_IDENT) advance(p);
                 break;
             }
             if (peek(p)->kind != TOK_IDENT) { set_error(p, "expected parameter name"); break; }
