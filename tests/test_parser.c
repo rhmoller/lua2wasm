@@ -315,6 +315,48 @@ static MunitResult test_malformed_paren_no_crash(const MunitParameter params[], 
     return MUNIT_OK;
 }
 
+/* `global` is a contextual keyword. Followed by a name it starts a
+ * declaration (STMT_GLOBAL); anywhere else it is an ordinary identifier,
+ * so `global = 5` and `global.x = 1` are plain assignments, not parse
+ * errors. */
+static MunitResult test_global_contextual_keyword(const MunitParameter params[], void *fixture) {
+    (void)params; (void)fixture;
+    struct { const char *src; StmtKind kind; } cases[] = {
+        { "global x = 1",        STMT_GLOBAL },
+        { "global = 5",          STMT_ASSIGN },
+        { "global = {} global.x = 1", STMT_ASSIGN },  /* check the 2nd stmt below */
+    };
+    /* case 0: declaration */
+    {
+        TokenList t = lex(cases[0].src);
+        NodePool pool; node_pool_init(&pool);
+        ParseResult r = parse(&t, &pool);
+        munit_assert_true(r.ok);
+        munit_assert_int(r.main_body.items[0]->kind, ==, STMT_GLOBAL);
+        parse_result_free(&r); node_pool_free(&pool); tokenlist_free(&t);
+    }
+    /* case 1: `global` as an ordinary global being assigned */
+    {
+        TokenList t = lex(cases[1].src);
+        NodePool pool; node_pool_init(&pool);
+        ParseResult r = parse(&t, &pool);
+        munit_assert_true(r.ok);
+        munit_assert_int(r.main_body.items[0]->kind, ==, STMT_ASSIGN);
+        parse_result_free(&r); node_pool_free(&pool); tokenlist_free(&t);
+    }
+    /* case 2: `global.x = 1` — index assignment on the `global` value */
+    {
+        TokenList t = lex(cases[2].src);
+        NodePool pool; node_pool_init(&pool);
+        ParseResult r = parse(&t, &pool);
+        munit_assert_true(r.ok);
+        munit_assert_int(r.main_body.items[1]->kind, ==, STMT_ASSIGN);
+        munit_assert_int(r.main_body.items[1]->as.assign.targets[0].kind, ==, TGT_INDEX);
+        parse_result_free(&r); node_pool_free(&pool); tokenlist_free(&t);
+    }
+    return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
     { "/print_sum_shape",   test_print_sum_shape,   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
     { "/precedence",        test_precedence,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -330,6 +372,7 @@ static MunitTest tests[] = {
     { "/implicit_global",         test_implicit_global,                 NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
     { "/no_capture_unboxed",      test_no_capture_means_unboxed,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
     { "/malformed_paren_no_crash", test_malformed_paren_no_crash,       NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+    { "/global_contextual_keyword", test_global_contextual_keyword,     NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
     { NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 };
 

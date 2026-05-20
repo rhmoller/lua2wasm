@@ -1231,12 +1231,19 @@ static Stmt *parse_stmt(Parser *p) {
              * via `parse_prefix_chain`, which handles a paren-grouped primary. */
             return parse_ident_stmt(p);
         case TOK_IDENT: {
-            /* `global x ...` is parsed as if `global` were a keyword, but we
-             * keep it as a normal identifier in the lexer for backward-compat
-             * and check for it here. */
+            /* `global` is a contextual keyword: it introduces a declaration
+             * only when followed by a name, `function`, an attribute `<`, or
+             * the wildcard `*`. In any other position (`global = 5`,
+             * `global.x = 1`, `global()`, `global:m()`) it is an ordinary
+             * identifier, so fall through to the assignment/call parser. The
+             * lexer keeps it as a plain TOK_IDENT; we disambiguate here. */
             const Token *t = peek(p);
             if (t->len == 6 && memcmp(t->start, "global", 6) == 0) {
-                return parse_global(p);
+                TokKind nxt = peek_at(p, 1)->kind;
+                if (nxt == TOK_IDENT || nxt == TOK_KW_FUNCTION ||
+                    nxt == TOK_LT || nxt == TOK_STAR) {
+                    return parse_global(p);
+                }
             }
             return parse_ident_stmt(p);
         }

@@ -43,6 +43,8 @@ pass	corners_patterns	classes, frontier, sets, captures, backrefs, gsub fn/table
 pass	corners_tables	insert/remove/move/sort/pack/unpack/ipairs
 pass	corners_metatables	index/newindex/eq/lt/le/len/concat/call/tostring/arith
 pass	corners_lang	select, multi-assign, and/or/not, goto, break, repeat, pcall/xpcall
+# Fixed: `global` is a contextual keyword, usable as an ordinary name --------
+pass	global_as_name	`global = 5`, `global.x`, `t.global` accepted (not forced into a decl)
 #
 # Captured bugs (xfail) ----------------------------------------------------
 # (none — all captured differences resolved. Note: error-message *wording* and
