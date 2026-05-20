@@ -2493,8 +2493,10 @@
         (local.set $idx (i32.add (call $tab_find (local.get $t) (local.get $k))
                                   (i32.const 1)))))
     (local.set $n (struct.get $LuaTable $n (local.get $t)))
+    ;; Exhausted: return an explicit nil (so `next({})` yields nil, not no
+    ;; value). The generic-for loop stops on a nil first result either way.
     (if (i32.ge_s (local.get $idx) (local.get $n))
-      (then (return (global.get $g_empty_args))))
+      (then (return (array.new_fixed $ArgArr 1 (ref.null any)))))
     (array.new_fixed $ArgArr 2
       (array.get $TArr (ref.as_non_null (struct.get $LuaTable $keys (local.get $t)))
                        (local.get $idx))
@@ -3470,25 +3472,35 @@
     (array.new_fixed $ArgArr 1 (local.get $removed)))
 
   ;; table.concat(t [, sep])    -> string concatenation of t[1..#t]
+  ;; table.concat(t [, sep [, i [, j]]]) -> t[i] .. sep .. ... .. t[j].
+  ;; Defaults: sep = "", i = 1, j = #t. An empty range (i > j) yields "".
   (func $builtin_table_concat (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
     (local $t (ref $LuaTable)) (local $sep anyref) (local $acc anyref)
-    (local $n i32) (local $i i32)
+    (local $i i32) (local $j i32) (local $k i32) (local $nargs i32)
     (local.set $t (ref.cast (ref $LuaTable) (call $args_at (local.get $args) (i32.const 0))))
-    (if (i32.gt_u (array.len (local.get $args)) (i32.const 1))
+    (local.set $nargs (array.len (local.get $args)))
+    (if (i32.gt_u (local.get $nargs) (i32.const 1))
       (then (local.set $sep (call $args_at (local.get $args) (i32.const 1))))
       (else (local.set $sep (ref.as_non_null (global.get $g_empty_str)))))
-    (local.set $n (call $tab_len (local.get $t)))
-    (if (i32.eqz (local.get $n))
+    (local.set $i (i32.const 1))
+    (if (i32.gt_u (local.get $nargs) (i32.const 2))
+      (then (local.set $i (i32.wrap_i64
+              (call $as_int (call $args_at (local.get $args) (i32.const 2)))))))
+    (local.set $j (call $tab_len (local.get $t)))
+    (if (i32.gt_u (local.get $nargs) (i32.const 3))
+      (then (local.set $j (i32.wrap_i64
+              (call $as_int (call $args_at (local.get $args) (i32.const 3)))))))
+    (if (i32.gt_s (local.get $i) (local.get $j))
       (then (return (array.new_fixed $ArgArr 1 (ref.as_non_null (global.get $g_empty_str))))))
-    (local.set $acc (call $tab_get (local.get $t) (ref.i31 (i32.const 1))))
-    (local.set $i (i32.const 2))
+    (local.set $acc (call $tab_get (local.get $t) (ref.i31 (local.get $i))))
+    (local.set $k (i32.add (local.get $i) (i32.const 1)))
     (block $done (loop $lp
-      (br_if $done (i32.gt_s (local.get $i) (local.get $n)))
+      (br_if $done (i32.gt_s (local.get $k) (local.get $j)))
       (local.set $acc (call $lua_concat
         (call $lua_concat (local.get $acc) (local.get $sep))
-        (call $tab_get (local.get $t) (ref.i31 (local.get $i)))))
-      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (call $tab_get (local.get $t) (ref.i31 (local.get $k)))))
+      (local.set $k (i32.add (local.get $k) (i32.const 1)))
       (br $lp)))
     (array.new_fixed $ArgArr 1 (call $lua_tostring (local.get $acc))))
 

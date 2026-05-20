@@ -17,15 +17,16 @@ pass	float_precision	floats print enough digits to round-trip
 pass	gsub_empty_pat	gsub with "" pattern no longer traps
 pass	gsub_empty_match	empty-match " *" no longer doubles separators
 pass	match_empty_pat	match/find with "" pattern no longer traps
+# Fixed: stdlib gaps (concat range, hex floats, next nil) -------------------
+pass	table_concat_range	table.concat honors i/j range args
+pass	tonumber_hex_float	tonumber parses hex floats
+pass	next_empty	next({}) returns nil
 #
 # Captured bugs (xfail) ----------------------------------------------------
-xfail	table_concat_range	table.concat ignores i/j range args
 xfail	math_log_base	math.log(x,10/2) via log(x)/log(base) loses a ULP
 xfail	pow_one_inf	1^inf is nan (JS Math.pow) not 1.0
-xfail	tonumber_hex_float	tonumber rejects hex floats
 xfail	div_zero_int	int // 0 throws nil payload, not a message
 xfail	mod_zero_int	int % 0 throws nil payload, not a message
-xfail	next_empty	next({}) returns nothing instead of nil
 xfail	format_q_newline	%q encodes newline as "\n" not backslash-newline
 xfail	arith_err_msg	arith error drops "on a <type> value" + strips .lua
 xfail	paren_truncation	(f()) not adjusted to a single value

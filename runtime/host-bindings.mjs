@@ -359,6 +359,18 @@ export function makeHelpers({ getInstance, formatFloat, cFormatG }) {
             const sign = hex[1] === "-" ? -1n : 1n;
             return exp().lua_make_int(sign * BigInt("0x" + hex[2]));
         }
+        // Hex float: 0x mantissa with a '.' and/or a binary 'p' exponent
+        // (JS Number() doesn't parse these). 0x1p4 -> 16.0, 0x.8 -> 0.5.
+        const hf = /^([+-]?)0[xX]([0-9a-fA-F]*)(?:\.([0-9a-fA-F]*))?(?:[pP]([+-]?[0-9]+))?$/.exec(s);
+        if (hf && (s.includes(".") || /[pP]/.test(s)) && (hf[2] || hf[3])) {
+            const sign = hf[1] === "-" ? -1 : 1;
+            let mant = 0;
+            for (const ch of (hf[2] || "")) mant = mant * 16 + parseInt(ch, 16);
+            let scale = 1;
+            for (const ch of (hf[3] || "")) { scale /= 16; mant += parseInt(ch, 16) * scale; }
+            const binExp = hf[4] !== undefined ? parseInt(hf[4], 10) : 0;
+            return exp().lua_make_float(sign * mant * Math.pow(2, binExp));
+        }
         const dec = /^([+-]?)([0-9]+)$/.exec(s);
         if (dec) {
             const sign = dec[1] === "-" ? -1n : 1n;
