@@ -1,0 +1,53 @@
+1
+1
+2
+2
+4
+4
+8
+8
+8
+8
+8
+4
+8
+8
+1
+2
+8
+16
+1
+10
+100
+1
+4
+0
+2
+4
+3
+7
+5
+3
+12
+8
+16
+4
+4
+4
+16
+9
+16
+5
+false	string_packsize:66: variable-length format
+false	string_packsize:67: variable-length format
+false	string_packsize:68: variable-length format
+false	string_packsize:69: variable-length format
+false	string_packsize:72: out of limits
+false	string_packsize:73: out of limits
+false	string_packsize:76: out of limits
+false	string_packsize:77: out of limits
+false	string_packsize:80: missing size
+0
+2
+false	string_packsize:85: not power of 2
+false	invalid format

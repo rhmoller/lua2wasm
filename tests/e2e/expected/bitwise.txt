@@ -1,0 +1,49 @@
+0
+240
+65280
+0
+255
+255
+0
+15
+0
+85
+-1
+0
+-256
+1
+2
+16
+256
+224
+64
+15
+15
+0
+2
+32
+0
+0
+0
+0
+3
+5
+6
+255
+2
+4
+-4
+false	bitwise:64: attempt to perform arithmetic
+false	bitwise:65: attempt to perform arithmetic
+false	bitwise:66: attempt to perform arithmetic
+false	bitwise:67: attempt to perform arithmetic
+band	band
+bor	bor
+bxor	bxor
+shl	shl
+shr	shr
+bnot
+integer
+integer
+integer
+integer

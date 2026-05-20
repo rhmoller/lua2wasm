@@ -1,0 +1,14 @@
+true
+0.0
+1.0
+1.000000
+1.000000
+1.000000
+hello
+value
+true
+ Double brackets
+true
+false
+stored
+nil

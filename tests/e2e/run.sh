@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Generic end-to-end runner for one manifest row: compile a fixture, assemble
+# it with wasm-as, run it under Node, and compare stdout against the golden
+# file tests/e2e/expected/<name>.txt.
+#
+#   run.sh <lua2wasm> <src-dir> <build-dir> <name> <fixture-rel-path>
+#
+# Goldens are captured from the current pipeline; regenerate with
+# tests/e2e/regen.sh after an intended output change.
+set -uo pipefail
+BIN="$1"; SRC_DIR="$2"; BUILD_DIR="$3"; NAME="$4"; FIXTURE="$5"
+
+WAT="$BUILD_DIR/e2e_$NAME.wat"
+WASM="$BUILD_DIR/e2e_$NAME.wasm"
+GOLDEN="$SRC_DIR/tests/e2e/expected/$NAME.txt"
+
+if ! "$BIN" "$SRC_DIR/$FIXTURE" -o "$WAT"; then
+    echo "FAIL: $NAME compile failed" >&2; exit 1
+fi
+if ! wasm-as --all-features --disable-custom-descriptors -o "$WASM" "$WAT"; then
+    echo "FAIL: $NAME wasm-as failed" >&2; exit 1
+fi
+
+# $(...) strips trailing newlines on both sides, so a golden file's final
+# newline never causes a spurious mismatch.
+OUT="$(node --experimental-wasm-exnref "$SRC_DIR/runtime/host.mjs" "$WASM")"
+EXP="$(cat "$GOLDEN")"
+if [[ "$OUT" != "$EXP" ]]; then
+    echo "FAIL: $NAME output mismatch" >&2
+    diff <(printf '%s\n' "$EXP") <(printf '%s\n' "$OUT") >&2 || true
+    exit 1
+fi

@@ -1,0 +1,13 @@
+65
+65
+66
+65	66	67
+104	101	108	108	111
+233
+9731
+128512
+97	233	9731	128512
+hello
+false	utf8_codepoint:25: invalid UTF-8 code
+false	utf8_codepoint:28: invalid UTF-8 code
+0

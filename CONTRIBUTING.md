@@ -30,8 +30,12 @@ land as syntax in the parser. A typical landing pattern:
 
 1. Write a `tests/fixtures/<feature>.lua` that prints something the new
    feature is needed for.
-2. Add `tests/test_e2e_<feature>.sh` (or an expected-output file under
-   `tests/expected/`) and wire it into `CMakeLists.txt`.
+2. Add a row to `tests/e2e/manifest.tsv` (`<name>\t<fixture path>`) and a
+   golden in `tests/e2e/expected/<name>.txt` — capture it with
+   `tests/e2e/regen.sh` once the output is right. CMake turns each row into
+   its own `test_e2e_<name>` automatically. (Only tests that need a custom
+   driver — stdin, stderr capture, `-m` modules, multiple compiler
+   invocations — get a standalone `tests/test_e2e_<feature>.sh`.)
 3. Confirm the test fails for the right reason.
 4. Implement lexer → parser → codegen until it passes.
 5. Land the fixture, harness, and implementation in one commit.
@@ -74,12 +78,18 @@ No AI-attribution trailers (no `Co-Authored-By: Claude`).
 
 - `tests/test_lexer.c`, `tests/test_parser.c`, `tests/test_codegen.c`
   — µnit unit tests (positive cases and a growing set of negatives).
-- `tests/test_e2e_*.sh` — end-to-end: compile → `wasm-as` → run under
-  Node, compare against either an inline string or
-  `tests/expected/<name>.txt`. New tests should prefer the expected-file
-  form so output can be edited as plain text.
+- `tests/e2e/` — the data-driven end-to-end suite. `manifest.tsv` lists
+  `<name>\t<fixture>` rows; `run.sh` compiles each fixture (→ `wasm-as` →
+  Node) and diffs stdout against `tests/e2e/expected/<name>.txt`. CMake
+  registers one `test_e2e_<name>` per row. Regenerate goldens after an
+  intended output change with `tests/e2e/regen.sh`.
+- `tests/test_e2e_*.sh` — the handful of end-to-end tests that need a custom
+  driver (stdin, stderr capture, `-m` modules, multi-fixture sweeps); each
+  is registered individually in `CMakeLists.txt`.
 - `tests/test_host_format.mjs` — `node --test` for the JS-side number
   formatters (`runtime/format.mjs`).
+- `scripts/diff-test.sh` + `tests/diff/` — differential check vs reference
+  Lua 5.5 (the model the e2e harness follows).
 
 ## Pull requests
 

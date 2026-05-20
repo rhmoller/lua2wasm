@@ -1,0 +1,8 @@
+10	500	1000
+1	25	50
+int
+float
+T	F
+first	second
+nil	510	1000
+49

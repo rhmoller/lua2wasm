@@ -1,0 +1,7 @@
+false
+call_typing:3: attempt to call a non-function value
+false
+call_typing:7: attempt to call a non-function value
+obj
+30
+via:false

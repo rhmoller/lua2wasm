@@ -1,0 +1,18 @@
+ plain 
+2
+
+ outer ]] 
+ a ]] b ]=] c 
+ deep ]====] 
+no leading newline
+also stripped
+a
+b
+c
+alpha
+beta
+gamma
+delta
+epsilon
+paren-less
+also works

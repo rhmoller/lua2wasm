@@ -1,0 +1,10 @@
+onetwothree	3
+12XYZ	5
+A B c=3	3
+HELLO	5
+aBc	3
+xyz	3
+a:1 b:2	2
+424242	3
+false	invalid replacement value
+heLLo	2

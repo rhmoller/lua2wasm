@@ -1,0 +1,14 @@
+hell0 w0rld	2
+hell0 world	1
+XXX	3
+hi N, bye N	2
+[foo] [bar] [baz]	3
+XhelloY	1
+XhelloY	1
+1:a,2:b,	2
+%%%%	4
+abc	0
+-a-b-c-	4
+-	1
+yxxx	1
+XnYXnY	2

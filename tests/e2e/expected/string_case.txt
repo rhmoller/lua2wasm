@@ -1,0 +1,12 @@
+HELLO
+HELLO, WORLD!
+
+ABC XYZ 123 !@#
+hello
+hello, world!
+
+abc xyz 123 !@#
+Aé
+aÉ
+false
+true

@@ -1,0 +1,29 @@
+1
+-1
+1
+-1
+0.0
+1.0
+0.0
+false
+3	0.75
+-3	-0.75
+0	0.0
+5	0.0
+5
+5
+nil
+nil
+nil
+integer
+float
+nil
+nil
+nil
+true
+false
+false
+true
+9223372036854775807
+-9223372036854775808
+true

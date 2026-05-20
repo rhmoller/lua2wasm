@@ -1,0 +1,14 @@
+ABC
+Hi!
+
+1
+2	é
+3
+3
+4
+4
+é☃
+10
+false	value out of range
+false	value out of range
+true

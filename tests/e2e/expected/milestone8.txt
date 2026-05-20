@@ -1,0 +1,10 @@
+dog
+dog speaks
+hello
+default:missing
+11
+22
+true
+false
+table
+nil

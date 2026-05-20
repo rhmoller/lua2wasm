@@ -1,0 +1,14 @@
+ab
+a1
+1a
+12
+1.5x
+false	concat_typecheck:12: attempt to perform arithmetic
+false	concat_typecheck:13: attempt to perform arithmetic
+false	concat_typecheck:14: attempt to perform arithmetic
+false	concat_typecheck:15: attempt to perform arithmetic
+false	concat_typecheck:16: attempt to perform arithmetic
+false	concat_typecheck:17: attempt to perform arithmetic
+nil
+true	nil	false
+table	nil

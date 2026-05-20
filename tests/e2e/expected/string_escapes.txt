@@ -1,0 +1,27 @@
+3
+10
+9
+7
+8
+12
+11
+\quote\
+"inner"
+inner
+1	0
+65
+255
+255
+65
+65
+1
+255
+abcdef
+abcd
+2
+3
+4
+Hi!
+first
+second
+3

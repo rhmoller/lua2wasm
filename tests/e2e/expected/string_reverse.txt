@@ -1,0 +1,8 @@
+
+a
+ba
+olleh
+racecar
+54321
+false
+true

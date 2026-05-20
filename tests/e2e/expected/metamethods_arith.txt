@@ -1,0 +1,15 @@
+add	add
+sub	sub
+mul	mul
+div	div
+mod	mod
+pow	pow
+idiv	idiv
+unm
+add
+5
+2
+2
+true
+false	metamethods_arith:40: attempt to perform arithmetic
+false	metamethods_arith:41: attempt to perform arithmetic

@@ -1,0 +1,12 @@
+a
+c
+for	1
+for	2
+for	4
+for	5
+counted	3
+nested fwd
+retry done, n =	3
+escaped nested do
+odd sum	9
+after start/done block

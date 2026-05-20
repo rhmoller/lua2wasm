@@ -1,0 +1,12 @@
+A:x
+A:table
+A:table
+hi 42
+12
+99
+7
+5
+0
+3
+false	metamethods_concat_len:39: attempt to index a value
+false	metamethods_concat_len:40: attempt to perform arithmetic

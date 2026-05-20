@@ -1,0 +1,6 @@
+hellohello
+AB
+3
+h
+function	5
+false	string

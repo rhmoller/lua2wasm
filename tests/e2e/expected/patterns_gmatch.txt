@@ -1,0 +1,11 @@
+alpha,beta,gamma
+a	1
+b	2
+c	3
+2
+bar
+baz
+3	42
+8	7
+12	101
+0

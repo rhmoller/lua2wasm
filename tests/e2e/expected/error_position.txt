@@ -1,0 +1,14 @@
+false	error_position:4: plain
+false	no prefix
+false	error_position:12: with level 1
+false	error_position:20: two up
+false	table
+table
+42
+false	error_position:36: asserted
+hi
+true
+locked
+table
+table
+new

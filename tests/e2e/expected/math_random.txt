@@ -1,0 +1,10 @@
+true	true	true
+true
+true
+number
+float
+true
+integer
+123	456
+integer
+false

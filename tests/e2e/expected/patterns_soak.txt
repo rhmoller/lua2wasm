@@ -1,0 +1,42 @@
+Hello
+123
+2
+F
+oo
+a1b2c3
+0
+,
+2
+hello!@#
+1	3
+1	2
+e
+-1
+abc
+**!!%%
+aaa
+ab
+b
+a
+color
+colour
+he
+lo
+hello
+nil
+hello	world
+
+nil
+n	o
+foo	4
+(b(c)d)
+7	11
+a1,b2,c3
+heLLo	2
+<foo><bar>	2
+aaa	3
+bac	1
+hi earth	2
+4	4
+2	2
+nil

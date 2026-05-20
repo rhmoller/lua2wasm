@@ -1,0 +1,15 @@
+abcd	5
+Z	2
+10
+0
+97	98	0	0
+104	101	108	108	111	0	0	0	0	0
+0
+1
+true
+4
+5
+7	xyz	9	6
+false	data does not fit
+7	abc	8	6
+false	string_pack_c:44: missing size

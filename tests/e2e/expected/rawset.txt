@@ -1,0 +1,7 @@
+1	2
+one	two
+nil
+42
+false
+false
+false

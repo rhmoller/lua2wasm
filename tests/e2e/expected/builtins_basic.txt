@@ -1,0 +1,6 @@
+Lua 5.5
+42
+hello, world
+abc
+false
+builtins_basic:19: boom

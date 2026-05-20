@@ -1,0 +1,18 @@
+true
+table
+42
+100
+true
+hello via _G
+1
+OK
+OVERRIDE:	first
+restored
+via _G:	from _G
+Lua 5.5
+true
+true
+99
+nil
+nil
+nil

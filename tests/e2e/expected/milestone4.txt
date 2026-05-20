@@ -1,0 +1,22 @@
+10
+20
+30
+3
+alice
+30
+100
+200
+ex
+31
+oslo
+42
+one
+two
+2
+0
+two
+1
+2
+hello world
+two
+value

@@ -1,0 +1,25 @@
+hello	7
+3
+97	98	0
+0
+abc	5
+false	string contains zeros
+hello	14
+10
+4
+5
+7
+2
+120	121
+false	data does not fit
+2	0
+0	2
+hi	5
+hi	5
+5	7	hi	9	6
+9
+1	X	10
+false	string_pack_sz:54: variable-length format
+false	string_pack_sz:55: variable-length format
+6
+ab	52719	7

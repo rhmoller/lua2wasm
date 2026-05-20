@@ -1,0 +1,10 @@
+15
+hi there
+1.5
+3
+true
+true
+default
+2
+big
+3
