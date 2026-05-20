@@ -60,7 +60,7 @@ false\tstring_packsize:80: missing size
 0
 2
 false\tstring_packsize:85: not power of 2
-false\tnil'
+false\tinvalid format'
 
 OUT="$(node --experimental-wasm-exnref "$SRC_DIR/runtime/host.mjs" "$WASM")"
 if [[ "$OUT" != "$EXPECTED" ]]; then

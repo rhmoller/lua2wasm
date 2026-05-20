@@ -35,10 +35,10 @@ print(#s2)                                                 -- 5
 print(string.unpack("!4 b c3 b", s2))                     -- 7  xyz  9  6
 
 -- Too long → raise.
-print(pcall(string.pack, "c2", "abcd"))                   -- false  nil
+print(pcall(string.pack, "c2", "abcd"))                   -- false  data does not fit
 
 -- Mixed with ints (no NULs in payload).
 print(string.unpack("Bc3B", string.pack("Bc3B", 7, "abc", 8)))   -- 7  abc  8  6
 
 -- c without [N] is rejected (parser-level).
-print(pcall(string.pack, "c", "x"))                       -- false  nil
+print(pcall(string.pack, "c", "x"))                       -- false  ...: missing size

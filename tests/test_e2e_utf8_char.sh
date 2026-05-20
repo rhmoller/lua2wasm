@@ -19,8 +19,8 @@ Hi!
 4
 é☃
 10
-false\tnil
-false\tnil
+false\tvalue out of range
+false\tvalue out of range
 true'
 
 OUT="$(node --experimental-wasm-exnref "$SRC_DIR/runtime/host.mjs" "$WASM")"

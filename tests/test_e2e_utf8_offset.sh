@@ -32,7 +32,7 @@ nil
 2
 12
 nil
-false\tnil'
+false\tinvalid UTF-8 code'
 
 OUT="$(node --experimental-wasm-exnref "$SRC_DIR/runtime/host.mjs" "$WASM")"
 if [[ "$OUT" != "$EXPECTED" ]]; then

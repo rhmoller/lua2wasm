@@ -12,15 +12,15 @@ EXPECTED=$'<v=42>
 <v=42>
 <v=42>
 false
-false\tnil
+false\t\'__tostring\' must return a string
 nil\tnil\t99
 foo=1; bar=2
 yes
 x\ty
 nil
 locked
-false\tnil
-false\tnil
+false\tcannot change a protected metatable
+false\tcannot change a protected metatable
 table
 7'
 

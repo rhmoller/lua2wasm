@@ -1440,8 +1440,8 @@ static const char PRELUDE[] = {
  * LITERAL_SLAB below; verify_literal_slab() checks that LITERAL_PREFIX and
  * that map agree, so an edit to one without the other fails the build
  * instead of silently corrupting messages or reading past the slab. */
-#define LITERAL_PREFIX "niltruefalse<float>numberstringtablefunctionboolean__index__add__eq\tLua 5.5'for' step is zeroattempt to call a non-function value__callmodule '' not loadedvalue out of rangedata does not fitinvalid UTF-8 codeattempt to perform arithmeticattempt to index a valuetable index is niltable index is NaNtoo largeyearmonthdayhourminsecwdayydayisdsttable overflowout of limitsmissing sizevariable-length formatnot power of 2invalid formatattempt to divide by zeroattempt to perform 'n%0'"
-#define LITERAL_PREFIX_LEN 479
+#define LITERAL_PREFIX "niltruefalse<float>numberstringtablefunctionboolean__index__add__eq\tLua 5.5'for' step is zeroattempt to call a non-function value__callmodule '' not loadedvalue out of rangedata does not fitinvalid UTF-8 codeattempt to perform arithmeticattempt to index a valuetable index is niltable index is NaNtoo largeyearmonthdayhourminsecwdayydayisdsttable overflowout of limitsmissing sizevariable-length formatnot power of 2invalid formatattempt to divide by zeroattempt to perform 'n%0'attempt to compare two values'__tostring' must return a string'__newindex' chain too long; possible loopattempt to close a non-closable valuevalue expectedcannot change a protected metatablestring expectedtable expectedtable or string expectedinvalid replacement valuestring contains zeros"
+#define LITERAL_PREFIX_LEN 768
 static_assert(sizeof(LITERAL_PREFIX) - 1 == LITERAL_PREFIX_LEN,
               "LITERAL_PREFIX_LEN must match the byte length of LITERAL_PREFIX");
 
@@ -1476,6 +1476,17 @@ static const struct { unsigned off; const char *s; } LITERAL_SLAB[] = {
     {416, "invalid format" },                       /* packsize 'c' overflow */
     {430, "attempt to divide by zero" },           /* $lua_fdiv divisor 0 */
     {455, "attempt to perform 'n%0'" },            /* $lua_mod divisor 0 */
+    {479, "attempt to compare two values" },       /* $compare_mm */
+    {508, "'__tostring' must return a string" },   /* $lua_tostring */
+    {541, "'__newindex' chain too long; possible loop" }, /* $lua_tabset */
+    {583, "attempt to close a non-closable value" },/* $do_close */
+    {620, "value expected" },                      /* pcall/xpcall/select */
+    {634, "cannot change a protected metatable" }, /* $builtin_setmetatable */
+    {669, "string expected" },                     /* require/os.getenv */
+    {684, "table expected" },                      /* $builtin_rawget */
+    {698, "table or string expected" },            /* $builtin_rawlen */
+    {722, "invalid replacement value" },           /* gsub replacement paths */
+    {747, "string contains zeros" },               /* $builtin_string_pack 'z' */
 };
 
 /* Returns the offending entry's string on drift between LITERAL_PREFIX and

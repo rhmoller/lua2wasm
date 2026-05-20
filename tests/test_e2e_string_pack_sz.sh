@@ -13,7 +13,7 @@ EXPECTED=$'hello\t7
 97\t98\t0
 0
 abc\t5
-false\tnil
+false\tstring contains zeros
 hello\t14
 10
 4
@@ -21,7 +21,7 @@ hello\t14
 7
 2
 120\t121
-false\tnil
+false\tdata does not fit
 2\t0
 0\t2
 hi\t5

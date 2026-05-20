@@ -16,7 +16,7 @@ aBc\t3
 xyz\t3
 a:1 b:2\t2
 424242\t3
-false\tnil
+false\tinvalid replacement value
 heLLo\t2'
 
 OUT="$(node --experimental-wasm-exnref "$SRC_DIR/runtime/host.mjs" "$WASM")"

@@ -21,8 +21,8 @@ true
 true
 true
 true
-false\tnil
-false\tnil'
+false\tattempt to compare two values
+false\tattempt to compare two values'
 
 OUT="$(node --experimental-wasm-exnref "$SRC_DIR/runtime/host.mjs" "$WASM")"
 if [[ "$OUT" != "$EXPECTED" ]]; then

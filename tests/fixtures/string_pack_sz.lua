@@ -13,7 +13,7 @@ print(string.byte(string.pack("z", ""), 1))              -- 0 (just the terminat
 print(string.unpack("z", "abc\0xyz\0"))                  -- abc  5
 
 -- z with embedded NUL → reject.
-print(pcall(string.pack, "z", "a\0b"))                   -- false  nil
+print(pcall(string.pack, "z", "a\0b"))                   -- false  string contains zeros
 
 -- s default size = 8 (size_t).
 print(string.unpack("s", string.pack("s", "hello")))    -- hello  14
@@ -29,7 +29,7 @@ print(string.byte(string.pack("s1", "xy"), 1))           -- 2
 print(string.byte(string.pack("s1", "xy"), 2, 3))        -- 120  121
 
 -- s1 length-overflow rejection (length > 255).
-print(pcall(string.pack, "s1", string.rep("a", 300)))    -- false  nil
+print(pcall(string.pack, "s1", string.rep("a", 300)))    -- false  data does not fit
 
 -- Endianness affects the length prefix byte order.
 local sle = string.pack("<s2", "hi")
@@ -51,8 +51,8 @@ print(#sa)                                                -- b@0 + pad 3 + s4 pr
 print(string.unpack("!4 b s4", sa))                      -- 1  X  10
 
 -- packsize still rejects s and z (unchanged).
-print(pcall(string.packsize, "s"))                       -- false  nil
-print(pcall(string.packsize, "z"))                       -- false  nil
+print(pcall(string.packsize, "s"))                       -- false  ...: variable-length format
+print(pcall(string.packsize, "z"))                       -- false  ...: variable-length format
 
 -- Body bytes are NOT aligned: s prefix lands aligned, then next
 -- option re-aligns independently.

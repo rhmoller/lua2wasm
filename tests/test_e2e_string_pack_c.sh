@@ -20,7 +20,7 @@ true
 4
 5
 7\txyz\t9\t6
-false\tnil
+false\tdata does not fit
 7\tabc\t8\t6
 false\tstring_pack_c:44: missing size'
 
