@@ -53,6 +53,8 @@ pass	index_nonindexable	index of nil/number is a catchable error mentioning "ind
 pass	method_tail_call	`return self:m(...)` is TCO'd like `return f(...)`
 # Fixed: table.concat rejects non-string/number elements (was silently coerced)
 pass	concat_invalid_value	concat of a boolean/table element is a catchable error
+# Fixed: multiple-assignment eval order (LHS before stores; right-to-left) -----
+pass	multi_assign_order	t[i] captures old i; repeated target keeps leftmost value
 #
 # Captured bugs (xfail) ----------------------------------------------------
 # (none — all captured differences resolved. Note: error-message *wording* and

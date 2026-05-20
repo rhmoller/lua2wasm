@@ -963,20 +963,77 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
                 emit_target_close(c, t, depth);
                 break;
             }
-            /* Multi-target: must evaluate ALL RHS before assigning (Lua spec).
-             * Build the full args array in $tmp_args, then distribute. */
+            /* Multi-target. Lua evaluates every LHS table/key sub-expression
+             * and every RHS value *before* any store, then stores right-to-
+             * left (so a repeated target keeps its leftmost value, matching
+             * reference). Concretely: `i, t[i] = i+1, 99` must capture t[i]'s
+             * index before i is reassigned, and `g.a, g.b, g.a = 1, 2, 3`
+             * must leave g.a == 1.
+             *
+             * Pre-evaluate index targets' table+key into parallel arrays
+             * (left-to-right); plain var targets have a static address and
+             * need no pre-eval, so we skip the arrays entirely when every
+             * target is a variable. */
             (void)last_call;
+            int has_index = 0;
+            for (int i = 0; i < n_targets; i++)
+                if (s->as.assign.targets[i].kind != TGT_VAR) { has_index = 1; break; }
+            if (has_index) {
+                emit_indent(c, depth);
+                wat_appendf(c->w,
+                    "(local.set $tmp_lhs_t (array.new $ArgArr (ref.null any) "
+                    "(i32.const %d)))\n", n_targets);
+                emit_indent(c, depth);
+                wat_appendf(c->w,
+                    "(local.set $tmp_lhs_k (array.new $ArgArr (ref.null any) "
+                    "(i32.const %d)))\n", n_targets);
+                for (int i = 0; i < n_targets; i++) {
+                    AssignTarget *t = &s->as.assign.targets[i];
+                    if (t->kind == TGT_VAR) continue;
+                    emit_indent(c, depth);
+                    wat_appendf(c->w,
+                        "(array.set $ArgArr (ref.as_non_null (local.get $tmp_lhs_t)) "
+                        "(i32.const %d)\n", i);
+                    emit_expr(c, t->as.index.table, depth + 1);
+                    emit_indent(c, depth); wat_append(c->w, ")\n");
+                    emit_indent(c, depth);
+                    wat_appendf(c->w,
+                        "(array.set $ArgArr (ref.as_non_null (local.get $tmp_lhs_k)) "
+                        "(i32.const %d)\n", i);
+                    emit_expr(c, t->as.index.key, depth + 1);
+                    emit_indent(c, depth); wat_append(c->w, ")\n");
+                }
+            }
             emit_indent(c, depth); wat_append(c->w, "(local.set $tmp_args\n");
             emit_args_array(c, s->as.assign.values, n_values, depth + 1);
             emit_indent(c, depth); wat_append(c->w, ")\n");
-            for (int i = 0; i < n_targets; i++) {
+            for (int i = n_targets - 1; i >= 0; i--) {
                 AssignTarget *t = &s->as.assign.targets[i];
-                emit_target_open(c, t, depth);
-                emit_indent(c, depth + 1);
-                wat_appendf(c->w,
-                    "(call $args_at (ref.as_non_null (local.get $tmp_args)) "
-                    "(i32.const %d))\n", i);
-                emit_target_close(c, t, depth);
+                if (t->kind == TGT_VAR) {
+                    emit_target_open(c, t, depth);
+                    emit_indent(c, depth + 1);
+                    wat_appendf(c->w,
+                        "(call $args_at (ref.as_non_null (local.get $tmp_args)) "
+                        "(i32.const %d))\n", i);
+                    emit_target_close(c, t, depth);
+                } else {
+                    /* index target: store via pre-evaluated table+key so
+                     * __newindex still fires (matches emit_target_open). */
+                    emit_indent(c, depth); wat_append(c->w, "(call $lua_tabset\n");
+                    emit_indent(c, depth + 1);
+                    wat_appendf(c->w,
+                        "(array.get $ArgArr (ref.as_non_null (local.get $tmp_lhs_t)) "
+                        "(i32.const %d))\n", i);
+                    emit_indent(c, depth + 1);
+                    wat_appendf(c->w,
+                        "(array.get $ArgArr (ref.as_non_null (local.get $tmp_lhs_k)) "
+                        "(i32.const %d))\n", i);
+                    emit_indent(c, depth + 1);
+                    wat_appendf(c->w,
+                        "(call $args_at (ref.as_non_null (local.get $tmp_args)) "
+                        "(i32.const %d))\n", i);
+                    emit_indent(c, depth); wat_append(c->w, ")\n");
+                }
             }
             break;
         }
@@ -1708,6 +1765,8 @@ static void emit_user_function(CG *c, const LuaFunc *fn) {
     wat_append(w, "    (local $tmp_clo (ref null $LuaClosure))\n");
     wat_append(w, "    (local $tmp_callee anyref)\n");
     wat_append(w, "    (local $tmp_tab (ref null $LuaTable))\n");
+    wat_append(w, "    (local $tmp_lhs_t (ref null $ArgArr))\n");
+    wat_append(w, "    (local $tmp_lhs_k (ref null $ArgArr))\n");
     emit_for_scratch_locals(w, &fn->body);
     if (fn->is_vararg) {
         /* Non-null: prologue always writes $varargs before first use. */
@@ -2201,6 +2260,8 @@ static void emit_main_chunk(CG *c) {
     wat_append(out, "    (local $tmp_clo (ref null $LuaClosure))\n");
     wat_append(out, "    (local $tmp_callee anyref)\n");
     wat_append(out, "    (local $tmp_tab (ref null $LuaTable))\n");
+    wat_append(out, "    (local $tmp_lhs_t (ref null $ArgArr))\n");
+    wat_append(out, "    (local $tmp_lhs_k (ref null $ArgArr))\n");
     emit_for_scratch_locals(out, &pr->main_body);
     {
         int bids[128]; int n = 0;
