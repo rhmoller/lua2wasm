@@ -47,6 +47,8 @@ pass	corners_lang	select, multi-assign, and/or/not, goto, break, repeat, pcall/x
 pass	global_as_name	`global = 5`, `global.x`, `t.global` accepted (not forced into a decl)
 # Fixed: error(nil)/error() yields the string "<no error object>" (Lua 5.5) --
 pass	error_no_object	nil error object becomes "<no error object>" at pcall/xpcall boundary
+# Fixed: indexing a non-table raises an "index" error, not a "call" error ----
+pass	index_nonindexable	index of nil/number is a catchable error mentioning "index"
 #
 # Captured bugs (xfail) ----------------------------------------------------
 # (none — all captured differences resolved. Note: error-message *wording* and

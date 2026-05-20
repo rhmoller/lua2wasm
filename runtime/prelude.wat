@@ -1174,11 +1174,12 @@
           (then (return (call $tab_get
             (ref.cast (ref $LuaTable) (local.get $tab)) (local.get $k)))))
         (return (ref.null any))))
-    ;; Other types: build "attempt to index a <type> value" — for now
-    ;; reuse the short "attempt to call a non-function value" slot's
-    ;; surrounding error path (Lua phrasing is similar enough).
+    ;; Other types (nil, number, boolean, ...): "attempt to index a value",
+    ;; matching the write path ($lua_tabset) and rawget. We carry the index
+    ;; expression's own source line ($line) rather than the topmost frame's,
+    ;; so build the message directly instead of via $throw_lit.
     (local.set $err (struct.new $LuaString
-      (array.new_data $LuaArr $str_data (i32.const 93) (i32.const 36))))
+      (array.new_data $LuaArr $str_data (i32.const 237) (i32.const 24))))
     (throw $LuaError (call $prefix_error_msg
       (ref.as_non_null (global.get $g_src_name))
       (local.get $line)
