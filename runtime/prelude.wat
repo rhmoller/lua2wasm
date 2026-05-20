@@ -3590,6 +3590,7 @@
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
     (local $t (ref $LuaTable)) (local $sep anyref) (local $acc anyref)
     (local $i i32) (local $j i32) (local $k i32) (local $nargs i32)
+    (local $elem anyref)
     (local.set $t (ref.cast (ref $LuaTable) (call $args_at (local.get $args) (i32.const 0))))
     (local.set $nargs (array.len (local.get $args)))
     (if (i32.gt_u (local.get $nargs) (i32.const 1))
@@ -3605,13 +3606,21 @@
               (call $as_int (call $args_at (local.get $args) (i32.const 3)))))))
     (if (i32.gt_s (local.get $i) (local.get $j))
       (then (return (array.new_fixed $ArgArr 1 (ref.as_non_null (global.get $g_empty_str))))))
+    ;; Reference table.concat accepts only strings and numbers per element
+    ;; (it does NOT tostring tables/booleans); anything else is a catchable
+    ;; "invalid value ... for 'concat'" error.
     (local.set $acc (call $tab_get (local.get $t) (ref.i31 (local.get $i))))
+    (if (i32.eqz (call $is_concatable (local.get $acc)))
+      (then (call $throw_lit (i32.const 785) (i32.const 35))))
     (local.set $k (i32.add (local.get $i) (i32.const 1)))
     (block $done (loop $lp
       (br_if $done (i32.gt_s (local.get $k) (local.get $j)))
+      (local.set $elem (call $tab_get (local.get $t) (ref.i31 (local.get $k))))
+      (if (i32.eqz (call $is_concatable (local.get $elem)))
+        (then (call $throw_lit (i32.const 785) (i32.const 35))))
       (local.set $acc (call $lua_concat
         (call $lua_concat (local.get $acc) (local.get $sep))
-        (call $tab_get (local.get $t) (ref.i31 (local.get $k)))))
+        (local.get $elem)))
       (local.set $k (i32.add (local.get $k) (i32.const 1)))
       (br $lp)))
     (array.new_fixed $ArgArr 1 (call $lua_tostring (local.get $acc))))
