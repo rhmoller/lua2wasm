@@ -1730,6 +1730,16 @@
     ;; unreachable, but typechecker needs a tail expression:
     (global.get $g_empty_args))
 
+  ;; Reference Lua's luaG_errormsg replaces a nil error object with the
+  ;; string "<no error object>" before delivering it to the catcher (after
+  ;; any message handler has run). error()/error(nil) raises a null anyref,
+  ;; so mirror that substitution at the pcall/xpcall boundary.
+  (func $err_or_noobj (param $e anyref) (result anyref)
+    (if (result anyref) (ref.is_null (local.get $e))
+      (then (struct.new $LuaString
+              (array.new_data $LuaArr $str_data (i32.const 768) (i32.const 17))))
+      (else (local.get $e))))
+
   ;; pcall(f, ...): calls f with the remaining args. Returns (true, results...)
   ;; on success; (false, err) on caught $LuaError. The callee can be any
   ;; value — we delegate to $lua_call_any, which walks __call and surfaces
@@ -1774,7 +1784,8 @@
       (return (local.get $r2)))
     (local.set $err)
     (global.set $call_depth (local.get $saved_depth))
-    (array.new_fixed $ArgArr 2 (global.get $g_false) (local.get $err)))
+    (array.new_fixed $ArgArr 2 (global.get $g_false)
+      (call $err_or_noobj (local.get $err))))
 
   ;; xpcall(f, msgh, ...): like pcall, but on error calls msgh(err) and
   ;; uses its first return value as the error returned. If msgh itself
@@ -1821,10 +1832,12 @@
         (try_table (result (ref $ArgArr)) (catch $LuaError $msgh_throw)
           (call $lua_call_any (local.get $msgh)
             (array.new_fixed $ArgArr 1 (local.get $err)) (local.get $line)))))
-      (return (array.new_fixed $ArgArr 2 (global.get $g_false) (local.get $handled))))
+      (return (array.new_fixed $ArgArr 2 (global.get $g_false)
+        (call $err_or_noobj (local.get $handled)))))
     (local.set $handled)
     (global.set $call_depth (local.get $saved_depth))
-    (array.new_fixed $ArgArr 2 (global.get $g_false) (local.get $handled)))
+    (array.new_fixed $ArgArr 2 (global.get $g_false)
+      (call $err_or_noobj (local.get $handled))))
 
   ;; warn(...): hand a concatenated string to the host. Accepts (and
   ;; silently ignores) the "@on"/"@off" control messages.
