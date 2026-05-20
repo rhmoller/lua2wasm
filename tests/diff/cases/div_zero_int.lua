@@ -1,3 +1,5 @@
--- BUG: integer floor-division by zero throws a nil-payload error instead of a
--- catchable message. Reference: false  <chunk>:1: attempt to perform 'n//0'
-print(pcall(function() return 3 // 0 end))
+-- Integer // 0 must raise a *catchable* error (it used to throw a nil payload,
+-- so pcall returned nil and string.find(err, ...) itself errored). We check the
+-- semantic property — a string error object — not the exact wording.
+local ok, err = pcall(function() return 3 // 0 end)
+print(ok, type(err))

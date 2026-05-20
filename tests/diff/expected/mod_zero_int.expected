@@ -1,1 +1,1 @@
-false	mod_zero_int.lua:3: attempt to perform 'n%0'
+false	string

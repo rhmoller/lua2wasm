@@ -1447,9 +1447,11 @@ static const char PRELUDE[] = {
  *  368, len 12: "missing size"                    (pack 'c' missing [N])
  *  380, len 22: "variable-length format"          (packsize on 's'/'z')
  *  402, len 14: "not power of 2"                  (pack '!N' validation)
- *  416, len 14: "invalid format"                  (packsize 'c' overflow) */
-#define LITERAL_PREFIX "niltruefalse<float>numberstringtablefunctionboolean__index__add__eq\tLua 5.5'for' step is zeroattempt to call a non-function value__callmodule '' not loadedvalue out of rangedata does not fitinvalid UTF-8 codeattempt to perform arithmeticattempt to index a valuetable index is niltable index is NaNtoo largeyearmonthdayhourminsecwdayydayisdsttable overflowout of limitsmissing sizevariable-length formatnot power of 2invalid format"
-#define LITERAL_PREFIX_LEN 430
+ *  416, len 14: "invalid format"                  (packsize 'c' overflow)
+ *  430, len 25: "attempt to divide by zero"       ($lua_fdiv divisor 0)
+ *  455, len 24: "attempt to perform 'n%0'"        ($lua_mod divisor 0) */
+#define LITERAL_PREFIX "niltruefalse<float>numberstringtablefunctionboolean__index__add__eq\tLua 5.5'for' step is zeroattempt to call a non-function value__callmodule '' not loadedvalue out of rangedata does not fitinvalid UTF-8 codeattempt to perform arithmeticattempt to index a valuetable index is niltable index is NaNtoo largeyearmonthdayhourminsecwdayydayisdsttable overflowout of limitsmissing sizevariable-length formatnot power of 2invalid formatattempt to divide by zeroattempt to perform 'n%0'"
+#define LITERAL_PREFIX_LEN 479
 
 /* Emit the body of one user function. */
 static void emit_user_function(CG *c, const LuaFunc *fn) {

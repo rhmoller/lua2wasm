@@ -327,7 +327,7 @@
         ;; unrepresentable") never fires. Subtraction in wasm wraps, so
         ;; INT64_MIN // -1 → INT64_MIN, exactly like real-Lua's overflow.
         (if (i64.eqz (local.get $bi))
-          (then (throw $LuaError (ref.null any))))
+          (then (call $throw_lit (i32.const 430) (i32.const 25))))   ;; "attempt to divide by zero"
         (if (i64.eq (local.get $bi) (i64.const -1))
           (then (return (call $make_int
             (i64.sub (i64.const 0) (local.get $ai))))))
@@ -364,7 +364,7 @@
         ;; on INT64_MIN/-1 doesn't trap on every engine but is implementation-
         ;; defined; explicit short-circuit is portable).
         (if (i64.eqz (local.get $bi))
-          (then (throw $LuaError (ref.null any))))
+          (then (call $throw_lit (i32.const 455) (i32.const 24))))   ;; "attempt to perform 'n%0'"
         (if (i64.eq (local.get $bi) (i64.const -1))
           (then (return (call $make_int (i64.const 0)))))
         (local.set $r  (i64.rem_s (local.get $ai) (local.get $bi)))
