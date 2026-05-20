@@ -9,6 +9,8 @@ Hi!
 4
 é☃
 10
-false	value out of range
-false	value out of range
+4
+6
+false
+false
 true

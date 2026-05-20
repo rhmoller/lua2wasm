@@ -24,9 +24,15 @@ print(utf8.char(233, 9731))             -- é☃
 -- Concatenation length = sum of byte widths.
 print(#utf8.char(65, 233, 9731, 128512))-- 1+2+3+4 = 10
 
--- Out-of-range codepoints raise.
-print(pcall(function() return utf8.char(-1) end))         -- false   nil
-print(pcall(function() return utf8.char(1114112) end))    -- false   nil  (0x110000)
+-- Extended range: codepoints above U+10FFFF up to MAXUTF (0x7FFFFFFF) are
+-- accepted, encoded as 4–6 byte UTF-8 (matches reference).
+print(#utf8.char(1114112))              -- 4   (0x110000)
+print(#utf8.char(0x7FFFFFFF))           -- 6
+
+-- Out of range (< 0 or > 0x7FFFFFFF) raises. The parenthesized pcall yields
+-- just the boolean status, so error wording / chunk name are not compared.
+print((pcall(utf8.char, -1)))           -- false
+print((pcall(utf8.char, 0x7FFFFFFF + 1)))  -- false
 
 -- Result is a fresh string each call.
 local a = utf8.char(65)
