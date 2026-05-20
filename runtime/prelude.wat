@@ -4043,52 +4043,75 @@
       (br $lp2)))
     (local.get $out))
 
-  ;; utf8.codes iterator. Called with (s, prev_p).
-  ;;   prev_p == 0 -> emit first codepoint at byte 1
-  ;;   prev_p > 0  -> advance past codepoint at prev_p, emit next
-  ;; Returns empty when past end. Raises on invalid sequences (strict).
-  ;; (Lax flag from utf8.codes(s, lax) is currently ignored — see
-  ;;  docs/stdlib.md.)
+  ;; True iff byte $b is a UTF-8 continuation byte (0x80..0xBF).
+  (func $utf8_iscont (param $b i32) (result i32)
+    (i32.eq (i32.and (local.get $b) (i32.const 0xC0)) (i32.const 0x80)))
+
+  ;; utf8.codes iterator. Called with (s, ctrl), where ctrl is the byte
+  ;; position the previous step returned (1-based) or 0 to start. Mirrors
+  ;; reference iter_aux: read ctrl as an *unsigned* index n; if n >= #s the
+  ;; iteration is over (this also handles a negative ctrl, which becomes a
+  ;; huge unsigned — so out-of-range positions yield nil instead of an
+  ;; out-of-bounds trap). Otherwise skip any continuation bytes, decode the
+  ;; codepoint, and reject a stray continuation byte immediately after it
+  ;; (strict). Returns empty when past the end. Lax flag ignored.
   (func $builtin_utf8_codes_iter (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
     (local $bytes (ref $LuaArr)) (local $n_bytes i32)
-    (local $prev i32) (local $p i32) (local $w i32)
+    (local $ctrl i64) (local $n i32) (local $w i32) (local $next i32)
     (local $out (ref $ArgArr))
     (local.set $bytes (struct.get $LuaString $bytes
       (ref.cast (ref $LuaString) (call $args_at (local.get $args) (i32.const 0)))))
     (local.set $n_bytes (array.len (local.get $bytes)))
-    (local.set $prev (i32.wrap_i64
-      (call $as_int (call $args_at (local.get $args) (i32.const 1)))))
-    (if (i32.eqz (local.get $prev))
-      (then (local.set $p (i32.const 0)))
-      (else
-        ;; advance past the codepoint at byte $prev (1-based)
-        (local.set $w (call $utf8_decode_step
-          (local.get $bytes) (i32.sub (local.get $prev) (i32.const 1))
-          (i32.const 0)))
-        (if (i32.eqz (local.get $w))
-          (then (call $throw_lit (i32.const 190) (i32.const 18))))   ;; "invalid UTF-8 code"
-        (local.set $p (i32.add (i32.sub (local.get $prev) (i32.const 1))
-                                (local.get $w)))))
-    (if (i32.ge_s (local.get $p) (local.get $n_bytes))
+    (local.set $ctrl (call $as_int (call $args_at (local.get $args) (i32.const 1))))
+    ;; n = (unsigned)ctrl; n >= #s ends iteration. A negative ctrl is a huge
+    ;; unsigned, so it ends too — no out-of-bounds access.
+    (if (i32.or (i64.lt_s (local.get $ctrl) (i64.const 0))
+                (i64.ge_s (local.get $ctrl)
+                          (i64.extend_i32_s (local.get $n_bytes))))
+      (then (return (global.get $g_empty_args))))
+    (local.set $n (i32.wrap_i64 (local.get $ctrl)))
+    ;; Skip continuation bytes to land on the next codepoint's lead byte.
+    (block $skipped (loop $sk
+      (br_if $skipped (i32.ge_s (local.get $n) (local.get $n_bytes)))
+      (br_if $skipped (i32.eqz (call $utf8_iscont
+        (array.get_u $LuaArr (local.get $bytes) (local.get $n)))))
+      (local.set $n (i32.add (local.get $n) (i32.const 1)))
+      (br $sk)))
+    (if (i32.ge_s (local.get $n) (local.get $n_bytes))
       (then (return (global.get $g_empty_args))))
     (local.set $w (call $utf8_decode_step
-      (local.get $bytes) (local.get $p) (i32.const 0)))
+      (local.get $bytes) (local.get $n) (i32.const 0)))
     (if (i32.eqz (local.get $w))
       (then (call $throw_lit (i32.const 190) (i32.const 18))))   ;; "invalid UTF-8 code"
+    ;; A continuation byte right after the codepoint is a malformed sequence.
+    (local.set $next (i32.add (local.get $n) (local.get $w)))
+    (if (i32.lt_s (local.get $next) (local.get $n_bytes))
+      (then (if (call $utf8_iscont
+                  (array.get_u $LuaArr (local.get $bytes) (local.get $next)))
+        (then (call $throw_lit (i32.const 190) (i32.const 18))))))   ;; "invalid UTF-8 code"
     (local.set $out (array.new $ArgArr (ref.null any) (i32.const 2)))
     (array.set $ArgArr (local.get $out) (i32.const 0)
       (call $make_int (i64.extend_i32_s
-        (i32.add (local.get $p) (i32.const 1)))))
+        (i32.add (local.get $n) (i32.const 1)))))
     (array.set $ArgArr (local.get $out) (i32.const 1)
       (call $make_int (i64.extend_i32_u
-        (call $utf8_assemble (local.get $bytes) (local.get $p) (local.get $w)))))
+        (call $utf8_assemble (local.get $bytes) (local.get $n) (local.get $w)))))
     (local.get $out))
 
   ;; utf8.codes(s [, lax]) — returns (iter, s, 0) for generic for.
   ;; Generic for then drives iter(s, prev) until it returns nothing.
   (func $builtin_utf8_codes (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
+    (local $bytes (ref $LuaArr))
+    ;; Reference rejects a string that *starts* with a continuation byte at
+    ;; the codes() call (the iterator's skip step would otherwise swallow it).
+    (local.set $bytes (struct.get $LuaString $bytes
+      (ref.cast (ref $LuaString) (call $args_at (local.get $args) (i32.const 0)))))
+    (if (i32.gt_s (array.len (local.get $bytes)) (i32.const 0))
+      (then (if (call $utf8_iscont
+                  (array.get_u $LuaArr (local.get $bytes) (i32.const 0)))
+        (then (call $throw_lit (i32.const 190) (i32.const 18))))))   ;; "invalid UTF-8 code"
     (array.new_fixed $ArgArr 3
       ;; Inline closure for the iter — drops $g_builtin_utf8_codes_iter
       ;; from the live set when utf8.codes is unreferenced.

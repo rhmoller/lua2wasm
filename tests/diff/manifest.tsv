@@ -59,6 +59,8 @@ pass	multi_assign_order	t[i] captures old i; repeated target keeps leftmost valu
 pass	loop_var_capture	closures over a for-loop variable see per-iteration values
 # Fixed: numeric-for is float when init or step is float (limit type irrelevant)
 pass	for_num_float_type	`for i=1,3,1.0` makes i a float from the first iteration
+# Fixed: utf8.codes iterator — out-of-range pos -> nil (was a trap), strict errors
+pass	utf8_codes_iter	codes iterator stops on out-of-range pos; invalid seq is catchable
 #
 # Captured bugs (xfail) ----------------------------------------------------
 # (none — all captured differences resolved. Note: error-message *wording* and
