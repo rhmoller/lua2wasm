@@ -4755,6 +4755,30 @@
       (br $outer)))
     (i32.const -1))
 
+  ;; --- shared pattern-search prologue helpers (find/match/gsub) ---
+
+  ;; Anchor: returns 1 if the pattern begins with '^' (matching then runs
+  ;; from ppos 1 and only at the initial subject position), else 0. The
+  ;; length guard keeps the pat[0] read off an empty pattern (i32.and is
+  ;; not short-circuit, so find("","") would otherwise read OOB).
+  (func $pat_anchor_start (param $pat (ref $LuaArr)) (result i32)
+    (if (result i32) (i32.gt_s (array.len (local.get $pat)) (i32.const 0))
+      (then (i32.eq (array.get_u $LuaArr (local.get $pat) (i32.const 0))
+                    (i32.const 94)))   ;; '^'
+      (else (i32.const 0))))
+
+  ;; Normalize a 1-based string index argument (find/match `init`): a
+  ;; negative value counts from the end, and anything below 1 clamps to 1.
+  ;; Callers still reject init > n+1 separately, since that is an early
+  ;; "no match" return.
+  (func $norm_str_init (param $init i32) (param $n i32) (result i32)
+    (if (i32.lt_s (local.get $init) (i32.const 0))
+      (then (local.set $init (i32.add (local.get $n)
+                               (i32.add (local.get $init) (i32.const 1))))))
+    (if (i32.lt_s (local.get $init) (i32.const 1))
+      (then (local.set $init (i32.const 1))))
+    (local.get $init))
+
   ;; string.find(s, pat [, init [, plain]]).
   ;; Returns (start, end, captures…) on success — 1-based positions of
   ;; the first and last matched bytes (or end < start for an empty
@@ -4802,11 +4826,7 @@
     (if (i32.gt_u (local.get $nargs) (i32.const 3))
       (then (local.set $plain (call $lua_truthy
               (call $args_at (local.get $args) (i32.const 3))))))
-    (if (i32.lt_s (local.get $init) (i32.const 0))
-      (then (local.set $init (i32.add (local.get $n_sub)
-                                       (i32.add (local.get $init) (i32.const 1))))))
-    (if (i32.lt_s (local.get $init) (i32.const 1))
-      (then (local.set $init (i32.const 1))))
+    (local.set $init (call $norm_str_init (local.get $init) (local.get $n_sub)))
     (if (i32.gt_s (local.get $init) (i32.add (local.get $n_sub) (i32.const 1)))
       (then (return (array.new_fixed $ArgArr 1 (ref.null any)))))
     ;; Plain mode: literal substring search, no captures.
@@ -4821,16 +4841,8 @@
           (call $make_int (i64.extend_i32_s
             (i32.add (i32.sub (local.get $end) (local.get $n_pat)) (i32.const 1))))
           (call $make_int (i64.extend_i32_s (local.get $end)))))))
-    (local.set $start_ppos (i32.const 0))
-    ;; '^' anchor at pattern start. i32.and isn't short-circuit, so we
-    ;; must guard the pat[0] read on n_pat > 0 explicitly — otherwise
-    ;; find("", "") trips an OOB array access.
-    (if (i32.gt_s (local.get $n_pat) (i32.const 0))
-      (then
-        (if (i32.eq (array.get_u $LuaArr (local.get $pat) (i32.const 0))
-                    (i32.const 94))   ;; '^'
-          (then (local.set $anchored (i32.const 1))
-                (local.set $start_ppos (i32.const 1))))))
+    (local.set $start_ppos (call $pat_anchor_start (local.get $pat)))
+    (local.set $anchored (local.get $start_ppos))
     (local.set $sp (i32.sub (local.get $init) (i32.const 1)))
     (local.set $caps (array.new $CapArr (i32.const 0) (i32.const 64)))
     (block $search_done (loop $search
@@ -4887,21 +4899,11 @@
     (if (i32.gt_u (local.get $nargs) (i32.const 2))
       (then (local.set $init (i32.wrap_i64
               (call $as_int (call $args_at (local.get $args) (i32.const 2)))))))
-    (if (i32.lt_s (local.get $init) (i32.const 0))
-      (then (local.set $init (i32.add (local.get $n_sub)
-                                       (i32.add (local.get $init) (i32.const 1))))))
-    (if (i32.lt_s (local.get $init) (i32.const 1))
-      (then (local.set $init (i32.const 1))))
+    (local.set $init (call $norm_str_init (local.get $init) (local.get $n_sub)))
     (if (i32.gt_s (local.get $init) (i32.add (local.get $n_sub) (i32.const 1)))
       (then (return (array.new_fixed $ArgArr 1 (ref.null any)))))
-    (local.set $start_ppos (i32.const 0))
-    ;; Anchored if the pattern begins with '^'. Nest the check (i32.and is not
-    ;; short-circuit) so the pat[0] read never touches an empty pattern.
-    (if (i32.gt_s (local.get $n_pat) (i32.const 0))
-      (then (if (i32.eq (array.get_u $LuaArr (local.get $pat) (i32.const 0))
-                        (i32.const 94))
-        (then (local.set $anchored (i32.const 1))
-              (local.set $start_ppos (i32.const 1))))))
+    (local.set $start_ppos (call $pat_anchor_start (local.get $pat)))
+    (local.set $anchored (local.get $start_ppos))
     (local.set $sp (i32.sub (local.get $init) (i32.const 1)))
     (local.set $caps (array.new $CapArr (i32.const 0) (i32.const 64)))
     (block $search_done (loop $search
@@ -5304,14 +5306,8 @@
           (then (local.set $repl_kind (i32.const 2))
                 (local.set $repl_bytes (array.new $LuaArr (i32.const 0) (i32.const 0))))
           (else (throw $LuaError (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 722) (i32.const 25))))))))))
-    (local.set $start_ppos (i32.const 0))
-    ;; Anchored if the pattern begins with '^'. Nest the check (i32.and is not
-    ;; short-circuit) so the pat[0] read never touches an empty pattern.
-    (if (i32.gt_s (local.get $n_pat) (i32.const 0))
-      (then (if (i32.eq (array.get_u $LuaArr (local.get $pat) (i32.const 0))
-                        (i32.const 94))
-        (then (local.set $anchored (i32.const 1))
-              (local.set $start_ppos (i32.const 1))))))
+    (local.set $start_ppos (call $pat_anchor_start (local.get $pat)))
+    (local.set $anchored (local.get $start_ppos))
     (local.set $b (call $builder_new))
     (local.set $caps (array.new $CapArr (i32.const 0) (i32.const 64)))
     ;; End position of the last accepted match. Used to reject an empty match
