@@ -297,6 +297,24 @@ static MunitResult test_no_capture_means_unboxed(const MunitParameter params[], 
     return MUNIT_OK;
 }
 
+/* A malformed parenthesized expression must report a parse error, not
+ * crash. Regression: `parse_expr` returns NULL inside `( ... )` and the
+ * LPAREN arm dereferenced it (`inner->paren = 1`) -> SIGSEGV. */
+static MunitResult test_malformed_paren_no_crash(const MunitParameter params[], void *fixture) {
+    (void)params; (void)fixture;
+    const char *srcs[] = { "local x = ()", "return (", "local y = (1+)" };
+    for (size_t i = 0; i < sizeof(srcs) / sizeof(srcs[0]); i++) {
+        TokenList t = lex(srcs[i]);
+        NodePool pool; node_pool_init(&pool);
+        ParseResult r = parse(&t, &pool);
+        munit_assert_false(r.ok);
+        parse_result_free(&r);
+        node_pool_free(&pool);
+        tokenlist_free(&t);
+    }
+    return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
     { "/print_sum_shape",   test_print_sum_shape,   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
     { "/precedence",        test_precedence,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -311,6 +329,7 @@ static MunitTest tests[] = {
     { "/for_num_vs_gen",          test_for_numeric_vs_generic,          NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
     { "/implicit_global",         test_implicit_global,                 NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
     { "/no_capture_unboxed",      test_no_capture_means_unboxed,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+    { "/malformed_paren_no_crash", test_malformed_paren_no_crash,       NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
     { NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 };
 

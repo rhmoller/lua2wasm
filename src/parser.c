@@ -368,7 +368,9 @@ static Expr *parse_primary(Parser *p) {
         case TOK_LPAREN: {
             advance(p);
             Expr *inner = parse_expr(p);
+            if (!p->ok) return NULL;
             expect(p, TOK_RPAREN, ")");
+            if (!p->ok) return NULL;
             /* Parentheses adjust a multi-value expression to one value. */
             inner->paren = 1;
             return inner;
