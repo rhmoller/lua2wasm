@@ -1,10 +1,10 @@
 // Number formatting helpers shared between the host runtime and tests.
 //
-// `formatFloat(f)` mimics Lua 5.5's `tostring(<float>)`: it prints the shorter
-// of %.14g / %.17g that round-trips back to the same double (Lua 5.5 widened
-// the default beyond %.14g so floats survive a string round-trip), appends
-// ".0" when the result looks like an integer, and renders non-finites as
-// inf / -inf / nan.
+// `formatFloat(f)` mimics Lua 5.5's `tostring(<float>)`: it prints %.15g
+// (LUA_NUMBER_FMT, widened from %.14g in 5.4) and falls back to %.17g
+// (LUA_NUMBER_FMT_N) only when %.15g doesn't round-trip back to the same
+// double, appends ".0" when the result looks like an integer, and renders
+// non-finites as inf / -inf / nan.
 //
 // `cFormatG(x, prec, strip)` is a faithful C `printf("%.*g")`: exponent form
 // when the decimal exponent is < -4 or >= prec, a >= 2-digit exponent, and
@@ -47,8 +47,9 @@ export function formatFloat(f) {
     if (Number.isNaN(f)) return "nan";
     if (f === Infinity) return "inf";
     if (f === -Infinity) return "-inf";
-    // Lua 5.5: shorter of %.14g / %.17g that round-trips to the same double.
-    let s = cFormatG(f, 14);
+    // Lua 5.5: %.15g (LUA_NUMBER_FMT), widening to %.17g only when %.15g
+    // doesn't round-trip back to the same double.
+    let s = cFormatG(f, 15);
     if (Number(s) !== f) s = cFormatG(f, 17);
     if (/^-?[0-9]+$/.test(s)) s += ".0";         // integer-looking -> add ".0"
     return s;

@@ -83,6 +83,8 @@ pass	format_p	%p formats address-bearing values vs (null), was echoed literally
 pass	os_date_strftime	os.date supports name/12-hour/%c/%x specifiers (UTC, deterministic)
 # Fixed: os.time(table) builds a timestamp from a date table (was ignored)
 pass	os_time_table	os.time(table) round-trips via os.date; required-field/type errors
+# Fixed: tostring(float) default is %.15g (Lua 5.5), not %.14g
+pass	float_tostring_15g	float tostring widened to %.15g; %.17g fallback when needed
 #
 # Captured bugs (xfail) ----------------------------------------------------
 # (none — all captured differences resolved. Note: error-message *wording* and
