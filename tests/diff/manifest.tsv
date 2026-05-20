@@ -32,6 +32,17 @@ pass	format_q_newline	%q emits backslash + real newline
 pass	div_zero_int	int // 0 raises a catchable string error
 pass	mod_zero_int	int % 0 raises a catchable string error
 pass	arith_err_msg	arithmetic on a non-number raises a catchable string error
+# Fixed: spec-corner batch (found by the corner-case sweep) -----------------
+pass	for_int_overflow	numeric for terminates on integer overflow (was infinite loop)
+pass	format_d_noninteger	%d on a non-integer raises a catchable error (was silent 0)
+pass	format_q_literals	%q emits type-preserving literals for number/bool/nil
+# Corner-case regression anchors (broad spec coverage) ----------------------
+pass	corners_numbers	int/float type, key normalization, mixed compare, tointeger
+pass	corners_strings	compare/length with NUL, sub/rep/byte, format combos, tonumber
+pass	corners_patterns	classes, frontier, sets, captures, backrefs, gsub fn/table
+pass	corners_tables	insert/remove/move/sort/pack/unpack/ipairs
+pass	corners_metatables	index/newindex/eq/lt/le/len/concat/call/tostring/arith
+pass	corners_lang	select, multi-assign, and/or/not, goto, break, repeat, pcall/xpcall
 #
 # Captured bugs (xfail) ----------------------------------------------------
 # (none — all captured differences resolved. Note: error-message *wording* and

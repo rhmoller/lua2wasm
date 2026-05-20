@@ -1023,17 +1023,23 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
                 "      %s)))))\n", label, load_buf);
             /* body */
             emit_block(c, &s->as.for_num.body, depth + 2);
-            /* i = i + step */
+            /* i = i + step, but stop if the integer addition wrapped past the
+             * representable range (Lua 5.4 numeric-for overflow semantics) —
+             * otherwise `for i = maxinteger-2, maxinteger` would loop forever. */
+            emit_indent(c, depth + 2);
+            wat_appendf(c->w, "(local.set $for_next (call $lua_add %s (local.get $for_step)))\n",
+                        load_buf);
+            emit_indent(c, depth + 2);
+            wat_appendf(c->w,
+                "(br_if $brk_%d (call $for_overflowed %s (local.get $for_step) "
+                "(local.get $for_next)))\n", label, load_buf);
             emit_indent(c, depth + 2);
             if (boxed) {
                 wat_appendf(c->w,
-                    "(struct.set $Box $v (local.get $L%d) "
-                    "(call $lua_add (struct.get $Box $v (local.get $L%d)) "
-                    "(local.get $for_step)))\n", slot, slot);
+                    "(struct.set $Box $v (local.get $L%d) (local.get $for_next))\n", slot);
             } else {
                 wat_appendf(c->w,
-                    "(local.set $L%d (call $lua_add (local.get $L%d) "
-                    "(local.get $for_step)))\n", slot, slot);
+                    "(local.set $L%d (local.get $for_next))\n", slot);
             }
             emit_indent(c, depth + 2); wat_appendf(c->w, "br $cont_%d\n", label);
             emit_indent(c, depth + 1); wat_append(c->w, ")\n");
@@ -1487,6 +1493,7 @@ static void emit_user_function(CG *c, const LuaFunc *fn) {
     wat_append(w, "    (local $tmp_tab (ref null $LuaTable))\n");
     wat_append(w, "    (local $for_stop anyref)\n");
     wat_append(w, "    (local $for_step anyref)\n");
+    wat_append(w, "    (local $for_next anyref)\n");
     wat_append(w, "    (local $for_iter_any anyref)\n");
     wat_append(w, "    (local $for_state anyref)\n");
     wat_append(w, "    (local $for_k anyref)\n");
@@ -2220,6 +2227,7 @@ int codegen_module(const ParseResult *pr, const char *src_name,
         wat_append(out, "    (local $tmp_tab (ref null $LuaTable))\n");
         wat_append(out, "    (local $for_stop anyref)\n");
         wat_append(out, "    (local $for_step anyref)\n");
+        wat_append(out, "    (local $for_next anyref)\n");
         wat_append(out, "    (local $for_iter_any anyref)\n");
         wat_append(out, "    (local $for_state anyref)\n");
         wat_append(out, "    (local $for_k anyref)\n");

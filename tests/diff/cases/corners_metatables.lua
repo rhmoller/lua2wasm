@@ -1,0 +1,10 @@
+-- Metamethod corners that already match reference Lua 5.5.
+local base = { greet = "hi" } local t = setmetatable({}, { __index = base }) print(t.greet, rawget(t, "greet"))
+local log = {} local n = setmetatable({}, { __newindex = function(tb, k, v) log[#log + 1] = k end }) n.x = 1 n.y = 2 print(#log, log[1], log[2])
+local eqmt = { __eq = function() return true end } local a = setmetatable({}, eqmt) local b = setmetatable({}, eqmt) print(a == b, a == 1, a == {})
+local cmt = { __lt = function() return true end, __le = function() return false end } local c = setmetatable({}, cmt) local d = setmetatable({}, cmt) print(c < d, c <= d)
+print(#setmetatable({}, { __len = function() return 42 end }))
+local ccat = setmetatable({}, { __concat = function() return "cat" end }) print(ccat .. "x", "x" .. ccat)
+print(setmetatable({}, { __call = function(self, x) return x * 2 end })(21))
+print(tostring(setmetatable({}, { __tostring = function() return "custom" end })))
+local amt = setmetatable({}, { __add = function() return 99 end }) print(amt + 1, 1 + amt)

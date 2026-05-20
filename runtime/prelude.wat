@@ -1350,6 +1350,19 @@
           (then (throw $LuaError (struct.new $LuaString
             (array.new_data $LuaArr $str_data (i32.const 75) (i32.const 18)))))))))
 
+  ;; True iff advancing a numeric-for index wrapped the i64 range: only
+  ;; possible when index and step are both integers. step>0 wraps iff
+  ;; next < index; step<0 wraps iff next > index. Float loops never wrap
+  ;; (they reach +/-inf, which fails the <= test and terminates normally).
+  (func $for_overflowed (param $i anyref) (param $step anyref) (param $next anyref)
+                        (result i32)
+    (if (i32.eqz (i32.and (call $is_int (local.get $i)) (call $is_int (local.get $step))))
+      (then (return (i32.const 0))))
+    (if (i64.gt_s (call $as_int (local.get $step)) (i64.const 0))
+      (then (return (i64.lt_s (call $as_int (local.get $next))
+                              (call $as_int (local.get $i))))))
+    (i64.gt_s (call $as_int (local.get $next)) (call $as_int (local.get $i))))
+
   ;; Close a <close> local at end of scope (milestone 23, minimal).
   ;; Skips nil/false; otherwise looks up __close on the value and
   ;; calls it with (value, err). err is currently always nil — the
@@ -5657,14 +5670,18 @@
         (else
           (local.set $arg (call $args_at (local.get $args) (local.get $arg_idx)))
           (local.set $arg_idx (i32.add (local.get $arg_idx) (i32.const 1)))
-          ;; For %s and %q, pre-tostring so __tostring is honoured.
+          ;; For %s, pre-tostring so __tostring is honoured. %q must see the
+          ;; raw value (it emits a type-preserving literal, not a string).
           (local.set $b (array.get_u $LuaArr (local.get $fmt) (local.get $j)))
-          (if (i32.or (i32.eq (local.get $b) (i32.const 115))   ;; 's'
-                      (i32.eq (local.get $b) (i32.const 113)))  ;; 'q'
+          (if (i32.eq (local.get $b) (i32.const 115))           ;; 's'
             (then (local.set $arg (call $lua_tostring (local.get $arg)))))))
       (local.set $written (call $host_fmt_spec
         (struct.new $LuaString (local.get $spec))
         (local.get $arg)))
+      ;; host returns -1 when the value has no valid form for this conversion
+      ;; (e.g. %d on a non-integer, %q on a table) — raise a catchable error.
+      (if (i32.lt_s (local.get $written) (i32.const 0))
+        (then (call $throw_lit (i32.const 416) (i32.const 14))))   ;; "invalid format"
       (local.set $acc (call $lua_concat (local.get $acc)
                         (call $fmt_buf_to_str (local.get $written))))
       (local.set $i (i32.add (local.get $j) (i32.const 1)))

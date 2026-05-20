@@ -7,7 +7,7 @@ local v = setmetatable({x = 42}, {
 print(tostring(v))                -- <v=42>
 print(v)                          -- <v=42>  (print uses tostring)
 print(string.format("%s", v))     -- <v=42>  (format pre-tostrings for %s)
-print(string.format("%q", v))     -- "<v=42>"
+print((pcall(string.format, "%q", v)))  -- false  (a table has no %q literal form)
 
 -- __tostring must return a string; non-string return raises.
 local bad = setmetatable({}, { __tostring = function() return 123 end })

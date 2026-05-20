@@ -285,13 +285,27 @@ export function makeHelpers({ getInstance, formatFloat, cFormatG }) {
         const conv  = m[4];
         const tag = valRef === null || valRef === undefined ? 0
                   : exp().lua_tag(valRef);
-        const asInt = () => {
+        // Integer argument for %d/%i/%u/%o/%x/%X/%c. Returns null when the
+        // value has no integer representation (non-integral float, or a
+        // non-numeric value) so the caller can raise a catchable error rather
+        // than silently formatting 0. Numeric strings are coerced, like Lua.
+        const asIntOrNull = () => {
             if (tag === 2) return exp().lua_get_int(valRef);
             if (tag === 3) {
                 const f = exp().lua_get_float(valRef);
-                if (Number.isFinite(f) && Number.isInteger(f)) return BigInt(f);
+                return (Number.isFinite(f) && Number.isInteger(f)) ? BigInt(f) : null;
             }
-            return 0n;
+            if (tag === 4) {
+                const p = parseLuaNumber(valRef, 0);
+                if (p === null || p === undefined) return null;
+                const pt = exp().lua_tag(p);
+                if (pt === 2) return exp().lua_get_int(p);
+                if (pt === 3) {
+                    const f = exp().lua_get_float(p);
+                    return (Number.isFinite(f) && Number.isInteger(f)) ? BigInt(f) : null;
+                }
+            }
+            return null;
         };
         const asFloat = () => {
             if (tag === 3) return exp().lua_get_float(valRef);
@@ -308,36 +322,64 @@ export function makeHelpers({ getInstance, formatFloat, cFormatG }) {
                 return writeFmtBuf(applyPad(s, flags, width));
             }
             case "q": {
-                const s = valRef === null || valRef === undefined ? "nil"
-                        : tag === 4 ? readLuaString(valRef) : luaToString(valRef);
-                return writeFmtBuf(quoteForLua(s));
+                // %q must emit a value readable back as the SAME type: bare
+                // number/true/false/nil literals, a quoted string, or a
+                // round-trippable form for floats. Tables etc. have no literal
+                // form -> -1 signals a catchable error to the WAT caller.
+                if (tag === 0) return writeFmtBuf("nil");
+                if (tag === 1) return writeFmtBuf(exp().lua_get_bool(valRef) ? "true" : "false");
+                if (tag === 2) {
+                    const iv = exp().lua_get_int(valRef);
+                    // mininteger has no decimal literal that parses back.
+                    return writeFmtBuf(iv === -(2n ** 63n) ? "0x8000000000000000" : String(iv));
+                }
+                if (tag === 3) {
+                    const f = exp().lua_get_float(valRef);
+                    if (Number.isNaN(f)) return writeFmtBuf("(0/0)");
+                    if (f === Infinity) return writeFmtBuf("1e9999");
+                    if (f === -Infinity) return writeFmtBuf("-1e9999");
+                    return writeFmtBuf(formatHexFloat(f, false));
+                }
+                if (tag === 4) return writeFmtBuf(quoteForLua(readLuaString(valRef)));
+                return -1;
             }
-            case "c":
+            case "c": {
+                const iv = asIntOrNull(); if (iv === null) return -1;
                 return writeFmtBuf(applyPad(
-                    String.fromCharCode(Number(asInt()) & 0xff), flags, width));
-            case "d": case "i":
-                body = formatIntSpec(asInt(), 10, false, flags, prec);
+                    String.fromCharCode(Number(iv) & 0xff), flags, width));
+            }
+            case "d": case "i": {
+                const iv = asIntOrNull(); if (iv === null) return -1;
+                body = formatIntSpec(iv, 10, false, flags, prec);
                 return writeFmtBuf(applyPadNumeric(body, flags, width));
+            }
             case "u": {
-                let v = asInt(); if (v < 0n) v += (1n << 64n);
+                let v = asIntOrNull(); if (v === null) return -1;
+                if (v < 0n) v += (1n << 64n);
                 body = formatIntSpec(v, 10, false, flags, prec);
                 return writeFmtBuf(applyPadNumeric(body, flags, width));
             }
-            case "o":
-                body = formatIntSpec(asInt(), 8, false, flags, prec);
+            case "o": {
+                const iv = asIntOrNull(); if (iv === null) return -1;
+                body = formatIntSpec(iv, 8, false, flags, prec);
                 if (flags.includes("#") && !body.replace(/^[-+ ]/, "").startsWith("0"))
                     body = body.replace(/^([-+ ]?)/, "$10");
                 return writeFmtBuf(applyPadNumeric(body, flags, width));
-            case "x":
-                body = formatIntSpec(asInt(), 16, false, flags, prec);
-                if (flags.includes("#") && asInt() !== 0n)
+            }
+            case "x": {
+                const iv = asIntOrNull(); if (iv === null) return -1;
+                body = formatIntSpec(iv, 16, false, flags, prec);
+                if (flags.includes("#") && iv !== 0n)
                     body = body.replace(/^([-+ ]?)/, "$10x");
                 return writeFmtBuf(applyPadNumeric(body, flags, width));
-            case "X":
-                body = formatIntSpec(asInt(), 16, true, flags, prec);
-                if (flags.includes("#") && asInt() !== 0n)
+            }
+            case "X": {
+                const iv = asIntOrNull(); if (iv === null) return -1;
+                body = formatIntSpec(iv, 16, true, flags, prec);
+                if (flags.includes("#") && iv !== 0n)
                     body = body.replace(/^([-+ ]?)/, "$10X");
                 return writeFmtBuf(applyPadNumeric(body, flags, width));
+            }
             case "f": case "F": case "e": case "E": case "g": case "G":
                 body = formatFloatSpec(asFloat(), conv, prec, flags);
                 return writeFmtBuf(applyPadNumeric(body, flags, width));

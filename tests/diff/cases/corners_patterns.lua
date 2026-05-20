@@ -1,0 +1,11 @@
+-- Pattern-matching corners that already match reference Lua 5.5.
+print(("a1 B2"):gsub("%a", "X"), ("a1 B2"):gsub("%d", "D"), ("a1 B2"):gsub("%s", "_"))
+print(("THE (quick) fox"):gsub("%f[%a]%a+%f[%A]", "W"))
+print(("a-b.c"):gsub("[%-.]", "/"), ("hello"):gsub("[aeiou]", "*"))
+print(("hello world"):match("(%w+)%s+(%w+)"))
+print(("abcabc"):match("(abc)%1"))
+print(("hello"):match("l()l"))
+print(("abc"):gsub("%a", function(c) if c == "b" then return "B" end end))
+print(("$a $b"):gsub("%$(%w+)", { a = "1", b = "2" }))
+print(("aaaa"):gsub("a", "b", 2))
+print(("(a(b)c)"):match("%b()"))

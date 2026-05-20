@@ -1,0 +1,13 @@
+0	3	b	c
+1	2	nil
+2	nil	x	nil	zero is true
+true	true	false	false
+123
+3
+3
+false	table	7
+false	msg
+true	42	unused
+false	handled
+true	false	3	3
+nil	boolean	number	number	string	table	function

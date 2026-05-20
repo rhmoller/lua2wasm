@@ -11,7 +11,7 @@ wasm-as --all-features --disable-custom-descriptors -o "$WASM" "$WAT"
 EXPECTED=$'<v=42>
 <v=42>
 <v=42>
-"<v=42>"
+false
 false\tnil
 nil\tnil\t99
 foo=1; bar=2
