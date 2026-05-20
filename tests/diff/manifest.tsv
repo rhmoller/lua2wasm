@@ -13,10 +13,12 @@ pass	float_tostring_exp	exponent-form float no longer gets a spurious ".0"
 pass	float_neg_zero	negative zero keeps its sign
 pass	format_g_smallexp	%g switches to exponent form below 1e-4
 pass	float_precision	floats print enough digits to round-trip
+# Fixed: pattern-engine empty matches (short-circuit guard + e!=lastmatch) ---
+pass	gsub_empty_pat	gsub with "" pattern no longer traps
+pass	gsub_empty_match	empty-match " *" no longer doubles separators
+pass	match_empty_pat	match/find with "" pattern no longer traps
 #
 # Captured bugs (xfail) ----------------------------------------------------
-xfail	gsub_empty_pat	gsub with "" pattern traps (array OOB)
-xfail	gsub_empty_match	empty-match " *" doubles separators
 xfail	table_concat_range	table.concat ignores i/j range args
 xfail	math_log_base	math.log(x,10/2) via log(x)/log(base) loses a ULP
 xfail	pow_one_inf	1^inf is nan (JS Math.pow) not 1.0

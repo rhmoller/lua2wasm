@@ -4860,11 +4860,13 @@
     (if (i32.gt_s (local.get $init) (i32.add (local.get $n_sub) (i32.const 1)))
       (then (return (array.new_fixed $ArgArr 1 (ref.null any)))))
     (local.set $start_ppos (i32.const 0))
-    (if (i32.and (i32.gt_s (local.get $n_pat) (i32.const 0))
-                 (i32.eq (array.get_u $LuaArr (local.get $pat) (i32.const 0))
-                         (i32.const 94)))
-      (then (local.set $anchored (i32.const 1))
-            (local.set $start_ppos (i32.const 1))))
+    ;; Anchored if the pattern begins with '^'. Nest the check (i32.and is not
+    ;; short-circuit) so the pat[0] read never touches an empty pattern.
+    (if (i32.gt_s (local.get $n_pat) (i32.const 0))
+      (then (if (i32.eq (array.get_u $LuaArr (local.get $pat) (i32.const 0))
+                        (i32.const 94))
+        (then (local.set $anchored (i32.const 1))
+              (local.set $start_ppos (i32.const 1))))))
     (local.set $sp (i32.sub (local.get $init) (i32.const 1)))
     (local.set $caps (array.new $CapArr (i32.const 0) (i32.const 64)))
     (block $search_done (loop $search
@@ -5239,7 +5241,7 @@
     (local $limit i32) (local $count i32) (local $sp i32) (local $end i32)
     (local $ncaps i32) (local $caps (ref $CapArr))
     (local $anchored i32) (local $start_ppos i32)
-    (local $last_end i32) (local $b (ref $Builder))
+    (local $last_end i32) (local $b (ref $Builder)) (local $last_match i32)
     (local.set $sub (struct.get $LuaString $bytes
       (ref.cast (ref $LuaString) (call $args_at (local.get $args) (i32.const 0)))))
     (local.set $pat (struct.get $LuaString $bytes
@@ -5268,13 +5270,19 @@
                 (local.set $repl_bytes (array.new $LuaArr (i32.const 0) (i32.const 0))))
           (else (throw $LuaError (ref.null any))))))))
     (local.set $start_ppos (i32.const 0))
-    (if (i32.and (i32.gt_s (local.get $n_pat) (i32.const 0))
-                 (i32.eq (array.get_u $LuaArr (local.get $pat) (i32.const 0))
-                         (i32.const 94)))
-      (then (local.set $anchored (i32.const 1))
-            (local.set $start_ppos (i32.const 1))))
+    ;; Anchored if the pattern begins with '^'. Nest the check (i32.and is not
+    ;; short-circuit) so the pat[0] read never touches an empty pattern.
+    (if (i32.gt_s (local.get $n_pat) (i32.const 0))
+      (then (if (i32.eq (array.get_u $LuaArr (local.get $pat) (i32.const 0))
+                        (i32.const 94))
+        (then (local.set $anchored (i32.const 1))
+              (local.set $start_ppos (i32.const 1))))))
     (local.set $b (call $builder_new))
     (local.set $caps (array.new $CapArr (i32.const 0) (i32.const 64)))
+    ;; End position of the last accepted match. Used to reject an empty match
+    ;; sitting exactly where the previous match ended (Lua's `e != lastmatch`),
+    ;; which would otherwise double the replacement after a non-empty match.
+    (local.set $last_match (i32.const -1))
     (block $done (loop $lp
       (br_if $done (i32.ge_s (local.get $count) (local.get $limit)))
       (br_if $done (i32.gt_s (local.get $sp) (local.get $n_sub)))
@@ -5284,7 +5292,9 @@
         (local.get $caps) (i32.const 0))
       (local.set $ncaps)
       (local.set $end)
-      (if (i32.ge_s (local.get $end) (i32.const 0))
+      (if (i32.and (i32.ge_s (local.get $end) (i32.const 0))
+                   (i32.eqz (i32.and (i32.eq (local.get $end) (local.get $sp))
+                                     (i32.eq (local.get $sp) (local.get $last_match)))))
         (then
           (call $builder_append (local.get $b) (local.get $sub)
             (local.get $last_end)
@@ -5313,6 +5323,7 @@
               (local.set $sp (i32.add (local.get $sp) (i32.const 1))))
             (else (local.set $sp (local.get $end))))
           (local.set $last_end (local.get $sp))
+          (local.set $last_match (local.get $end))
           (br_if $done (local.get $anchored))
           (br $lp)))
       (br_if $done (local.get $anchored))
