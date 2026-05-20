@@ -1414,6 +1414,17 @@
       (then (i64.ge_s (call $as_int (local.get $s)) (i64.const 0)))
       (else (f64.ge (call $as_float (local.get $s)) (f64.const 0)))))
 
+  ;; Numeric-for type rule (Lua 5.4+): the loop runs with integers iff the
+  ;; initial value AND the step are both integers; otherwise all three run
+  ;; as floats (the limit's type is irrelevant). Coerce $v to a float value
+  ;; when $v or $other is a float, so the control variable's type is settled
+  ;; before the first iteration (e.g. `for i=1,3,1.0` starts at 1.0, not 1).
+  (func $for_coerce (param $v anyref) (param $other anyref) (result anyref)
+    (if (result anyref)
+      (i32.or (call $is_float (local.get $v)) (call $is_float (local.get $other)))
+      (then (call $make_float (call $as_float (local.get $v))))
+      (else (local.get $v))))
+
   ;; Real Lua errors at runtime when a numeric-for step is zero.
   (func $for_check_step (param $s anyref)
     (if (call $is_int (local.get $s))

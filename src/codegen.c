@@ -1183,6 +1183,20 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
             emit_indent(c, depth); wat_append(c->w, ")\n");
             emit_indent(c, depth);
             wat_appendf(c->w, "(call $for_check_step (local.get %s))\n", f_step);
+            /* Settle the control variable's type up front: if init or step is
+             * a float the whole loop is float (Lua 5.4+). counter_loc is the
+             * local that holds the running value. */
+            char counter_loc[24];
+            if (boxed) snprintf(counter_loc, sizeof counter_loc, "%s", f_cur);
+            else       snprintf(counter_loc, sizeof counter_loc, "$L%d", slot);
+            emit_indent(c, depth);
+            wat_appendf(c->w,
+                "(local.set %s (call $for_coerce (local.get %s) (local.get %s)))\n",
+                counter_loc, counter_loc, f_step);
+            emit_indent(c, depth);
+            wat_appendf(c->w,
+                "(local.set %s (call $for_coerce (local.get %s) (local.get %s)))\n",
+                f_step, f_step, counter_loc);
 
             emit_indent(c, depth); wat_appendf(c->w, "(block $brk_%d\n", label);
             emit_indent(c, depth + 1); wat_appendf(c->w, "(loop $cont_%d\n", label);
