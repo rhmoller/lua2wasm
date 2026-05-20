@@ -1265,6 +1265,9 @@
   (global $g_globals (mut (ref null $LuaTable)) (ref.null $LuaTable))
   (global $g_tab_str    (mut (ref null $LuaString)) (ref.null $LuaString))
   (global $g_empty_str  (mut (ref null $LuaString)) (ref.null $LuaString))
+  ;; Shared metatable for all strings: {__index = string}. Built lazily by
+  ;; $get_string_mt the first time getmetatable() sees a string.
+  (global $g_string_mt  (mut (ref null $LuaTable)) (ref.null $LuaTable))
 
   (func $tab_set (param $t (ref $LuaTable)) (param $k anyref) (param $v anyref)
     (local $i i32) (local $n i32) (local $cap i32) (local $mask i32)
@@ -2714,14 +2717,29 @@
         (ref.cast (ref $LuaTable) (local.get $mt)))))
     (array.new_fixed $ArgArr 1 (local.get $t)))
 
+  ;; Lazily build (and cache) the shared string metatable {__index = string}.
+  (func $get_string_mt (result (ref $LuaTable))
+    (local $mt (ref $LuaTable))
+    (if (i32.eqz (ref.is_null (global.get $g_string_mt)))
+      (then (return (ref.as_non_null (global.get $g_string_mt)))))
+    (local.set $mt (call $tab_new))
+    (call $tab_set (local.get $mt)
+      (ref.as_non_null (global.get $g_mkey_index))
+      (call $tab_get (ref.as_non_null (global.get $g_globals))
+        (struct.new $LuaString
+          (array.new_data $LuaArr $str_data (i32.const 25) (i32.const 6)))))   ;; "string"
+    (global.set $g_string_mt (local.get $mt))
+    (local.get $mt))
+
   (func $builtin_getmetatable (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
     (local $v anyref)
     (local $t (ref $LuaTable)) (local $mt (ref null $LuaTable)) (local $guard anyref)
     (local.set $v (call $args_at (local.get $args) (i32.const 0)))
-    ;; lua-spec: getmetatable on a non-table just returns nil — we don't
-    ;; implement per-type metatables for primitives. Crucially, it must
-    ;; NOT trap when handed a string/number/etc.
+    ;; Strings share a metatable ({__index = string}); reference exposes it.
+    (if (ref.test (ref $LuaString) (local.get $v))
+      (then (return (array.new_fixed $ArgArr 1 (call $get_string_mt)))))
+    ;; Other primitives have no metatable here — return nil (and never trap).
     (if (i32.eqz (ref.test (ref $LuaTable) (local.get $v)))
       (then (return (array.new_fixed $ArgArr 1 (ref.null any)))))
     (local.set $t (ref.cast (ref $LuaTable) (local.get $v)))

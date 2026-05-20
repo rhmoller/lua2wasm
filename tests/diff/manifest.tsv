@@ -65,6 +65,8 @@ pass	utf8_codes_iter	codes iterator stops on out-of-range pos; invalid seq is ca
 pass	gmatch_empty	gmatch no longer doubles/ trails spurious empty matches
 # Fixed: tostring of table/function uses "type: 0xADDR" (was bare "table")
 pass	tostring_addr	tostring shape/stability/distinctness for tables and functions
+# Fixed: getmetatable(string) returns the shared string metatable (was nil)
+pass	getmetatable_string	strings expose {__index = string} via getmetatable
 #
 # Captured bugs (xfail) ----------------------------------------------------
 # (none — all captured differences resolved. Note: error-message *wording* and
