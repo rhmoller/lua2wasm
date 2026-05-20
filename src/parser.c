@@ -136,6 +136,14 @@ static int frame_declare(FuncFrame *f, const char *name, size_t name_len) {
     return slot;
 }
 
+/* Mark the most recently declared local as <const> (read-only). Lua 5.5
+ * makes for-loop control variables const (the numeric control var, and the
+ * first variable of a generic for); the assignment parser then rejects
+ * writes to them just like an explicit `local x <const>`. */
+static void frame_mark_last_const(FuncFrame *f) {
+    if (f->local_count > 0) f->locals[f->local_count - 1].attrib = 1;
+}
+
 /* Look up the most recent local declaration by slot index, returning its
  * attribute (0 = none, 1 = const, 2 = close). Returns -1 if not found. */
 static int frame_local_attrib_by_slot(const FuncFrame *f, int slot) {
@@ -885,7 +893,7 @@ static Stmt *parse_ident_stmt(Parser *p) {
             int a = frame_local_attrib_by_slot(cur_frame(p),
                                                targets[i].as.var.idx);
             if (a == 1) {
-                set_error(p, "attempt to assign to <const> local"); return NULL;
+                set_error(p, "attempt to assign to const variable"); return NULL;
             }
         }
     }
@@ -928,6 +936,7 @@ static Stmt *parse_for(Parser *p) {
         int mark = frame_mark(cur_frame(p));
         int slot = frame_declare(cur_frame(p), first->start, first->len);
         if (slot < 0) { set_error(p, "too many locals"); return NULL; }
+        frame_mark_last_const(cur_frame(p));  /* numeric control var is const */
         Block body = {0};
         parse_block(p, &body, TOK_KW_END, TOK_KW_END, TOK_KW_END);
         frame_rewind(cur_frame(p), mark);
@@ -968,6 +977,9 @@ static Stmt *parse_for(Parser *p) {
     for (int i = 0; i < n_names; i++) {
         int slot = frame_declare(cur_frame(p), names[i]->start, names[i]->len);
         if (slot < 0) { set_error(p, "too many locals"); return NULL; }
+        /* Lua 5.5: only the first (control) variable of a generic for is
+         * const; the remaining variables are ordinary assignable locals. */
+        if (i == 0) frame_mark_last_const(cur_frame(p));
         local_idxs[i] = slot;
         names_arr[i] = names[i]->start;
         lens_arr[i] = names[i]->len;

@@ -357,6 +357,29 @@ static MunitResult test_global_contextual_keyword(const MunitParameter params[],
     return MUNIT_OK;
 }
 
+/* Lua 5.5: for-loop control variables are const. The numeric control var
+ * and the *first* variable of a generic for reject assignment; the
+ * remaining generic-for variables and any shadowing local stay assignable
+ * (matching reference lua5.5). */
+static MunitResult test_for_control_var_const(const MunitParameter params[], void *fixture) {
+    (void)params; (void)fixture;
+    struct { const char *src; int ok; } cases[] = {
+        { "for i=1,3 do i=9 end",                          0 },  /* numeric: reject */
+        { "for k,v in pairs({}) do k=1 end",               0 },  /* generic 1st: reject */
+        { "for k,v in pairs({}) do v=1 end",               1 },  /* generic 2nd: allow */
+        { "for k,v in pairs({}) do local k=9 k=10 end",    1 },  /* shadowed: allow */
+        { "local s=0 for i=1,3 do s=s+i end",              1 },  /* read control var: allow */
+    };
+    for (size_t i = 0; i < sizeof(cases)/sizeof(cases[0]); i++) {
+        TokenList t = lex(cases[i].src);
+        NodePool pool; node_pool_init(&pool);
+        ParseResult r = parse(&t, &pool);
+        munit_assert_int(r.ok, ==, cases[i].ok);
+        parse_result_free(&r); node_pool_free(&pool); tokenlist_free(&t);
+    }
+    return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
     { "/print_sum_shape",   test_print_sum_shape,   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
     { "/precedence",        test_precedence,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -373,6 +396,7 @@ static MunitTest tests[] = {
     { "/no_capture_unboxed",      test_no_capture_means_unboxed,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
     { "/malformed_paren_no_crash", test_malformed_paren_no_crash,       NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
     { "/global_contextual_keyword", test_global_contextual_keyword,     NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+    { "/for_control_var_const",     test_for_control_var_const,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
     { NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 };
 
