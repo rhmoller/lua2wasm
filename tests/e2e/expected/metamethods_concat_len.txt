@@ -1,6 +1,6 @@
 A:x
-A:table
-A:table
+A:table: 0x10
+A:table: 0x12
 hi 42
 12
 99

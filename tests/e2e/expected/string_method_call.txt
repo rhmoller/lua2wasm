@@ -2,5 +2,5 @@ hellohello
 AB
 3
 h
-function	5
+function: 0x0	5
 false	string

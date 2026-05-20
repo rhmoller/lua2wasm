@@ -63,6 +63,8 @@ pass	for_num_float_type	`for i=1,3,1.0` makes i a float from the first iteration
 pass	utf8_codes_iter	codes iterator stops on out-of-range pos; invalid seq is catchable
 # Fixed: gmatch empty matches suppressed when end == previous end (e~=lastmatch)
 pass	gmatch_empty	gmatch no longer doubles/ trails spurious empty matches
+# Fixed: tostring of table/function uses "type: 0xADDR" (was bare "table")
+pass	tostring_addr	tostring shape/stability/distinctness for tables and functions
 #
 # Captured bugs (xfail) ----------------------------------------------------
 # (none — all captured differences resolved. Note: error-message *wording* and

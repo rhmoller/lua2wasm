@@ -880,6 +880,44 @@
       (ref.as_non_null (global.get $fmt_buf)) (i32.const 0) (local.get $n))
     (local.get $out))
 
+  ;; Lowercase hex digits of a non-negative i32 (minimal width, "0" for 0).
+  (func $int_to_hex_bytes (param $v i32) (result (ref $LuaArr))
+    (local $n i32) (local $tmp i32) (local $out (ref $LuaArr))
+    (local $i i32) (local $d i32)
+    (local.set $tmp (local.get $v))
+    (local.set $n (i32.const 1))
+    (block $cnt (loop $cl
+      (local.set $tmp (i32.shr_u (local.get $tmp) (i32.const 4)))
+      (br_if $cnt (i32.eqz (local.get $tmp)))
+      (local.set $n (i32.add (local.get $n) (i32.const 1)))
+      (br $cl)))
+    (local.set $out (array.new $LuaArr (i32.const 0) (local.get $n)))
+    (local.set $tmp (local.get $v))
+    (local.set $i (i32.sub (local.get $n) (i32.const 1)))
+    (block $done (loop $wl
+      (local.set $d (i32.and (local.get $tmp) (i32.const 15)))
+      (array.set $LuaArr (local.get $out) (local.get $i)
+        (if (result i32) (i32.lt_u (local.get $d) (i32.const 10))
+          (then (i32.add (local.get $d) (i32.const 48)))     ;; '0'..'9'
+          (else (i32.add (local.get $d) (i32.const 87)))))   ;; 'a'..'f'
+      (local.set $tmp (i32.shr_u (local.get $tmp) (i32.const 4)))
+      (br_if $done (i32.eqz (local.get $i)))
+      (local.set $i (i32.sub (local.get $i) (i32.const 1)))
+      (br $wl)))
+    (local.get $out))
+
+  ;; Build "<prefix>: 0x<hex id>" — the address-style string Lua uses for
+  ;; tables/functions/etc. ($off,$len) point at the prefix word in $str_data.
+  (func $obj_addr_string (param $off i32) (param $len i32) (param $id i32)
+                         (result (ref $LuaString))
+    (ref.cast (ref $LuaString) (call $lua_concat
+      (call $lua_concat
+        (struct.new $LuaString
+          (array.new_data $LuaArr $str_data (local.get $off) (local.get $len)))
+        (struct.new $LuaString (array.new_fixed $LuaArr 4
+          (i32.const 58) (i32.const 32) (i32.const 48) (i32.const 120))))  ;; ": 0x"
+      (struct.new $LuaString (call $int_to_hex_bytes (local.get $id))))))
+
   (func $lua_tostring (param $v anyref) (result (ref $LuaString))
     (local $mm anyref) (local $r anyref)
     ;; Honour __tostring on any value with a metatable.
@@ -911,17 +949,19 @@
     (if (call $is_float (local.get $v))
       (then (return (struct.new $LuaString
         (call $float_to_bytes (call $as_float (local.get $v)))))))
-    ;; tables and functions: short placeholder (Lua usually appends an
-    ;; address-like suffix; we don't, documented as a gap in stdlib.md).
-    ;; Data segment layout (see codegen):
-    ;;   niltruefalse<float>numberstringtablefunction...
-    ;;    0    3    7   12     19    25   31   36
+    ;; tables and functions: "type: 0x<addr>". The data segment layout (see
+    ;; codegen) is: niltruefalse<float>numberstringtablefunction...
+    ;;               0    3    7   12     19    25   31   36
+    ;; Tables use their unique $id so distinct tables stringify distinctly,
+    ;; matching reference. Closures have no per-object id, so they share a
+    ;; constant address (the "function:" prefix is what callers check; their
+    ;; mutual distinctness is a documented minor gap).
     (if (ref.test (ref $LuaTable) (local.get $v))
-      (then (return (struct.new $LuaString
-        (array.new_data $LuaArr $str_data (i32.const 31) (i32.const 5))))))   ;; "table"
+      (then (return (call $obj_addr_string (i32.const 31) (i32.const 5)
+        (struct.get $LuaTable $id (ref.cast (ref $LuaTable) (local.get $v)))))))   ;; "table"
     (if (ref.test (ref $LuaClosure) (local.get $v))
-      (then (return (struct.new $LuaString
-        (array.new_data $LuaArr $str_data (i32.const 36) (i32.const 8))))))   ;; "function"
+      (then (return (call $obj_addr_string (i32.const 36) (i32.const 8)
+        (i32.const 0)))))   ;; "function"
     ;; Unknown type: nil placeholder so we never trap.
     (struct.new $LuaString
       (array.new_data $LuaArr $str_data (i32.const 0) (i32.const 3))))
