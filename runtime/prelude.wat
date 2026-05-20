@@ -3672,8 +3672,15 @@
         (local.set $v (call $args_at (local.get $args) (i32.const 1)))
         (call $tab_set (local.get $t) (ref.i31 (i32.add (local.get $n) (i32.const 1))) (local.get $v))
         (return (global.get $g_empty_args))))
-    ;; 3-arg form
+    ;; Only the 2- and 3-argument forms exist (the 1-arg/4+-arg cases used to
+    ;; trap or silently drop arguments).
+    (if (i32.ne (array.len (local.get $args)) (i32.const 3))
+      (then (call $throw_lit (i32.const 925) (i32.const 25))))   ;; "wrong number of arguments"
+    ;; 3-arg form: position must be in [1, #t+1].
     (local.set $pos (i32.wrap_i64 (call $as_int (call $args_at (local.get $args) (i32.const 1)))))
+    (if (i32.or (i32.lt_s (local.get $pos) (i32.const 1))
+                (i32.gt_s (local.get $pos) (i32.add (local.get $n) (i32.const 1))))
+      (then (call $throw_lit (i32.const 837) (i32.const 22))))   ;; "position out of bounds"
     (local.set $v (call $args_at (local.get $args) (i32.const 2)))
     ;; shift elements pos..n up by 1
     (local.set $i (local.get $n))
@@ -3694,14 +3701,18 @@
     (local $removed anyref) (local $i i32)
     (local.set $t (ref.cast (ref $LuaTable) (call $args_at (local.get $args) (i32.const 0))))
     (local.set $n (call $tab_len (local.get $t)))
-    (if (i32.eqz (local.get $n))
-      (then (return (array.new_fixed $ArgArr 1 (ref.null any)))))
     (if (i32.gt_u (array.len (local.get $args)) (i32.const 1))
       (then (local.set $pos
         (i32.wrap_i64 (call $as_int (call $args_at (local.get $args) (i32.const 1))))))
       (else (local.set $pos (local.get $n))))
+    ;; When an explicit pos differs from #t, it must be in [1, #t+1]. (pos==#t
+    ;; — including the empty-table default 0 — is always allowed.)
+    (if (i32.ne (local.get $pos) (local.get $n))
+      (then (if (i32.or (i32.lt_s (local.get $pos) (i32.const 1))
+                        (i32.gt_s (local.get $pos) (i32.add (local.get $n) (i32.const 1))))
+        (then (call $throw_lit (i32.const 837) (i32.const 22))))))   ;; "position out of bounds"
     (local.set $removed (call $tab_get (local.get $t) (ref.i31 (local.get $pos))))
-    ;; shift elements pos+1..n down by 1
+    ;; shift elements pos+1..n down by 1, then clear the vacated slot
     (local.set $i (local.get $pos))
     (block $done (loop $lp
       (br_if $done (i32.ge_s (local.get $i) (local.get $n)))
@@ -3709,7 +3720,7 @@
         (call $tab_get (local.get $t) (ref.i31 (i32.add (local.get $i) (i32.const 1)))))
       (local.set $i (i32.add (local.get $i) (i32.const 1)))
       (br $lp)))
-    (call $tab_set (local.get $t) (ref.i31 (local.get $n)) (ref.null any))
+    (call $tab_set (local.get $t) (ref.i31 (local.get $i)) (ref.null any))
     (array.new_fixed $ArgArr 1 (local.get $removed)))
 
   ;; table.concat(t [, sep])    -> string concatenation of t[1..#t]
