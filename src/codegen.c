@@ -108,6 +108,10 @@ typedef struct {
     int in_main;            /* 1 while emitting $main body, 0 inside user fn */
     int break_labels[64];   /* break targets for nested while/for/repeat */
     int break_depth;
+    int for_depth;          /* nesting depth of numeric/generic for-loops;
+                             * indexes per-level $for_* scratch locals so a
+                             * nested loop can't clobber the enclosing loop's
+                             * stop/step or iterator state */
     /* Escape-analysis context for the currently-emitted body: cur_captured[s]
      * != 0 means slot s must be heap-boxed (some descendant function captures
      * it); cur_captured[s] == 0 lets the slot be a plain wasm anyref. Set
@@ -1028,6 +1032,13 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
             if (!push_break_label(c, label)) break;
             int slot = s->as.for_num.local_idx;
             int boxed = slot_is_boxed(c, slot);
+            /* Per-nesting-level scratch so an inner for-loop can't clobber
+             * this loop's stop/step. */
+            int fd = c->for_depth;
+            char f_stop[24], f_step[24], f_next[24];
+            snprintf(f_stop, sizeof f_stop, "$for_stop_%d", fd);
+            snprintf(f_step, sizeof f_step, "$for_step_%d", fd);
+            snprintf(f_next, sizeof f_next, "$for_next_%d", fd);
             /* Initialize the control variable with `start`, and stash
              * stop/step in scratch locals. */
             emit_indent(c, depth);
@@ -1038,10 +1049,10 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
             }
             emit_expr(c, s->as.for_num.start, depth + 1);
             emit_indent(c, depth); wat_append(c->w, boxed ? "))\n" : ")\n");
-            emit_indent(c, depth); wat_append(c->w, "(local.set $for_stop\n");
+            emit_indent(c, depth); wat_appendf(c->w, "(local.set %s\n", f_stop);
             emit_expr(c, s->as.for_num.stop, depth + 1);
             emit_indent(c, depth); wat_append(c->w, ")\n");
-            emit_indent(c, depth); wat_append(c->w, "(local.set $for_step\n");
+            emit_indent(c, depth); wat_appendf(c->w, "(local.set %s\n", f_step);
             if (s->as.for_num.step) {
                 emit_expr(c, s->as.for_num.step, depth + 1);
             } else {
@@ -1049,14 +1060,14 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
             }
             emit_indent(c, depth); wat_append(c->w, ")\n");
             emit_indent(c, depth);
-            wat_append(c->w, "(call $for_check_step (local.get $for_step))\n");
+            wat_appendf(c->w, "(call $for_check_step (local.get %s))\n", f_step);
 
             emit_indent(c, depth); wat_appendf(c->w, "(block $brk_%d\n", label);
             emit_indent(c, depth + 1); wat_appendf(c->w, "(loop $cont_%d\n", label);
             /* terminate? */
             emit_indent(c, depth + 2);
-            wat_append(c->w,
-                "(if (call $for_step_positive (local.get $for_step))\n");
+            wat_appendf(c->w,
+                "(if (call $for_step_positive (local.get %s))\n", f_step);
             emit_indent(c, depth + 2); wat_append(c->w, "  (then\n");
             const char *load_i  = boxed ? "(struct.get $Box $v (local.get $L%d))"
                                         : "(local.get $L%d)";
@@ -1066,32 +1077,34 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
             wat_appendf(c->w,
                 "    (br_if $brk_%d (i32.eqz (call $num_le\n"
                 "      %s\n"
-                "      (local.get $for_stop)))))\n", label, load_buf);
+                "      (local.get %s)))))\n", label, load_buf, f_stop);
             emit_indent(c, depth + 2); wat_append(c->w, "  (else\n");
             emit_indent(c, depth + 2);
             wat_appendf(c->w,
                 "    (br_if $brk_%d (i32.eqz (call $num_le\n"
-                "      (local.get $for_stop)\n"
-                "      %s)))))\n", label, load_buf);
+                "      (local.get %s)\n"
+                "      %s)))))\n", label, f_stop, load_buf);
             /* body */
+            c->for_depth++;
             emit_block(c, &s->as.for_num.body, depth + 2);
+            c->for_depth--;
             /* i = i + step, but stop if the integer addition wrapped past the
              * representable range (Lua 5.4 numeric-for overflow semantics) —
              * otherwise `for i = maxinteger-2, maxinteger` would loop forever. */
             emit_indent(c, depth + 2);
-            wat_appendf(c->w, "(local.set $for_next (call $lua_add %s (local.get $for_step)))\n",
-                        load_buf);
+            wat_appendf(c->w, "(local.set %s (call $lua_add %s (local.get %s)))\n",
+                        f_next, load_buf, f_step);
             emit_indent(c, depth + 2);
             wat_appendf(c->w,
-                "(br_if $brk_%d (call $for_overflowed %s (local.get $for_step) "
-                "(local.get $for_next)))\n", label, load_buf);
+                "(br_if $brk_%d (call $for_overflowed %s (local.get %s) "
+                "(local.get %s)))\n", label, load_buf, f_step, f_next);
             emit_indent(c, depth + 2);
             if (boxed) {
                 wat_appendf(c->w,
-                    "(struct.set $Box $v (local.get $L%d) (local.get $for_next))\n", slot);
+                    "(struct.set $Box $v (local.get $L%d) (local.get %s))\n", slot, f_next);
             } else {
                 wat_appendf(c->w,
-                    "(local.set $L%d (local.get $for_next))\n", slot);
+                    "(local.set $L%d (local.get %s))\n", slot, f_next);
             }
             emit_indent(c, depth + 2); wat_appendf(c->w, "br $cont_%d\n", label);
             emit_indent(c, depth + 1); wat_append(c->w, ")\n");
@@ -1107,20 +1120,28 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
              * otherwise bind v1..vN to results, set k = result[0]. */
             int label = c->next_label++;
             if (!push_break_label(c, label)) break;
+            /* Per-nesting-level iterator state so an inner for-loop can't
+             * clobber this loop's iterator/state/control key. ($tmp_args is
+             * recomputed each iteration, so it stays function-shared.) */
+            int fd = c->for_depth;
+            char f_iter[24], f_state[24], f_k[24];
+            snprintf(f_iter, sizeof f_iter, "$for_iter_%d", fd);
+            snprintf(f_state, sizeof f_state, "$for_state_%d", fd);
+            snprintf(f_k, sizeof f_k, "$for_k_%d", fd);
             int n_exprs = s->as.for_gen.n_exprs;
             emit_indent(c, depth); wat_append(c->w, "(local.set $tmp_args\n");
             emit_args_array(c, s->as.for_gen.exprs, n_exprs, depth + 1);
             emit_indent(c, depth); wat_append(c->w, ")\n");
             /* iter = args[0]; state = args[1]; k = args[2]. */
-            emit_indent(c, depth); wat_append(c->w,
-                "(local.set $for_iter_any "
-                "(call $args_at (ref.as_non_null (local.get $tmp_args)) (i32.const 0)))\n");
-            emit_indent(c, depth); wat_append(c->w,
-                "(local.set $for_state "
-                "(call $args_at (ref.as_non_null (local.get $tmp_args)) (i32.const 1)))\n");
-            emit_indent(c, depth); wat_append(c->w,
-                "(local.set $for_k "
-                "(call $args_at (ref.as_non_null (local.get $tmp_args)) (i32.const 2)))\n");
+            emit_indent(c, depth); wat_appendf(c->w,
+                "(local.set %s "
+                "(call $args_at (ref.as_non_null (local.get $tmp_args)) (i32.const 0)))\n", f_iter);
+            emit_indent(c, depth); wat_appendf(c->w,
+                "(local.set %s "
+                "(call $args_at (ref.as_non_null (local.get $tmp_args)) (i32.const 1)))\n", f_state);
+            emit_indent(c, depth); wat_appendf(c->w,
+                "(local.set %s "
+                "(call $args_at (ref.as_non_null (local.get $tmp_args)) (i32.const 2)))\n", f_k);
 
             /* Pre-allocate boxes (or just nil-init the local) per loop var. */
             for (int i = 0; i < s->as.for_gen.n_names; i++) {
@@ -1141,10 +1162,10 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
              * so a wrong type produces a typed error instead of a trap. */
             emit_indent(c, depth + 2); wat_append(c->w, "(local.set $tmp_args\n");
             emit_indent(c, depth + 3); wat_append(c->w, "(call $lua_call_any\n");
-            emit_indent(c, depth + 4); wat_append(c->w, "(local.get $for_iter_any)\n");
+            emit_indent(c, depth + 4); wat_appendf(c->w, "(local.get %s)\n", f_iter);
             emit_indent(c, depth + 4);
-            wat_append(c->w,
-                "(array.new_fixed $ArgArr 2 (local.get $for_state) (local.get $for_k))\n");
+            wat_appendf(c->w,
+                "(array.new_fixed $ArgArr 2 (local.get %s) (local.get %s))\n", f_state, f_k);
             emit_indent(c, depth + 4);
             wat_appendf(c->w, "(i32.const %d)\n", s->line);
             emit_indent(c, depth + 3); wat_append(c->w, ")\n");
@@ -1157,9 +1178,9 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
                 label);
             /* update k to results[0] */
             emit_indent(c, depth + 2);
-            wat_append(c->w,
-                "(local.set $for_k "
-                "(call $args_at (ref.as_non_null (local.get $tmp_args)) (i32.const 0)))\n");
+            wat_appendf(c->w,
+                "(local.set %s "
+                "(call $args_at (ref.as_non_null (local.get $tmp_args)) (i32.const 0)))\n", f_k);
             /* bind loop vars from results */
             for (int i = 0; i < s->as.for_gen.n_names; i++) {
                 int li = s->as.for_gen.local_idxs[i];
@@ -1177,7 +1198,9 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
                 }
             }
             /* body */
+            c->for_depth++;
             emit_block(c, &s->as.for_gen.body, depth + 2);
+            c->for_depth--;
             emit_indent(c, depth + 2); wat_appendf(c->w, "br $cont_%d\n", label);
             emit_indent(c, depth + 1); wat_append(c->w, ")\n");
             emit_indent(c, depth);     wat_append(c->w, ")\n");
@@ -1464,6 +1487,52 @@ static void collect_dispatch_ids(const Block *b, int *out, int *n, int cap) {
     }
 }
 
+/* Deepest nesting of numeric/generic for-loops in a block. Each for-loop
+ * adds one level; other compound statements pass their inner depth through
+ * unchanged (only for-loops own $for_* scratch). The result sizes the
+ * per-level scratch declarations in the function prologue. */
+static int max_for_nesting(const Block *b) {
+    int best = 0;
+    if (!b) return 0;
+    for (size_t i = 0; i < b->count; i++) {
+        const Stmt *s = b->items[i];
+        int d = 0;
+        switch (s->kind) {
+        case STMT_FOR_NUM: d = 1 + max_for_nesting(&s->as.for_num.body); break;
+        case STMT_FOR_GEN: d = 1 + max_for_nesting(&s->as.for_gen.body); break;
+        case STMT_WHILE:   d = max_for_nesting(&s->as.while_stmt.body); break;
+        case STMT_REPEAT:  d = max_for_nesting(&s->as.repeat.body); break;
+        case STMT_DO:      d = max_for_nesting(&s->as.do_stmt.body); break;
+        case STMT_IF:
+            for (size_t a = 0; a < s->as.if_stmt.narms; a++) {
+                int da = max_for_nesting(&s->as.if_stmt.arms[a].body);
+                if (da > d) d = da;
+            }
+            if (s->as.if_stmt.has_else) {
+                int de = max_for_nesting(&s->as.if_stmt.else_body);
+                if (de > d) d = de;
+            }
+            break;
+        default: break;
+        }
+        if (d > best) best = d;
+    }
+    return best;
+}
+
+/* Emit the per-level $for_* scratch locals for a function body. */
+static void emit_for_scratch_locals(WatBuilder *w, const Block *body) {
+    int levels = max_for_nesting(body);
+    for (int d = 0; d < levels; d++) {
+        wat_appendf(w,
+            "    (local $for_stop_%d anyref) (local $for_step_%d anyref)"
+            " (local $for_next_%d anyref)\n", d, d, d);
+        wat_appendf(w,
+            "    (local $for_iter_%d anyref) (local $for_state_%d anyref)"
+            " (local $for_k_%d anyref)\n", d, d, d);
+    }
+}
+
 /* ============================================================
  * Static prelude
  * ============================================================ */
@@ -1577,12 +1646,7 @@ static void emit_user_function(CG *c, const LuaFunc *fn) {
     wat_append(w, "    (local $tmp_args (ref null $ArgArr))\n");
     wat_append(w, "    (local $tmp_clo (ref null $LuaClosure))\n");
     wat_append(w, "    (local $tmp_tab (ref null $LuaTable))\n");
-    wat_append(w, "    (local $for_stop anyref)\n");
-    wat_append(w, "    (local $for_step anyref)\n");
-    wat_append(w, "    (local $for_next anyref)\n");
-    wat_append(w, "    (local $for_iter_any anyref)\n");
-    wat_append(w, "    (local $for_state anyref)\n");
-    wat_append(w, "    (local $for_k anyref)\n");
+    emit_for_scratch_locals(w, &fn->body);
     if (fn->is_vararg) {
         /* Non-null: prologue always writes $varargs before first use. */
         wat_append(w, "    (local $varargs (ref $ArgArr))\n");
@@ -2074,12 +2138,7 @@ static void emit_main_chunk(CG *c) {
     wat_append(out, "    (local $tmp_args (ref null $ArgArr))\n");
     wat_append(out, "    (local $tmp_clo (ref null $LuaClosure))\n");
     wat_append(out, "    (local $tmp_tab (ref null $LuaTable))\n");
-    wat_append(out, "    (local $for_stop anyref)\n");
-    wat_append(out, "    (local $for_step anyref)\n");
-    wat_append(out, "    (local $for_next anyref)\n");
-    wat_append(out, "    (local $for_iter_any anyref)\n");
-    wat_append(out, "    (local $for_state anyref)\n");
-    wat_append(out, "    (local $for_k anyref)\n");
+    emit_for_scratch_locals(out, &pr->main_body);
     {
         int bids[128]; int n = 0;
         collect_dispatch_ids(&pr->main_body, bids, &n, 128);
