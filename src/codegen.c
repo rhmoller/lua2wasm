@@ -64,9 +64,10 @@ static StrRef strpool_add(StrPool *p, const char *bytes, size_t len) {
  * Each block that declares one or more labels pushes a LabelScope while
  * we emit it. emit_stmt looks up `goto NAME` by walking the parent chain.
  *
- * The codegen runs a pre-pass that fills in Stmt.as.label.{id,target_id,
- * direction,has_forward,has_backward} so emit_block can decide whether to
- * wrap regions in (block …) (forward) or (loop …) (backward) wrappers. */
+ * The codegen runs a pre-pass that fills in
+ * Stmt.as.label.{id,segment_idx,block_dispatch_id,target_segment_idx} so
+ * emit_block can wrap each label-bearing block in a (loop $dispatch_BID)
+ * and route gotos through a br_table on $next_BID. */
 typedef struct LabelScope {
     Stmt **labels;          /* pointers to STMT_LABEL nodes in this block */
     int n;
@@ -114,61 +115,48 @@ static void cg_error(CG *c, const char *msg) {
  *   1. Assign each STMT_LABEL a unique id.
  *   2. Resolve each STMT_GOTO to a target label by lexical lookup
  *      through enclosing blocks; error if unresolved.
- *   3. Classify direction (forward / backward) based on where the goto
- *      sits relative to the label in the label's home block. For a goto
- *      in an inner block, the relevant position is that of the inner
- *      block's containing statement in the home block.
- *   4. Set the label's has_forward / has_backward flags.
+ *   3. Copy the target's block_dispatch_id / segment_idx onto the goto so
+ *      emit can route it through the right block's br_table.
  *
- * Scope chain mirrors block nesting. For each block we keep a parallel
- * array of label stmts and their block-indexes, no AST pollution.
+ * Scope chain mirrors block nesting. For each block we keep an array of
+ * the label stmts it declares, no AST pollution.
  */
 
 typedef struct LabelAnalysisScope {
     Stmt *labels[64];       /* up to 64 labels per single block */
-    int label_idx[64];      /* block-index of each label */
     int n;
-    int home_idx;           /* index in parent block of the stmt whose body is THIS block */
     struct LabelAnalysisScope *parent;
 } LabelAnalysisScope;
 
-/* Resolve a goto. Returns the matching label stmt and writes the goto's
- * effective position in the label's home block to *out_home_idx; returns
- * NULL on miss. */
-static Stmt *la_lookup(LabelAnalysisScope *scope, const char *name, size_t len,
-                       int goto_cur_in_inner, int *out_home_idx,
-                       int *out_label_block_idx) {
-    int eff_idx = goto_cur_in_inner;
+/* Resolve a goto to its target label by walking the scope chain outward.
+ * Returns the matching label stmt, or NULL on miss. */
+static Stmt *la_lookup(LabelAnalysisScope *scope, const char *name, size_t len) {
     for (LabelAnalysisScope *s = scope; s; s = s->parent) {
         for (int i = 0; i < s->n; i++) {
             Stmt *lab = s->labels[i];
             if (lab->as.label.name_len == len &&
                 memcmp(lab->as.label.name, name, len) == 0) {
-                *out_home_idx = eff_idx;
-                *out_label_block_idx = s->label_idx[i];
                 return lab;
             }
         }
-        eff_idx = s->home_idx;
     }
     return NULL;
 }
 
-static void la_block(CG *c, const Block *b, LabelAnalysisScope *parent,
-                     int home_idx_in_parent);
+static void la_block(CG *c, const Block *b, LabelAnalysisScope *parent);
 
-static void la_recurse_stmt(CG *c, Stmt *s, LabelAnalysisScope *scope, int idx) {
+static void la_recurse_stmt(CG *c, Stmt *s, LabelAnalysisScope *scope) {
     switch (s->kind) {
-    case STMT_DO:      la_block(c, &s->as.do_stmt.body,    scope, idx); break;
-    case STMT_WHILE:   la_block(c, &s->as.while_stmt.body, scope, idx); break;
-    case STMT_REPEAT:  la_block(c, &s->as.repeat.body,     scope, idx); break;
-    case STMT_FOR_NUM: la_block(c, &s->as.for_num.body,    scope, idx); break;
-    case STMT_FOR_GEN: la_block(c, &s->as.for_gen.body,    scope, idx); break;
+    case STMT_DO:      la_block(c, &s->as.do_stmt.body,    scope); break;
+    case STMT_WHILE:   la_block(c, &s->as.while_stmt.body, scope); break;
+    case STMT_REPEAT:  la_block(c, &s->as.repeat.body,     scope); break;
+    case STMT_FOR_NUM: la_block(c, &s->as.for_num.body,    scope); break;
+    case STMT_FOR_GEN: la_block(c, &s->as.for_gen.body,    scope); break;
     case STMT_IF:
         for (size_t i = 0; i < s->as.if_stmt.narms; i++)
-            la_block(c, &s->as.if_stmt.arms[i].body, scope, idx);
+            la_block(c, &s->as.if_stmt.arms[i].body, scope);
         if (s->as.if_stmt.has_else)
-            la_block(c, &s->as.if_stmt.else_body, scope, idx);
+            la_block(c, &s->as.if_stmt.else_body, scope);
         break;
     /* STMT_LOCAL_FUNC and inline function expressions start a fresh
      * label namespace; emit_user_function runs the pre-pass on those
@@ -177,8 +165,8 @@ static void la_recurse_stmt(CG *c, Stmt *s, LabelAnalysisScope *scope, int idx) 
     }
 }
 
-static void la_block(CG *c, const Block *b, LabelAnalysisScope *parent, int home_idx) {
-    LabelAnalysisScope scope = { .n = 0, .home_idx = home_idx, .parent = parent };
+static void la_block(CG *c, const Block *b, LabelAnalysisScope *parent) {
+    LabelAnalysisScope scope = { .n = 0, .parent = parent };
     /* Pass 1: collect labels, dedup, assign ids. */
     for (size_t i = 0; i < b->count; i++) {
         Stmt *st = b->items[i];
@@ -202,11 +190,8 @@ static void la_block(CG *c, const Block *b, LabelAnalysisScope *parent, int home
             }
         }
         st->as.label.id = c->next_label_id++;
-        st->as.label.has_forward = 0;
-        st->as.label.has_backward = 0;
         st->as.label.segment_idx = scope.n + 1; /* 1-based; segment 0 is "before any label" */
         scope.labels[scope.n] = st;
-        scope.label_idx[scope.n] = (int)i;
         scope.n++;
     }
     /* All labels in this block share the same dispatch-block id: by
@@ -219,9 +204,7 @@ static void la_block(CG *c, const Block *b, LabelAnalysisScope *parent, int home
     for (size_t i = 0; i < b->count; i++) {
         Stmt *st = b->items[i];
         if (st->kind == STMT_GOTO) {
-            int home_idx_of_goto, label_idx_in_home;
-            Stmt *lab = la_lookup(&scope, st->as.label.name, st->as.label.name_len,
-                                  (int)i, &home_idx_of_goto, &label_idx_in_home);
+            Stmt *lab = la_lookup(&scope, st->as.label.name, st->as.label.name_len);
             if (!lab) {
                 char msg[128];
                 int n = (int)(st->as.label.name_len < 80 ? st->as.label.name_len : 80);
@@ -230,18 +213,10 @@ static void la_block(CG *c, const Block *b, LabelAnalysisScope *parent, int home
                 cg_error(c, msg);
                 return;
             }
-            st->as.label.target_id = lab->as.label.id;
             st->as.label.block_dispatch_id = lab->as.label.block_dispatch_id;
             st->as.label.target_segment_idx = lab->as.label.segment_idx;
-            if (home_idx_of_goto < label_idx_in_home) {
-                st->as.label.direction = 0; /* forward */
-                lab->as.label.has_forward = 1;
-            } else {
-                st->as.label.direction = 1; /* backward */
-                lab->as.label.has_backward = 1;
-            }
         } else if (st->kind != STMT_LABEL) {
-            la_recurse_stmt(c, st, &scope, (int)i);
+            la_recurse_stmt(c, st, &scope);
         }
     }
 }
@@ -1478,7 +1453,7 @@ static void emit_user_function(CG *c, const LuaFunc *fn) {
      * every label and goto before we emit the $next_BID i32 locals. */
     int saved_next_id_pre = c->next_label_id;
     c->next_label_id = 0;
-    la_block(c, &fn->body, NULL, -1);
+    la_block(c, &fn->body, NULL);
 
     for (int i = 0; i < fn->n_locals; i++) {
         if (fn->captured && fn->captured[i]) {
@@ -1810,12 +1785,6 @@ int codegen_module(const ParseResult *pr, const char *src_name,
      * table) and access goes through $tab_get / $tab_set. The parser
      * still tracks the global list for name resolution, but no wasm
      * globals are emitted for them. */
-    if (0) {
-        wat_append(out, "\n  ;; --- user globals ---\n");
-        for (size_t i = 0; i < pr->globals.count; i++) {
-            wat_appendf(out, "  (global $g_user_%zu (mut anyref) (ref.null any))\n", i);
-        }
-    }
 
     /* $stdlib_init: builds math/string tables from the library builtins
      * and assigns them to the corresponding $g_user_N slots. */
@@ -2212,7 +2181,7 @@ int codegen_module(const ParseResult *pr, const char *src_name,
         /* Pre-pass before locals: dispatch ids must be assigned so the
          * $next_BID i32 locals can be declared up-front. */
         c.next_label_id = 0;
-        la_block(&c, &pr->main_body, NULL, -1);
+        la_block(&c, &pr->main_body, NULL);
 
         for (int i = 0; i < pr->main_n_locals; i++) {
             if (pr->main_captured && pr->main_captured[i]) {

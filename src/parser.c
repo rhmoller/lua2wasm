@@ -356,7 +356,7 @@ static Expr *parse_primary(Parser *p) {
             if (!resolve_name(p, t->start, t->len, &kind, &idx)) {
                 char buf[160];
                 snprintf(buf, sizeof(buf),
-                    "undefined variable `%.*s` (phase 3a: locals/upvalues + `print` only)",
+                    "undefined variable `%.*s`",
                     (int)t->len, t->start);
                 set_error(p, buf);
                 return NULL;
