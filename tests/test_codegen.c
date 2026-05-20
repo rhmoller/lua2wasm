@@ -58,6 +58,35 @@ static MunitResult test_string_in_data_segment(const MunitParameter params[], vo
     return MUNIT_OK;
 }
 
+/* The string pool interns by content: a key referenced many times is
+ * emitted into $str_data exactly once. Here `zqxw` is referenced three
+ * times (two stores + one load) yet must appear a single time in the
+ * module text (it lives only in the data segment; access sites use
+ * numeric offsets). */
+static MunitResult test_data_segment_dedups(const MunitParameter params[], void *fixture) {
+    (void)params; (void)fixture;
+    TokenList t = lex("local t = {} t.zqxw = 1 t.zqxw = 2 print(t.zqxw)");
+    NodePool pool; node_pool_init(&pool);
+    ParseResult r = parse(&t, &pool);
+    munit_assert_true(r.ok);
+
+    WatBuilder w; wat_init(&w);
+    char err[256] = {0};
+    int ok = codegen_module(&r, "test", 0, &w, err, sizeof(err));
+    if (!ok) munit_logf(MUNIT_LOG_ERROR, "codegen: %s", err);
+    munit_assert_true(ok);
+    const char *s = wat_cstr(&w);
+    int count = 0;
+    for (const char *p = strstr(s, "zqxw"); p; p = strstr(p + 1, "zqxw")) count++;
+    munit_assert_int(count, ==, 1);
+
+    wat_free(&w);
+    parse_result_free(&r);
+    node_pool_free(&pool);
+    tokenlist_free(&t);
+    return MUNIT_OK;
+}
+
 static MunitResult test_user_function_emitted(const MunitParameter params[], void *fixture) {
     (void)params; (void)fixture;
     TokenList t = lex("local function f(x) return x end print(f(7))");
@@ -108,6 +137,7 @@ static MunitResult test_pool_pointer_stability(const MunitParameter params[], vo
 static MunitTest tests[] = {
     { "/emits_expected",       test_emits_expected,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
     { "/string_data",          test_string_in_data_segment, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+    { "/data_segment_dedups",  test_data_segment_dedups,    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
     { "/user_function",        test_user_function_emitted,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
     { "/pool_pointer_stability", test_pool_pointer_stability, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
     { NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },

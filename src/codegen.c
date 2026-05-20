@@ -24,10 +24,10 @@
  *   $LuaFn     = func ((ref $LuaClosure) (ref $ArgArr)) -> anyref
  *   $LuaClosure = struct { (ref $LuaFn) code, (ref $UpvalArr) upvals }
  *
- * All locals (and parameters) are stored in $Box cells so they can be
- * captured by inner closures and remain mutable. Boxing is uniform; we
- * leave any "is this local actually captured?" escape analysis as a
- * later optimization.
+ * Locals (and parameters) captured by an inner closure are stored in $Box
+ * cells so the box can be shared and stay mutable; the parser's escape
+ * analysis (LuaFunc.captured) flags which slots need boxing, and the rest
+ * are emitted as plain wasm `anyref` slots (see slot_is_boxed).
  *
  * Each Lua function in source becomes a top-level wasm function named
  * `$user_N` (N = LuaFunc.func_idx). The implicit chunk becomes `$main`,
@@ -46,7 +46,25 @@ typedef struct {
     size_t len;
 } StrRef;
 
+/* Find an existing run of exactly these bytes anywhere in the pool. The
+ * data segment is a flat byte array addressed by (offset, len), so any
+ * matching run can be shared — including overlap with a longer string or
+ * with the fixed LITERAL_PREFIX. Returns SIZE_MAX if absent. */
+static size_t strpool_find(const StrPool *p, const char *bytes, size_t len) {
+    if (len == 0) return 0;            /* zero bytes read => any offset works */
+    if (len > p->used) return SIZE_MAX;
+    for (size_t i = 0; i + len <= p->used; i++)
+        if (memcmp(p->bytes + i, bytes, len) == 0) return i;
+    return SIZE_MAX;
+}
+
+/* Intern a byte run, returning its (offset, len). Deduplicates: a run that
+ * already appears in the pool is reused rather than re-appended, which keeps
+ * repeated keys (metamethod names, "__index", library keys) single-copy in
+ * the emitted $str_data segment. */
 static StrRef strpool_add(StrPool *p, const char *bytes, size_t len) {
+    size_t found = strpool_find(p, bytes, len);
+    if (found != SIZE_MAX) return (StrRef){ .offset = found, .len = len };
     if (p->used + len > p->cap) {
         size_t new_cap = p->cap ? p->cap : 64;
         while (p->used + len > new_cap) new_cap *= 2;
