@@ -79,6 +79,8 @@ pass	utf8_len_codepoint_bounds	len/codepoint raise "out of bounds" instead of cl
 pass	utf8_char_range	utf8.char range/byte-counts incl. >U+10FFFF (was capped at 0x10FFFF)
 # Fixed: string.format %p ("0x<addr>" for ref types, "(null)" otherwise)
 pass	format_p	%p formats address-bearing values vs (null), was echoed literally
+# Fixed: os.date strftime specifiers %a/%A/%b/%B/%I/%c/%x (C-locale names)
+pass	os_date_strftime	os.date supports name/12-hour/%c/%x specifiers (UTC, deterministic)
 #
 # Captured bugs (xfail) ----------------------------------------------------
 # (none — all captured differences resolved. Note: error-message *wording* and

@@ -493,20 +493,36 @@ export function makeHelpers({ getInstance, formatFloat, cFormatG }) {
             return -1;
         }
         const pad2 = (n) => n < 10 ? "0" + n : "" + n;
+        const pad2sp = (n) => n < 10 ? " " + n : "" + n;   // space-padded width 2
+        // C-locale names (strftime); reference Lua uses the C locale.
+        const WDAY = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday",
+                      "Friday", "Saturday"];
+        const MON = ["January", "February", "March", "April", "May", "June",
+                     "July", "August", "September", "October", "November",
+                     "December"];
+        const hour12 = () => { const h = get("H") % 12; return h === 0 ? 12 : h; };
         const out = body.replace(/%(.)/g, (_, c) => {
             switch (c) {
                 case "Y": return "" + get("Y");
                 case "y": return pad2(get("Y") % 100);
                 case "m": return pad2(get("m"));
                 case "d": return pad2(get("d"));
+                case "e": return pad2sp(get("d"));
                 case "H": return pad2(get("H"));
+                case "I": return pad2(hour12());
                 case "M": return pad2(get("M"));
                 case "S": return pad2(get("S"));
-                case "j": return pad2(yday()).padStart(3, "0");
+                case "j": return ("" + yday()).padStart(3, "0");
                 case "w": return "" + get("w");
+                case "a": return WDAY[get("w")].slice(0, 3);
+                case "A": return WDAY[get("w")];
+                case "b": case "h": return MON[get("m") - 1].slice(0, 3);
+                case "B": return MON[get("m") - 1];
                 case "p": return get("H") < 12 ? "AM" : "PM";
-                case "c": return dt.toString();
-                case "x": return useUTC ? dt.toUTCString().slice(0, 16) : dt.toDateString();
+                case "c": return `${WDAY[get("w")].slice(0, 3)} ${MON[get("m") - 1].slice(0, 3)} `
+                                 + `${pad2sp(get("d"))} ${pad2(get("H"))}:${pad2(get("M"))}:`
+                                 + `${pad2(get("S"))} ${get("Y")}`;
+                case "x": return `${pad2(get("m"))}/${pad2(get("d"))}/${pad2(get("Y") % 100)}`;
                 case "X": return pad2(get("H")) + ":" + pad2(get("M")) + ":" + pad2(get("S"));
                 case "%": return "%";
                 default:  return "%" + c;
