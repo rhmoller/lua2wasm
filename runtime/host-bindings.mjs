@@ -122,7 +122,7 @@ export class BufferedFile {
 // `tostring`-like rendering for the host; needed by formatSpec's `%s` /
 // `%q` and the playground's print. Caller passes in formatFloat to keep
 // dependency direction clean.
-export function makeHelpers({ getInstance, formatFloat }) {
+export function makeHelpers({ getInstance, formatFloat, cFormatG }) {
     const exp = () => getInstance().exports;
 
     function readLuaString(v) {
@@ -205,13 +205,12 @@ export function makeHelpers({ getInstance, formatFloat }) {
             body = v.toExponential(prec);
             body = body.replace(/e([+-]?)(\d)$/, "e$10$2");
         } else {
-            if (prec === 0) prec = 1;
-            body = v.toPrecision(prec);
-            if (!flags.includes("#")) body = body.replace(/\.?0+(e|$)/, "$1");
-            body = body.replace(/e([+-]?)(\d)$/, "e$10$2");
+            // %g: faithful C printf semantics (exponent form below 1e-4 or at/
+            // above `prec` significant digits), not JS toPrecision's thresholds.
+            body = cFormatG(v, prec, !flags.includes("#"));
         }
         if (upper) body = body.toUpperCase();
-        if (v >= 0) {
+        if (!body.startsWith("-")) {             // sign flags only when non-negative
             if (flags.includes("+")) body = "+" + body;
             else if (flags.includes(" ")) body = " " + body;
         }

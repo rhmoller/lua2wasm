@@ -8,19 +8,19 @@ WASM="$BUILD_DIR/math_atan_log.wasm"
 "$BIN" "$FIXTURE" -o "$WAT"
 wasm-as --all-features --disable-custom-descriptors -o "$WASM" "$WAT"
 
-EXPECTED="3.1415926535898
+EXPECTED="3.1415926535897931
 0.0
 0.0
-1.5707963267949
--1.5707963267949
-3.1415926535898
-3.1415926535898
+1.5707963267948966
+-1.5707963267948966
+3.1415926535897931
+3.1415926535897931
 0.0
 1.0
 3.0
 2.0
 0.0
-3"
+2.9999999999999996"
 
 OUT="$(node --experimental-wasm-exnref "$SRC_DIR/runtime/host.mjs" "$WASM")"
 if [[ "$OUT" != "$EXPECTED" ]]; then

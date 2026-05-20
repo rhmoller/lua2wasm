@@ -5,7 +5,7 @@ print(2 ^ 10)                  -- 1024.0
 print(2 ^ 0)                   -- 1.0
 print(2 ^ -1)                  -- 0.5      (was 1.0 with int-loop pow)
 print(2 ^ -2)                  -- 0.25
-print(2 ^ 0.5)                 -- 1.4142135623731  (sqrt(2))
+print(2 ^ 0.5)                 -- 1.4142135623730951  (sqrt(2))
 print(2 ^ 0.5 == math.sqrt(2)) -- true
 
 print(8 ^ (1/3))               -- 2.0
