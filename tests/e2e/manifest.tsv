@@ -99,3 +99,4 @@ utf8_len	tests/fixtures/utf8_len.lua
 utf8_offset	tests/fixtures/utf8_offset.lua
 vararg_typed	tests/fixtures/vararg_typed.lua
 varargs	tests/fixtures/varargs.lua
+table_key_map	tests/fixtures/table_key_map.lua

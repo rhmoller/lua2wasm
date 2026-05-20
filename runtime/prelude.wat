@@ -49,7 +49,8 @@
       (field $cap  (mut i32))
       (field $idx  (mut (ref null $IArr)))
       (field $mask (mut i32))
-      (field $meta (mut (ref null $LuaTable)))))))
+      (field $meta (mut (ref null $LuaTable)))
+      (field $id   i32)))))   ;; unique identity for hashing table keys
 
   (import "host" "print" (func $host_print (param anyref)))
   (import "host" "write_raw" (func $host_write_raw (param anyref)))
@@ -169,6 +170,11 @@
   ;; $call_depth is the count of active frames; index 0..depth-1 is live.
   (global $call_lines (mut (ref null $LineArr)) (ref.null $LineArr))
   (global $call_depth (mut i32) (i32.const 0))
+  ;; Monotonic identity counter for tables. WasmGC exposes no pointer or
+  ;; identity hash, so each $LuaTable is stamped with a unique id at creation
+  ;; ($tab_new) and $lua_hash mixes it — without this, every table key hashes
+  ;; to 0 and a table-keyed map degrades to O(n^2).
+  (global $g_next_table_id (mut i32) (i32.const 1))
   ;; Lua-style source name ("main" for main.lua). Set in $stdlib_init.
   (global $g_src_name (mut (ref null $LuaString)) (ref.null $LuaString))
 
@@ -954,11 +960,15 @@
 
   ;; --- tables (open-addressing hash index over dense key/value arrays) ---
   (func $tab_new (result (ref $LuaTable))
+    (local $id i32)
+    (local.set $id (global.get $g_next_table_id))
+    (global.set $g_next_table_id (i32.add (local.get $id) (i32.const 1)))
     (struct.new $LuaTable
       (ref.null $TArr) (ref.null $TArr)
       (i32.const 0) (i32.const 0)
       (ref.null $IArr) (i32.const 0)
-      (ref.null $LuaTable)))
+      (ref.null $LuaTable)
+      (local.get $id)))
 
   ;; Grow keys/vals arrays to at least new_cap; copies old contents.
   (func $tab_grow (param $t (ref $LuaTable)) (param $new_cap i32)
@@ -1033,8 +1043,14 @@
           (local.set $i (i32.add (local.get $i) (i32.const 1)))
           (br $lp)))
         (return (local.get $h))))
-    ;; Tables, closures: identity isn't observable in WasmGC, so all
-    ;; such keys hash to 0 and resolve via linear probe over the index.
+    ;; Tables carry a unique $id; mix it (Knuth multiplicative hash) so
+    ;; sequentially-created tables spread across the index instead of
+    ;; clustering. Closures have no id field, so they still hash to 0 and
+    ;; resolve via linear probe (function-as-key is rare).
+    (if (ref.test (ref $LuaTable) (local.get $v))
+      (then (return (i32.mul
+        (struct.get $LuaTable $id (ref.cast (ref $LuaTable) (local.get $v)))
+        (i32.const -1640531527)))))   ;; 0x9E3779B9
     (i32.const 0))
 
   ;; Rebuild the hash index from keys[0..n]. new_mask is (cap-1) where
