@@ -24,10 +24,11 @@ pass	next_empty	next({}) returns nil
 # Fixed: math fidelity (log2/log10 special-case, 1^inf guard) ---------------
 pass	math_log_base	math.log base 2/10 uses log2/log10
 pass	pow_one_inf	1^inf is 1.0
+# Fixed: misc (paren adjust-to-one, %q newline) -----------------------------
+pass	paren_truncation	(f()) is adjusted to a single value
+pass	format_q_newline	%q emits backslash + real newline
 #
 # Captured bugs (xfail) ----------------------------------------------------
 xfail	div_zero_int	int // 0 throws nil payload, not a message
 xfail	mod_zero_int	int % 0 throws nil payload, not a message
-xfail	format_q_newline	%q encodes newline as "\n" not backslash-newline
 xfail	arith_err_msg	arith error drops "on a <type> value" + strips .lua
-xfail	paren_truncation	(f()) not adjusted to a single value

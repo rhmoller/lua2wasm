@@ -51,6 +51,7 @@ Expr *expr_new(NodePool *p, ExprKind k, int line) {
     Expr *e = node_pool_alloc(p, sizeof(Expr));
     e->kind = k;
     e->line = line;
+    e->paren = 0;
     return e;
 }
 

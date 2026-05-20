@@ -46,7 +46,7 @@ print(string.format("%G", 1.5))                      -- 1.5
 
 -- %q (Lua-readable quoted form).
 print(string.format("%q", "hello"))                  -- "hello"
-print(string.format("%q", "a\nb"))                   -- "a\nb"
+print(string.format("%q", "a\nb"))                   -- "a\<newline>b" (backslash + real newline)
 print(string.format("%q", "it's \"x\""))             -- "it's \"x\""
 
 -- %% (literal percent — no arg consumed).

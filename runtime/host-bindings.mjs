@@ -253,19 +253,24 @@ export function makeHelpers({ getInstance, formatFloat, cFormatG }) {
         return sign + (upper ? out.toUpperCase() : out);
     }
 
+    // Matches reference Lua's addquoted: ", \ and newline become a backslash
+    // followed by the character itself (so a literal "\n" is backslash + a real
+    // newline). Other control chars become \ddd, padded to 3 digits only when
+    // the next char is a digit (to keep the escape unambiguous).
     function quoteForLua(s) {
         let out = '"';
         for (let i = 0; i < s.length; i++) {
             const ch = s[i];
             const c = s.charCodeAt(i);
-            if (ch === '"' || ch === "\\") out += "\\" + ch;
-            else if (ch === "\n") out += "\\n";
-            else if (ch === "\r") out += "\\r";
-            else if (c === 0) {
+            if (ch === '"' || ch === "\\" || ch === "\n") {
+                out += "\\" + ch;
+            } else if (c < 32 || c === 127) {
                 const nxt = s.charCodeAt(i + 1);
-                out += (nxt >= 48 && nxt <= 57) ? "\\000" : "\\0";
-            } else if (c < 32 || c === 127) out += "\\" + c;
-            else out += ch;
+                const digits = String(c);
+                out += "\\" + (nxt >= 48 && nxt <= 57 ? digits.padStart(3, "0") : digits);
+            } else {
+                out += ch;
+            }
         }
         return out + '"';
     }

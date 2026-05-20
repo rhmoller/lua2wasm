@@ -80,6 +80,9 @@ typedef enum {
 struct Expr {
     ExprKind kind;
     int line;
+    /* Set when the expression was wrapped in parentheses: `(f())` is adjusted
+     * to exactly one value, so it is never spliced as a multi-value tail. */
+    int paren;
     union {
         int64_t i_val;
         double f_val;

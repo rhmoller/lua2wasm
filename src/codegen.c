@@ -502,6 +502,7 @@ static void emit_unop(CG *c, const Expr *e, int depth) {
 /* An expression whose value in a multi-value position is a full $ArgArr
  * (call/method-call/vararg) rather than a single anyref. */
 static int is_multival_tail(const Expr *e) {
+    if (e->paren) return 0;   /* `(f())` is adjusted to a single value */
     return e->kind == EXPR_CALL ||
            e->kind == EXPR_METHOD_CALL ||
            e->kind == EXPR_VARARG;
@@ -894,7 +895,8 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
             /* Tail-call optimization: exactly `return <call_expr>` (regular
              * or method form — method calls just need their args array set up
              * via emit_call_array equivalent; here we only TCO the regular form). */
-            if (n_values == 1 && s->as.return_stmt.values[0]->kind == EXPR_CALL) {
+            if (n_values == 1 && s->as.return_stmt.values[0]->kind == EXPR_CALL
+                && !s->as.return_stmt.values[0]->paren) {
                 emit_tail_call(c, s->as.return_stmt.values[0], depth);
                 break;
             }

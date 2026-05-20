@@ -369,6 +369,8 @@ static Expr *parse_primary(Parser *p) {
             advance(p);
             Expr *inner = parse_expr(p);
             expect(p, TOK_RPAREN, ")");
+            /* Parentheses adjust a multi-value expression to one value. */
+            inner->paren = 1;
             return inner;
         }
         case TOK_ELLIPSIS: {
