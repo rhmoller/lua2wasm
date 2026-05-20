@@ -32,6 +32,18 @@ static char *read_file(const char *path) {
     return buf;
 }
 
+/* Lua skips a leading line starting with '#' (shebang / first-line marker)
+ * in any loaded chunk. Blank that line in place — keeping the newline so
+ * line numbers stay accurate — because modules get wrapped and concatenated
+ * before lexing, so the lexer's own start-of-input skip only ever sees the
+ * first source's shebang, not a module's (or the entry's, when modules
+ * precede it). */
+static void strip_shebang(char *s) {
+    if (s && s[0] == '#') {
+        for (char *p = s; *p && *p != '\n'; p++) *p = ' ';
+    }
+}
+
 static void usage(const char *prog) {
     fprintf(stderr,
         "usage: %s <main.lua> [-m <module.lua>]... -o <output.wat>\n"
@@ -73,6 +85,7 @@ int main(int argc, char **argv) {
 
     char *entry_src = read_file(in);
     if (!entry_src) return 1;
+    strip_shebang(entry_src);
 
     /* Build the combined source: prepend each module wrapped in
      *   package.preload["NAME"] = function()
@@ -92,6 +105,7 @@ int main(int argc, char **argv) {
         for (int i = 0; i < n_modules; i++) {
             mod_srcs[i] = read_file(modules[i]);
             if (!mod_srcs[i]) return 1;
+            strip_shebang(mod_srcs[i]);
             module_name_of(modules[i], mod_names[i], sizeof(mod_names[i]));
             /* approx: wrapper + name + content + end-newline */
             total += strlen(mod_srcs[i]) + strlen(mod_names[i]) + 64;
