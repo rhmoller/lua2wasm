@@ -15,6 +15,11 @@ static char *read_file(const char *path) {
     fseek(f, 0, SEEK_SET);
     if (n < 0) { fclose(f); return NULL; }
     char *buf = malloc((size_t)n + 1);
+    if (!buf) {
+        fprintf(stderr, "%s: out of memory reading %ld bytes\n", path, n);
+        fclose(f);
+        return NULL;
+    }
     size_t got = fread(buf, 1, (size_t)n, f);
     if (got != (size_t)n) {
         fprintf(stderr, "%s: short read (%zu of %ld bytes)\n", path, got, n);

@@ -5,6 +5,12 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Size of the shared $fmt_buf scratch array (bytes). The runtime chunks
+ * large reads/formats through it, so three sites must agree on this number:
+ * the allocation below, the chunk bounds in runtime/prelude.wat, and
+ * FMT_BUF_CAP in runtime/host-bindings.mjs. */
+#define LUA_FMT_BUF_CAP 16384
+
 /* ============================================================
  * Codegen v3a.
  *
@@ -100,7 +106,7 @@ typedef struct {
     StrPool strs;
     int next_label;
     int in_main;            /* 1 while emitting $main body, 0 inside user fn */
-    int break_labels[16];   /* break targets for nested while/for/repeat */
+    int break_labels[64];   /* break targets for nested while/for/repeat */
     int break_depth;
     /* Escape-analysis context for the currently-emitted body: cur_captured[s]
      * != 0 means slot s must be heap-boxed (some descendant function captures
@@ -125,6 +131,20 @@ static void cg_error(CG *c, const char *msg) {
     if (!c->ok) return;
     c->ok = 0;
     snprintf(c->err, sizeof(c->err), "codegen: %s", msg);
+}
+
+/* Push a loop's break target onto the fixed-size stack. Returns 0 (after
+ * setting cg_error) if loop nesting exceeds the stack — callers `break` out
+ * of the statement on failure so the depth stays balanced, instead of
+ * silently writing past break_labels. */
+static int push_break_label(CG *c, int label) {
+    int cap = (int)(sizeof(c->break_labels) / sizeof(c->break_labels[0]));
+    if (c->break_depth >= cap) {
+        cg_error(c, "loop nesting too deep");
+        return 0;
+    }
+    c->break_labels[c->break_depth++] = label;
+    return 1;
 }
 
 /* ----- goto/label pre-pass -----
@@ -906,7 +926,7 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
 
         case STMT_WHILE: {
             int label = c->next_label++;
-            c->break_labels[c->break_depth++] = label;
+            if (!push_break_label(c, label)) break;
             emit_indent(c, depth); wat_appendf(c->w, "(block $brk_%d\n", label);
             emit_indent(c, depth + 1); wat_appendf(c->w, "(loop $cont_%d\n", label);
             emit_expr(c, s->as.while_stmt.cond, depth + 2);
@@ -923,7 +943,7 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
 
         case STMT_REPEAT: {
             int label = c->next_label++;
-            c->break_labels[c->break_depth++] = label;
+            if (!push_break_label(c, label)) break;
             emit_indent(c, depth); wat_appendf(c->w, "(block $brk_%d\n", label);
             emit_indent(c, depth + 1); wat_appendf(c->w, "(loop $cont_%d\n", label);
             emit_block(c, &s->as.repeat.body, depth + 2);
@@ -966,7 +986,7 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
 
         case STMT_FOR_NUM: {
             int label = c->next_label++;
-            c->break_labels[c->break_depth++] = label;
+            if (!push_break_label(c, label)) break;
             int slot = s->as.for_num.local_idx;
             int boxed = slot_is_boxed(c, slot);
             /* Initialize the control variable with `start`, and stash
@@ -1047,7 +1067,7 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
              * then loop: call iter(state, k); if first result is nil, break;
              * otherwise bind v1..vN to results, set k = result[0]. */
             int label = c->next_label++;
-            c->break_labels[c->break_depth++] = label;
+            if (!push_break_label(c, label)) break;
             int n_exprs = s->as.for_gen.n_exprs;
             emit_indent(c, depth); wat_append(c->w, "(local.set $tmp_args\n");
             emit_args_array(c, s->as.for_gen.exprs, n_exprs, depth + 1);
@@ -1884,13 +1904,14 @@ int codegen_module(const ParseResult *pr, const char *src_name,
         "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
         "        (i32.const %zu) (i32.const %zu))))\n",
         tab_str.offset, tab_str.len);
-    wat_append(out,
+    wat_appendf(out,
         "    (global.set $g_empty_str\n"
         "      (struct.new $LuaString (array.new $LuaArr (i32.const 0) (i32.const 0))))\n"
         "    (global.set $fmt_buf\n"
-        "      (array.new $LuaArr (i32.const 0) (i32.const 16384)))\n"
+        "      (array.new $LuaArr (i32.const 0) (i32.const %d)))\n"
         "    (global.set $call_lines\n"
-        "      (array.new $LineArr (i32.const 0) (i32.const 256)))\n");
+        "      (array.new $LineArr (i32.const 0) (i32.const 256)))\n",
+        LUA_FMT_BUF_CAP);
     /* Source name used by error() and debug.traceback. */
     if (src_name) {
         StrRef sn = strpool_add(&c.strs, src_name, strlen(src_name));

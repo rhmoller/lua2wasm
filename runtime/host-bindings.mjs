@@ -157,9 +157,9 @@ export function makeHelpers({ getInstance, formatFloat, cFormatG }) {
         }
     }
 
-    // Must match the $fmt_buf size in stdlib_init; truncating beyond
-    // it is safer than walking off the end of the GC array.
-    const FMT_BUF_CAP = 16384;
+    // Uses the module-level FMT_BUF_CAP (kept in sync with the $fmt_buf
+    // size in stdlib_init); truncating beyond it is safer than walking off
+    // the end of the GC array.
     function writeFmtBuf(s) {
         const bytes = new TextEncoder().encode(s);
         const n = Math.min(bytes.length, FMT_BUF_CAP);

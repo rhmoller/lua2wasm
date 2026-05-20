@@ -1952,7 +1952,9 @@
   ;; (host_read / host_read_num), >= 0 means an open file (fs_read /
   ;; fs_read_num). $fmt_buf is the shared landing buffer for both, capped
   ;; at 16384 bytes; "a" and large N-byte reads chunk through it so a file
-  ;; bigger than the buffer doesn't overrun it.
+  ;; bigger than the buffer doesn't overrun it. The 16384 here must match
+  ;; LUA_FMT_BUF_CAP (codegen.c, which allocates $fmt_buf) and FMT_BUF_CAP
+  ;; (host-bindings.mjs).
 
   (func $read_src_bytes (param $fd i32) (param $mode i32) (param $count i32) (result i32)
     (if (result i32) (i32.lt_s (local.get $fd) (i32.const 0))
