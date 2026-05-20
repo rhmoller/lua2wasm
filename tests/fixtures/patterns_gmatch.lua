@@ -12,11 +12,12 @@ for k, v in string.gmatch("a=1 b=2 c=3", "(%a)=(%d)") do
 end
 -- expect three lines: a 1 / b 2 / c 3
 
--- Empty-match progress guard: '%a*' returns "abc" then "" on a 3-char
--- subject, not "a","b","c","".
+-- Empty-match handling: '%a*' on "abc" yields just "abc". The trailing
+-- empty match is suppressed because its end equals the previous match's end
+-- (reference gmatch's `e ~= lastmatch` rule), so n == 1, not 2.
 local n = 0
 for _ in string.gmatch("abc", "%a*") do n = n + 1 end
-print(n)                                                    -- 2
+print(n)                                                    -- 1
 
 -- init argument starts the iteration at byte position init.
 for w in string.gmatch("foo bar baz", "%a+", 5) do
