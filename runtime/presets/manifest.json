@@ -9,6 +9,7 @@
     { "key": "pcall",      "file": "runtime/presets/pcall.lua" },
     { "key": "iter",       "file": "tests/fixtures/iterator.lua" },
     { "key": "stdin",      "file": "tests/fixtures/io_read.lua" },
+    { "key": "files",      "file": "runtime/presets/files.lua" },
     { "key": "forloop",    "file": "runtime/presets/forloop.lua" },
     { "key": "s_hello",    "file": "tests/samples/hello.lua" },
     { "key": "s_account",  "file": "tests/samples/account.lua" },

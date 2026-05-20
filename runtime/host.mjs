@@ -1,9 +1,13 @@
 // Host runner for lua2wasm modules under Node.
 // Usage: node host.mjs <module.wasm>
 import { readFile } from "node:fs/promises";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync,
+         unlinkSync, renameSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { formatFloat, formatScalar } from "./format.mjs";
-import { MATH_FNS, MATH2_FNS, makeHelpers } from "./host-bindings.mjs";
+import { MATH_FNS, MATH2_FNS, makeHelpers,
+         BufferedFile, parseFileMode, FMT_BUF_CAP } from "./host-bindings.mjs";
 
 const wasmPath = process.argv[2];
 if (!wasmPath) {
@@ -35,16 +39,21 @@ function ensureStdin() {
     } catch { stdinBuf = new Uint8Array(0); }
 }
 function writeBytesToFmtBuf(slice) {
-    for (let i = 0; i < slice.length; i++)
+    const n = Math.min(slice.length, FMT_BUF_CAP);
+    for (let i = 0; i < n; i++)
         instance.exports.fmt_buf_set(i, slice[i]);
-    return slice.length;
+    return n;
 }
 // mode 0 = "l", 1 = "L", 2 = "a", 3 = N-byte count
 function hostRead(mode, count) {
     ensureStdin();
     if (mode === 2) {
-        const slice = stdinBuf.subarray(stdinPos);
-        stdinPos = stdinBuf.length;
+        // Chunked: hand back at most a buffer's worth and advance the
+        // cursor; 0 at EOF lets the WAT "a" loop terminate.
+        if (stdinPos >= stdinBuf.length) return 0;
+        const end = Math.min(stdinPos + FMT_BUF_CAP, stdinBuf.length);
+        const slice = stdinBuf.subarray(stdinPos, end);
+        stdinPos = end;
         return writeBytesToFmtBuf(slice);
     }
     if (mode === 3) {
@@ -79,6 +88,105 @@ function hostReadNum() {
     return helpers.parseNumberFromString(m[0]);
 }
 
+// --- filesystem: an fd registry over node:fs, with BufferedFile doing
+// the cursor/slice bookkeeping. The error convention matches the WAT
+// side: a negative return means failure, with the message (the first
+// (-ret - 1) bytes of $fmt_buf) built here so it can include the path. ---
+const openFiles = new Map();   // fd -> { file: BufferedFile, path, writable }
+let nextFd = 3;                // 0/1/2 are the conceptual std streams
+function fmtBufBytes(bytes) {
+    const n = Math.min(bytes.length, FMT_BUF_CAP);
+    for (let i = 0; i < n; i++) instance.exports.fmt_buf_set(i, bytes[i]);
+    return n;
+}
+function fmtBufErr(msg) {
+    return -(fmtBufBytes(new TextEncoder().encode(msg)) + 1);
+}
+function errnoText(e) {
+    switch (e && e.code) {
+        case "ENOENT": return "No such file or directory";
+        case "EACCES": return "Permission denied";
+        case "EISDIR": return "Is a directory";
+        case "ENOTDIR": return "Not a directory";
+        case "EEXIST": return "File exists";
+        default: return (e && e.message) || "I/O error";
+    }
+}
+function fsOpen(pathRef, modeRef) {
+    const path = luaToString(pathRef);
+    const m = parseFileMode(modeRef ? luaToString(modeRef) : "r");
+    if (!m) return fmtBufErr(path + ": invalid mode");
+    let bytes;
+    try {
+        if (m.needExisting) {
+            if (existsSync(path)) bytes = new Uint8Array(readFileSync(path));
+            else if (m.mustExist)
+                return fmtBufErr(path + ": No such file or directory");
+            else bytes = new Uint8Array(0);
+        } else {
+            bytes = new Uint8Array(0);   // w / w+ truncate
+        }
+    } catch (e) { return fmtBufErr(path + ": " + errnoText(e)); }
+    const fd = nextFd++;
+    openFiles.set(fd, { file: new BufferedFile(bytes, { append: m.append }),
+                        path, writable: m.write });
+    return fd;
+}
+function fsRead(fd, mode, count) {
+    const e = openFiles.get(fd);
+    if (!e) return -1;
+    const slice = e.file.read(mode, count);
+    if (slice === null) return -1;
+    return fmtBufBytes(slice);
+}
+function fsReadNum(fd) {
+    const e = openFiles.get(fd);
+    if (!e) return null;
+    const s = e.file.readNumStr();
+    return s === null ? null : helpers.parseNumberFromString(s);
+}
+function fsWrite(fd, valRef) {
+    const e = openFiles.get(fd);
+    if (!e) return -1;
+    e.file.write(new TextEncoder().encode(luaToString(valRef)));
+    return 0;
+}
+function fsSeek(fd, whence, offset) {
+    const e = openFiles.get(fd);
+    if (!e) return -1n;
+    return BigInt(e.file.seek(whence, Number(offset)));
+}
+function fsFlush(fd) {
+    const e = openFiles.get(fd);
+    if (!e) return -1;
+    if (e.writable && e.file.dirty) {
+        try { writeFileSync(e.path, Buffer.from(e.file.contents())); }
+        catch (err) { return fmtBufErr(e.path + ": " + errnoText(err)); }
+        e.file.dirty = false;
+    }
+    return 0;
+}
+function fsClose(fd) {
+    const r = fsFlush(fd);
+    openFiles.delete(fd);
+    return r < 0 ? r : 0;
+}
+function osRemove(pathRef) {
+    const path = luaToString(pathRef);
+    try { unlinkSync(path); return 0; }
+    catch (e) { return fmtBufErr(path + ": " + errnoText(e)); }
+}
+function osRename(oldRef, newRef) {
+    const o = luaToString(oldRef), n = luaToString(newRef);
+    try { renameSync(o, n); return 0; }
+    catch (e) { return fmtBufErr(o + ": " + errnoText(e)); }
+}
+function osTmpname() {
+    const name = join(tmpdir(),
+        "lua_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2));
+    return fmtBufBytes(new TextEncoder().encode(name));
+}
+
 ({ instance } = await WebAssembly.instantiate(bytes, {
     host: {
         print:     (v) => { process.stdout.write(luaToString(v) + "\n"); },
@@ -106,6 +214,16 @@ function hostReadNum() {
         os_date:   (fmt, time, hasTime) => osDate(fmt,
             (!hasTime && FROZEN_TIME !== null) ? FROZEN_TIME : time,
             hasTime || FROZEN_TIME !== null),
+        fs_open:     (path, mode)        => fsOpen(path, mode),
+        fs_read:     (fd, mode, count)   => fsRead(fd, mode, count),
+        fs_read_num: (fd)                => fsReadNum(fd),
+        fs_write:    (fd, val)           => fsWrite(fd, val),
+        fs_seek:     (fd, whence, off)   => fsSeek(fd, whence, off),
+        fs_flush:    (fd)                => fsFlush(fd),
+        fs_close:    (fd)                => fsClose(fd),
+        os_remove:   (path)             => osRemove(path),
+        os_rename:   (oldp, newp)       => osRename(oldp, newp),
+        os_tmpname:  ()                 => osTmpname(),
     },
 }));
 try {

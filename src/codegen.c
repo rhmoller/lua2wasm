@@ -1726,6 +1726,20 @@ static void compute_live_set(const ParseResult *pr, int n_builtins,
              strcmp(n, "_utf8_codes_iter") == 0)) {
             live[i] = 1;
         }
+        /* The io.open / io.lines / file:lines bodies are part of the
+         * always-present prelude and reference the file-handle method
+         * closure globals + the lines iterator directly (via $g_*). Those
+         * globals only exist when their builtin is live, so force these
+         * live unconditionally — exactly like the iterator builtins above.
+         * Cost is a handful of closures even when the program never opens
+         * a file; the prelude bodies referencing them are unconditional. */
+        if (c == BLT_LIB_IO &&
+            (strcmp(n, "_file_read")  == 0 || strcmp(n, "_file_write") == 0 ||
+             strcmp(n, "_file_close") == 0 || strcmp(n, "_file_flush") == 0 ||
+             strcmp(n, "_file_seek")  == 0 || strcmp(n, "_file_lines") == 0 ||
+             strcmp(n, "_io_lines_iter") == 0)) {
+            live[i] = 1;
+        }
     }
 }
 

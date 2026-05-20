@@ -90,6 +90,9 @@ static const struct {
     /* io library */
     { "write", 5, "$builtin_io_write", BLT_LIB_IO },
     { "read",  4, "$builtin_io_read",  BLT_LIB_IO },
+    { "open",  4, "$builtin_io_open",  BLT_LIB_IO },
+    { "lines", 5, "$builtin_io_lines", BLT_LIB_IO },
+    { "type",  4, "$io_type",          BLT_LIB_IO },
     /* File-handle methods. Leading underscore keeps the standard io-table
      * install loop from registering them as io._* keys; codegen emits a
      * dedicated installation step that wires them onto the three stdio
@@ -98,6 +101,18 @@ static const struct {
     { "_handle_err_write", 17, "$io_handle_err_write", BLT_LIB_IO },
     { "_handle_read",      12, "$io_handle_read",      BLT_LIB_IO },
     { "_handle_noop",      12, "$io_handle_noop",      BLT_LIB_IO },
+    /* Real-file-handle methods (created by io.open). Same underscore rule:
+     * io.open builds each handle table at runtime and attaches these via
+     * their $g_* closure globals, so they're never io.* keys themselves.
+     * $builtin_io_open / $builtin_io_lines reference these globals from
+     * the always-present prelude, so they're force-lived in codegen. */
+    { "_file_read",     10, "$file_read",     BLT_LIB_IO },
+    { "_file_write",    11, "$file_write",    BLT_LIB_IO },
+    { "_file_close",    11, "$file_close",    BLT_LIB_IO },
+    { "_file_flush",    11, "$file_flush",    BLT_LIB_IO },
+    { "_file_seek",     10, "$file_seek",     BLT_LIB_IO },
+    { "_file_lines",    11, "$file_lines",    BLT_LIB_IO },
+    { "_io_lines_iter", 14, "$io_lines_iter", BLT_LIB_IO },
     /* table library */
     { "insert", 6, "$builtin_table_insert", BLT_LIB_TABLE },
     { "remove", 6, "$builtin_table_remove", BLT_LIB_TABLE },
@@ -120,6 +135,9 @@ static const struct {
     { "getenv",  6, "$builtin_os_getenv",  BLT_LIB_OS },
     { "exit",    4, "$builtin_os_exit",    BLT_LIB_OS },
     { "execute", 7, "$builtin_os_execute", BLT_LIB_OS },
+    { "remove",  6, "$builtin_os_remove",  BLT_LIB_OS },
+    { "rename",  6, "$builtin_os_rename",  BLT_LIB_OS },
+    { "tmpname", 7, "$builtin_os_tmpname", BLT_LIB_OS },
 };
 
 #define N (sizeof(BUILTINS)/sizeof(BUILTINS[0]))

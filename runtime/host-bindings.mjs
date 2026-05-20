@@ -8,6 +8,117 @@ export const MATH_FNS  = [Math.sin, Math.cos, Math.tan, Math.asin,
                           Math.acos, Math.atan, Math.exp, Math.log];
 export const MATH2_FNS = [Math.atan2, Math.pow];
 
+// --- filesystem support, shared by the Node runner and the playground ---
+//
+// Both hosts keep an fd registry of open files; the actual byte storage
+// differs (Node uses node:fs synchronously, the playground uses just-bash
+// asynchronously via JSPI). The buffer/cursor logic in between is identical,
+// so it lives here as a host-agnostic helper. The WAT side passes a read
+// `mode` (0="l", 1="L", 2="a", 3=N bytes) and capped reads chunk through the
+// shared 16 KB $fmt_buf, so a file larger than the buffer never overruns it.
+
+export const FMT_BUF_CAP = 16384;
+
+// Parse an io.open mode string into capability flags. A trailing "b"
+// (binary) is accepted and ignored; we always operate on raw bytes.
+// Returns null for an unrecognised mode.
+//   needExisting: load current file contents at open time (r/r+/a/a+)
+//   mustExist:    fail if the file is absent (r/r+)
+export function parseFileMode(mode) {
+    let s = (mode || "r").replace("b", "");
+    const plus = s.includes("+");
+    const base = s[0];
+    switch (base) {
+        case "r": return { read: true,  write: plus, append: false,
+                           needExisting: true,  mustExist: true };
+        case "w": return { read: plus,  write: true, append: false,
+                           needExisting: false, mustExist: false };
+        case "a": return { read: plus,  write: true, append: true,
+                           needExisting: true,  mustExist: false };
+        default:  return null;
+    }
+}
+
+// A whole-file byte buffer with a cursor. Reads slice from it; writes
+// splice into it (extending as needed) and mark it dirty so the host
+// knows to persist on flush/close.
+export class BufferedFile {
+    constructor(bytes, { append = false } = {}) {
+        this.buf = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+        this.append = append;
+        this.pos = append ? this.buf.length : 0;
+        this.dirty = false;
+    }
+
+    // Returns a Uint8Array slice, or null at EOF for line / N-byte modes.
+    // Mode 2 ("a") never returns null — an empty slice signals "no more".
+    read(mode, count) {
+        if (mode === 2) {
+            if (this.pos >= this.buf.length) return new Uint8Array(0);
+            const end = Math.min(this.pos + FMT_BUF_CAP, this.buf.length);
+            const s = this.buf.subarray(this.pos, end);
+            this.pos = end;
+            return s;
+        }
+        if (mode === 3) {
+            if (this.pos >= this.buf.length) return null;
+            const end = Math.min(this.pos + count, this.buf.length);
+            const s = this.buf.subarray(this.pos, end);
+            this.pos = end;
+            return s;
+        }
+        // line modes 0 ("l") and 1 ("L")
+        if (this.pos >= this.buf.length) return null;
+        let end = this.pos;
+        while (end < this.buf.length && this.buf[end] !== 0x0A) end++;
+        const includeNL = mode === 1 && end < this.buf.length;
+        const s = this.buf.subarray(this.pos, end + (includeNL ? 1 : 0));
+        this.pos = end + (end < this.buf.length ? 1 : 0);
+        return s;
+    }
+
+    // Skip leading whitespace and return the matched numeric token (as a
+    // string) per Lua syntax, advancing the cursor; null if none.
+    readNumStr() {
+        while (this.pos < this.buf.length) {
+            const b = this.buf[this.pos];
+            if (b === 0x20 || b === 0x09 || b === 0x0A || b === 0x0D
+             || b === 0x0B || b === 0x0C) this.pos++;
+            else break;
+        }
+        if (this.pos >= this.buf.length) return null;
+        const tail = new TextDecoder().decode(this.buf.subarray(this.pos));
+        const m = /^[+-]?(0[xX][0-9a-fA-F]+(\.[0-9a-fA-F]*)?([pP][+-]?[0-9]+)?|[0-9]+\.?[0-9]*([eE][+-]?[0-9]+)?|\.[0-9]+([eE][+-]?[0-9]+)?)/.exec(tail);
+        if (!m) return null;
+        this.pos += new TextEncoder().encode(m[0]).length;
+        return m[0];
+    }
+
+    write(bytes) {
+        if (this.append) this.pos = this.buf.length;
+        const end = this.pos + bytes.length;
+        if (end > this.buf.length) {
+            const nb = new Uint8Array(end);
+            nb.set(this.buf);
+            this.buf = nb;
+        }
+        this.buf.set(bytes, this.pos);
+        this.pos = end;
+        this.dirty = true;
+    }
+
+    // whence: 0 = set, 1 = cur, 2 = end. Returns the new position.
+    seek(whence, offset) {
+        const base = whence === 0 ? 0 : whence === 2 ? this.buf.length : this.pos;
+        let np = base + offset;
+        if (np < 0) np = 0;
+        this.pos = np;
+        return np;
+    }
+
+    contents() { return this.buf; }
+}
+
 // `tostring`-like rendering for the host; needed by formatSpec's `%s` /
 // `%q` and the playground's print. Caller passes in formatFloat to keep
 // dependency direction clean.

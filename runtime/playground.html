@@ -2,6 +2,13 @@
 <html lang="en">
 <meta charset="utf-8">
 <title>lua2wasm playground</title>
+<!-- Favicon: the official Lua logo (http://lua-users.org/wiki/LuaLogo),
+     inlined as base64 PNGs at 16/32/64 px so the page stays self-contained
+     (the GitHub Pages deploy stages a flat dist/ with no asset copy step).
+     The browser picks the size closest to its render target. -->
+<link rel="icon" type="image/png" sizes="16x16" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAABmJLR0QAAAAAAAD5Q7t/AAAACXBIWXMAAAABAAAAAQBPJcTWAAAAB3RJTUUH1wQKDjopNFerjAAAAnpJREFUeJxtk89LVFEcxT/3vTvP54w/xlFnIEfNVMQyalNYpCBhUNQi2rfPbQtD6B/QllLUwn0bV4aLpDa1iiCoJgk1E8QxUx/Nszfz5r17W1xFE7+rC/eee77ne77H5sQSApIZcNNQUwduI1g2xBVznz0H3aMQeOIY0IJELThJiCoQhaA1WBbYCbAd8+mtp5C9AEuv5CHYkoZNxRD8gUw35M6D2wTBDvz6ArvL0HYF2odAutB9Ux4y19QZ1mQWrj6EvruQypnWVWxZf4taL85q/X0OthehuQ+KH/clOCmj222GOy/g9HUDNNXf38LY2GWCIIynp1++XlubfwKWA78Lcl+3C2XfMP8PltJifPwa9+9fRCltx7EenZhY+qb1wiOobbTMhOPIaO67exR84IfjyP2zwHGkDf33oKkLooqERBL+7kB2AFLZgYEsq6sevh8CUK0qpqbeEceKIIh49uwDWqdy0HIWvJ8SdARagZsBIQcH83hegO+H9PZmWF8vUSqFTE6+p6eniWo1BoSE2gxobQHCNFreMZ8JQCAEDA93ksm4DA11ks/X09qaYmSkC1CRsdayJMQhSAc2P8PeZiJhtbe3NwDgupJcro502qW+3sHzyqRSCWBvA7a+gp2wISqD2wClDWhokzJ/qaMjbSWTCYpFn7a2BgqFLTyvghACzwuilZW3M0oVZsGpPdiDJAgbatJw+zmcuXHcDVMqguV5mHsAYQlUtP9IxSYDoQ8/Fszu158yDgkBKoTSOnyagTePobwLtoRw70iYjmYhCqHpNLSeNe4E27BVAG/VLJ0QUPFBxSel0TXMcdUMWCvjlHRMgCq+mZtWAP8Azi3klkVk/CYAAAAASUVORK5CYII=">
+<link rel="icon" type="image/png" sizes="32x32" href="data:image/png;base64,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">
+<link rel="icon" type="image/png" sizes="64x64" href="data:image/png;base64,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">
 <style>
   /* Catppuccin palettes (https://github.com/catppuccin/catppuccin).
      Two flavours wired to the same variable names so the rest of the
@@ -262,6 +269,7 @@
       <option value="forloop">for + ipairs</option>
       <option value="iter">iterator (closure)</option>
       <option value="stdin">interactive (io.read)</option>
+      <option value="files">files (io.open)</option>
     </optgroup>
     <optgroup label="from lua.org/extras">
       <option value="s_hello">hello.lua</option>
@@ -392,8 +400,10 @@ const luaHighlightStyle = HighlightStyle.define([
 ]);
 import createLua2WasmModule       from "../build-em/lua2wasm.js";
 import binaryen                   from "https://cdn.jsdelivr.net/npm/binaryen@121.0.0/index.js";
+import { InMemoryFs }             from "https://esm.sh/just-bash@latest";
 import { MATH_FNS, MATH2_FNS,
-         makeHelpers }            from "./host-bindings.mjs";
+         makeHelpers, BufferedFile,
+         parseFileMode }          from "./host-bindings.mjs";
 import { formatFloat, formatScalar } from "./format.mjs";
 
 /* ----- fixture presets ----- */
@@ -479,6 +489,53 @@ local third = io.read()        -- EOF -> nil
 print(first)
 print(second)
 print(third)
+`,
+  "files": `-- Files, in your browser! io.open / io.lines / io.type read and write a
+-- virtual filesystem (powered by just-bash) that PERSISTS across Runs.
+-- Click Run a few times and watch the visit counter climb.
+
+local counter = "/demo/visits.txt"
+
+-- Read the previous count. io.open returns nil (not an error) when the
+-- file is missing, so the very first Run simply starts from zero.
+local n = 0
+local f = io.open(counter, "r")
+if f then
+  n = tonumber(f:read("a")) or 0
+  f:close()
+end
+n = n + 1
+
+-- Write the new count back. "w" truncates; assert turns a failed open
+-- into an error carrying the host's message.
+local out = assert(io.open(counter, "w"))
+out:write(tostring(n))
+out:close()
+print("You have run this program " .. n .. " time(s).")
+
+-- A second file shows the rest of the API: multi-arg write, io.lines,
+-- byte-accurate read + seek, io.type, and os.remove.
+local notes = "/demo/notes.txt"
+local g = assert(io.open(notes, "w"))
+g:write("buy milk\\n")
+g:write("write a compiler\\n", "learn Lua\\n")   -- :write takes many args
+g:close()
+
+print("\\nnotes.txt, line by line:")
+for line in io.lines(notes) do
+  print("  - " .. line)
+end
+
+local r = assert(io.open(notes, "r"))
+print("\\nfirst 8 bytes:", r:read(8))        -- "buy milk"
+r:seek("set", 0)                            -- rewind to the start
+print("after rewind: ", r:read("l"))        -- "buy milk" (whole first line)
+print("io.type open: ", io.type(r))         -- file
+r:close()
+print("io.type closed:", io.type(r))        -- closed file
+
+os.remove(notes)
+print("\\nremoved notes.txt — visits.txt stays. That's the persistence!")
 `,
   "forloop": `local list = {"apple", "banana", "cherry"}
 for i, v in ipairs(list) do
@@ -845,6 +902,14 @@ const { luaToString, formatSpec, parseLuaNumber, osDate, osGetenv } = helpers;
  * the page loaded. We subtract this baseline at every call. */
 const clockEpochMs = performance.now();
 
+/* Virtual filesystem backing io.open / io.lines / os.remove etc. We use
+ * just-bash's pure in-memory FS, created once and reused across Run
+ * clicks so a file written in one run is readable in the next (it resets
+ * on page reload). Its API is async, so the fs host imports below bridge
+ * through JSPI exactly like io.read does. */
+const vfs = new InMemoryFs();
+const dirOf = (p) => { const i = p.lastIndexOf("/"); return i <= 0 ? "/" : p.slice(0, i); };
+
 /* ----- the run pipeline ----- */
 async function run() {
   clearOut();
@@ -898,10 +963,12 @@ async function run() {
       });
     }
 
+    const FMT_BUF_CAP = 16384;
     function writeBytesToFmtBuf(bytes) {
-      for (let j = 0; j < bytes.length; j++)
+      const n = Math.min(bytes.length, FMT_BUF_CAP);
+      for (let j = 0; j < n; j++)
         instance.exports.fmt_buf_set(j, bytes[j]);
-      return bytes.length;
+      return n;
     }
 
     /* Mode-aware read: prompts for one line via JSPI; treats "all" as the
@@ -922,6 +989,91 @@ async function run() {
 
     const readImport    = hasJSPI ? new WebAssembly.Suspending(readImpl)    : () => -1;
     const readNumImport = hasJSPI ? new WebAssembly.Suspending(readNumImpl) : () => null;
+
+    /* ----- filesystem (just-bash InMemoryFs) -----
+     * Fresh fd registry per run (so leftover handles don't leak across
+     * runs) over the page-persistent `vfs`. Pure buffer ops (read/write/
+     * seek) are synchronous; only open/flush/close/remove/rename touch the
+     * async VFS and are wrapped in WebAssembly.Suspending. Error
+     * convention matches the WAT side: negative return, message bytes in
+     * $fmt_buf. Without JSPI the async ones degrade to a soft failure. */
+    const openFiles = new Map();
+    let nextFd = 3;
+    const fsErr = (msg) => -(writeBytesToFmtBuf(new TextEncoder().encode(msg)) + 1);
+
+    async function fsOpenImpl(pathRef, modeRef) {
+      const path = luaToString(pathRef);
+      const m = parseFileMode(modeRef ? luaToString(modeRef) : "r");
+      if (!m) return fsErr(path + ": invalid mode");
+      let bytes;
+      try {
+        if (m.needExisting) {
+          if (await vfs.exists(path)) bytes = await vfs.readFileBuffer(path);
+          else if (m.mustExist) return fsErr(path + ": No such file or directory");
+          else bytes = new Uint8Array(0);
+        } else bytes = new Uint8Array(0);
+      } catch (e) { return fsErr(path + ": " + (e && e.message || "open error")); }
+      const fd = nextFd++;
+      openFiles.set(fd, { file: new BufferedFile(bytes, { append: m.append }),
+                          path, writable: m.write });
+      return fd;
+    }
+    function fsReadImpl(fd, mode, count) {
+      const e = openFiles.get(fd); if (!e) return -1;
+      const s = e.file.read(mode, count);
+      return s === null ? -1 : writeBytesToFmtBuf(s);
+    }
+    function fsReadNumImpl(fd) {
+      const e = openFiles.get(fd); if (!e) return null;
+      const s = e.file.readNumStr();
+      return s === null ? null : helpers.parseNumberFromString(s);
+    }
+    function fsWriteImpl(fd, valRef) {
+      const e = openFiles.get(fd); if (!e) return -1;
+      e.file.write(new TextEncoder().encode(luaToString(valRef)));
+      return 0;
+    }
+    function fsSeekImpl(fd, whence, offset) {
+      const e = openFiles.get(fd); if (!e) return -1n;
+      return BigInt(e.file.seek(whence, Number(offset)));
+    }
+    async function fsFlushImpl(fd) {
+      const e = openFiles.get(fd); if (!e) return -1;
+      if (e.writable && e.file.dirty) {
+        try {
+          try { await vfs.mkdir(dirOf(e.path), { recursive: true }); } catch {}
+          await vfs.writeFile(e.path, e.file.contents());
+          e.file.dirty = false;
+        } catch (er) { return fsErr(e.path + ": " + (er && er.message || "write error")); }
+      }
+      return 0;
+    }
+    async function fsCloseImpl(fd) {
+      const r = await fsFlushImpl(fd);
+      openFiles.delete(fd);
+      return r < 0 ? r : 0;
+    }
+    async function osRemoveImpl(pathRef) {
+      const path = luaToString(pathRef);
+      try { await vfs.rm(path); return 0; }
+      catch (e) { return fsErr(path + ": " + (e && e.message || "remove error")); }
+    }
+    async function osRenameImpl(oldRef, newRef) {
+      const o = luaToString(oldRef), n = luaToString(newRef);
+      try { await vfs.mv(o, n); return 0; }
+      catch (e) { return fsErr(o + ": " + (e && e.message || "rename error")); }
+    }
+    function osTmpnameImpl() {
+      const name = "/tmp/lua_" + Date.now().toString(36) + "_"
+                 + Math.random().toString(36).slice(2);
+      return writeBytesToFmtBuf(new TextEncoder().encode(name));
+    }
+
+    const fsOpen   = hasJSPI ? new WebAssembly.Suspending(fsOpenImpl)   : () => -1;
+    const fsFlush  = hasJSPI ? new WebAssembly.Suspending(fsFlushImpl)  : () => -1;
+    const fsClose  = hasJSPI ? new WebAssembly.Suspending(fsCloseImpl)  : () => -1;
+    const osRemove = hasJSPI ? new WebAssembly.Suspending(osRemoveImpl) : () => -1;
+    const osRename = hasJSPI ? new WebAssembly.Suspending(osRenameImpl) : () => -1;
 
     ({ instance } = await WebAssembly.instantiate(bytes, {
       host: {
@@ -951,6 +1103,16 @@ async function run() {
           throw new Error("os.exit(" + (hasCode ? code : 0) + ")");
         },
         os_date:   (fmt, time, hasTime)  => osDate(fmt, time, hasTime),
+        fs_open:     fsOpen,
+        fs_read:     fsReadImpl,
+        fs_read_num: fsReadNumImpl,
+        fs_write:    fsWriteImpl,
+        fs_seek:     fsSeekImpl,
+        fs_flush:    fsFlush,
+        fs_close:    fsClose,
+        os_remove:   osRemove,
+        os_rename:   osRename,
+        os_tmpname:  osTmpnameImpl,
       },
     }));
     curInstance = instance;
