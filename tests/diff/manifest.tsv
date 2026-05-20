@@ -73,6 +73,8 @@ pass	setmetatable_typecheck	setmetatable on a non-table is a catchable error
 pass	tonumber_base_range	tonumber with an out-of-range base is a catchable error
 # Fixed: utf8.offset returns (start,end) + bounds/continuation errors (Lua 5.5)
 pass	utf8_offset	utf8.offset two-value return; out-of-bounds/continuation are errors
+# Fixed: utf8.len/utf8.codepoint validate positions (out-of-range was clamped)
+pass	utf8_len_codepoint_bounds	len/codepoint raise "out of bounds" instead of clamping
 #
 # Captured bugs (xfail) ----------------------------------------------------
 # (none — all captured differences resolved. Note: error-message *wording* and

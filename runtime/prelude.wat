@@ -4070,6 +4070,7 @@
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
     (local $bytes (ref $LuaArr)) (local $n i32) (local $nargs i32)
     (local $i i32) (local $j i32) (local $lax i32)
+    (local $posi i64) (local $posj i64)
     (local $p i32) (local $w i32)
     ;; two-pass: first count, then allocate the ArgArr and fill.
     (local $count i32) (local $idx i32)
@@ -4078,25 +4079,27 @@
       (ref.cast (ref $LuaString) (call $args_at (local.get $args) (i32.const 0)))))
     (local.set $n (array.len (local.get $bytes)))
     (local.set $nargs (array.len (local.get $args)))
-    (local.set $i (i32.const 1))
+    (local.set $posi (i64.const 1))
     (if (i32.gt_u (local.get $nargs) (i32.const 1))
-      (then (local.set $i (i32.wrap_i64
-              (call $as_int (call $args_at (local.get $args) (i32.const 1)))))))
-    (local.set $j (local.get $i))
+      (then (local.set $posi (call $as_int (call $args_at (local.get $args) (i32.const 1))))))
+    (local.set $posi (call $u_posrelat (local.get $posi) (local.get $n)))
+    (local.set $posj (local.get $posi))   ;; j defaults to i
     (if (i32.gt_u (local.get $nargs) (i32.const 2))
-      (then (local.set $j (i32.wrap_i64
-              (call $as_int (call $args_at (local.get $args) (i32.const 2)))))))
+      (then (local.set $posj (call $u_posrelat
+              (call $as_int (call $args_at (local.get $args) (i32.const 2)))
+              (local.get $n)))))
     (if (i32.gt_u (local.get $nargs) (i32.const 3))
       (then (local.set $lax (call $lua_truthy
               (call $args_at (local.get $args) (i32.const 3))))))
-    (if (i32.lt_s (local.get $i) (i32.const 0))
-      (then (local.set $i (i32.add (local.get $n) (i32.add (local.get $i) (i32.const 1))))))
-    (if (i32.lt_s (local.get $j) (i32.const 0))
-      (then (local.set $j (i32.add (local.get $n) (i32.add (local.get $j) (i32.const 1))))))
-    (if (i32.lt_s (local.get $i) (i32.const 1)) (then (local.set $i (i32.const 1))))
-    (if (i32.gt_s (local.get $j) (local.get $n)) (then (local.set $j (local.get $n))))
-    (if (i32.gt_s (local.get $i) (local.get $j))
+    ;; Initial position must be >= 1 and final position <= #s ("out of bounds").
+    (if (i64.lt_s (local.get $posi) (i64.const 1))
+      (then (call $throw_lit (i32.const 846) (i32.const 13))))   ;; "out of bounds"
+    (if (i64.gt_s (local.get $posj) (i64.extend_i32_s (local.get $n)))
+      (then (call $throw_lit (i32.const 846) (i32.const 13))))   ;; "out of bounds"
+    (if (i64.gt_s (local.get $posi) (local.get $posj))
       (then (return (global.get $g_empty_args))))
+    (local.set $i (i32.wrap_i64 (local.get $posi)))
+    (local.set $j (i32.wrap_i64 (local.get $posj)))
     ;; pass 1: count + validate
     (local.set $p (i32.sub (local.get $i) (i32.const 1)))
     (block $done1 (loop $lp1
@@ -4201,6 +4204,19 @@
       (call $args_at (local.get $args) (i32.const 0))
       (ref.i31 (i32.const 0))))
 
+  ;; Reference u_posrelat: a non-negative position is taken as-is; a negative
+  ;; one counts from the end (#s + pos + 1), underflowing to 0 when it would
+  ;; go past the start. Shared by utf8.offset/len/codepoint.
+  (func $u_posrelat (param $pos i64) (param $len i32) (result i64)
+    (if (result i64) (i64.ge_s (local.get $pos) (i64.const 0))
+      (then (local.get $pos))
+      (else (if (result i64)
+              (i64.gt_u (i64.sub (i64.const 0) (local.get $pos))
+                        (i64.extend_i32_s (local.get $len)))
+        (then (i64.const 0))
+        (else (i64.add (i64.add (i64.extend_i32_s (local.get $len)) (local.get $pos))
+                       (i64.const 1)))))))
+
   ;; Build utf8.offset's result: (start, end) 1-based byte positions of the
   ;; codepoint beginning at 0-based $p. For a multi-byte lead byte, $end skips
   ;; to the last continuation byte; for a single byte (or the past-the-end
@@ -4250,16 +4266,9 @@
       (else (local.set $posi
         (i64.add (i64.extend_i32_s (local.get $len)) (i64.const 1)))))
     (if (i32.gt_u (local.get $nargs) (i32.const 2))
-      (then
-        (local.set $posi (call $as_int (call $args_at (local.get $args) (i32.const 2))))
-        ;; u_posrelat: negative counts from the end; underflow clamps to 0.
-        (if (i64.lt_s (local.get $posi) (i64.const 0))
-          (then (if (i64.gt_u (i64.sub (i64.const 0) (local.get $posi))
-                              (i64.extend_i32_s (local.get $len)))
-            (then (local.set $posi (i64.const 0)))
-            (else (local.set $posi (i64.add
-              (i64.add (i64.extend_i32_s (local.get $len)) (local.get $posi))
-              (i64.const 1)))))))))
+      (then (local.set $posi (call $u_posrelat
+              (call $as_int (call $args_at (local.get $args) (i32.const 2)))
+              (local.get $len)))))
     ;; posi must be in [1, #s+1]
     (if (i32.eqz (i32.and
           (i64.ge_s (local.get $posi) (i64.const 1))
@@ -4328,34 +4337,36 @@
   (func $builtin_utf8_len (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
     (local $bytes (ref $LuaArr)) (local $n i32) (local $nargs i32)
-    (local $i i32) (local $j i32) (local $lax i32)
-    (local $p i32) (local $w i32) (local $count i64)
+    (local $posi i64) (local $posj i64) (local $lax i32)
+    (local $p i32) (local $end i32) (local $w i32) (local $count i64)
     (local $out (ref $ArgArr))
     (local.set $bytes (struct.get $LuaString $bytes
       (ref.cast (ref $LuaString) (call $args_at (local.get $args) (i32.const 0)))))
     (local.set $n (array.len (local.get $bytes)))
     (local.set $nargs (array.len (local.get $args)))
-    (local.set $i (i32.const 1))
-    (local.set $j (i32.const -1))
+    (local.set $posi (i64.const 1))
     (if (i32.gt_u (local.get $nargs) (i32.const 1))
-      (then (local.set $i (i32.wrap_i64
-              (call $as_int (call $args_at (local.get $args) (i32.const 1)))))))
+      (then (local.set $posi (call $as_int (call $args_at (local.get $args) (i32.const 1))))))
+    (local.set $posi (call $u_posrelat (local.get $posi) (local.get $n)))
+    (local.set $posj (i64.const -1))
     (if (i32.gt_u (local.get $nargs) (i32.const 2))
-      (then (local.set $j (i32.wrap_i64
-              (call $as_int (call $args_at (local.get $args) (i32.const 2)))))))
+      (then (local.set $posj (call $as_int (call $args_at (local.get $args) (i32.const 2))))))
+    (local.set $posj (call $u_posrelat (local.get $posj) (local.get $n)))
     (if (i32.gt_u (local.get $nargs) (i32.const 3))
       (then (local.set $lax (call $lua_truthy
               (call $args_at (local.get $args) (i32.const 3))))))
-    ;; negative-index normalisation, then 1-based clamp
-    (if (i32.lt_s (local.get $i) (i32.const 0))
-      (then (local.set $i (i32.add (local.get $n) (i32.add (local.get $i) (i32.const 1))))))
-    (if (i32.lt_s (local.get $j) (i32.const 0))
-      (then (local.set $j (i32.add (local.get $n) (i32.add (local.get $j) (i32.const 1))))))
-    (if (i32.lt_s (local.get $i) (i32.const 1)) (then (local.set $i (i32.const 1))))
-    (if (i32.gt_s (local.get $j) (local.get $n)) (then (local.set $j (local.get $n))))
-    (local.set $p (i32.sub (local.get $i) (i32.const 1)))   ;; 0-based
+    ;; Initial position must be in [1, #s+1]; final position must be <= #s.
+    (if (i32.eqz (i32.and (i64.ge_s (local.get $posi) (i64.const 1))
+                          (i64.le_s (i64.sub (local.get $posi) (i64.const 1))
+                                    (i64.extend_i32_s (local.get $n)))))
+      (then (call $throw_lit (i32.const 846) (i32.const 13))))   ;; "out of bounds"
+    (if (i32.eqz (i64.lt_s (i64.sub (local.get $posj) (i64.const 1))
+                           (i64.extend_i32_s (local.get $n))))
+      (then (call $throw_lit (i32.const 846) (i32.const 13))))   ;; "out of bounds"
+    (local.set $p (i32.wrap_i64 (i64.sub (local.get $posi) (i64.const 1))))    ;; 0-based start
+    (local.set $end (i32.wrap_i64 (i64.sub (local.get $posj) (i64.const 1))))  ;; 0-based last
     (block $done (loop $lp
-      (br_if $done (i32.gt_s (i32.add (local.get $p) (i32.const 1)) (local.get $j)))
+      (br_if $done (i32.gt_s (local.get $p) (local.get $end)))
       (local.set $w (call $utf8_decode_step
         (local.get $bytes) (local.get $p) (local.get $lax)))
       (if (i32.eqz (local.get $w))
