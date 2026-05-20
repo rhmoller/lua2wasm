@@ -668,8 +668,11 @@ static void emit_call(CG *c, const Expr *e, int depth) {
  * error for non-callables); TCO is lost in that case, which is fine
  * for a metamethod hop. */
 static void emit_tail_call(CG *c, const Expr *e, int depth) {
-    /* Stash callee and args once. */
-    emit_indent(c, depth); wat_append(c->w, "(local.set $tmp_any\n");
+    /* Stash the callee in its own local: $tmp_any can't be used here because
+     * a method-call argument (e.g. `f(s:gmatch(...))`) reuses $tmp_any for
+     * its receiver while we build the args array below, which would clobber
+     * the callee. */
+    emit_indent(c, depth); wat_append(c->w, "(local.set $tmp_callee\n");
     emit_expr(c, e->as.call.callee, depth + 1);
     emit_indent(c, depth); wat_append(c->w, ")\n");
     emit_indent(c, depth); wat_append(c->w, "(local.set $tmp_args\n");
@@ -679,12 +682,12 @@ static void emit_tail_call(CG *c, const Expr *e, int depth) {
      * line so error()/traceback see this site instead of the (now-defunct)
      * caller's. */
     emit_indent(c, depth);
-    wat_append(c->w, "(if (ref.test (ref $LuaClosure) (local.get $tmp_any))\n");
+    wat_append(c->w, "(if (ref.test (ref $LuaClosure) (local.get $tmp_callee))\n");
     emit_indent(c, depth + 1); wat_append(c->w, "(then\n");
     emit_indent(c, depth + 2);
     wat_appendf(c->w, "(call $replace_top_call_frame (i32.const %d))\n", e->line);
     emit_indent(c, depth + 2);
-    wat_append(c->w, "(local.set $tmp_clo (ref.cast (ref $LuaClosure) (local.get $tmp_any)))\n");
+    wat_append(c->w, "(local.set $tmp_clo (ref.cast (ref $LuaClosure) (local.get $tmp_callee)))\n");
     emit_indent(c, depth + 2); wat_append(c->w, "(return_call_ref $LuaFn\n");
     emit_indent(c, depth + 3);
     wat_append(c->w, "(ref.as_non_null (local.get $tmp_clo))\n");
@@ -695,7 +698,7 @@ static void emit_tail_call(CG *c, const Expr *e, int depth) {
     /* Slow path: __call walk / typed error. */
     emit_indent(c, depth);
     wat_appendf(c->w,
-        "(return (call $lua_call_any (local.get $tmp_any) "
+        "(return (call $lua_call_any (local.get $tmp_callee) "
         "(ref.as_non_null (local.get $tmp_args)) (i32.const %d)))\n",
         e->line);
 }
@@ -1645,6 +1648,7 @@ static void emit_user_function(CG *c, const LuaFunc *fn) {
     wat_append(w, "    (local $tmp_any anyref)\n");
     wat_append(w, "    (local $tmp_args (ref null $ArgArr))\n");
     wat_append(w, "    (local $tmp_clo (ref null $LuaClosure))\n");
+    wat_append(w, "    (local $tmp_callee anyref)\n");
     wat_append(w, "    (local $tmp_tab (ref null $LuaTable))\n");
     emit_for_scratch_locals(w, &fn->body);
     if (fn->is_vararg) {
@@ -2137,6 +2141,7 @@ static void emit_main_chunk(CG *c) {
     wat_append(out, "    (local $tmp_any anyref)\n");
     wat_append(out, "    (local $tmp_args (ref null $ArgArr))\n");
     wat_append(out, "    (local $tmp_clo (ref null $LuaClosure))\n");
+    wat_append(out, "    (local $tmp_callee anyref)\n");
     wat_append(out, "    (local $tmp_tab (ref null $LuaTable))\n");
     emit_for_scratch_locals(out, &pr->main_body);
     {

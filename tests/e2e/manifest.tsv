@@ -102,3 +102,4 @@ varargs	tests/fixtures/varargs.lua
 table_key_map	tests/fixtures/table_key_map.lua
 table_churn	tests/fixtures/table_churn.lua
 nested_for	tests/fixtures/nested_for.lua
+tailcall_mvarg	tests/fixtures/tailcall_mvarg.lua
