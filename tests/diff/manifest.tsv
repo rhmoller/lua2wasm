@@ -49,6 +49,8 @@ pass	global_as_name	`global = 5`, `global.x`, `t.global` accepted (not forced in
 pass	error_no_object	nil error object becomes "<no error object>" at pcall/xpcall boundary
 # Fixed: indexing a non-table raises an "index" error, not a "call" error ----
 pass	index_nonindexable	index of nil/number is a catchable error mentioning "index"
+# Fixed: method calls in tail position are proper tail calls (constant stack) -
+pass	method_tail_call	`return self:m(...)` is TCO'd like `return f(...)`
 #
 # Captured bugs (xfail) ----------------------------------------------------
 # (none — all captured differences resolved. Note: error-message *wording* and

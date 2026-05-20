@@ -661,23 +661,13 @@ static void emit_call(CG *c, const Expr *e, int depth) {
     emit_indent(c, depth); wat_append(c->w, ")\n");
 }
 
-/* Tail call: `return f(args)` lowers to a return_call_ref so deep
- * recursion doesn't grow the wasm call stack. Fast path: if the callee
- * really is a closure, use return_call_ref. Slow path: fall through to
- * $lua_call_any (which walks __call metamethods and throws a typed
- * error for non-callables); TCO is lost in that case, which is fine
- * for a metamethod hop. */
-static void emit_tail_call(CG *c, const Expr *e, int depth) {
-    /* Stash the callee in its own local: $tmp_any can't be used here because
-     * a method-call argument (e.g. `f(s:gmatch(...))`) reuses $tmp_any for
-     * its receiver while we build the args array below, which would clobber
-     * the callee. */
-    emit_indent(c, depth); wat_append(c->w, "(local.set $tmp_callee\n");
-    emit_expr(c, e->as.call.callee, depth + 1);
-    emit_indent(c, depth); wat_append(c->w, ")\n");
-    emit_indent(c, depth); wat_append(c->w, "(local.set $tmp_args\n");
-    emit_args_array(c, e->as.call.args, e->as.call.nargs, depth + 1);
-    emit_indent(c, depth); wat_append(c->w, ")\n");
+/* Tail-call dispatch shared by the regular and method forms. Assumes the
+ * callee value is in $tmp_callee and the argument array in $tmp_args. Fast
+ * path: a real closure -> return_call_ref, so deep recursion runs in
+ * constant wasm stack. Slow path: fall through to $lua_call_any (which
+ * walks __call metamethods and throws a typed error for non-callables);
+ * TCO is lost there, which is fine for a metamethod hop. */
+static void emit_tail_dispatch(CG *c, int line, int depth) {
     /* Fast path: real closure -> return_call_ref. Update the top frame
      * line so error()/traceback see this site instead of the (now-defunct)
      * caller's. */
@@ -685,7 +675,7 @@ static void emit_tail_call(CG *c, const Expr *e, int depth) {
     wat_append(c->w, "(if (ref.test (ref $LuaClosure) (local.get $tmp_callee))\n");
     emit_indent(c, depth + 1); wat_append(c->w, "(then\n");
     emit_indent(c, depth + 2);
-    wat_appendf(c->w, "(call $replace_top_call_frame (i32.const %d))\n", e->line);
+    wat_appendf(c->w, "(call $replace_top_call_frame (i32.const %d))\n", line);
     emit_indent(c, depth + 2);
     wat_append(c->w, "(local.set $tmp_clo (ref.cast (ref $LuaClosure) (local.get $tmp_callee)))\n");
     emit_indent(c, depth + 2); wat_append(c->w, "(return_call_ref $LuaFn\n");
@@ -700,7 +690,72 @@ static void emit_tail_call(CG *c, const Expr *e, int depth) {
     wat_appendf(c->w,
         "(return (call $lua_call_any (local.get $tmp_callee) "
         "(ref.as_non_null (local.get $tmp_args)) (i32.const %d)))\n",
-        e->line);
+        line);
+}
+
+/* `return obj:m(args)` — the method-call tail form. Mirrors emit_call_array's
+ * method branch (receiver once into $tmp_any; method via $lua_index; args =
+ * [recv] ++ method args), but parks the callee/args in $tmp_callee/$tmp_args
+ * and hands off to emit_tail_dispatch so it gets the same TCO as a plain
+ * `return f(args)`. The receiver is read into the [recv] fixed array before
+ * the method args are evaluated, so an arg that itself reuses $tmp_any can't
+ * clobber it. */
+static void emit_tail_method_call(CG *c, const Expr *e, int depth) {
+    StrRef sr = strpool_add(&c->strs, e->as.method_call.method,
+                            e->as.method_call.method_len);
+    emit_indent(c, depth); wat_append(c->w, "(local.set $tmp_any\n");
+    emit_expr(c, e->as.method_call.recv, depth + 1);
+    emit_indent(c, depth); wat_append(c->w, ")\n");
+    emit_indent(c, depth); wat_append(c->w, "(local.set $tmp_callee\n");
+    emit_indent(c, depth + 1); wat_append(c->w, "(call $lua_index\n");
+    emit_indent(c, depth + 2); wat_append(c->w, "(local.get $tmp_any)\n");
+    emit_indent(c, depth + 2);
+    wat_appendf(c->w,
+        "(struct.new $LuaString (array.new_data $LuaArr $str_data "
+        "(i32.const %zu) (i32.const %zu)))\n", sr.offset, sr.len);
+    emit_indent(c, depth + 2);
+    wat_appendf(c->w, "(i32.const %d)\n", e->line);
+    emit_indent(c, depth + 1); wat_append(c->w, ")\n");
+    emit_indent(c, depth); wat_append(c->w, ")\n");
+    size_t mna = e->as.method_call.nargs;
+    int has_mv = mna > 0 && is_multival_tail(e->as.method_call.args[mna - 1]);
+    emit_indent(c, depth); wat_append(c->w, "(local.set $tmp_args\n");
+    emit_indent(c, depth + 1); wat_append(c->w, "(call $merge_args\n");
+    emit_indent(c, depth + 2);
+    wat_append(c->w, "(array.new_fixed $ArgArr 1 (local.get $tmp_any))\n");
+    if (mna == 0) {
+        emit_indent(c, depth + 2); wat_append(c->w, "(global.get $g_empty_args)\n");
+    } else if (!has_mv) {
+        emit_indent(c, depth + 2);
+        wat_appendf(c->w, "(array.new_fixed $ArgArr %zu\n", mna);
+        for (size_t i = 0; i < mna; i++) emit_expr(c, e->as.method_call.args[i], depth + 3);
+        emit_indent(c, depth + 2); wat_append(c->w, ")\n");
+    } else {
+        emit_args_array(c, e->as.method_call.args, mna, depth + 2);
+    }
+    emit_indent(c, depth + 1); wat_append(c->w, ")\n");
+    emit_indent(c, depth); wat_append(c->w, ")\n");
+    emit_tail_dispatch(c, e->line, depth);
+}
+
+/* Tail call: `return f(args)` / `return obj:m(args)` lowers to a
+ * return_call_ref so deep recursion doesn't grow the wasm call stack. */
+static void emit_tail_call(CG *c, const Expr *e, int depth) {
+    if (e->kind == EXPR_METHOD_CALL) {
+        emit_tail_method_call(c, e, depth);
+        return;
+    }
+    /* Stash the callee in its own local: $tmp_any can't be used here because
+     * a method-call argument (e.g. `f(s:gmatch(...))`) reuses $tmp_any for
+     * its receiver while we build the args array below, which would clobber
+     * the callee. */
+    emit_indent(c, depth); wat_append(c->w, "(local.set $tmp_callee\n");
+    emit_expr(c, e->as.call.callee, depth + 1);
+    emit_indent(c, depth); wat_append(c->w, ")\n");
+    emit_indent(c, depth); wat_append(c->w, "(local.set $tmp_args\n");
+    emit_args_array(c, e->as.call.args, e->as.call.nargs, depth + 1);
+    emit_indent(c, depth); wat_append(c->w, ")\n");
+    emit_tail_dispatch(c, e->line, depth);
 }
 
 /* ----- function expression: build a closure -----
@@ -951,11 +1006,12 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
                 emit_indent(c, depth); wat_append(c->w, "return\n");
                 break;
             }
-            /* Tail-call optimization: exactly `return <call_expr>` (regular
-             * or method form — method calls just need their args array set up
-             * via emit_call_array equivalent; here we only TCO the regular form). */
-            if (n_values == 1 && s->as.return_stmt.values[0]->kind == EXPR_CALL
-                && !s->as.return_stmt.values[0]->paren) {
+            /* Tail-call optimization: exactly `return f(args)` or
+             * `return obj:m(args)` (not parenthesized, which forces adjust-to-
+             * one and so isn't a tail call). */
+            if (n_values == 1 && !s->as.return_stmt.values[0]->paren
+                && (s->as.return_stmt.values[0]->kind == EXPR_CALL
+                    || s->as.return_stmt.values[0]->kind == EXPR_METHOD_CALL)) {
                 emit_tail_call(c, s->as.return_stmt.values[0], depth);
                 break;
             }
