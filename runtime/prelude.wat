@@ -49,6 +49,7 @@
       (field $cap  (mut i32))
       (field $idx  (mut (ref null $IArr)))
       (field $mask (mut i32))
+      (field $used (mut i32))   ;; occupied index slots: live entries + tombstones
       (field $meta (mut (ref null $LuaTable)))
       (field $id   i32)))))   ;; unique identity for hashing table keys
 
@@ -966,7 +967,7 @@
     (struct.new $LuaTable
       (ref.null $TArr) (ref.null $TArr)
       (i32.const 0) (i32.const 0)
-      (ref.null $IArr) (i32.const 0)
+      (ref.null $IArr) (i32.const 0) (i32.const 0)
       (ref.null $LuaTable)
       (local.get $id)))
 
@@ -1080,7 +1081,9 @@
           (local.set $i (i32.add (local.get $i) (i32.const 1)))
           (br $klp)))))
     (struct.set $LuaTable $idx  (local.get $t) (local.get $idx))
-    (struct.set $LuaTable $mask (local.get $t) (local.get $new_mask)))
+    (struct.set $LuaTable $mask (local.get $t) (local.get $new_mask))
+    ;; A fresh index has no tombstones: occupied slots == live entries.
+    (struct.set $LuaTable $used (local.get $t) (local.get $n)))
 
   ;; Probe the hash index for a key. Returns position in keys[] (>=0)
   ;; on hit, -1 on miss. Caller must ensure $idx is non-null (i.e. n>0
@@ -1094,12 +1097,15 @@
     (local.set $h (i32.and (local.get $mask) (call $lua_hash (local.get $k))))
     (loop $probe
       (local.set $slot (array.get $IArr (local.get $idx) (local.get $h)))
+      ;; 0 = empty -> key absent; <0 = tombstone -> keep probing; >0 = live.
       (if (i32.eqz (local.get $slot)) (then (return (i32.const -1))))
-      (local.set $pos (i32.sub (local.get $slot) (i32.const 1)))
-      (if (call $lua_eq_raw
-            (array.get $TArr (local.get $keys) (local.get $pos))
-            (local.get $k))
-        (then (return (local.get $pos))))
+      (if (i32.gt_s (local.get $slot) (i32.const 0))
+        (then
+          (local.set $pos (i32.sub (local.get $slot) (i32.const 1)))
+          (if (call $lua_eq_raw
+                (array.get $TArr (local.get $keys) (local.get $pos))
+                (local.get $k))
+            (then (return (local.get $pos))))))
       (local.set $h (i32.and (local.get $mask)
         (i32.add (local.get $h) (i32.const 1))))
       (br $probe))
@@ -1222,34 +1228,74 @@
   (func $tab_set (param $t (ref $LuaTable)) (param $k anyref) (param $v anyref)
     (local $i i32) (local $n i32) (local $cap i32) (local $mask i32)
     (local $keys (ref null $TArr)) (local $vals (ref null $TArr))
-    (local $idx (ref null $IArr)) (local $h i32) (local $slot i32)
+    (local $idx (ref null $IArr)) (local $h i32) (local $hm i32)
+    (local $slot i32) (local $ftomb i32)
     (local.set $i (call $tab_find (local.get $t) (local.get $k)))
     (if (i32.ge_s (local.get $i) (i32.const 0))
       (then
-        ;; existing key: update or delete
-        (local.set $vals (struct.get $LuaTable $vals (local.get $t)))
-        (if (ref.is_null (local.get $v))
+        ;; existing key: update in place...
+        (if (i32.eqz (ref.is_null (local.get $v)))
           (then
-            ;; delete: swap-with-last and rebuild the index so we don't
-            ;; have to chase tombstones. n is small relative to lookups
-            ;; in the typical workload, so the rebuild cost is amortised.
-            (local.set $n (i32.sub (struct.get $LuaTable $n (local.get $t)) (i32.const 1)))
-            (local.set $keys (struct.get $LuaTable $keys (local.get $t)))
-            (if (i32.lt_s (local.get $i) (local.get $n))
-              (then
-                (array.set $TArr (ref.as_non_null (local.get $keys)) (local.get $i)
-                  (array.get $TArr (ref.as_non_null (local.get $keys)) (local.get $n)))
-                (array.set $TArr (ref.as_non_null (local.get $vals)) (local.get $i)
-                  (array.get $TArr (ref.as_non_null (local.get $vals)) (local.get $n)))))
-            (array.set $TArr (ref.as_non_null (local.get $keys)) (local.get $n) (ref.null any))
-            (array.set $TArr (ref.as_non_null (local.get $vals)) (local.get $n) (ref.null any))
-            (struct.set $LuaTable $n (local.get $t) (local.get $n))
-            (call $tab_index_rebuild (local.get $t)
-              (struct.get $LuaTable $mask (local.get $t))))
+            (array.set $TArr (ref.as_non_null (struct.get $LuaTable $vals (local.get $t)))
+              (local.get $i) (local.get $v))
+            (return)))
+        ;; ...or delete. Keep keys/vals dense by swapping the last entry
+        ;; into the hole (and repointing its index slot), then tombstone the
+        ;; deleted key's slot. Tombstones (-1) keep probe chains intact, so
+        ;; delete is O(probe) instead of an O(n) index rebuild.
+        (local.set $keys (struct.get $LuaTable $keys (local.get $t)))
+        (local.set $vals (struct.get $LuaTable $vals (local.get $t)))
+        (local.set $idx  (struct.get $LuaTable $idx  (local.get $t)))
+        (local.set $mask (struct.get $LuaTable $mask (local.get $t)))
+        (local.set $n (i32.sub (struct.get $LuaTable $n (local.get $t)) (i32.const 1)))
+        ;; locate the deleted key's index slot ($h)
+        (local.set $h (i32.and (local.get $mask) (call $lua_hash (local.get $k))))
+        (block $found_del (loop $pd
+          (local.set $slot (array.get $IArr (ref.as_non_null (local.get $idx)) (local.get $h)))
+          (if (i32.gt_s (local.get $slot) (i32.const 0))
+            (then (if (call $lua_eq_raw
+                        (array.get $TArr (ref.as_non_null (local.get $keys))
+                          (i32.sub (local.get $slot) (i32.const 1)))
+                        (local.get $k))
+              (then (br $found_del)))))
+          (local.set $h (i32.and (local.get $mask) (i32.add (local.get $h) (i32.const 1))))
+          (br $pd)))
+        (if (i32.lt_s (local.get $i) (local.get $n))
+          (then
+            ;; move the last live entry (pos $n) into the hole (pos $i)
+            (array.set $TArr (ref.as_non_null (local.get $keys)) (local.get $i)
+              (array.get $TArr (ref.as_non_null (local.get $keys)) (local.get $n)))
+            (array.set $TArr (ref.as_non_null (local.get $vals)) (local.get $i)
+              (array.get $TArr (ref.as_non_null (local.get $vals)) (local.get $n)))
+            ;; repoint the moved key's slot (held value n+1) at its new pos
+            (local.set $hm (i32.and (local.get $mask)
+              (call $lua_hash (array.get $TArr (ref.as_non_null (local.get $keys)) (local.get $i)))))
+            (block $found_mv (loop $pm
+              (if (i32.eq (array.get $IArr (ref.as_non_null (local.get $idx)) (local.get $hm))
+                          (i32.add (local.get $n) (i32.const 1)))
+                (then (br $found_mv)))
+              (local.set $hm (i32.and (local.get $mask) (i32.add (local.get $hm) (i32.const 1))))
+              (br $pm)))
+            (array.set $IArr (ref.as_non_null (local.get $idx)) (local.get $hm)
+              (i32.add (local.get $i) (i32.const 1)))))
+        (array.set $TArr (ref.as_non_null (local.get $keys)) (local.get $n) (ref.null any))
+        (array.set $TArr (ref.as_non_null (local.get $vals)) (local.get $n) (ref.null any))
+        (array.set $IArr (ref.as_non_null (local.get $idx)) (local.get $h) (i32.const -1))
+        (struct.set $LuaTable $n (local.get $t) (local.get $n))
+        ;; reclaim: drop the index when empty; else rebuild (clearing
+        ;; tombstones) once they outnumber live entries — this keeps a
+        ;; clear-the-whole-table loop O(n) overall.
+        (if (i32.eqz (local.get $n))
+          (then
+            (struct.set $LuaTable $idx  (local.get $t) (ref.null $IArr))
+            (struct.set $LuaTable $mask (local.get $t) (i32.const 0))
+            (struct.set $LuaTable $used (local.get $t) (i32.const 0)))
           (else
-            (array.set $TArr (ref.as_non_null (local.get $vals)) (local.get $i) (local.get $v))))
+            (if (i32.ge_s (struct.get $LuaTable $used (local.get $t))
+                          (i32.shl (local.get $n) (i32.const 1)))
+              (then (call $tab_index_rebuild (local.get $t) (local.get $mask))))))
         (return)))
-    ;; not found: if value is nil, no-op; else append
+    ;; not found: nil value is a no-op; else append a new entry.
     (if (ref.is_null (local.get $v)) (then (return)))
     (local.set $n (struct.get $LuaTable $n (local.get $t)))
     (local.set $cap (struct.get $LuaTable $cap (local.get $t)))
@@ -1259,18 +1305,20 @@
           (if (result i32) (i32.eqz (local.get $cap))
             (then (i32.const 4))
             (else (i32.mul (local.get $cap) (i32.const 2)))))))
-    ;; Make sure the hash index has capacity for one more entry at <=50%
-    ;; load. Initial size 8; doubled each time. Rebuild from keys[0..n].
+    ;; Keep the index under 50% occupancy (live + tombstones = $used).
+    ;; Initial size 8; doubled each time, which also clears tombstones.
     (local.set $idx (struct.get $LuaTable $idx (local.get $t)))
     (if (ref.is_null (local.get $idx))
       (then (call $tab_index_rebuild (local.get $t) (i32.const 7)))
       (else
         (local.set $mask (struct.get $LuaTable $mask (local.get $t)))
-        (if (i32.ge_u (i32.shl (i32.add (local.get $n) (i32.const 1)) (i32.const 1))
+        (if (i32.ge_u (i32.shl (i32.add (struct.get $LuaTable $used (local.get $t))
+                                        (i32.const 1)) (i32.const 1))
                       (i32.add (local.get $mask) (i32.const 1)))
           (then (call $tab_index_rebuild (local.get $t)
             (i32.or (i32.shl (local.get $mask) (i32.const 1)) (i32.const 1)))))))
-    ;; Append to keys/vals and probe-insert into idx.
+    ;; Append to keys/vals and probe-insert into idx, reusing the first
+    ;; tombstone in the probe chain if any (so churn doesn't grow $used).
     (local.set $keys (struct.get $LuaTable $keys (local.get $t)))
     (local.set $vals (struct.get $LuaTable $vals (local.get $t)))
     (array.set $TArr (ref.as_non_null (local.get $keys)) (local.get $n) (local.get $k))
@@ -1279,13 +1327,24 @@
     (local.set $idx (struct.get $LuaTable $idx (local.get $t)))
     (local.set $mask (struct.get $LuaTable $mask (local.get $t)))
     (local.set $h (i32.and (local.get $mask) (call $lua_hash (local.get $k))))
+    (local.set $ftomb (i32.const -1))
     (loop $probe
       (local.set $slot (array.get $IArr (ref.as_non_null (local.get $idx)) (local.get $h)))
       (if (i32.eqz (local.get $slot))
         (then
-          (array.set $IArr (ref.as_non_null (local.get $idx)) (local.get $h)
-            (i32.add (local.get $n) (i32.const 1)))
+          (if (i32.ge_s (local.get $ftomb) (i32.const 0))
+            (then  ;; reuse a tombstone — occupied count ($used) unchanged
+              (array.set $IArr (ref.as_non_null (local.get $idx)) (local.get $ftomb)
+                (i32.add (local.get $n) (i32.const 1))))
+            (else  ;; consume a fresh empty slot — one more occupied
+              (array.set $IArr (ref.as_non_null (local.get $idx)) (local.get $h)
+                (i32.add (local.get $n) (i32.const 1)))
+              (struct.set $LuaTable $used (local.get $t)
+                (i32.add (struct.get $LuaTable $used (local.get $t)) (i32.const 1)))))
           (return)))
+      (if (i32.lt_s (local.get $slot) (i32.const 0))
+        (then (if (i32.lt_s (local.get $ftomb) (i32.const 0))
+          (then (local.set $ftomb (local.get $h))))))
       (local.set $h (i32.and (local.get $mask)
         (i32.add (local.get $h) (i32.const 1))))
       (br $probe)))
