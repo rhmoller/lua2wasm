@@ -1414,43 +1414,66 @@ static const char PRELUDE[] = {
 , '\0'
 };
 
-/* Reserved bytes of $str_data:
- *   0  nil(3)  3  true(4)  7  false(5)  12 <float>(7)
- *   19 number(6)  25 string(6)  31 table(5)  36 function(8)  44 boolean(7)
- *   51 __index(7)  58 __add(5)  63 __eq(4)  67 \t(1)  68 Lua 5.5(7) */
-/* Reserved bytes added after the historical prefix:
- *   75, len 18: "'for' step is zero"             (used by $for_check_step)
- *   93, len 36: "attempt to call a non-function value"  ($lua_call_any)
- *  129, len  6: "__call"                         ($g_mkey_call)
- *  135, len  8: "module '"                       ($builtin_require)
- *  143, len 12: "' not loaded"                   ($builtin_require)
- *  155, len 18: "value out of range"             ($builtin_string_char, …)
- *  173, len 17: "data does not fit"              ($builtin_string_unpack)
- *  190, len 18: "invalid UTF-8 code"             ($builtin_utf8_codepoint, …)
- *  208, len 29: "attempt to perform arithmetic" ($arith_mm)
- *  237, len 24: "attempt to index a value"       ($lua_tabset, $lua_index)
- *  261, len 18: "table index is nil"             ($builtin_rawset, $tab_set)
- *  279, len 18: "table index is NaN"             ($builtin_rawset, $tab_set)
- *  297, len  9: "too large"                      ($builtin_string_rep)
- *  306, len  4: "year"   } os.date("*t") field names, in struct-style
- *  310, len  5: "month"  } order so $builtin_os_date can index into
- *  315, len  3: "day"    } $str_data at fixed offsets when building
- *  318, len  4: "hour"   } the result table.
- *  322, len  3: "min"
- *  325, len  3: "sec"
- *  328, len  4: "wday"
- *  332, len  4: "yday"
- *  336, len  5: "isdst"
- *  341, len 14: "table overflow"                  ($tab_grow size guard)
- *  355, len 13: "out of limits"                   (pack size/align validation)
- *  368, len 12: "missing size"                    (pack 'c' missing [N])
- *  380, len 22: "variable-length format"          (packsize on 's'/'z')
- *  402, len 14: "not power of 2"                  (pack '!N' validation)
- *  416, len 14: "invalid format"                  (packsize 'c' overflow)
- *  430, len 25: "attempt to divide by zero"       ($lua_fdiv divisor 0)
- *  455, len 24: "attempt to perform 'n%0'"        ($lua_mod divisor 0) */
+/* The first LITERAL_PREFIX_LEN bytes of $str_data are reserved error
+ * messages and field names that prelude.wat addresses by *absolute* offset
+ * (e.g. `$throw_lit (i32.const 430) (i32.const 25)`). The byte map lives in
+ * LITERAL_SLAB below; verify_literal_slab() checks that LITERAL_PREFIX and
+ * that map agree, so an edit to one without the other fails the build
+ * instead of silently corrupting messages or reading past the slab. */
 #define LITERAL_PREFIX "niltruefalse<float>numberstringtablefunctionboolean__index__add__eq\tLua 5.5'for' step is zeroattempt to call a non-function value__callmodule '' not loadedvalue out of rangedata does not fitinvalid UTF-8 codeattempt to perform arithmeticattempt to index a valuetable index is niltable index is NaNtoo largeyearmonthdayhourminsecwdayydayisdsttable overflowout of limitsmissing sizevariable-length formatnot power of 2invalid formatattempt to divide by zeroattempt to perform 'n%0'"
 #define LITERAL_PREFIX_LEN 479
+static_assert(sizeof(LITERAL_PREFIX) - 1 == LITERAL_PREFIX_LEN,
+              "LITERAL_PREFIX_LEN must match the byte length of LITERAL_PREFIX");
+
+/* Executable form of the slab map. Each row is the absolute offset baked
+ * into prelude.wat and the bytes that must live there. Offsets are
+ * contiguous (each = previous offset + previous length); the trailing
+ * comment names the prelude consumer. */
+static const struct { unsigned off; const char *s; } LITERAL_SLAB[] = {
+    {  0, "nil"        }, {  3, "true"    }, {  7, "false"   }, { 12, "<float>"  },
+    { 19, "number"     }, { 25, "string"  }, { 31, "table"   }, { 36, "function" },
+    { 44, "boolean"    }, { 51, "__index" }, { 58, "__add"   }, { 63, "__eq"     },
+    { 67, "\t"         }, { 68, "Lua 5.5" },
+    { 75, "'for' step is zero" },                 /* $for_check_step */
+    { 93, "attempt to call a non-function value" },/* $lua_call_any */
+    {129, "__call"     },                          /* $g_mkey_call */
+    {135, "module '"   }, {143, "' not loaded" },  /* $builtin_require */
+    {155, "value out of range" },                  /* $builtin_string_char, … */
+    {173, "data does not fit" },                   /* $builtin_string_unpack */
+    {190, "invalid UTF-8 code" },                  /* $builtin_utf8_codepoint, … */
+    {208, "attempt to perform arithmetic" },       /* $arith_mm */
+    {237, "attempt to index a value" },            /* $lua_tabset, $lua_index */
+    {261, "table index is nil" },                  /* $builtin_rawset, $tab_set */
+    {279, "table index is NaN" },                  /* $builtin_rawset, $tab_set */
+    {297, "too large"  },                          /* $builtin_string_rep */
+    {306, "year" }, {310, "month"}, {315, "day"  }, {318, "hour" }, /* os.date("*t") */
+    {322, "min"  }, {325, "sec"  }, {328, "wday" }, {332, "yday" }, {336, "isdst"},
+    {341, "table overflow" },                      /* $tab_grow size guard */
+    {355, "out of limits" },                       /* pack size/align validation */
+    {368, "missing size" },                        /* pack 'c' missing [N] */
+    {380, "variable-length format" },              /* packsize on 's'/'z' */
+    {402, "not power of 2" },                       /* pack '!N' validation */
+    {416, "invalid format" },                       /* packsize 'c' overflow */
+    {430, "attempt to divide by zero" },           /* $lua_fdiv divisor 0 */
+    {455, "attempt to perform 'n%0'" },            /* $lua_mod divisor 0 */
+};
+
+/* Returns the offending entry's string on drift between LITERAL_PREFIX and
+ * LITERAL_SLAB (gap/overlap, content mismatch, or total != prefix length),
+ * or NULL when the slab is internally consistent. */
+static const char *verify_literal_slab(void) {
+    unsigned expect_off = 0;
+    for (size_t i = 0; i < sizeof(LITERAL_SLAB) / sizeof(LITERAL_SLAB[0]); i++) {
+        unsigned off = LITERAL_SLAB[i].off;
+        size_t len = strlen(LITERAL_SLAB[i].s);
+        if (off != expect_off) return LITERAL_SLAB[i].s;
+        if (off + len > LITERAL_PREFIX_LEN) return LITERAL_SLAB[i].s;
+        if (memcmp(&LITERAL_PREFIX[off], LITERAL_SLAB[i].s, len) != 0)
+            return LITERAL_SLAB[i].s;
+        expect_off = off + (unsigned)len;
+    }
+    return expect_off == LITERAL_PREFIX_LEN ? NULL : "(slab total length)";
+}
 
 /* Emit the body of one user function. */
 static void emit_user_function(CG *c, const LuaFunc *fn) {
@@ -1750,6 +1773,14 @@ static void compute_live_set(const ParseResult *pr, int n_builtins,
 int codegen_module(const ParseResult *pr, const char *src_name,
                    int tree_shake, WatBuilder *out,
                    char *err, size_t errlen) {
+    const char *slab_err = verify_literal_slab();
+    if (slab_err) {
+        snprintf(err, errlen,
+                 "codegen: literal slab drift at \"%s\" — LITERAL_PREFIX and "
+                 "the prelude.wat offset map disagree", slab_err);
+        return 0;
+    }
+
     CG c = { .w = out, .pr = pr, .ok = 1, .in_main = 1 };
     strpool_add(&c.strs, LITERAL_PREFIX, LITERAL_PREFIX_LEN);
 
