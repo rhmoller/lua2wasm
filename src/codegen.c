@@ -1151,20 +1151,26 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
             /* Per-nesting-level scratch so an inner for-loop can't clobber
              * this loop's stop/step. */
             int fd = c->for_depth;
-            char f_stop[24], f_step[24], f_next[24];
+            char f_stop[24], f_step[24], f_next[24], f_cur[24];
             snprintf(f_stop, sizeof f_stop, "$for_stop_%d", fd);
             snprintf(f_step, sizeof f_step, "$for_step_%d", fd);
             snprintf(f_next, sizeof f_next, "$for_next_%d", fd);
-            /* Initialize the control variable with `start`, and stash
-             * stop/step in scratch locals. */
+            snprintf(f_cur,  sizeof f_cur,  "$for_cur_%d",  fd);
+            /* The running counter lives in a scratch local; stash stop/step
+             * alongside. When the control variable is captured (boxed), the
+             * counter must stay separate from the user-visible $Box so that
+             * each iteration can bind a FRESH box (Lua 5.4+: the loop
+             * variable is a new local per iteration, so closures capture
+             * distinct values). When it isn't captured the slot holds the
+             * value directly and doubles as the counter. */
             emit_indent(c, depth);
             if (boxed) {
-                wat_appendf(c->w, "(local.set $L%d (struct.new $Box\n", slot);
+                wat_appendf(c->w, "(local.set %s\n", f_cur);
             } else {
                 wat_appendf(c->w, "(local.set $L%d\n", slot);
             }
             emit_expr(c, s->as.for_num.start, depth + 1);
-            emit_indent(c, depth); wat_append(c->w, boxed ? "))\n" : ")\n");
+            emit_indent(c, depth); wat_append(c->w, ")\n");
             emit_indent(c, depth); wat_appendf(c->w, "(local.set %s\n", f_stop);
             emit_expr(c, s->as.for_num.stop, depth + 1);
             emit_indent(c, depth); wat_append(c->w, ")\n");
@@ -1185,10 +1191,9 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
             wat_appendf(c->w,
                 "(if (call $for_step_positive (local.get %s))\n", f_step);
             emit_indent(c, depth + 2); wat_append(c->w, "  (then\n");
-            const char *load_i  = boxed ? "(struct.get $Box $v (local.get $L%d))"
-                                        : "(local.get $L%d)";
             char load_buf[80];
-            snprintf(load_buf, sizeof(load_buf), load_i, slot);
+            if (boxed) snprintf(load_buf, sizeof(load_buf), "(local.get %s)", f_cur);
+            else       snprintf(load_buf, sizeof(load_buf), "(local.get $L%d)", slot);
             emit_indent(c, depth + 2);
             wat_appendf(c->w,
                 "    (br_if $brk_%d (i32.eqz (call $num_le\n"
@@ -1200,6 +1205,12 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
                 "    (br_if $brk_%d (i32.eqz (call $num_le\n"
                 "      (local.get %s)\n"
                 "      %s)))))\n", label, f_stop, load_buf);
+            /* Fresh per-iteration binding for a captured control variable. */
+            if (boxed) {
+                emit_indent(c, depth + 2);
+                wat_appendf(c->w,
+                    "(local.set $L%d (struct.new $Box %s))\n", slot, load_buf);
+            }
             /* body */
             c->for_depth++;
             emit_block(c, &s->as.for_num.body, depth + 2);
@@ -1217,7 +1228,7 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
             emit_indent(c, depth + 2);
             if (boxed) {
                 wat_appendf(c->w,
-                    "(struct.set $Box $v (local.get $L%d) (local.get %s))\n", slot, f_next);
+                    "(local.set %s (local.get %s))\n", f_cur, f_next);
             } else {
                 wat_appendf(c->w,
                     "(local.set $L%d (local.get %s))\n", slot, f_next);
@@ -1297,15 +1308,17 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
             wat_appendf(c->w,
                 "(local.set %s "
                 "(call $args_at (ref.as_non_null (local.get $tmp_args)) (i32.const 0)))\n", f_k);
-            /* bind loop vars from results */
+            /* Bind loop vars from results. A captured var gets a FRESH $Box
+             * each iteration so closures over it see distinct values
+             * (Lua 5.4+ semantics), rather than sharing one mutated cell. */
             for (int i = 0; i < s->as.for_gen.n_names; i++) {
                 int li = s->as.for_gen.local_idxs[i];
                 emit_indent(c, depth + 2);
                 if (slot_is_boxed(c, li)) {
                     wat_appendf(c->w,
-                        "(struct.set $Box $v (local.get $L%d) "
+                        "(local.set $L%d (struct.new $Box "
                         "(call $args_at (ref.as_non_null (local.get $tmp_args)) "
-                        "(i32.const %d)))\n", li, i);
+                        "(i32.const %d))))\n", li, i);
                 } else {
                     wat_appendf(c->w,
                         "(local.set $L%d "
@@ -1642,7 +1655,7 @@ static void emit_for_scratch_locals(WatBuilder *w, const Block *body) {
     for (int d = 0; d < levels; d++) {
         wat_appendf(w,
             "    (local $for_stop_%d anyref) (local $for_step_%d anyref)"
-            " (local $for_next_%d anyref)\n", d, d, d);
+            " (local $for_next_%d anyref) (local $for_cur_%d anyref)\n", d, d, d, d);
         wat_appendf(w,
             "    (local $for_iter_%d anyref) (local $for_state_%d anyref)"
             " (local $for_k_%d anyref)\n", d, d, d);

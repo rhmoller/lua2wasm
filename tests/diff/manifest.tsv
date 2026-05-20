@@ -55,6 +55,8 @@ pass	method_tail_call	`return self:m(...)` is TCO'd like `return f(...)`
 pass	concat_invalid_value	concat of a boolean/table element is a catchable error
 # Fixed: multiple-assignment eval order (LHS before stores; right-to-left) -----
 pass	multi_assign_order	t[i] captures old i; repeated target keeps leftmost value
+# Fixed: for-loop control var is fresh per iteration (closures capture distinct)
+pass	loop_var_capture	closures over a for-loop variable see per-iteration values
 #
 # Captured bugs (xfail) ----------------------------------------------------
 # (none — all captured differences resolved. Note: error-message *wording* and
