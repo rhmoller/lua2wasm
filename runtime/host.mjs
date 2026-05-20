@@ -205,6 +205,9 @@ function osTmpname() {
         read:      (mode, count)  => hostRead(mode, count),
         read_num:  ()             => hostReadNum(),
         os_time:   ()             => FROZEN_TIME ?? BigInt(Math.floor(Date.now() / 1000)),
+        os_time_table: (y, mo, d, h, mi, s) =>
+            BigInt(Math.floor(new Date(Number(y), Number(mo) - 1, Number(d),
+                Number(h), Number(mi), Number(s)).getTime() / 1000)),
         os_clock:  ()             => {
             const u = process.cpuUsage(cpuStart);
             return (u.user + u.system) / 1e6;

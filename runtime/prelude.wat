@@ -128,6 +128,11 @@
   ;; --- os shims: thin wrappers over the host environment. ---
   ;; host_os_time: current wall-clock time, in unix seconds.
   (import "host" "os_time" (func $host_os_time (result i64)))
+  ;; host_os_time_table: unix seconds for a broken-down LOCAL time
+  ;; (year, month [1-12], day, hour, min, sec) — the os.time(table) form.
+  (import "host" "os_time_table"
+    (func $host_os_time_table
+      (param i64 i64 i64 i64 i64 i64) (result i64)))
   ;; host_os_clock: CPU time used by the process, in seconds.
   (import "host" "os_clock" (func $host_os_clock (result f64)))
   ;; host_os_getenv: $name is a $LuaString; writes the env value into
@@ -3106,13 +3111,45 @@
   ;; The host owns the actual concept of "now" and the environment; these
   ;; builtins just convert between Lua values and the host's contract.
 
+  ;; Read an integer-valued date-table field. When the field is nil, use
+  ;; $def if $has_def, else raise "field missing in date table". A present
+  ;; non-number field is the same error (semantic match — reference says
+  ;; "is not an integer"; we don't track exact wording).
+  (func $os_date_field (param $t (ref $LuaTable)) (param $off i32) (param $len i32)
+                       (param $def i64) (param $has_def i32) (result i64)
+    (local $v anyref)
+    (local.set $v (call $tab_get (local.get $t)
+      (struct.new $LuaString
+        (array.new_data $LuaArr $str_data (local.get $off) (local.get $len)))))
+    (if (ref.is_null (local.get $v))
+      (then
+        (if (local.get $has_def) (then (return (local.get $def))))
+        (call $throw_lit (i32.const 898) (i32.const 27))))   ;; "field missing in date table"
+    (if (i32.eqz (i32.or (call $is_int (local.get $v))
+                         (call $is_float (local.get $v))))
+      (then (call $throw_lit (i32.const 898) (i32.const 27))))
+    (call $as_int_unchecked (local.get $v)))
+
   (func $builtin_os_time (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
-    ;; The full Lua spec accepts an optional table {year, month, …} and
-    ;; converts it to a unix timestamp. The light shim ignores any arg
-    ;; and just returns the current time, which is enough to keep code
-    ;; like `math.randomseed(os.time())` working.
-    (array.new_fixed $ArgArr 1 (call $make_int (call $host_os_time))))
+    (local $arg anyref) (local $t (ref $LuaTable))
+    (local.set $arg (call $args_at (local.get $args) (i32.const 0)))
+    ;; No argument (or nil): current wall-clock time.
+    (if (ref.is_null (local.get $arg))
+      (then (return (array.new_fixed $ArgArr 1 (call $make_int (call $host_os_time))))))
+    ;; Otherwise the argument must be a table {year, month, day, [hour, min,
+    ;; sec]} interpreted as LOCAL time. year/month/day are required; hour
+    ;; defaults to 12, min/sec to 0 (matching reference).
+    (if (i32.eqz (ref.test (ref $LuaTable) (local.get $arg)))
+      (then (call $throw_lit (i32.const 684) (i32.const 14))))   ;; "table expected"
+    (local.set $t (ref.cast (ref $LuaTable) (local.get $arg)))
+    (array.new_fixed $ArgArr 1 (call $make_int (call $host_os_time_table
+      (call $os_date_field (local.get $t) (i32.const 306) (i32.const 4) (i64.const 0) (i32.const 0))   ;; year
+      (call $os_date_field (local.get $t) (i32.const 310) (i32.const 5) (i64.const 0) (i32.const 0))   ;; month
+      (call $os_date_field (local.get $t) (i32.const 315) (i32.const 3) (i64.const 0) (i32.const 0))   ;; day
+      (call $os_date_field (local.get $t) (i32.const 318) (i32.const 4) (i64.const 12) (i32.const 1))  ;; hour
+      (call $os_date_field (local.get $t) (i32.const 322) (i32.const 3) (i64.const 0) (i32.const 1))   ;; min
+      (call $os_date_field (local.get $t) (i32.const 325) (i32.const 3) (i64.const 0) (i32.const 1)))))) ;; sec
 
   (func $builtin_os_clock (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))

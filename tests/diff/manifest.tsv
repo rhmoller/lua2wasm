@@ -81,6 +81,8 @@ pass	utf8_char_range	utf8.char range/byte-counts incl. >U+10FFFF (was capped at 
 pass	format_p	%p formats address-bearing values vs (null), was echoed literally
 # Fixed: os.date strftime specifiers %a/%A/%b/%B/%I/%c/%x (C-locale names)
 pass	os_date_strftime	os.date supports name/12-hour/%c/%x specifiers (UTC, deterministic)
+# Fixed: os.time(table) builds a timestamp from a date table (was ignored)
+pass	os_time_table	os.time(table) round-trips via os.date; required-field/type errors
 #
 # Captured bugs (xfail) ----------------------------------------------------
 # (none — all captured differences resolved. Note: error-message *wording* and

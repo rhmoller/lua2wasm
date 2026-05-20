@@ -1093,6 +1093,9 @@ async function run() {
         read:      readImport,
         read_num:  readNumImport,
         os_time:   ()                    => BigInt(Math.floor(Date.now() / 1000)),
+        os_time_table: (y, mo, d, h, mi, s) =>
+            BigInt(Math.floor(new Date(Number(y), Number(mo) - 1, Number(d),
+                Number(h), Number(mi), Number(s)).getTime() / 1000)),
         os_clock:  ()                    => (performance.now() - clockEpochMs) / 1000,
         os_getenv: (name)                => osGetenv(name),
         os_exit:   (code, hasCode)       => {
