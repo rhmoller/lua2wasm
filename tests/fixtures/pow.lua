@@ -15,9 +15,7 @@ print(10 ^ 3)                  -- 1000.0
 
 -- IEEE-754 edge cases.
 print(0 ^ 0)                   -- 1.0
--- (JS Math.pow(1, Infinity) is NaN, not the IEEE-754-2008 "1"; we accept
--- whatever the host produces here.)
-print(1 ^ math.huge)           -- nan
+print(1 ^ math.huge)           -- 1.0  (cPow special-cases 1^y; JS pow gives nan)
 print(0 ^ -1)                  -- inf
 print(math.huge ^ 0)           -- 1.0
 

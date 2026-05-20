@@ -3125,16 +3125,24 @@
     (call $math_via_host (i32.const 5) (local.get $args)))
   (func $builtin_math_exp  (type $LuaFn) (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
     (call $math_via_host (i32.const 6) (local.get $args)))
-  ;; math.log(x [, base]) — 1-arg: ln(x). 2-arg: log_base(x) = ln(x)/ln(base).
+  ;; math.log(x [, base]) — 1-arg: ln(x). 2-arg: log_base(x). Like reference
+  ;; Lua, base 2 and 10 use log2/log10 (host kinds 8/9) for exact results;
+  ;; any other base falls back to ln(x)/ln(base).
   (func $builtin_math_log (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
-    (local $lx f64) (local $lb f64)
+    (local $x f64) (local $base f64) (local $lx f64) (local $lb f64)
     (if (i32.gt_u (array.len (local.get $args)) (i32.const 1))
       (then
-        (local.set $lx (call $host_math (i32.const 7)
-          (call $as_float (call $args_at (local.get $args) (i32.const 0)))))
-        (local.set $lb (call $host_math (i32.const 7)
-          (call $as_float (call $args_at (local.get $args) (i32.const 1)))))
+        (local.set $x (call $as_float (call $args_at (local.get $args) (i32.const 0))))
+        (local.set $base (call $as_float (call $args_at (local.get $args) (i32.const 1))))
+        (if (f64.eq (local.get $base) (f64.const 2))
+          (then (return (array.new_fixed $ArgArr 1 (call $make_float
+            (call $host_math (i32.const 8) (local.get $x)))))))
+        (if (f64.eq (local.get $base) (f64.const 10))
+          (then (return (array.new_fixed $ArgArr 1 (call $make_float
+            (call $host_math (i32.const 9) (local.get $x)))))))
+        (local.set $lx (call $host_math (i32.const 7) (local.get $x)))
+        (local.set $lb (call $host_math (i32.const 7) (local.get $base)))
         (return (array.new_fixed $ArgArr 1
           (call $make_float (f64.div (local.get $lx) (local.get $lb)))))))
     (call $math_via_host (i32.const 7) (local.get $args)))

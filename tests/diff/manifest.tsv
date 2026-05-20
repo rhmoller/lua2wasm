@@ -21,10 +21,11 @@ pass	match_empty_pat	match/find with "" pattern no longer traps
 pass	table_concat_range	table.concat honors i/j range args
 pass	tonumber_hex_float	tonumber parses hex floats
 pass	next_empty	next({}) returns nil
+# Fixed: math fidelity (log2/log10 special-case, 1^inf guard) ---------------
+pass	math_log_base	math.log base 2/10 uses log2/log10
+pass	pow_one_inf	1^inf is 1.0
 #
 # Captured bugs (xfail) ----------------------------------------------------
-xfail	math_log_base	math.log(x,10/2) via log(x)/log(base) loses a ULP
-xfail	pow_one_inf	1^inf is nan (JS Math.pow) not 1.0
 xfail	div_zero_int	int // 0 throws nil payload, not a message
 xfail	mod_zero_int	int % 0 throws nil payload, not a message
 xfail	format_q_newline	%q encodes newline as "\n" not backslash-newline

@@ -20,7 +20,7 @@ EXPECTED="3.1415926535897931
 3.0
 2.0
 0.0
-2.9999999999999996"
+3.0"
 
 OUT="$(node --experimental-wasm-exnref "$SRC_DIR/runtime/host.mjs" "$WASM")"
 if [[ "$OUT" != "$EXPECTED" ]]; then

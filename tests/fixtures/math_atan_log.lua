@@ -20,5 +20,4 @@ print(math.log(math.exp(1)))       -- 1.0
 print(math.log(8, 2))              -- 3.0
 print(math.log(100, 10))           -- 2.0
 print(math.log(1, 5))              -- 0.0
-print(math.log(1000, 10))          -- 2.9999999999999996 (Lua uses log10 -> 3.0;
-                                   -- we compute log(x)/log(base); see diff case math_log_base)
+print(math.log(1000, 10))          -- 3.0  (base 10 uses log10, like reference Lua)

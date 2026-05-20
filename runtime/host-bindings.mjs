@@ -5,8 +5,18 @@
 // `instance.exports.{lua_*,fmt_buf_set}` after instantiation completes.
 
 export const MATH_FNS  = [Math.sin, Math.cos, Math.tan, Math.asin,
-                          Math.acos, Math.atan, Math.exp, Math.log];
-export const MATH2_FNS = [Math.atan2, Math.pow];
+                          Math.acos, Math.atan, Math.exp, Math.log,
+                          Math.log2, Math.log10];
+
+// C pow() differs from JS Math.pow on IEEE-754 edge cases Lua relies on:
+// pow(1, y) == 1 for any y (including inf/nan), and pow(±1, ±inf) == 1, where
+// JS gives NaN for 1^inf. Match C so e.g. 1 ^ math.huge == 1.0.
+export function cPow(x, y) {
+    if (x === 1) return 1;
+    if (x === -1 && (y === Infinity || y === -Infinity)) return 1;
+    return Math.pow(x, y);
+}
+export const MATH2_FNS = [Math.atan2, cPow];
 
 // --- filesystem support, shared by the Node runner and the playground ---
 //
