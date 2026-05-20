@@ -921,3 +921,16 @@ add_test(
             ${CMAKE_SOURCE_DIR}
             ${CMAKE_BINARY_DIR}
 )
+
+# Differential check vs reference Lua 5.5 (golden files in tests/diff/expected,
+# captured via `scripts/diff-test.sh --regen` on a host with lua5.5). Check mode
+# needs no lua5.5: it diffs compiled output against the checked-in goldens.
+# `pass` cases guard against regressions; `xfail` cases are captured bugs and
+# turn this test red if one starts matching again (promote it to `pass`).
+add_test(
+    NAME test_diff_reference
+    COMMAND bash ${CMAKE_SOURCE_DIR}/scripts/diff-test.sh
+            $<TARGET_FILE:lua2wasm>
+            ${CMAKE_SOURCE_DIR}
+            ${CMAKE_BINARY_DIR}
+)

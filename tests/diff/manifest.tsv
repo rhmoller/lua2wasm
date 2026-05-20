@@ -1,0 +1,26 @@
+# Differential-test manifest. Tab-separated: <status>\t<case>\t<description>
+# status = pass  -> lua2wasm MUST match reference Lua 5.5
+# status = xfail -> captured bug; lua2wasm currently does NOT match. When it
+#                   starts matching, the harness fails (XPASS) -> promote to pass.
+#
+# Regression anchors (currently correct) -----------------------------------
+pass	ok_arith	int/float arithmetic, bitwise, wraparound
+pass	ok_strings	string lib: case, sub, rep, format, match, gsub-fn
+pass	ok_tables	table lib + pairs/sort iteration
+pass	ok_closures	closures, varargs, multi-return, pcall
+#
+# Captured bugs (xfail) ----------------------------------------------------
+xfail	gsub_empty_pat	gsub with "" pattern traps (array OOB)
+xfail	gsub_empty_match	empty-match " *" doubles separators
+xfail	float_tostring_exp	exponent-form float gets spurious ".0"
+xfail	float_neg_zero	negative zero loses its sign
+xfail	format_g_smallexp	%g uses fixed form below 1e-4 instead of exponent
+xfail	float_precision	floats print ~14 digits, lose round-trip precision
+xfail	table_concat_range	table.concat ignores i/j range args
+xfail	tonumber_hex_float	tonumber rejects hex floats
+xfail	div_zero_int	int // 0 throws nil payload, not a message
+xfail	mod_zero_int	int % 0 throws nil payload, not a message
+xfail	next_empty	next({}) returns nothing instead of nil
+xfail	format_q_newline	%q encodes newline as "\n" not backslash-newline
+xfail	arith_err_msg	arith error drops "on a <type> value" + strips .lua
+xfail	paren_truncation	(f()) not adjusted to a single value
