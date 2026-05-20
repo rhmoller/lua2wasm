@@ -324,6 +324,45 @@ static void emit_tab_set_global(WatBuilder *out, const char *tgt,
         tgt, key.offset, key.len, glob);
 }
 
+/* `(global.set <glob> "<s>")` — set a wasm global to an interned string. */
+static void emit_global_set_str(CG *c, const char *glob, const char *s, size_t len) {
+    StrRef sr = strpool_add(&c->strs, s, len);
+    wat_appendf(c->w,
+        "    (global.set %s\n"
+        "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
+        "        (i32.const %zu) (i32.const %zu))))\n",
+        glob, sr.offset, sr.len);
+}
+
+/* `(call $tab_set <target> "<key>" <value>)` where <target> and <value>
+ * are complete WAT expressions. The general form behind every stdlib_init
+ * table install whose value isn't itself a plain string. */
+static void emit_tab_set_str(CG *c, const char *target,
+                             const char *key, size_t klen, const char *value) {
+    StrRef sr = strpool_add(&c->strs, key, klen);
+    wat_appendf(c->w,
+        "    (call $tab_set %s\n"
+        "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
+        "        (i32.const %zu) (i32.const %zu)))\n"
+        "      %s)\n",
+        target, sr.offset, sr.len, value);
+}
+
+/* `(call $tab_set <target> "<key>" "<val>")` — install a string-valued
+ * entry; both key and value are interned (and deduplicated). */
+static void emit_tab_set_strval(CG *c, const char *target, const char *key,
+                                size_t klen, const char *val, size_t vlen) {
+    StrRef ks = strpool_add(&c->strs, key, klen);
+    StrRef vs = strpool_add(&c->strs, val, vlen);
+    wat_appendf(c->w,
+        "    (call $tab_set %s\n"
+        "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
+        "        (i32.const %zu) (i32.const %zu)))\n"
+        "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
+        "        (i32.const %zu) (i32.const %zu))))\n",
+        target, ks.offset, ks.len, vs.offset, vs.len);
+}
+
 static void emit_global_read(CG *c, const char *name, size_t name_len, int depth) {
     emit_indent(c, depth);
     wat_append(c->w, "(call $tab_get (ref.as_non_null (global.get $g_globals))\n");
@@ -1801,6 +1840,287 @@ static void compute_live_set(const ParseResult *pr, int n_builtins,
     }
 }
 
+/* Build each referenced stdlib library table (math/string/io/table/utf8/
+ * debug/os/package/coroutine) plus _VERSION, and install them in $g_globals.
+ * Tree-shake skips a library whose global name was never referenced. */
+static void emit_library_tables(CG *c, const unsigned char *gref, int nb) {
+    WatBuilder *out = c->w;
+    const ParseResult *pr = c->pr;
+    const char *G = "(ref.as_non_null (global.get $g_globals))";
+    (void)nb;
+    /* Library tables + the _VERSION constant. Each library table is built
+     * locally, then installed as $g_globals.<name>. With tree-shake on,
+     * a library is skipped unless its global name was actually
+     * referenced in user code. */
+    for (size_t gi = 0; gi < pr->globals.count; gi++) {
+        const char *gname = pr->globals.items[gi].name;
+        size_t glen = pr->globals.items[gi].name_len;
+        if (glen == 8 && memcmp(gname, "_VERSION", 8) == 0) {
+            if (!gref[gi]) continue;
+            emit_tab_set_strval(c, G, "_VERSION", 8, "Lua 5.5", 7);
+            continue;
+        }
+        if (glen == 2 && memcmp(gname, "_G", 2) == 0) continue;  /* installed above */
+        if (!gref[gi]) continue;  /* tree-shake: library not referenced */
+        BuiltinClass cls;
+        if      (glen == 4 && memcmp(gname, "math",   4) == 0) cls = BLT_LIB_MATH;
+        else if (glen == 6 && memcmp(gname, "string", 6) == 0) cls = BLT_LIB_STRING;
+        else if (glen == 2 && memcmp(gname, "io",     2) == 0) cls = BLT_LIB_IO;
+        else if (glen == 5 && memcmp(gname, "table",  5) == 0) cls = BLT_LIB_TABLE;
+        else if (glen == 4 && memcmp(gname, "utf8",   4) == 0) cls = BLT_LIB_UTF8;
+        else if (glen == 5 && memcmp(gname, "debug",  5) == 0) cls = BLT_LIB_DEBUG;
+        else if (glen == 2 && memcmp(gname, "os",     2) == 0) cls = BLT_LIB_OS;
+        else if (glen == 7 && memcmp(gname, "package", 7) == 0) {
+            /* Milestone 25: package = { loaded = {}, preload = {} }.
+             * No builtins live under this table; require() walks it.
+             * We also stub package.path, package.cpath, package.config so
+             * tests that probe `type(package.path) == "string"` pass. */
+            wat_append(out, "    (local.set $tab (call $tab_new))\n");
+            static const struct { const char *key; const char *val; } PKG_STR[] = {
+                { "loaded",  NULL },     /* table — handled separately */
+                { "preload", NULL },
+                { "path",    "" },       /* empty: there's no filesystem here */
+                { "cpath",   "" },
+                { "config",  "/\n;\n?\n!\n-\n" }, /* the stock Lua default */
+            };
+            for (size_t pi = 0; pi < sizeof(PKG_STR)/sizeof(PKG_STR[0]); pi++) {
+                size_t klen = strlen(PKG_STR[pi].key);
+                if (PKG_STR[pi].val == NULL)
+                    emit_tab_set_str(c, "(local.get $tab)", PKG_STR[pi].key, klen,
+                                     "(call $tab_new)");
+                else
+                    emit_tab_set_strval(c, "(local.get $tab)", PKG_STR[pi].key, klen,
+                                        PKG_STR[pi].val, strlen(PKG_STR[pi].val));
+            }
+            emit_tab_set_str(c, G, gname, glen, "(local.get $tab)");
+            continue;
+        }
+        else if (glen == 9 && memcmp(gname, "coroutine", 9) == 0) {
+            /* Empty stub library — no functions installed. Enough to
+             * satisfy `require "coroutine" == coroutine` style identity
+             * checks and to keep `type(coroutine) == "table"` happy;
+             * any actual coroutine.* call still trips later. */
+            wat_append(out, "    (local.set $tab (call $tab_new))\n");
+            emit_tab_set_str(c, G, gname, glen, "(local.get $tab)");
+            continue;
+        }
+        else continue;
+        wat_append(out, "    (local.set $tab (call $tab_new))\n");
+        for (int bi = 0; bi < nb; bi++) {
+            if (builtin_class(bi) != cls) continue;
+            const char *key = builtin_lib_key(bi);
+            /* Leading-underscore names are internal helpers (e.g. the
+             * io file-handle methods). They get live-marked + closure
+             * globals like any other builtin, but we don't expose them
+             * as table keys on the library — codegen installs them
+             * elsewhere on the right host objects. */
+            if (key[0] == '_') continue;
+            size_t key_len = strlen(key);
+            StrRef sr = strpool_add(&c->strs, key, key_len);
+            emit_tab_set_global(out, "$tab", sr, builtin_func_name(bi) + 1);
+        }
+        /* Plain-value constants for the math library. */
+        if (cls == BLT_LIB_MATH) {
+            emit_tab_set_str(c, "(local.get $tab)", "pi", 2,
+                "(struct.new $LuaFloat (f64.const 3.141592653589793))");
+            emit_tab_set_str(c, "(local.get $tab)", "huge", 4,
+                "(struct.new $LuaFloat (f64.const inf))");
+            emit_tab_set_str(c, "(local.get $tab)", "maxinteger", 10,
+                "(call $make_int (i64.const 9223372036854775807))");
+            emit_tab_set_str(c, "(local.get $tab)", "mininteger", 10,
+                "(call $make_int (i64.const -9223372036854775808))");
+        }
+        /* io.stdout / io.stderr / io.stdin: build a sub-table per
+         * stream, populated with the relevant file-handle methods. The
+         * methods themselves were registered as leading-underscore
+         * entries in builtins.c so the standard install loop above
+         * skipped them, but their closure globals
+         * ($g_io_handle_{write,err_write,read,noop}) are live and
+         * ready to use. */
+        if (cls == BLT_LIB_IO) {
+            /* `method_glob == NULL` selects the read method on stdin;
+             * the rest take a writer matching the handle's stream. */
+            static const struct {
+                const char *handle;
+                size_t      handle_len;
+                const char *method_glob;
+            } HANDLES[] = {
+                { "stdout", 6, "io_handle_write"     },
+                { "stderr", 6, "io_handle_err_write" },
+                { "stdin",  5, NULL                  },
+            };
+            StrRef wkey = strpool_add(&c->strs, "write", 5);
+            StrRef rkey = strpool_add(&c->strs, "read",  4);
+            StrRef ckey = strpool_add(&c->strs, "close", 5);
+            StrRef fkey = strpool_add(&c->strs, "flush", 5);
+            for (size_t hi = 0; hi < sizeof(HANDLES)/sizeof(HANDLES[0]); hi++) {
+                wat_append(out, "    (local.set $h (call $tab_new))\n");
+                if (HANDLES[hi].method_glob)
+                    emit_tab_set_global(out, "$h", wkey, HANDLES[hi].method_glob);
+                else
+                    emit_tab_set_global(out, "$h", rkey, "io_handle_read");
+                emit_tab_set_global(out, "$h", ckey, "io_handle_noop");
+                emit_tab_set_global(out, "$h", fkey, "io_handle_noop");
+                emit_tab_set_str(c, "(local.get $tab)", HANDLES[hi].handle,
+                                 HANDLES[hi].handle_len, "(local.get $h)");
+            }
+        }
+        /* utf8.charpattern: the Lua-pattern string that matches one
+         * UTF-8 codepoint. Binary content; strpool_add and data-segment
+         * escaping handle the non-printable bytes. */
+        if (cls == BLT_LIB_UTF8) {
+            static const char CHARPAT[] =
+                "[\x00-\x7F\xC2-\xFD][\x80-\xBF]*";
+            emit_tab_set_strval(c, "(local.get $tab)", "charpattern", 11,
+                                CHARPAT, sizeof(CHARPAT) - 1);
+        }
+        emit_tab_set_str(c, G, gname, glen, "(local.get $tab)");
+    }
+}
+
+/* Forward each installed library into package.loaded so `require "name"`
+ * returns it. Only emitted when package itself was built. */
+static void emit_require_bridge(CG *c, const unsigned char *gref) {
+    WatBuilder *out = c->w;
+    const ParseResult *pr = c->pr;
+    /* Make each stdlib library visible through `require "<name>"` by
+     * registering it in `package.loaded`. The library tables have just
+     * been installed in _G above; here we walk _G again, look up
+     * package.loaded once, and forward each library reference into it. */
+    {
+        static const char *LIB_NAMES[] = {
+            "math", "string", "io", "table", "utf8", "debug", "package",
+            "os", "coroutine",
+        };
+        int need_any = 0;
+        for (size_t li = 0; li < sizeof(LIB_NAMES) / sizeof(LIB_NAMES[0]); li++) {
+            size_t llen = strlen(LIB_NAMES[li]);
+            for (size_t gi = 0; gi < pr->globals.count; gi++) {
+                if (pr->globals.items[gi].name_len == llen &&
+                    memcmp(pr->globals.items[gi].name, LIB_NAMES[li], llen) == 0 &&
+                    gref[gi]) {
+                    need_any = 1; break;
+                }
+            }
+            if (need_any) break;
+        }
+        /* Only emit the bridge code when package itself was built —
+         * otherwise the (ref.cast (ref $LuaTable) ...) would trap. */
+        int have_package = 0;
+        for (size_t gi = 0; gi < pr->globals.count; gi++) {
+            if (pr->globals.items[gi].name_len == 7 &&
+                memcmp(pr->globals.items[gi].name, "package", 7) == 0 &&
+                gref[gi]) { have_package = 1; break; }
+        }
+        if (need_any && have_package) {
+            StrRef pkg_k    = strpool_add(&c->strs, "package", 7);
+            StrRef loaded_k = strpool_add(&c->strs, "loaded",  6);
+            wat_appendf(out,
+                "    (local.set $tab (ref.cast (ref $LuaTable)\n"
+                "      (call $tab_get\n"
+                "        (ref.cast (ref $LuaTable) (call $tab_get\n"
+                "          (ref.as_non_null (global.get $g_globals))\n"
+                "          (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
+                "            (i32.const %zu) (i32.const %zu)))))\n"
+                "        (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
+                "          (i32.const %zu) (i32.const %zu))))))\n",
+                pkg_k.offset, pkg_k.len, loaded_k.offset, loaded_k.len);
+            for (size_t li = 0; li < sizeof(LIB_NAMES) / sizeof(LIB_NAMES[0]); li++) {
+                size_t llen = strlen(LIB_NAMES[li]);
+                int gi_found = -1;
+                for (size_t gi = 0; gi < pr->globals.count; gi++) {
+                    if (pr->globals.items[gi].name_len == llen &&
+                        memcmp(pr->globals.items[gi].name, LIB_NAMES[li], llen) == 0 &&
+                        gref[gi]) { gi_found = (int)gi; break; }
+                }
+                if (gi_found < 0) continue;
+                StrRef name_k = strpool_add(&c->strs, LIB_NAMES[li], llen);
+                wat_appendf(out,
+                    "    (call $tab_set (local.get $tab)\n"
+                    "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
+                    "        (i32.const %zu) (i32.const %zu)))\n"
+                    "      (call $tab_get (ref.as_non_null (global.get $g_globals))\n"
+                    "        (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
+                    "          (i32.const %zu) (i32.const %zu)))))\n",
+                    name_k.offset, name_k.len, name_k.offset, name_k.len);
+            }
+        }
+    }
+}
+
+/* Emit `$main`, the top-level chunk: locals (boxed/unboxed per escape
+ * analysis), goto dispatch-id locals, the $stdlib_init call, eager boxing
+ * of captured slots, then the body. */
+static void emit_main_chunk(CG *c) {
+    WatBuilder *out = c->w;
+    const ParseResult *pr = c->pr;
+    wat_append(out, "\n  ;; --- main (top-level chunk) ---\n");
+    wat_append(out, "  (func $main (export \"main\")\n");
+    c->cur_captured = pr->main_captured;
+    c->cur_n_locals = pr->main_n_locals;
+    /* Pre-pass before locals: dispatch ids must be assigned so the
+     * $next_BID i32 locals can be declared up-front. */
+    c->next_label_id = 0;
+    la_block(c, &pr->main_body, NULL);
+
+    for (int i = 0; i < pr->main_n_locals; i++) {
+        if (pr->main_captured && pr->main_captured[i]) {
+            wat_appendf(out, "    (local $L%d (ref $Box))\n", i);
+        } else {
+            wat_appendf(out, "    (local $L%d anyref)\n", i);
+        }
+    }
+    wat_append(out, "    (local $tmp_any anyref)\n");
+    wat_append(out, "    (local $tmp_args (ref null $ArgArr))\n");
+    wat_append(out, "    (local $tmp_clo (ref null $LuaClosure))\n");
+    wat_append(out, "    (local $tmp_tab (ref null $LuaTable))\n");
+    wat_append(out, "    (local $for_stop anyref)\n");
+    wat_append(out, "    (local $for_step anyref)\n");
+    wat_append(out, "    (local $for_next anyref)\n");
+    wat_append(out, "    (local $for_iter_any anyref)\n");
+    wat_append(out, "    (local $for_state anyref)\n");
+    wat_append(out, "    (local $for_k anyref)\n");
+    {
+        int bids[128]; int n = 0;
+        collect_dispatch_ids(&pr->main_body, bids, &n, 128);
+        for (int i = 0; i < n; i++) {
+            wat_appendf(out, "    (local $next_%d i32)\n", bids[i]);
+        }
+    }
+    wat_append(out, "    (call $stdlib_init)\n");
+    /* Eager-init captured locals — see emit_user_function for the
+     * rationale; main has no params, so every captured slot needs it. */
+    for (int i = 0; i < pr->main_n_locals; i++) {
+        if (pr->main_captured && pr->main_captured[i]) {
+            wat_appendf(out,
+                "    (local.set $L%d (struct.new $Box (ref.null any)))\n", i);
+        }
+    }
+
+    if (c->ok) emit_block(c, &pr->main_body, 2);
+
+    wat_append(out, "  )\n");
+}
+
+/* Emit the `$str_data` passive data segment: every interned byte of the
+ * string pool, escaping quote/backslash/non-printables as \HH. */
+static void emit_data_segment(CG *c) {
+    WatBuilder *out = c->w;
+    wat_append(out, "\n  ;; @@SECTION:data@@\n");
+    wat_append(out, "  (data $str_data \"");
+    for (size_t i = 0; i < c->strs.used; i++) {
+        unsigned char b = (unsigned char)c->strs.bytes[i];
+        if (b == '"' || b == '\\') wat_appendf(out, "\\%02x", b);
+        else if (b >= 0x20 && b < 0x7f) {
+            char tmp[2] = { (char)b, 0 };
+            wat_append(out, tmp);
+        } else {
+            wat_appendf(out, "\\%02x", b);
+        }
+    }
+    wat_append(out, "\")\n");
+}
+
 int codegen_module(const ParseResult *pr, const char *src_name,
                    int tree_shake, WatBuilder *out,
                    char *err, size_t errlen) {
@@ -1900,21 +2220,10 @@ int codegen_module(const ParseResult *pr, const char *src_name,
         { "$g_mkey_tostring",   "__tostring"  },
         { "$g_mkey_metatable",  "__metatable" },
     };
-    for (size_t k = 0; k < sizeof(MKEYS)/sizeof(MKEYS[0]); k++) {
-        StrRef r = strpool_add(&c.strs, MKEYS[k].key, strlen(MKEYS[k].key));
-        wat_appendf(out,
-            "    (global.set %s\n"
-            "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
-            "        (i32.const %zu) (i32.const %zu))))\n",
-            MKEYS[k].name, r.offset, r.len);
-    }
+    for (size_t k = 0; k < sizeof(MKEYS)/sizeof(MKEYS[0]); k++)
+        emit_global_set_str(&c, MKEYS[k].name, MKEYS[k].key, strlen(MKEYS[k].key));
     /* "\t" used by print when joining args. */
-    StrRef tab_str = strpool_add(&c.strs, "\t", 1);
-    wat_appendf(out,
-        "    (global.set $g_tab_str\n"
-        "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
-        "        (i32.const %zu) (i32.const %zu))))\n",
-        tab_str.offset, tab_str.len);
+    emit_global_set_str(&c, "$g_tab_str", "\t", 1);
     wat_appendf(out,
         "    (global.set $g_empty_str\n"
         "      (struct.new $LuaString (array.new $LuaArr (i32.const 0) (i32.const 0))))\n"
@@ -1925,12 +2234,7 @@ int codegen_module(const ParseResult *pr, const char *src_name,
         LUA_FMT_BUF_CAP);
     /* Source name used by error() and debug.traceback. */
     if (src_name) {
-        StrRef sn = strpool_add(&c.strs, src_name, strlen(src_name));
-        wat_appendf(out,
-            "    (global.set $g_src_name\n"
-            "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
-            "        (i32.const %zu) (i32.const %zu))))\n",
-            sn.offset, sn.len);
+        emit_global_set_str(&c, "$g_src_name", src_name, strlen(src_name));
     } else {
         wat_append(out,
             "    (global.set $g_src_name\n"
@@ -1951,299 +2255,23 @@ int codegen_module(const ParseResult *pr, const char *src_name,
         if (!live[bi]) continue;
         const char *key = builtin_name(bi);
         if (key[0] == '_') continue;   /* internal-only (e.g. _ipairs_iter) */
-        StrRef sr = strpool_add(&c.strs, key, strlen(key));
-        wat_appendf(out,
-            "    (call $tab_set (ref.as_non_null (global.get $g_globals))\n"
-            "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
-            "        (i32.const %zu) (i32.const %zu)))\n"
-            "      (global.get $g_%s))\n",
-            sr.offset, sr.len, builtin_func_name(bi) + 1);
+        char val[128];
+        snprintf(val, sizeof(val), "(global.get $g_%s)", builtin_func_name(bi) + 1);
+        emit_tab_set_str(&c, "(ref.as_non_null (global.get $g_globals))",
+                         key, strlen(key), val);
     }
 
     /* Install _G as a self-reference. _ENV is the per-function "environment"
      * upvalue in Lua 5.4+; we don't implement that machinery, so we alias
      * it to _G — close enough for tests that just need _ENV to exist. */
-    {
-        StrRef sr = strpool_add(&c.strs, "_G", 2);
-        wat_appendf(out,
-            "    (call $tab_set (ref.as_non_null (global.get $g_globals))\n"
-            "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
-            "        (i32.const %zu) (i32.const %zu)))\n"
-            "      (ref.as_non_null (global.get $g_globals)))\n",
-            sr.offset, sr.len);
-        StrRef env = strpool_add(&c.strs, "_ENV", 4);
-        wat_appendf(out,
-            "    (call $tab_set (ref.as_non_null (global.get $g_globals))\n"
-            "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
-            "        (i32.const %zu) (i32.const %zu)))\n"
-            "      (ref.as_non_null (global.get $g_globals)))\n",
-            env.offset, env.len);
-    }
+    emit_tab_set_str(&c, "(ref.as_non_null (global.get $g_globals))",
+                     "_G", 2, "(ref.as_non_null (global.get $g_globals))");
+    emit_tab_set_str(&c, "(ref.as_non_null (global.get $g_globals))",
+                     "_ENV", 4, "(ref.as_non_null (global.get $g_globals))");
 
-    /* Library tables + the _VERSION constant. Each library table is built
-     * locally, then installed as $g_globals.<name>. With tree-shake on,
-     * a library is skipped unless its global name was actually
-     * referenced in user code. */
-    for (size_t gi = 0; gi < pr->globals.count; gi++) {
-        const char *gname = pr->globals.items[gi].name;
-        size_t glen = pr->globals.items[gi].name_len;
-        if (glen == 8 && memcmp(gname, "_VERSION", 8) == 0) {
-            if (!gref[gi]) continue;
-            StrRef key = strpool_add(&c.strs, "_VERSION", 8);
-            wat_appendf(out,
-                "    (call $tab_set (ref.as_non_null (global.get $g_globals))\n"
-                "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
-                "        (i32.const %zu) (i32.const %zu)))\n"
-                "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
-                "        (i32.const 68) (i32.const 7))))\n",
-                key.offset, key.len);
-            continue;
-        }
-        if (glen == 2 && memcmp(gname, "_G", 2) == 0) continue;  /* installed above */
-        if (!gref[gi]) continue;  /* tree-shake: library not referenced */
-        BuiltinClass cls;
-        if      (glen == 4 && memcmp(gname, "math",   4) == 0) cls = BLT_LIB_MATH;
-        else if (glen == 6 && memcmp(gname, "string", 6) == 0) cls = BLT_LIB_STRING;
-        else if (glen == 2 && memcmp(gname, "io",     2) == 0) cls = BLT_LIB_IO;
-        else if (glen == 5 && memcmp(gname, "table",  5) == 0) cls = BLT_LIB_TABLE;
-        else if (glen == 4 && memcmp(gname, "utf8",   4) == 0) cls = BLT_LIB_UTF8;
-        else if (glen == 5 && memcmp(gname, "debug",  5) == 0) cls = BLT_LIB_DEBUG;
-        else if (glen == 2 && memcmp(gname, "os",     2) == 0) cls = BLT_LIB_OS;
-        else if (glen == 7 && memcmp(gname, "package", 7) == 0) {
-            /* Milestone 25: package = { loaded = {}, preload = {} }.
-             * No builtins live under this table; require() walks it.
-             * We also stub package.path, package.cpath, package.config so
-             * tests that probe `type(package.path) == "string"` pass. */
-            wat_append(out, "    (local.set $tab (call $tab_new))\n");
-            static const struct { const char *key; const char *val; } PKG_STR[] = {
-                { "loaded",  NULL },     /* table — handled separately */
-                { "preload", NULL },
-                { "path",    "" },       /* empty: there's no filesystem here */
-                { "cpath",   "" },
-                { "config",  "/\n;\n?\n!\n-\n" }, /* the stock Lua default */
-            };
-            for (size_t pi = 0; pi < sizeof(PKG_STR)/sizeof(PKG_STR[0]); pi++) {
-                StrRef k = strpool_add(&c.strs, PKG_STR[pi].key, strlen(PKG_STR[pi].key));
-                if (PKG_STR[pi].val == NULL) {
-                    wat_appendf(out,
-                        "    (call $tab_set (local.get $tab)\n"
-                        "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
-                        "        (i32.const %zu) (i32.const %zu)))\n"
-                        "      (call $tab_new))\n",
-                        k.offset, k.len);
-                } else {
-                    StrRef v = strpool_add(&c.strs, PKG_STR[pi].val, strlen(PKG_STR[pi].val));
-                    wat_appendf(out,
-                        "    (call $tab_set (local.get $tab)\n"
-                        "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
-                        "        (i32.const %zu) (i32.const %zu)))\n"
-                        "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
-                        "        (i32.const %zu) (i32.const %zu))))\n",
-                        k.offset, k.len, v.offset, v.len);
-                }
-            }
-            StrRef name_key = strpool_add(&c.strs, gname, glen);
-            wat_appendf(out,
-                "    (call $tab_set (ref.as_non_null (global.get $g_globals))\n"
-                "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
-                "        (i32.const %zu) (i32.const %zu)))\n"
-                "      (local.get $tab))\n",
-                name_key.offset, name_key.len);
-            continue;
-        }
-        else if (glen == 9 && memcmp(gname, "coroutine", 9) == 0) {
-            /* Empty stub library — no functions installed. Enough to
-             * satisfy `require "coroutine" == coroutine` style identity
-             * checks and to keep `type(coroutine) == "table"` happy;
-             * any actual coroutine.* call still trips later. */
-            wat_append(out, "    (local.set $tab (call $tab_new))\n");
-            StrRef name_key = strpool_add(&c.strs, gname, glen);
-            wat_appendf(out,
-                "    (call $tab_set (ref.as_non_null (global.get $g_globals))\n"
-                "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
-                "        (i32.const %zu) (i32.const %zu)))\n"
-                "      (local.get $tab))\n",
-                name_key.offset, name_key.len);
-            continue;
-        }
-        else continue;
-        wat_append(out, "    (local.set $tab (call $tab_new))\n");
-        for (int bi = 0; bi < nb; bi++) {
-            if (builtin_class(bi) != cls) continue;
-            const char *key = builtin_lib_key(bi);
-            /* Leading-underscore names are internal helpers (e.g. the
-             * io file-handle methods). They get live-marked + closure
-             * globals like any other builtin, but we don't expose them
-             * as table keys on the library — codegen installs them
-             * elsewhere on the right host objects. */
-            if (key[0] == '_') continue;
-            size_t key_len = strlen(key);
-            StrRef sr = strpool_add(&c.strs, key, key_len);
-            emit_tab_set_global(out, "$tab", sr, builtin_func_name(bi) + 1);
-        }
-        /* Plain-value constants for the math library. */
-        if (cls == BLT_LIB_MATH) {
-            StrRef pi_key = strpool_add(&c.strs, "pi", 2);
-            wat_appendf(out,
-                "    (call $tab_set (local.get $tab)\n"
-                "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
-                "        (i32.const %zu) (i32.const %zu)))\n"
-                "      (struct.new $LuaFloat (f64.const 3.141592653589793)))\n",
-                pi_key.offset, pi_key.len);
-            StrRef huge_key = strpool_add(&c.strs, "huge", 4);
-            wat_appendf(out,
-                "    (call $tab_set (local.get $tab)\n"
-                "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
-                "        (i32.const %zu) (i32.const %zu)))\n"
-                "      (struct.new $LuaFloat (f64.const inf)))\n",
-                huge_key.offset, huge_key.len);
-            StrRef maxi_key = strpool_add(&c.strs, "maxinteger", 10);
-            wat_appendf(out,
-                "    (call $tab_set (local.get $tab)\n"
-                "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
-                "        (i32.const %zu) (i32.const %zu)))\n"
-                "      (call $make_int (i64.const 9223372036854775807)))\n",
-                maxi_key.offset, maxi_key.len);
-            StrRef mini_key = strpool_add(&c.strs, "mininteger", 10);
-            wat_appendf(out,
-                "    (call $tab_set (local.get $tab)\n"
-                "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
-                "        (i32.const %zu) (i32.const %zu)))\n"
-                "      (call $make_int (i64.const -9223372036854775808)))\n",
-                mini_key.offset, mini_key.len);
-        }
-        /* io.stdout / io.stderr / io.stdin: build a sub-table per
-         * stream, populated with the relevant file-handle methods. The
-         * methods themselves were registered as leading-underscore
-         * entries in builtins.c so the standard install loop above
-         * skipped them, but their closure globals
-         * ($g_io_handle_{write,err_write,read,noop}) are live and
-         * ready to use. */
-        if (cls == BLT_LIB_IO) {
-            /* `method_glob == NULL` selects the read method on stdin;
-             * the rest take a writer matching the handle's stream. */
-            static const struct {
-                const char *handle;
-                size_t      handle_len;
-                const char *method_glob;
-            } HANDLES[] = {
-                { "stdout", 6, "io_handle_write"     },
-                { "stderr", 6, "io_handle_err_write" },
-                { "stdin",  5, NULL                  },
-            };
-            StrRef wkey = strpool_add(&c.strs, "write", 5);
-            StrRef rkey = strpool_add(&c.strs, "read",  4);
-            StrRef ckey = strpool_add(&c.strs, "close", 5);
-            StrRef fkey = strpool_add(&c.strs, "flush", 5);
-            for (size_t hi = 0; hi < sizeof(HANDLES)/sizeof(HANDLES[0]); hi++) {
-                wat_append(out, "    (local.set $h (call $tab_new))\n");
-                if (HANDLES[hi].method_glob)
-                    emit_tab_set_global(out, "$h", wkey, HANDLES[hi].method_glob);
-                else
-                    emit_tab_set_global(out, "$h", rkey, "io_handle_read");
-                emit_tab_set_global(out, "$h", ckey, "io_handle_noop");
-                emit_tab_set_global(out, "$h", fkey, "io_handle_noop");
-                StrRef hkey = strpool_add(&c.strs, HANDLES[hi].handle,
-                                          HANDLES[hi].handle_len);
-                wat_appendf(out,
-                    "    (call $tab_set (local.get $tab)\n"
-                    "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
-                    "        (i32.const %zu) (i32.const %zu)))\n"
-                    "      (local.get $h))\n",
-                    hkey.offset, hkey.len);
-            }
-        }
-        /* utf8.charpattern: the Lua-pattern string that matches one
-         * UTF-8 codepoint. Binary content; strpool_add and data-segment
-         * escaping handle the non-printable bytes. */
-        if (cls == BLT_LIB_UTF8) {
-            StrRef cp_key = strpool_add(&c.strs, "charpattern", 11);
-            static const char CHARPAT[] =
-                "[\x00-\x7F\xC2-\xFD][\x80-\xBF]*";
-            StrRef cp_val = strpool_add(&c.strs, CHARPAT, sizeof(CHARPAT) - 1);
-            wat_appendf(out,
-                "    (call $tab_set (local.get $tab)\n"
-                "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
-                "        (i32.const %zu) (i32.const %zu)))\n"
-                "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
-                "        (i32.const %zu) (i32.const %zu))))\n",
-                cp_key.offset, cp_key.len,
-                cp_val.offset, cp_val.len);
-        }
-        {
-            StrRef name_key = strpool_add(&c.strs, gname, glen);
-            wat_appendf(out,
-                "    (call $tab_set (ref.as_non_null (global.get $g_globals))\n"
-                "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
-                "        (i32.const %zu) (i32.const %zu)))\n"
-                "      (local.get $tab))\n",
-                name_key.offset, name_key.len);
-        }
-    }
+    emit_library_tables(&c, gref, nb);
 
-    /* Make each stdlib library visible through `require "<name>"` by
-     * registering it in `package.loaded`. The library tables have just
-     * been installed in _G above; here we walk _G again, look up
-     * package.loaded once, and forward each library reference into it. */
-    {
-        static const char *LIB_NAMES[] = {
-            "math", "string", "io", "table", "utf8", "debug", "package",
-            "os", "coroutine",
-        };
-        int need_any = 0;
-        for (size_t li = 0; li < sizeof(LIB_NAMES) / sizeof(LIB_NAMES[0]); li++) {
-            size_t llen = strlen(LIB_NAMES[li]);
-            for (size_t gi = 0; gi < pr->globals.count; gi++) {
-                if (pr->globals.items[gi].name_len == llen &&
-                    memcmp(pr->globals.items[gi].name, LIB_NAMES[li], llen) == 0 &&
-                    gref[gi]) {
-                    need_any = 1; break;
-                }
-            }
-            if (need_any) break;
-        }
-        /* Only emit the bridge code when package itself was built —
-         * otherwise the (ref.cast (ref $LuaTable) ...) would trap. */
-        int have_package = 0;
-        for (size_t gi = 0; gi < pr->globals.count; gi++) {
-            if (pr->globals.items[gi].name_len == 7 &&
-                memcmp(pr->globals.items[gi].name, "package", 7) == 0 &&
-                gref[gi]) { have_package = 1; break; }
-        }
-        if (need_any && have_package) {
-            StrRef pkg_k    = strpool_add(&c.strs, "package", 7);
-            StrRef loaded_k = strpool_add(&c.strs, "loaded",  6);
-            wat_appendf(out,
-                "    (local.set $tab (ref.cast (ref $LuaTable)\n"
-                "      (call $tab_get\n"
-                "        (ref.cast (ref $LuaTable) (call $tab_get\n"
-                "          (ref.as_non_null (global.get $g_globals))\n"
-                "          (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
-                "            (i32.const %zu) (i32.const %zu)))))\n"
-                "        (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
-                "          (i32.const %zu) (i32.const %zu))))))\n",
-                pkg_k.offset, pkg_k.len, loaded_k.offset, loaded_k.len);
-            for (size_t li = 0; li < sizeof(LIB_NAMES) / sizeof(LIB_NAMES[0]); li++) {
-                size_t llen = strlen(LIB_NAMES[li]);
-                int gi_found = -1;
-                for (size_t gi = 0; gi < pr->globals.count; gi++) {
-                    if (pr->globals.items[gi].name_len == llen &&
-                        memcmp(pr->globals.items[gi].name, LIB_NAMES[li], llen) == 0 &&
-                        gref[gi]) { gi_found = (int)gi; break; }
-                }
-                if (gi_found < 0) continue;
-                StrRef name_k = strpool_add(&c.strs, LIB_NAMES[li], llen);
-                wat_appendf(out,
-                    "    (call $tab_set (local.get $tab)\n"
-                    "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
-                    "        (i32.const %zu) (i32.const %zu)))\n"
-                    "      (call $tab_get (ref.as_non_null (global.get $g_globals))\n"
-                    "        (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
-                    "          (i32.const %zu) (i32.const %zu)))))\n",
-                    name_k.offset, name_k.len, name_k.offset, name_k.len);
-            }
-        }
-    }
+    emit_require_bridge(&c, gref);
     wat_append(out, "  )\n");
 
     wat_append(out, "\n  ;; @@SECTION:user-code@@\n");
@@ -2254,69 +2282,9 @@ int codegen_module(const ParseResult *pr, const char *src_name,
         if (!c.ok) break;
     }
 
-    if (c.ok) {
-        wat_append(out, "\n  ;; --- main (top-level chunk) ---\n");
-        wat_append(out, "  (func $main (export \"main\")\n");
-        c.cur_captured = pr->main_captured;
-        c.cur_n_locals = pr->main_n_locals;
-        /* Pre-pass before locals: dispatch ids must be assigned so the
-         * $next_BID i32 locals can be declared up-front. */
-        c.next_label_id = 0;
-        la_block(&c, &pr->main_body, NULL);
+    if (c.ok) emit_main_chunk(&c);
 
-        for (int i = 0; i < pr->main_n_locals; i++) {
-            if (pr->main_captured && pr->main_captured[i]) {
-                wat_appendf(out, "    (local $L%d (ref $Box))\n", i);
-            } else {
-                wat_appendf(out, "    (local $L%d anyref)\n", i);
-            }
-        }
-        wat_append(out, "    (local $tmp_any anyref)\n");
-        wat_append(out, "    (local $tmp_args (ref null $ArgArr))\n");
-        wat_append(out, "    (local $tmp_clo (ref null $LuaClosure))\n");
-        wat_append(out, "    (local $tmp_tab (ref null $LuaTable))\n");
-        wat_append(out, "    (local $for_stop anyref)\n");
-        wat_append(out, "    (local $for_step anyref)\n");
-        wat_append(out, "    (local $for_next anyref)\n");
-        wat_append(out, "    (local $for_iter_any anyref)\n");
-        wat_append(out, "    (local $for_state anyref)\n");
-        wat_append(out, "    (local $for_k anyref)\n");
-        {
-            int bids[128]; int n = 0;
-            collect_dispatch_ids(&pr->main_body, bids, &n, 128);
-            for (int i = 0; i < n; i++) {
-                wat_appendf(out, "    (local $next_%d i32)\n", bids[i]);
-            }
-        }
-        wat_append(out, "    (call $stdlib_init)\n");
-        /* Eager-init captured locals — see emit_user_function for the
-         * rationale; main has no params, so every captured slot needs it. */
-        for (int i = 0; i < pr->main_n_locals; i++) {
-            if (pr->main_captured && pr->main_captured[i]) {
-                wat_appendf(out,
-                    "    (local.set $L%d (struct.new $Box (ref.null any)))\n", i);
-            }
-        }
-
-        if (c.ok) emit_block(&c, &pr->main_body, 2);
-
-        wat_append(out, "  )\n");
-    }
-
-    /* Data segment */
-    wat_append(out, "\n  ;; @@SECTION:data@@\n");
-    wat_append(out, "  (data $str_data \"");
-    for (size_t i = 0; i < c.strs.used; i++) {
-        unsigned char b = (unsigned char)c.strs.bytes[i];
-        if (b == '"' || b == '\\') wat_appendf(out, "\\%02x", b);
-        else if (b >= 0x20 && b < 0x7f) {
-            char tmp[2] = { (char)b, 0 };
-            wat_append(out, tmp);
-        } else {
-            wat_appendf(out, "\\%02x", b);
-        }
-    }
-    wat_append(out, "\")\n");
+    emit_data_segment(&c);
 
     wat_append(out, ")\n");
 
