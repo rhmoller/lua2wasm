@@ -430,12 +430,16 @@ TokenList lex(const char *source) {
             case ':': if (L.p[1] == ':') TWO(TOK_DBLCOLON); else ONE(TOK_COLON); break;
             case '=': if (L.p[1] == '=') TWO(TOK_EQ);      else ONE(TOK_ASSIGN); break;
             case '~': if (L.p[1] == '=') TWO(TOK_NEQ);     else ONE(TOK_TILDE); break;
-            case '<': if (L.p[1] == '=') TWO(TOK_LE);
-                      else if (L.p[1] == '<') TWO(TOK_SHL);
-                      else ONE(TOK_LT); break;
-            case '>': if (L.p[1] == '=') TWO(TOK_GE);
-                      else if (L.p[1] == '>') TWO(TOK_SHR);
-                      else ONE(TOK_GT); break;
+            case '<':
+                if (L.p[1] == '=') TWO(TOK_LE);
+                else if (L.p[1] == '<') TWO(TOK_SHL);
+                else ONE(TOK_LT);
+                break;
+            case '>':
+                if (L.p[1] == '=') TWO(TOK_GE);
+                else if (L.p[1] == '>') TWO(TOK_SHR);
+                else ONE(TOK_GT);
+                break;
             case '.':
                 if (L.p[1] == '.' && L.p[2] == '.') THREE(TOK_ELLIPSIS);
                 else if (L.p[1] == '.') TWO(TOK_CONCAT);
