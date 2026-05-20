@@ -67,6 +67,8 @@ pass	gmatch_empty	gmatch no longer doubles/ trails spurious empty matches
 pass	tostring_addr	tostring shape/stability/distinctness for tables and functions
 # Fixed: getmetatable(string) returns the shared string metatable (was nil)
 pass	getmetatable_string	strings expose {__index = string} via getmetatable
+# Fixed: setmetatable type-checks args (was an illegal-cast trap on non-tables)
+pass	setmetatable_typecheck	setmetatable on a non-table is a catchable error
 #
 # Captured bugs (xfail) ----------------------------------------------------
 # (none — all captured differences resolved. Note: error-message *wording* and

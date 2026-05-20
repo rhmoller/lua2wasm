@@ -2701,8 +2701,17 @@
   (func $builtin_setmetatable (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
     (local $t (ref $LuaTable)) (local $mt anyref) (local $cur (ref null $LuaTable))
-    (local.set $t (ref.cast (ref $LuaTable) (call $args_at (local.get $args) (i32.const 0))))
+    (local $arg0 anyref)
+    ;; arg #1 must be a table (was an illegal-cast trap for strings/etc.).
+    (local.set $arg0 (call $args_at (local.get $args) (i32.const 0)))
+    (if (i32.eqz (ref.test (ref $LuaTable) (local.get $arg0)))
+      (then (call $throw_lit (i32.const 684) (i32.const 14))))   ;; "table expected"
+    (local.set $t (ref.cast (ref $LuaTable) (local.get $arg0)))
     (local.set $mt (call $args_at (local.get $args) (i32.const 1)))
+    ;; arg #2 must be nil or a table.
+    (if (i32.and (i32.eqz (ref.is_null (local.get $mt)))
+                 (i32.eqz (ref.test (ref $LuaTable) (local.get $mt))))
+      (then (call $throw_lit (i32.const 684) (i32.const 14))))   ;; "table expected"
     ;; Protect: if the existing metatable carries __metatable, error.
     (local.set $cur (struct.get $LuaTable $meta (local.get $t)))
     (if (i32.eqz (ref.is_null (local.get $cur)))
