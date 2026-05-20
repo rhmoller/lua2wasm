@@ -48,12 +48,15 @@ print(tonumber("10", 36))      -- 36
 print(tonumber("z", 36))       -- 35
 print(tonumber("-10", 16))     -- -16
 
--- Invalid base / digit-out-of-range: nil.
+-- Digit out of range for the base: nil.
 print(tonumber("9", 8))        -- nil  (9 is out of base 8)
 print(tonumber("ff", 10))      -- nil
 print(tonumber("xyz", 16))     -- nil
-print(tonumber("10", 1))       -- nil  (base < 2)
-print(tonumber("10", 37))      -- nil  (base > 36)
+-- Base itself out of range [2, 36]: a catchable error (not nil). The
+-- parenthesized pcall adjusts to just the boolean status, so the assertion
+-- is portable (the error wording/chunk name are not compared).
+print((pcall(tonumber, "10", 1)))    -- false  (base < 2)
+print((pcall(tonumber, "10", 37)))   -- false  (base > 36)
 
 -- Subtypes: decimal int vs decimal float.
 print(math.type(tonumber("5")))       -- integer

@@ -2622,17 +2622,31 @@
   (func $builtin_tonumber (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
     (local $v anyref) (local $base i32) (local $nargs i32)
+    (local $arg1 anyref) (local $has_base i32)
     (local.set $v (call $args_at (local.get $args) (i32.const 0)))
     (local.set $nargs (array.len (local.get $args)))
+    ;; A nil second argument means "standard conversion", same as omitting it.
     (if (i32.gt_u (local.get $nargs) (i32.const 1))
-      (then (local.set $base (i32.wrap_i64
-              (call $as_int (call $args_at (local.get $args) (i32.const 1)))))))
-    ;; with no base, numeric arguments pass through unchanged.
-    (if (i32.eqz (local.get $base))
+      (then
+        (local.set $arg1 (call $args_at (local.get $args) (i32.const 1)))
+        (if (i32.eqz (ref.is_null (local.get $arg1)))
+          (then
+            (local.set $has_base (i32.const 1))
+            (local.set $base (i32.wrap_i64 (call $as_int (local.get $arg1))))))))
+    ;; No base: numbers pass through; strings parse with auto base detection.
+    (if (i32.eqz (local.get $has_base))
       (then
         (if (i32.or (call $is_int (local.get $v)) (call $is_float (local.get $v)))
-          (then (return (array.new_fixed $ArgArr 1 (local.get $v)))))))
-    ;; otherwise, only strings can be parsed; non-strings yield nil.
+          (then (return (array.new_fixed $ArgArr 1 (local.get $v)))))
+        (if (i32.eqz (ref.test (ref $LuaString) (local.get $v)))
+          (then (return (array.new_fixed $ArgArr 1 (ref.null any)))))
+        (return (array.new_fixed $ArgArr 1
+          (call $host_parse_num (local.get $v) (i32.const 0))))))
+    ;; Explicit base must be in [2, 36] (reference raises "base out of range").
+    (if (i32.or (i32.lt_s (local.get $base) (i32.const 2))
+                (i32.gt_s (local.get $base) (i32.const 36)))
+      (then (call $throw_lit (i32.const 820) (i32.const 17))))   ;; "base out of range"
+    ;; With an explicit base, only strings are parsed; non-strings yield nil.
     (if (i32.eqz (ref.test (ref $LuaString) (local.get $v)))
       (then (return (array.new_fixed $ArgArr 1 (ref.null any)))))
     (array.new_fixed $ArgArr 1
