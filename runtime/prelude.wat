@@ -5851,6 +5851,29 @@
       (ref.as_non_null (global.get $fmt_buf)) (i32.const 0) (local.get $n))
     (struct.new $LuaString (local.get $out)))
 
+  ;; "0x" ++ lowercase hex of $id — the address form string.format("%p") and
+  ;; (indirectly) the address-bearing types use.
+  (func $ptr_hex (param $id i32) (result (ref $LuaString))
+    (ref.cast (ref $LuaString) (call $lua_concat
+      (struct.new $LuaString
+        (array.new_fixed $LuaArr 2 (i32.const 48) (i32.const 120)))   ;; "0x"
+      (struct.new $LuaString (call $int_to_hex_bytes (local.get $id))))))
+
+  ;; string.format("%p", v): an address-bearing value (string, table,
+  ;; function) formats as "0x<addr>"; everything else (nil, number, boolean)
+  ;; is "(null)" — matching reference lua_topointer. Tables use their unique
+  ;; $id; strings/functions share a constant address (per tostring).
+  (func $fmt_ptr (param $v anyref) (result (ref $LuaString))
+    (if (ref.test (ref $LuaTable) (local.get $v))
+      (then (return (call $ptr_hex
+        (struct.get $LuaTable $id (ref.cast (ref $LuaTable) (local.get $v)))))))
+    (if (i32.or (ref.test (ref $LuaString) (local.get $v))
+                (ref.test (ref $LuaClosure) (local.get $v)))
+      (then (return (call $ptr_hex (i32.const 0)))))
+    (struct.new $LuaString (array.new_fixed $LuaArr 6
+      (i32.const 40) (i32.const 110) (i32.const 117)
+      (i32.const 108) (i32.const 108) (i32.const 41))))   ;; "(null)"
+
   ;; string.format(fmt, ...) — supports %s %d %x %g %f %e with optional .N
   ;; precision, plus %%. No width/flags.
   ;; string.format(fmt, ...) — walks fmt, copying literal runs and
@@ -5925,9 +5948,17 @@
         (else
           (local.set $arg (call $args_at (local.get $args) (local.get $arg_idx)))
           (local.set $arg_idx (i32.add (local.get $arg_idx) (i32.const 1)))
+          (local.set $b (array.get_u $LuaArr (local.get $fmt) (local.get $j)))
+          ;; %p is value-type dependent, so format it here rather than in the
+          ;; host (which sees no Lua type). Width/flags on %p are not applied.
+          (if (i32.eq (local.get $b) (i32.const 112))           ;; 'p'
+            (then
+              (local.set $acc (call $lua_concat (local.get $acc)
+                (call $fmt_ptr (local.get $arg))))
+              (local.set $i (i32.add (local.get $j) (i32.const 1)))
+              (br $main)))
           ;; For %s, pre-tostring so __tostring is honoured. %q must see the
           ;; raw value (it emits a type-preserving literal, not a string).
-          (local.set $b (array.get_u $LuaArr (local.get $fmt) (local.get $j)))
           (if (i32.eq (local.get $b) (i32.const 115))           ;; 's'
             (then (local.set $arg (call $lua_tostring (local.get $arg)))))))
       (local.set $written (call $host_fmt_spec
