@@ -1584,6 +1584,15 @@
   (func $push_call_frame (param $line i32)
     (local $lines (ref $LineArr)) (local $cap i32)
     (local $new_cap i32) (local $new (ref $LineArr))
+    ;; Depth guard: raise a *catchable* "stack overflow" before deep non-tail
+    ;; recursion exhausts the host's WASM call stack (which would be an
+    ;; uncatchable trap). The cap sits below the trap point with headroom to
+    ;; build+throw the error; pcall/xpcall save and restore $call_depth, so the
+    ;; catch unwinds cleanly. Tail calls use $replace_top_call_frame (no push),
+    ;; so proper-TCO loops are unaffected. Very heavy frames can still trap
+    ;; below this cap — the host stack size is a runtime-config concern.
+    (if (i32.ge_s (global.get $call_depth) (i32.const 2000))
+      (then (call $throw_lit (i32.const 971) (i32.const 14))))   ;; "stack overflow"
     (local.set $lines (ref.as_non_null (global.get $call_lines)))
     (local.set $cap (array.len (local.get $lines)))
     (if (i32.ge_s (global.get $call_depth) (local.get $cap))

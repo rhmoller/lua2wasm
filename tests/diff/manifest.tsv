@@ -98,7 +98,7 @@ pass	math_arg_coerce	math.* coerce numeric strings; non-number raises catchable 
 pass	obj_addr_distinct	function tostring/%p carries a stable, distinct per-object address
 pass	compare_type_msg	order-compare error names operand types (two table values / table with number)
 pass	mt_name	__name renames an object in tostring and type-aware compare errors
-xfail	deep_recursion	deep non-tail recursion raises a catchable "stack overflow"
+pass	deep_recursion	deep non-tail recursion raises a catchable "stack overflow"
 pass	os_difftime	os.difftime(t2,t1) returns the second difference as a float
 pass	os_setlocale	os.setlocale query/"C" returns "C"
 xfail	io_default_files	io.input()/io.output() return default handles; io.write routes through them
