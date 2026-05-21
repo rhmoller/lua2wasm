@@ -257,6 +257,7 @@ typedef struct {
     const LuaFunc ***bind_slot;
     const LuaFunc ***bind_upval;
     const LuaFunc **main_slot_func;
+    int n_binds;                    /* length of bind_slot/bind_upval, set by their allocator */
     int cur_func_idx;               /* func_idx of the body being emitted; -1 = main */
     const LuaFunc **cur_upval_func; /* upvalue->LuaFunc map for that body */
     int cur_n_params;
@@ -438,13 +439,20 @@ static void emit_float_literal(CG *c, double v, int depth) {
     wat_appendf(c->w, "(struct.new $LuaFloat (f64.const %.17g))\n", v);
 }
 
-static void emit_string_literal(CG *c, const char *bytes, size_t len, int depth) {
-    StrRef r = strpool_add(&c->strs, bytes, len);
+/* Emit a complete `(struct.new $LuaString (array.new_data $LuaArr $str_data
+ * (i32.const O) (i32.const L)))` for an already-interned run, as a single
+ * folded line indented to `depth`. The one canonical spelling for a pooled
+ * string in expression position. */
+static void emit_pooled_string(CG *c, StrRef r, int depth) {
     emit_indent(c, depth);
     wat_appendf(c->w,
         "(struct.new $LuaString "
         "(array.new_data $LuaArr $str_data (i32.const %zu) (i32.const %zu)))\n",
         r.offset, r.len);
+}
+
+static void emit_string_literal(CG *c, const char *bytes, size_t len, int depth) {
+    emit_pooled_string(c, strpool_add(&c->strs, bytes, len), depth);
 }
 
 /* ----- variable read / write -----
@@ -636,8 +644,9 @@ static void emit_target_open(CG *c, const AssignTarget *t, int depth) {
         emit_expr(c, t->as.index.key, depth + 1);
     }
 }
-static void emit_target_close(CG *c, const AssignTarget *t, int depth) {
-    (void)t;
+/* Close an emit_target_open() expression. The target is the same one passed to
+ * open, but every target shape closes with a single `)`, so it isn't needed. */
+static void emit_target_close(CG *c, int depth) {
     emit_indent(c, depth); wat_append(c->w, ")\n");
 }
 
@@ -906,6 +915,42 @@ static void emit_args_array(CG *c, Expr **args, size_t nargs, int depth) {
     emit_indent(c, depth); wat_append(c->w, ")\n");
 }
 
+/* Look up `obj:m` via $lua_index (which routes strings through the string
+ * library). The receiver must already be parked in $tmp_any. Emits, at `depth`:
+ *   (call $lua_index (local.get $tmp_any) <pooled method name> (i32.const line))
+ * Shared by the value and tail-call method forms. */
+static void emit_method_lookup(CG *c, StrRef method, int line, int depth) {
+    emit_indent(c, depth); wat_append(c->w, "(call $lua_index\n");
+    emit_indent(c, depth + 1); wat_append(c->w, "(local.get $tmp_any)\n");
+    emit_pooled_string(c, method, depth + 1);
+    emit_indent(c, depth + 1);
+    wat_appendf(c->w, "(i32.const %d)\n", line);
+    emit_indent(c, depth); wat_append(c->w, ")\n");
+}
+
+/* Emit the method-call argument array [recv] ++ method-args, at `depth`:
+ *   (call $merge_args (array.new_fixed $ArgArr 1 (local.get $tmp_any)) <args>)
+ * The receiver must already be parked in $tmp_any. Shared by the value and
+ * tail-call method forms. */
+static void emit_method_args_array(CG *c, const Expr *e, int depth) {
+    size_t mna = e->as.method_call.nargs;
+    int has_mv = mna > 0 && is_multival_tail(e->as.method_call.args[mna - 1]);
+    emit_indent(c, depth); wat_append(c->w, "(call $merge_args\n");
+    emit_indent(c, depth + 1);
+    wat_append(c->w, "(array.new_fixed $ArgArr 1 (local.get $tmp_any))\n");
+    if (mna == 0) {
+        emit_indent(c, depth + 1); wat_append(c->w, "(global.get $g_empty_args)\n");
+    } else if (!has_mv) {
+        emit_indent(c, depth + 1);
+        wat_appendf(c->w, "(array.new_fixed $ArgArr %zu\n", mna);
+        for (size_t i = 0; i < mna; i++) emit_expr(c, e->as.method_call.args[i], depth + 2);
+        emit_indent(c, depth + 1); wat_append(c->w, ")\n");
+    } else {
+        emit_args_array(c, e->as.method_call.args, mna, depth + 1);
+    }
+    emit_indent(c, depth); wat_append(c->w, ")\n");
+}
+
 /* Emit a call returning (ref $ArgArr) — the full multi-value result. */
 static void emit_call_array(CG *c, const Expr *e, int depth) {
     if (e->kind == EXPR_METHOD_CALL) {
@@ -917,32 +962,9 @@ static void emit_call_array(CG *c, const Expr *e, int depth) {
         emit_expr(c, e->as.method_call.recv, depth + 1);
         emit_indent(c, depth); wat_append(c->w, ")\n");
         emit_indent(c, depth); wat_append(c->w, "(call $lua_call_any\n");
-        emit_indent(c, depth + 1); wat_append(c->w, "(call $lua_index\n");
-        emit_indent(c, depth + 2); wat_append(c->w, "(local.get $tmp_any)\n");
-        emit_indent(c, depth + 2);
-        wat_appendf(c->w,
-            "(struct.new $LuaString (array.new_data $LuaArr $str_data "
-            "(i32.const %zu) (i32.const %zu)))\n", sr.offset, sr.len);
-        emit_indent(c, depth + 2);
-        wat_appendf(c->w, "(i32.const %d)\n", e->line);
-        emit_indent(c, depth + 1); wat_append(c->w, ")\n");
+        emit_method_lookup(c, sr, e->line, depth + 1);
         /* args = [recv] ++ method args */
-        size_t mna = e->as.method_call.nargs;
-        int has_mv = mna > 0 && is_multival_tail(e->as.method_call.args[mna - 1]);
-        emit_indent(c, depth + 1); wat_append(c->w, "(call $merge_args\n");
-        emit_indent(c, depth + 2);
-        wat_append(c->w, "(array.new_fixed $ArgArr 1 (local.get $tmp_any))\n");
-        if (mna == 0) {
-            emit_indent(c, depth + 2); wat_append(c->w, "(global.get $g_empty_args)\n");
-        } else if (!has_mv) {
-            emit_indent(c, depth + 2);
-            wat_appendf(c->w, "(array.new_fixed $ArgArr %zu\n", mna);
-            for (size_t i = 0; i < mna; i++) emit_expr(c, e->as.method_call.args[i], depth + 3);
-            emit_indent(c, depth + 2); wat_append(c->w, ")\n");
-        } else {
-            emit_args_array(c, e->as.method_call.args, mna, depth + 2);
-        }
-        emit_indent(c, depth + 1); wat_append(c->w, ")\n");
+        emit_method_args_array(c, e, depth + 1);
         emit_indent(c, depth + 1);
         wat_appendf(c->w, "(i32.const %d)\n", e->line);
         emit_indent(c, depth); wat_append(c->w, ")\n");
@@ -1034,33 +1056,10 @@ static void emit_tail_method_call(CG *c, const Expr *e, int depth) {
     emit_expr(c, e->as.method_call.recv, depth + 1);
     emit_indent(c, depth); wat_append(c->w, ")\n");
     emit_indent(c, depth); wat_append(c->w, "(local.set $tmp_callee\n");
-    emit_indent(c, depth + 1); wat_append(c->w, "(call $lua_index\n");
-    emit_indent(c, depth + 2); wat_append(c->w, "(local.get $tmp_any)\n");
-    emit_indent(c, depth + 2);
-    wat_appendf(c->w,
-        "(struct.new $LuaString (array.new_data $LuaArr $str_data "
-        "(i32.const %zu) (i32.const %zu)))\n", sr.offset, sr.len);
-    emit_indent(c, depth + 2);
-    wat_appendf(c->w, "(i32.const %d)\n", e->line);
-    emit_indent(c, depth + 1); wat_append(c->w, ")\n");
+    emit_method_lookup(c, sr, e->line, depth + 1);
     emit_indent(c, depth); wat_append(c->w, ")\n");
-    size_t mna = e->as.method_call.nargs;
-    int has_mv = mna > 0 && is_multival_tail(e->as.method_call.args[mna - 1]);
     emit_indent(c, depth); wat_append(c->w, "(local.set $tmp_args\n");
-    emit_indent(c, depth + 1); wat_append(c->w, "(call $merge_args\n");
-    emit_indent(c, depth + 2);
-    wat_append(c->w, "(array.new_fixed $ArgArr 1 (local.get $tmp_any))\n");
-    if (mna == 0) {
-        emit_indent(c, depth + 2); wat_append(c->w, "(global.get $g_empty_args)\n");
-    } else if (!has_mv) {
-        emit_indent(c, depth + 2);
-        wat_appendf(c->w, "(array.new_fixed $ArgArr %zu\n", mna);
-        for (size_t i = 0; i < mna; i++) emit_expr(c, e->as.method_call.args[i], depth + 3);
-        emit_indent(c, depth + 2); wat_append(c->w, ")\n");
-    } else {
-        emit_args_array(c, e->as.method_call.args, mna, depth + 2);
-    }
-    emit_indent(c, depth + 1); wat_append(c->w, ")\n");
+    emit_method_args_array(c, e, depth + 1);
     emit_indent(c, depth); wat_append(c->w, ")\n");
     emit_tail_dispatch(c, e->line, depth);
 }
@@ -1650,6 +1649,7 @@ static void resolve_upval_origin(CG *c, int func_idx, int u, int *of, int *os) {
 /* Build c->bind_slot / c->bind_upval / c->main_slot_func. */
 static void compute_func_bindings(CG *c, const ParseResult *pr) {
     int n = (int)pr->funcs.count;
+    c->n_binds = n;   /* free_func_bindings frees exactly this many rows */
     c->bind_slot  = calloc(n ? n : 1, sizeof *c->bind_slot);
     c->bind_upval = calloc(n ? n : 1, sizeof *c->bind_upval);
     c->main_slot_func = calloc(pr->main_n_locals ? pr->main_n_locals : 1, sizeof(const LuaFunc *));
@@ -1701,11 +1701,12 @@ static void compute_func_bindings(CG *c, const ParseResult *pr) {
 }
 
 static void free_func_bindings(CG *c) {
-    if (c->bind_slot)  for (int i = 0; i < c->n_sigs; i++) free((void *)c->bind_slot[i]);
-    if (c->bind_upval) for (int i = 0; i < c->n_sigs; i++) free((void *)c->bind_upval[i]);
+    if (c->bind_slot)  for (int i = 0; i < c->n_binds; i++) free((void *)c->bind_slot[i]);
+    if (c->bind_upval) for (int i = 0; i < c->n_binds; i++) free((void *)c->bind_upval[i]);
     free(c->bind_slot);  c->bind_slot = NULL;
     free(c->bind_upval); c->bind_upval = NULL;
     free(c->main_slot_func); c->main_slot_func = NULL;
+    c->n_binds = 0;
 }
 
 /* ----- whole-program signature inference (param + return unboxing) -----
@@ -2029,6 +2030,16 @@ static void emit_expr(CG *c, const Expr *e, int depth) {
     }
 }
 
+/* Emit `(call $args_at (ref.as_non_null (local.get $tmp_args)) (i32.const idx))`
+ * as a standalone indented line — the i-th value of the call/vararg result
+ * currently parked in $tmp_args. */
+static void emit_args_at(CG *c, int idx, int depth) {
+    emit_indent(c, depth);
+    wat_appendf(c->w,
+        "(call $args_at (ref.as_non_null (local.get $tmp_args)) (i32.const %d))\n",
+        idx);
+}
+
 /* Helper: emit code that pushes the i-th distributed value of a multi-value
  * binding/assignment.
  *
@@ -2048,9 +2059,7 @@ static void emit_distributed_value(CG *c, int i, int n_values, Expr **values,
     if (i == n_values - 1) {
         if (last_call) {
             /* The trailing call. Take its first result. */
-            emit_indent(c, depth);
-            wat_append(c->w,
-                "(call $args_at (ref.as_non_null (local.get $tmp_args)) (i32.const 0))\n");
+            emit_args_at(c, 0, depth);
         } else {
             emit_expr(c, values[i], depth);
         }
@@ -2058,10 +2067,7 @@ static void emit_distributed_value(CG *c, int i, int n_values, Expr **values,
     }
     /* i > n_values - 1: only reachable if last_call (extra values from call) */
     if (last_call) {
-        emit_indent(c, depth);
-        wat_appendf(c->w,
-            "(call $args_at (ref.as_non_null (local.get $tmp_args)) (i32.const %d))\n",
-            i - (n_values - 1));
+        emit_args_at(c, i - (n_values - 1), depth);
     } else {
         emit_indent(c, depth); wat_append(c->w, "(ref.null any)\n");
     }
@@ -2148,7 +2154,7 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
                 } else {
                     emit_expr(c, s->as.assign.values[0], depth + 1);
                 }
-                emit_target_close(c, t, depth);
+                emit_target_close(c, depth);
                 break;
             }
             /* Multi-target. Lua evaluates every LHS table/key sub-expression
@@ -2161,8 +2167,9 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
              * Pre-evaluate index targets' table+key into parallel arrays
              * (left-to-right); plain var targets have a static address and
              * need no pre-eval, so we skip the arrays entirely when every
-             * target is a variable. */
-            (void)last_call;
+             * target is a variable. (last_call is only relevant to the
+             * single-target branch above; the multi-target path always
+             * builds the full $tmp_args array via emit_args_array.) */
             int has_index = 0;
             for (int i = 0; i < n_targets; i++)
                 if (s->as.assign.targets[i].kind != TGT_VAR) { has_index = 1; break; }
@@ -2199,11 +2206,8 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
                 AssignTarget *t = &s->as.assign.targets[i];
                 if (t->kind == TGT_VAR) {
                     emit_target_open(c, t, depth);
-                    emit_indent(c, depth + 1);
-                    wat_appendf(c->w,
-                        "(call $args_at (ref.as_non_null (local.get $tmp_args)) "
-                        "(i32.const %d))\n", i);
-                    emit_target_close(c, t, depth);
+                    emit_args_at(c, i, depth + 1);
+                    emit_target_close(c, depth);
                 } else {
                     /* index target: store via pre-evaluated table+key so
                      * __newindex still fires (matches emit_target_open). */
@@ -2216,10 +2220,7 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
                     wat_appendf(c->w,
                         "(array.get $ArgArr (ref.as_non_null (local.get $tmp_lhs_k)) "
                         "(i32.const %d))\n", i);
-                    emit_indent(c, depth + 1);
-                    wat_appendf(c->w,
-                        "(call $args_at (ref.as_non_null (local.get $tmp_args)) "
-                        "(i32.const %d))\n", i);
+                    emit_args_at(c, i, depth + 1);
                     emit_indent(c, depth); wat_append(c->w, ")\n");
                 }
             }
@@ -3433,7 +3434,6 @@ static void emit_library_tables(CG *c, const unsigned char *gref, int nb) {
     WatBuilder *out = c->w;
     const ParseResult *pr = c->pr;
     const char *G = "(ref.as_non_null (global.get $g_globals))";
-    (void)nb;
     /* Library tables + the _VERSION constant. Each library table is built
      * locally, then installed as $g_globals.<name>. With tree-shake on,
      * a library is skipped unless its global name was actually
@@ -3448,15 +3448,7 @@ static void emit_library_tables(CG *c, const unsigned char *gref, int nb) {
         }
         if (glen == 2 && memcmp(gname, "_G", 2) == 0) continue;  /* installed above */
         if (!gref[gi]) continue;  /* tree-shake: library not referenced */
-        BuiltinClass cls;
-        if      (glen == 4 && memcmp(gname, "math",   4) == 0) cls = BLT_LIB_MATH;
-        else if (glen == 6 && memcmp(gname, "string", 6) == 0) cls = BLT_LIB_STRING;
-        else if (glen == 2 && memcmp(gname, "io",     2) == 0) cls = BLT_LIB_IO;
-        else if (glen == 5 && memcmp(gname, "table",  5) == 0) cls = BLT_LIB_TABLE;
-        else if (glen == 4 && memcmp(gname, "utf8",   4) == 0) cls = BLT_LIB_UTF8;
-        else if (glen == 5 && memcmp(gname, "debug",  5) == 0) cls = BLT_LIB_DEBUG;
-        else if (glen == 2 && memcmp(gname, "os",     2) == 0) cls = BLT_LIB_OS;
-        else if (glen == 7 && memcmp(gname, "package", 7) == 0) {
+        if (glen == 7 && memcmp(gname, "package", 7) == 0) {
             /* Milestone 25: package = { loaded = {}, preload = {} }.
              * No builtins live under this table; require() walks it.
              * We also stub package.path, package.cpath, package.config so
@@ -3481,7 +3473,7 @@ static void emit_library_tables(CG *c, const unsigned char *gref, int nb) {
             emit_tab_set_str(c, G, gname, glen, "(local.get $tab)");
             continue;
         }
-        else if (glen == 9 && memcmp(gname, "coroutine", 9) == 0) {
+        if (glen == 9 && memcmp(gname, "coroutine", 9) == 0) {
             /* Empty stub library — no functions installed. Enough to
              * satisfy `require "coroutine" == coroutine` style identity
              * checks and to keep `type(coroutine) == "table"` happy;
@@ -3490,7 +3482,11 @@ static void emit_library_tables(CG *c, const unsigned char *gref, int nb) {
             emit_tab_set_str(c, G, gname, glen, "(local.get $tab)");
             continue;
         }
-        else continue;
+        /* The function-bearing libraries (math/string/io/table/utf8/debug/os)
+         * map name -> BuiltinClass via the same helper the live-set pass uses. */
+        int cls_i = class_for_global(gname, glen);
+        if (cls_i < 0) continue;
+        BuiltinClass cls = (BuiltinClass)cls_i;
         wat_append(out, "    (local.set $tab (call $tab_new))\n");
         for (int bi = 0; bi < nb; bi++) {
             if (builtin_class(bi) != cls) continue;
@@ -3942,13 +3938,13 @@ int codegen_module(const ParseResult *pr, const char *src_name,
         snprintf(err, errlen, "%s", c.err);
         strpool_free(&c.strs);
         free(live); free(gref);
-        free_func_bindings(&c);   /* before free_signatures: it reads c.n_sigs */
+        free_func_bindings(&c);
         free_signatures(&c);
         return 0;
     }
     strpool_free(&c.strs);
     free(live); free(gref);
-    free_func_bindings(&c);       /* before free_signatures: it reads c.n_sigs */
+    free_func_bindings(&c);
     free_signatures(&c);
     return 1;
 }
