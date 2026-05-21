@@ -3431,6 +3431,28 @@
       (then (call $throw_number_expected (local.get $v)) (unreachable)))
     (call $as_float (local.get $c)))
 
+  ;; Integer analog of $as_float_co: a number or numeric string denoting an
+  ;; exact integer passes through; a fractional / out-of-range value raises a
+  ;; catchable "number has no integer representation"; a non-number raises
+  ;; "number expected, got <type>".
+  (func $as_int_co (param $v anyref) (result i64)
+    (local $c anyref) (local $f f64)
+    (local.set $c (call $coerce_num (local.get $v)))
+    (if (ref.is_null (local.get $c))
+      (then (call $throw_number_expected (local.get $v)) (unreachable)))
+    (if (call $is_int (local.get $c))
+      (then (return (call $as_int (local.get $c)))))
+    (local.set $f (call $as_float (local.get $c)))
+    (if (i32.eqz (i32.and
+          (f64.eq (local.get $f) (f64.trunc (local.get $f)))
+          (i32.and
+            (f64.eq (local.get $f) (local.get $f))
+            (i32.and
+              (f64.ge (local.get $f) (f64.const -9223372036854775808.0))
+              (f64.lt (local.get $f) (f64.const  9223372036854775808.0))))))
+      (then (call $throw_lit (i32.const 985) (i32.const 36)) (unreachable)))   ;; "number has no integer representation"
+    (i64.trunc_f64_s (local.get $f)))
+
   (func $builtin_math_floor (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
     (local $v anyref)
@@ -3616,8 +3638,8 @@
     (array.new_fixed $ArgArr 1
       (call $lua_bool_to_ref
         (i64.lt_u
-          (call $as_int (call $args_at (local.get $args) (i32.const 0)))
-          (call $as_int (call $args_at (local.get $args) (i32.const 1)))))))
+          (call $as_int_co (call $args_at (local.get $args) (i32.const 0)))
+          (call $as_int_co (call $args_at (local.get $args) (i32.const 1)))))))
 
   ;; xoshiro256** single step. Mutates the four state globals; returns the
   ;; output u64. Algorithm from Blackman & Vigna's public description.
@@ -3765,7 +3787,7 @@
     (block $done (loop $lp
       (br_if $done (i32.ge_s (local.get $i) (local.get $n)))
       (local.set $v (call $args_at (local.get $args) (local.get $i)))
-      (if (call $num_lt (local.get $v) (local.get $best))
+      (if (call $lua_lt_raw (local.get $v) (local.get $best))
         (then (local.set $best (local.get $v))))
       (local.set $i (i32.add (local.get $i) (i32.const 1)))
       (br $lp)))
@@ -3780,7 +3802,7 @@
     (block $done (loop $lp
       (br_if $done (i32.ge_s (local.get $i) (local.get $n)))
       (local.set $v (call $args_at (local.get $args) (local.get $i)))
-      (if (call $num_lt (local.get $best) (local.get $v))
+      (if (call $lua_lt_raw (local.get $best) (local.get $v))
         (then (local.set $best (local.get $v))))
       (local.set $i (i32.add (local.get $i) (i32.const 1)))
       (br $lp)))

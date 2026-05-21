@@ -102,6 +102,7 @@ pass	deep_recursion	deep non-tail recursion raises a catchable "stack overflow"
 pass	os_difftime	os.difftime(t2,t1) returns the second difference as a float
 pass	os_setlocale	os.setlocale query/"C" returns "C"
 pass	io_default_files	io.input()/io.output() return default handles; io.write routes through them
+pass	math_minmax_ult	min/max use the full < operator; ult coerces int strings, rejects non-integers
 #
 # -- deferred: large milestone (open a discussion before tackling) --
 # Full <close> on early exits needs close calls injected before every

@@ -264,11 +264,10 @@ anything large.
 1. `<close>` cleanup on early exits — `__close` runs at natural block exit; `return` / `break` / `goto` / error unwinds through a scope still skip it. Completing it needs an active-close-scope stack in codegen plus per-scope `try_table` unwinding — a milestone, not a small fix.
 2. Full `debug.*` library + multi-frame traceback (today `debug.traceback` returns the current frame only; `debug.getinfo` is unimplemented — its `nparams`/`nups`/`isvararg`/`linedefined` fields need per-function metadata a no-bytecode AOT compiler doesn't retain).
 3. `load` / `loadfile` — would need the compiler itself shipped at runtime. (`require` already works via `-m FILE` modules baked in at compile time.)
-4. `math.min` / `math.max` / `math.ult` numeric-string coercion — the float-taking math functions now coerce strings and raise a catchable `number expected`; these comparison/integer-typed ones still take the direct path.
-5. Dynamic error messages with the offending value embedded (e.g. `"invalid format option 'r'"` instead of just `"invalid format"`).
-6. Coroutines — blocked on the WASM stack-switching proposal landing in browsers.
-7. Source maps so DevTools can step from compiled WASM back into Lua.
-8. `wasm-opt` step in the *CLI* build pipeline. The playground already runs Binaryen optimization opt-in; the CLI flow just calls `wasm-as` and stops there.
+4. Dynamic error messages with the offending value embedded (e.g. `"invalid format option 'r'"` instead of just `"invalid format"`).
+5. Coroutines — blocked on the WASM stack-switching proposal landing in browsers.
+6. Source maps so DevTools can step from compiled WASM back into Lua.
+7. `wasm-opt` step in the *CLI* build pipeline. The playground already runs Binaryen optimization opt-in; the CLI flow just calls `wasm-as` and stops there.
 
 ## Contributing
 
