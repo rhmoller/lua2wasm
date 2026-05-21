@@ -11,6 +11,13 @@
  * FMT_BUF_CAP in runtime/host-bindings.mjs. */
 #define LUA_FMT_BUF_CAP 16384
 
+/* Fixed-size codegen working-set caps. Each has an explicit overflow guard at
+ * its use site that raises a codegen error (never silently truncates). */
+#define MAX_BREAK_DEPTH       64   /* nested loop break targets */
+#define MAX_BLOCK_LABELS      64   /* ::labels:: declared in one block */
+#define MAX_CLOSE_SLOTS       32   /* <close> locals declared in one block */
+#define MAX_DISPATCH_IDS     128   /* label-bearing blocks per function */
+
 /* ============================================================
  * Codegen v3a.
  *
@@ -40,11 +47,33 @@
  * which has no closure/args parameters and no return value.
  * ============================================================ */
 
-/* ----- string-literal pool ----- */
+/* ----- string-literal pool -----
+ *
+ * An exact-whole-run index sits in front of the flat byte array so the common
+ * case (the same key interned again — "__index", metamethod names, library
+ * keys) resolves with a single hash probe + memcmp instead of an O(pool_bytes)
+ * brute-force scan. The index is open-addressing FNV-1a, keyed by (the bytes
+ * of) each previously-interned run and storing the offset that run resolved to.
+ *
+ * It is purely an accelerator: a hash miss falls back to strpool_scan, which
+ * still finds any matching substring — including overlap with a longer string
+ * or with the fixed LITERAL_PREFIX. Recorded offsets are always the
+ * scan-resolved (lowest) offset, so dedup decisions and emitted byte offsets
+ * are identical to the index-free version. */
+typedef struct {
+    size_t hash;     /* FNV-1a of the run's bytes (run hashed at insert time) */
+    size_t offset;   /* its resolved offset in the byte array */
+    size_t len;      /* its length, for collision verification */
+    int    used;     /* slot occupied */
+} StrIdxSlot;
+
 typedef struct {
     char *bytes;
     size_t used;
     size_t cap;
+    StrIdxSlot *idx;   /* open-addressing index; NULL until first insert */
+    size_t idx_cap;    /* power-of-two capacity */
+    size_t idx_count;  /* occupied slots */
 } StrPool;
 
 typedef struct {
@@ -52,15 +81,68 @@ typedef struct {
     size_t len;
 } StrRef;
 
-/* Find an existing run of exactly these bytes anywhere in the pool. The
- * data segment is a flat byte array addressed by (offset, len), so any
- * matching run can be shared — including overlap with a longer string or
- * with the fixed LITERAL_PREFIX. Returns SIZE_MAX if absent. */
-static size_t strpool_find(const StrPool *p, const char *bytes, size_t len) {
+static size_t strpool_hash(const char *bytes, size_t len) {
+    size_t h = 1469598103934665603u;          /* FNV-1a 64-bit offset basis */
+    for (size_t i = 0; i < len; i++) {
+        h ^= (unsigned char)bytes[i];
+        h *= 1099511628211u;                   /* FNV prime */
+    }
+    return h;
+}
+
+/* Brute-force fallback: find an existing run of exactly these bytes anywhere
+ * in the pool (substring overlap allowed). Returns SIZE_MAX if absent. */
+static size_t strpool_scan(const StrPool *p, const char *bytes, size_t len) {
     if (len == 0) return 0;            /* zero bytes read => any offset works */
     if (len > p->used) return SIZE_MAX;
     for (size_t i = 0; i + len <= p->used; i++)
         if (memcmp(p->bytes + i, bytes, len) == 0) return i;
+    return SIZE_MAX;
+}
+
+/* Record a resolved (offset,len) run in the whole-run index. Grows/rehashes
+ * the table when it passes ~70% load. */
+static void strpool_index_put(StrPool *p, size_t hash, size_t offset, size_t len);
+static void strpool_index_grow(StrPool *p) {
+    size_t new_cap = p->idx_cap ? p->idx_cap * 2 : 64;
+    StrIdxSlot *old = p->idx;
+    size_t old_cap = p->idx_cap;
+    p->idx = xmalloc(new_cap * sizeof *p->idx);
+    memset(p->idx, 0, new_cap * sizeof *p->idx);
+    p->idx_cap = new_cap;
+    p->idx_count = 0;
+    for (size_t i = 0; i < old_cap; i++)
+        if (old[i].used) strpool_index_put(p, old[i].hash, old[i].offset, old[i].len);
+    free(old);
+}
+static void strpool_index_put(StrPool *p, size_t hash, size_t offset, size_t len) {
+    if (p->idx_cap == 0 || (p->idx_count + 1) * 10 >= p->idx_cap * 7)
+        strpool_index_grow(p);
+    size_t mask = p->idx_cap - 1;
+    size_t i = hash & mask;
+    while (p->idx[i].used) {
+        if (p->idx[i].hash == hash && p->idx[i].len == len &&
+            p->idx[i].offset == offset)
+            return;                            /* already present */
+        i = (i + 1) & mask;
+    }
+    p->idx[i] = (StrIdxSlot){ .hash = hash, .offset = offset, .len = len, .used = 1 };
+    p->idx_count++;
+}
+
+/* Whole-run lookup via the index. Returns the run's offset, or SIZE_MAX on a
+ * miss (caller falls back to strpool_scan). */
+static size_t strpool_index_get(const StrPool *p, size_t hash,
+                                const char *bytes, size_t len) {
+    if (p->idx_cap == 0) return SIZE_MAX;
+    size_t mask = p->idx_cap - 1;
+    size_t i = hash & mask;
+    while (p->idx[i].used) {
+        if (p->idx[i].hash == hash && p->idx[i].len == len &&
+            memcmp(p->bytes + p->idx[i].offset, bytes, len) == 0)
+            return p->idx[i].offset;
+        i = (i + 1) & mask;
+    }
     return SIZE_MAX;
 }
 
@@ -69,8 +151,17 @@ static size_t strpool_find(const StrPool *p, const char *bytes, size_t len) {
  * repeated keys (metamethod names, "__index", library keys) single-copy in
  * the emitted $str_data segment. */
 static StrRef strpool_add(StrPool *p, const char *bytes, size_t len) {
-    size_t found = strpool_find(p, bytes, len);
-    if (found != SIZE_MAX) return (StrRef){ .offset = found, .len = len };
+    if (len == 0) return (StrRef){ .offset = 0, .len = 0 };
+    size_t hash = strpool_hash(bytes, len);
+    size_t found = strpool_index_get(p, hash, bytes, len);
+    if (found == SIZE_MAX) {
+        /* Miss on the whole-run index: a substring overlap may still exist. */
+        found = strpool_scan(p, bytes, len);
+    }
+    if (found != SIZE_MAX) {
+        strpool_index_put(p, hash, found, len);
+        return (StrRef){ .offset = found, .len = len };
+    }
     if (p->used + len > p->cap) {
         size_t new_cap = p->cap ? p->cap : 64;
         while (p->used + len > new_cap) new_cap *= 2;
@@ -80,7 +171,15 @@ static StrRef strpool_add(StrPool *p, const char *bytes, size_t len) {
     StrRef r = { .offset = p->used, .len = len };
     memcpy(p->bytes + p->used, bytes, len);
     p->used += len;
+    strpool_index_put(p, hash, r.offset, len);
     return r;
+}
+
+static void strpool_free(StrPool *p) {
+    free(p->bytes);
+    free(p->idx);
+    p->bytes = NULL;
+    p->idx = NULL;
 }
 
 /* ----- label-scope stack for goto / ::label:: -----
@@ -120,7 +219,7 @@ typedef struct {
     StrPool strs;
     int next_label;
     int in_main;            /* 1 while emitting $main body, 0 inside user fn */
-    int break_labels[64];   /* break targets for nested while/for/repeat */
+    int break_labels[MAX_BREAK_DEPTH];   /* break targets for nested while/for/repeat */
     int break_depth;
     int for_depth;          /* nesting depth of numeric/generic for-loops;
                              * indexes per-level $for_* scratch locals so a
@@ -208,7 +307,7 @@ static int push_break_label(CG *c, int label) {
  */
 
 typedef struct LabelAnalysisScope {
-    Stmt *labels[64];       /* up to 64 labels per single block */
+    Stmt *labels[MAX_BLOCK_LABELS]; /* up to MAX_BLOCK_LABELS labels per block */
     int n;
     struct LabelAnalysisScope *parent;
 } LabelAnalysisScope;
@@ -256,7 +355,7 @@ static void la_block(CG *c, const Block *b, LabelAnalysisScope *parent) {
     for (size_t i = 0; i < b->count; i++) {
         Stmt *st = b->items[i];
         if (st->kind != STMT_LABEL) continue;
-        if (scope.n >= 64) {
+        if (scope.n >= MAX_BLOCK_LABELS) {
             cg_error(c, "too many labels in one block (limit 64)");
             return;
         }
@@ -564,7 +663,9 @@ static const char *binop_helper(BinOp op) {
         case BIN_BXOR:   return "$lua_bxor";
         case BIN_SHL:    return "$lua_shl";
         case BIN_SHR:    return "$lua_shr";
-        default:         return "$lua_add";
+        /* BIN_AND / BIN_OR are short-circuiting and handled in emit_binop
+         * before reaching here; any other value is a codegen bug. */
+        default:         return NULL;
     }
 }
 
@@ -650,10 +751,12 @@ static void emit_binop(CG *c, const Expr *e, int depth) {
         emit_indent(c, depth); wat_append(c->w, ")\n");
         return;
     }
+    const char *helper = binop_helper(op);
+    if (!helper) { cg_error(c, "internal: unhandled binary operator"); return; }
     emit_expr(c, e->as.binop.lhs, depth);
     emit_expr(c, e->as.binop.rhs, depth);
     emit_indent(c, depth);
-    wat_appendf(c->w, "(call %s)\n", binop_helper(op));
+    wat_appendf(c->w, "(call %s)\n", helper);
 }
 
 static void emit_unop(CG *c, const Expr *e, int depth) {
@@ -2682,8 +2785,8 @@ static void emit_block(CG *c, const Block *b, int depth) {
     for (size_t i = 0; i < b->count; i++) {
         if (b->items[i]->kind == STMT_LABEL) { has_labels = 1; break; }
     }
-    int close_slots[32];
-    int n_close = collect_close_slots(b, close_slots, 32);
+    int close_slots[MAX_CLOSE_SLOTS];
+    int n_close = collect_close_slots(b, close_slots, MAX_CLOSE_SLOTS);
     if (!has_labels) {
         for (size_t i = 0; i < b->count; i++) emit_stmt(c, b->items[i], depth);
         emit_close_calls(c, close_slots, n_close, depth);
@@ -2693,7 +2796,7 @@ static void emit_block(CG *c, const Block *b, int depth) {
     /* Compute segment boundaries: seg_start[k] = index of the first stmt
      * in segment k (k = 0..N). Segment 0 starts at 0; segment k>=1 starts
      * at the position AFTER the k-th label statement. */
-    int seg_start[65];                          /* up to 64 labels + sentinel */
+    int seg_start[MAX_BLOCK_LABELS + 1];        /* one slot per label + sentinel */
     int N = 0;
     int bid = -1;
     seg_start[0] = 0;
@@ -2702,7 +2805,7 @@ static void emit_block(CG *c, const Block *b, int depth) {
         if (st->kind != STMT_LABEL) continue;
         if (N == 0) bid = st->as.label.block_dispatch_id;
         N++;
-        if (N >= 64) { cg_error(c, "too many labels in one block (limit 64)"); return; }
+        if (N >= MAX_BLOCK_LABELS) { cg_error(c, "too many labels in one block (limit 64)"); return; }
         seg_start[N] = (int)i + 1;
     }
     int seg_end_N = (int)b->count;              /* end of segment N */
@@ -2774,35 +2877,39 @@ static void emit_block(CG *c, const Block *b, int depth) {
 
 /* Walk a block body collecting dispatch ids of every block-with-labels.
  * Output is the set of distinct ids (no duplicates because each block's
- * dispatch id is uniquely the id of its first label). */
-static void collect_dispatch_ids(const Block *b, int *out, int *n, int cap);
-static void collect_dispatch_ids_stmt(const Stmt *s, int *out, int *n, int cap) {
+ * dispatch id is uniquely the id of its first label). On overflow this raises
+ * a codegen error rather than dropping ids — a dropped id would leave its
+ * $next_<id> local undeclared, producing invalid WAT. */
+static void collect_dispatch_ids(CG *c, const Block *b, int *out, int *n, int cap);
+static void collect_dispatch_ids_stmt(CG *c, const Stmt *s, int *out, int *n, int cap) {
     switch (s->kind) {
-    case STMT_DO:      collect_dispatch_ids(&s->as.do_stmt.body,    out, n, cap); break;
-    case STMT_WHILE:   collect_dispatch_ids(&s->as.while_stmt.body, out, n, cap); break;
-    case STMT_REPEAT:  collect_dispatch_ids(&s->as.repeat.body,     out, n, cap); break;
-    case STMT_FOR_NUM: collect_dispatch_ids(&s->as.for_num.body,    out, n, cap); break;
-    case STMT_FOR_GEN: collect_dispatch_ids(&s->as.for_gen.body,    out, n, cap); break;
+    case STMT_DO:      collect_dispatch_ids(c, &s->as.do_stmt.body,    out, n, cap); break;
+    case STMT_WHILE:   collect_dispatch_ids(c, &s->as.while_stmt.body, out, n, cap); break;
+    case STMT_REPEAT:  collect_dispatch_ids(c, &s->as.repeat.body,     out, n, cap); break;
+    case STMT_FOR_NUM: collect_dispatch_ids(c, &s->as.for_num.body,    out, n, cap); break;
+    case STMT_FOR_GEN: collect_dispatch_ids(c, &s->as.for_gen.body,    out, n, cap); break;
     case STMT_IF:
         for (size_t i = 0; i < s->as.if_stmt.narms; i++)
-            collect_dispatch_ids(&s->as.if_stmt.arms[i].body, out, n, cap);
+            collect_dispatch_ids(c, &s->as.if_stmt.arms[i].body, out, n, cap);
         if (s->as.if_stmt.has_else)
-            collect_dispatch_ids(&s->as.if_stmt.else_body, out, n, cap);
+            collect_dispatch_ids(c, &s->as.if_stmt.else_body, out, n, cap);
         break;
     default: break;
     }
 }
-static void collect_dispatch_ids(const Block *b, int *out, int *n, int cap) {
+static void collect_dispatch_ids(CG *c, const Block *b, int *out, int *n, int cap) {
     /* Find the first label in this block (if any) — its id is the dispatch id. */
     for (size_t i = 0; i < b->count; i++) {
         const Stmt *st = b->items[i];
         if (st->kind == STMT_LABEL) {
-            if (*n < cap) out[(*n)++] = st->as.label.block_dispatch_id;
+            if (*n >= cap) { cg_error(c, "too many label-bearing blocks in one function"); return; }
+            out[(*n)++] = st->as.label.block_dispatch_id;
             break;
         }
     }
     for (size_t i = 0; i < b->count; i++) {
-        collect_dispatch_ids_stmt(b->items[i], out, n, cap);
+        collect_dispatch_ids_stmt(c, b->items[i], out, n, cap);
+        if (!c->ok) return;
     }
 }
 
@@ -3044,8 +3151,8 @@ static void emit_user_function(CG *c, const LuaFunc *fn, int direct, int ret_sin
      * function so STMT_GOTO can target them and emit_block can read them
      * in br_table. Default-zero i32 ⇒ first dispatch lands in segment 0. */
     {
-        int bids[128]; int n = 0;
-        collect_dispatch_ids(&fn->body, bids, &n, 128);
+        int bids[MAX_DISPATCH_IDS]; int n = 0;
+        collect_dispatch_ids(c, &fn->body, bids, &n, MAX_DISPATCH_IDS);
         for (int i = 0; i < n; i++) {
             wat_appendf(w, "    (local $next_%d i32)\n", bids[i]);
         }
@@ -3054,8 +3161,13 @@ static void emit_user_function(CG *c, const LuaFunc *fn, int direct, int ret_sin
     /* Param extraction: from args[i] (normal) or the direct $pi param. */
     for (int i = 0; i < fn->n_params; i++) {
         char src[64];
-        if (direct) snprintf(src, sizeof src, "(local.get $p%d)", i);
-        else        snprintf(src, sizeof src, "(call $args_at (local.get $args) (i32.const %d))", i);
+        int sn = direct
+            ? snprintf(src, sizeof src, "(local.get $p%d)", i)
+            : snprintf(src, sizeof src, "(call $args_at (local.get $args) (i32.const %d))", i);
+        if (sn < 0 || (size_t)sn >= sizeof src) {
+            cg_error(c, "param-extraction expression too long");
+            return;
+        }
         if (fn->captured && fn->captured[i])
             wat_appendf(w, "    (local.set $L%d (struct.new $Box %s))\n", i, src);
         else
@@ -3587,8 +3699,8 @@ static void emit_main_chunk(CG *c) {
                             " (local $ifor_next_%d i64)\n", d, d, d);
     }
     {
-        int bids[128]; int n = 0;
-        collect_dispatch_ids(&pr->main_body, bids, &n, 128);
+        int bids[MAX_DISPATCH_IDS]; int n = 0;
+        collect_dispatch_ids(c, &pr->main_body, bids, &n, MAX_DISPATCH_IDS);
         for (int i = 0; i < n; i++) {
             wat_appendf(out, "    (local $next_%d i32)\n", bids[i]);
         }
@@ -3780,7 +3892,12 @@ int codegen_module(const ParseResult *pr, const char *src_name,
         const char *key = builtin_name(bi);
         if (key[0] == '_') continue;   /* internal-only (e.g. _ipairs_iter) */
         char val[128];
-        snprintf(val, sizeof(val), "(global.get $g_%s)", builtin_func_name(bi) + 1);
+        int vn = snprintf(val, sizeof(val), "(global.get $g_%s)",
+                          builtin_func_name(bi) + 1);
+        if (vn < 0 || (size_t)vn >= sizeof(val)) {
+            cg_error(&c, "builtin global-get expression too long");
+            break;
+        }
         emit_tab_set_str(&c, "(ref.as_non_null (global.get $g_globals))",
                          key, strlen(key), val);
     }
@@ -3823,13 +3940,13 @@ int codegen_module(const ParseResult *pr, const char *src_name,
 
     if (!c.ok) {
         snprintf(err, errlen, "%s", c.err);
-        free(c.strs.bytes);
+        strpool_free(&c.strs);
         free(live); free(gref);
         free_func_bindings(&c);   /* before free_signatures: it reads c.n_sigs */
         free_signatures(&c);
         return 0;
     }
-    free(c.strs.bytes);
+    strpool_free(&c.strs);
     free(live); free(gref);
     free_func_bindings(&c);       /* before free_signatures: it reads c.n_sigs */
     free_signatures(&c);
