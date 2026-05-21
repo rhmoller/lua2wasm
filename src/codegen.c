@@ -125,6 +125,11 @@ typedef struct {
     int opt_int;
     const unsigned char *cur_is_int;
     const unsigned char *cur_is_float;   /* slots proven float-only -> unboxed f64 */
+    /* Direct-call PoC (lever 3): cur_func_slot[s] != NULL means local slot s is
+     * statically bound to that LuaFunc (a non-captured, never-reassigned local
+     * function), so a call f(args) of matching arity can skip the $ArgArr and
+     * invoke the function's direct-args entry $user_N_da. */
+    const LuaFunc **cur_func_slot;
     int cur_n_params;
     /* goto/label state */
     int next_label_id;      /* fresh per function body */
@@ -587,6 +592,23 @@ static void emit_multival_array(CG *c, const Expr *e, int depth) {
     emit_call_array(c, e, depth);
 }
 
+/* If `e` is a call whose callee is a statically-bound local function (lever 3)
+ * invoked with exactly its parameter count and no multi-value-splat argument,
+ * return that LuaFunc — the call can go to the direct-args entry $user_N_da and
+ * skip building an $ArgArr. Otherwise NULL. */
+static const LuaFunc *direct_call_target(CG *c, const Expr *e) {
+    if (!c->opt_int || !c->cur_func_slot || e->kind != EXPR_CALL) return NULL;
+    const Expr *callee = e->as.call.callee;
+    if (callee->kind != EXPR_VAR || callee->as.var.kind != VAR_LOCAL) return NULL;
+    int slot = callee->as.var.idx;
+    if (slot < 0 || slot >= c->cur_n_locals) return NULL;
+    const LuaFunc *K = c->cur_func_slot[slot];
+    if (!K || K->is_vararg || (int)e->as.call.nargs != K->n_params) return NULL;
+    for (size_t i = 0; i < e->as.call.nargs; i++)
+        if (is_multival_tail(e->as.call.args[i])) return NULL;
+    return K;
+}
+
 /* Build a (ref $ArgArr) from a sequence of argument expressions, splicing
  * the trailing expression's full multi-value result if it is a call or `...`. */
 static void emit_args_array(CG *c, Expr **args, size_t nargs, int depth) {
@@ -655,6 +677,23 @@ static void emit_call_array(CG *c, const Expr *e, int depth) {
         emit_indent(c, depth + 1); wat_append(c->w, ")\n");
         emit_indent(c, depth + 1);
         wat_appendf(c->w, "(i32.const %d)\n", e->line);
+        emit_indent(c, depth); wat_append(c->w, ")\n");
+        return;
+    }
+    const LuaFunc *dt = direct_call_target(c, e);
+    if (dt) {
+        /* Direct-args call: pass the closure + unpacked args to $user_N_da,
+         * no $ArgArr allocation. Returns the result array like $lua_call_any.
+         * (Frame push/pop is skipped — a known function needs no __call walk;
+         * error positions inside it fall back to the caller's frame, matching
+         * the project's "error position not tracked" stance.) */
+        emit_indent(c, depth);
+        wat_appendf(c->w, "(call $user_%d_da\n", dt->func_idx);
+        emit_indent(c, depth + 1); wat_append(c->w, "(ref.cast (ref $LuaClosure)\n");
+        emit_expr(c, e->as.call.callee, depth + 2);
+        emit_indent(c, depth + 1); wat_append(c->w, ")\n");
+        for (size_t i = 0; i < e->as.call.nargs; i++)
+            emit_expr(c, e->as.call.args[i], depth + 1);
         emit_indent(c, depth); wat_append(c->w, ")\n");
         return;
     }
@@ -1158,6 +1197,62 @@ static void compute_float_slots(CG *c, const Block *body, int n_locals, int n_pa
     while (changed) { changed = 0; float_kill_block(c, body, out, &changed); }
     c->cur_is_float = saved;
     c->cur_n_locals = saved_n;
+}
+
+/* Record which local slots are statically bound to a known function (lever 3). */
+static void func_slot_walk(const Block *b, const LuaFunc **out,
+                           unsigned char *reassigned, int n);
+static void func_slot_walk_stmt(const Stmt *s, const LuaFunc **out,
+                                unsigned char *reassigned, int n) {
+    switch (s->kind) {
+    case STMT_LOCAL_FUNC: {
+        int sl = s->as.local_func.local_idx;
+        if (sl >= 0 && sl < n) out[sl] = s->as.local_func.func;
+        break;
+    }
+    case STMT_LOCAL:
+        if (s->as.local.n_values == s->as.local.n_names)
+            for (int j = 0; j < s->as.local.n_names; j++)
+                if (s->as.local.values[j]->kind == EXPR_FUNCTION) {
+                    int sl = s->as.local.local_idxs[j];
+                    if (sl >= 0 && sl < n) out[sl] = s->as.local.values[j]->as.func_expr.func;
+                }
+        break;
+    case STMT_ASSIGN:
+        for (int j = 0; j < s->as.assign.n_targets; j++) {
+            AssignTarget *t = &s->as.assign.targets[j];
+            if (t->kind == TGT_VAR && t->as.var.kind == VAR_LOCAL
+                && t->as.var.idx >= 0 && t->as.var.idx < n)
+                reassigned[t->as.var.idx] = 1;
+        }
+        break;
+    case STMT_IF:
+        for (size_t a = 0; a < s->as.if_stmt.narms; a++)
+            func_slot_walk(&s->as.if_stmt.arms[a].body, out, reassigned, n);
+        if (s->as.if_stmt.has_else) func_slot_walk(&s->as.if_stmt.else_body, out, reassigned, n);
+        break;
+    case STMT_WHILE:   func_slot_walk(&s->as.while_stmt.body, out, reassigned, n); break;
+    case STMT_DO:      func_slot_walk(&s->as.do_stmt.body,    out, reassigned, n); break;
+    case STMT_REPEAT:  func_slot_walk(&s->as.repeat.body,     out, reassigned, n); break;
+    case STMT_FOR_NUM: func_slot_walk(&s->as.for_num.body,    out, reassigned, n); break;
+    case STMT_FOR_GEN: func_slot_walk(&s->as.for_gen.body,    out, reassigned, n); break;
+    default: break;
+    }
+}
+static void func_slot_walk(const Block *b, const LuaFunc **out,
+                           unsigned char *reassigned, int n) {
+    for (size_t i = 0; i < b->count; i++) func_slot_walk_stmt(b->items[i], out, reassigned, n);
+}
+
+static void compute_func_slots(const Block *body, int n_locals,
+                               const unsigned char *captured, const LuaFunc **out) {
+    unsigned char *reassigned = calloc(n_locals ? n_locals : 1, 1);
+    for (int i = 0; i < n_locals; i++) out[i] = NULL;
+    func_slot_walk(body, out, reassigned, n_locals);
+    /* A reassigned or captured slot can't be guaranteed to still hold K. */
+    for (int i = 0; i < n_locals; i++)
+        if (reassigned[i] || (captured && captured[i])) out[i] = NULL;
+    free(reassigned);
 }
 
 /* ----- main expression dispatch ----- */
@@ -2196,33 +2291,47 @@ static const char *verify_literal_slab(void) {
 }
 
 /* Emit the body of one user function. */
-static void emit_user_function(CG *c, const LuaFunc *fn) {
+static void emit_user_function(CG *c, const LuaFunc *fn, int direct) {
     WatBuilder *w = c->w;
-    wat_appendf(w,
-        "  (func $user_%d (type $LuaFn) "
-        "(param $closure (ref $LuaClosure)) "
-        "(param $args (ref $ArgArr)) (result (ref $ArgArr))\n",
-        fn->func_idx);
+    if (direct) {
+        /* Direct-args entry: closure + one anyref param per declared parameter,
+         * no $args/$ArgArr. Same body and array-based return as $user_N. */
+        wat_appendf(w, "  (func $user_%d_da (param $closure (ref $LuaClosure))",
+                    fn->func_idx);
+        for (int i = 0; i < fn->n_params; i++) wat_appendf(w, " (param $p%d anyref)", i);
+        wat_append(w, " (result (ref $ArgArr))\n");
+    } else {
+        wat_appendf(w,
+            "  (func $user_%d (type $LuaFn) "
+            "(param $closure (ref $LuaClosure)) "
+            "(param $args (ref $ArgArr)) (result (ref $ArgArr))\n",
+            fn->func_idx);
+    }
 
     /* Wire escape-analysis state for this body. */
     const unsigned char *prev_captured = c->cur_captured;
     int prev_n_locals = c->cur_n_locals;
     const unsigned char *prev_is_int = c->cur_is_int;
     const unsigned char *prev_is_float = c->cur_is_float;
+    const LuaFunc **prev_func_slot = c->cur_func_slot;
     int prev_n_params = c->cur_n_params;
     c->cur_captured = fn->captured;
     c->cur_n_locals = fn->n_locals;
     c->cur_n_params = fn->n_params;
     unsigned char *isint = NULL, *isfloat = NULL;
+    const LuaFunc **fslot = NULL;
     if (c->opt_int) {
         isint = calloc(fn->n_locals ? fn->n_locals : 1, 1);
         compute_int_slots(c, &fn->body, fn->n_locals, fn->n_params, fn->captured, isint);
         c->cur_is_int = isint;
         isfloat = calloc(fn->n_locals ? fn->n_locals : 1, 1);
         compute_float_slots(c, &fn->body, fn->n_locals, fn->n_params, fn->captured, isfloat);
+        fslot = calloc(fn->n_locals ? fn->n_locals : 1, sizeof *fslot);
+        compute_func_slots(&fn->body, fn->n_locals, fn->captured, fslot);
     }
     c->cur_is_int = isint;
     c->cur_is_float = isfloat;
+    c->cur_func_slot = fslot;
 
     /* Run the label pre-pass NOW so block_dispatch_id is populated on
      * every label and goto before we emit the $next_BID i32 locals. */
@@ -2270,17 +2379,15 @@ static void emit_user_function(CG *c, const LuaFunc *fn) {
         }
     }
 
-    /* Param extraction: each declared parameter takes args[i] (nil if missing). */
+    /* Param extraction: from args[i] (normal) or the direct $pi param. */
     for (int i = 0; i < fn->n_params; i++) {
-        if (fn->captured && fn->captured[i]) {
-            wat_appendf(w,
-                "    (local.set $L%d (struct.new $Box "
-                "(call $args_at (local.get $args) (i32.const %d))))\n", i, i);
-        } else {
-            wat_appendf(w,
-                "    (local.set $L%d "
-                "(call $args_at (local.get $args) (i32.const %d)))\n", i, i);
-        }
+        char src[64];
+        if (direct) snprintf(src, sizeof src, "(local.get $p%d)", i);
+        else        snprintf(src, sizeof src, "(call $args_at (local.get $args) (i32.const %d))", i);
+        if (fn->captured && fn->captured[i])
+            wat_appendf(w, "    (local.set $L%d (struct.new $Box %s))\n", i, src);
+        else
+            wat_appendf(w, "    (local.set $L%d %s)\n", i, src);
     }
     if (fn->is_vararg) {
         wat_appendf(w,
@@ -2311,16 +2418,20 @@ static void emit_user_function(CG *c, const LuaFunc *fn) {
     wat_append(w, "    (global.get $g_empty_args)\n");
     wat_append(w, "  )\n");
 
-    /* Declare so the funcref is usable in const init / closures. */
-    wat_appendf(w, "  (elem declare func $user_%d)\n", fn->func_idx);
+    /* Declare so the funcref is usable in const init / closures. The direct
+     * entry is only ever called by name, so it needs no elem declare. */
+    if (!direct)
+        wat_appendf(w, "  (elem declare func $user_%d)\n", fn->func_idx);
 
     c->cur_captured = prev_captured;
     c->cur_n_locals = prev_n_locals;
     c->cur_is_int = prev_is_int;
     c->cur_is_float = prev_is_float;
+    c->cur_func_slot = prev_func_slot;
     c->cur_n_params = prev_n_params;
     free(isint);
     free(isfloat);
+    free(fslot);
 }
 
 /* ---------- tree-shaking (milestone 0 / size opt) ---------- */
@@ -2747,15 +2858,19 @@ static void emit_main_chunk(CG *c) {
     c->cur_n_locals = pr->main_n_locals;
     c->cur_n_params = 0;
     unsigned char *isint = NULL, *isfloat = NULL;
+    const LuaFunc **fslot = NULL;
     if (c->opt_int) {
         isint = calloc(pr->main_n_locals ? pr->main_n_locals : 1, 1);
         compute_int_slots(c, &pr->main_body, pr->main_n_locals, 0, pr->main_captured, isint);
         c->cur_is_int = isint;
         isfloat = calloc(pr->main_n_locals ? pr->main_n_locals : 1, 1);
         compute_float_slots(c, &pr->main_body, pr->main_n_locals, 0, pr->main_captured, isfloat);
+        fslot = calloc(pr->main_n_locals ? pr->main_n_locals : 1, sizeof *fslot);
+        compute_func_slots(&pr->main_body, pr->main_n_locals, pr->main_captured, fslot);
     }
     c->cur_is_int = isint;
     c->cur_is_float = isfloat;
+    c->cur_func_slot = fslot;
     /* Pre-pass before locals: dispatch ids must be assigned so the
      * $next_BID i32 locals can be declared up-front. */
     c->next_label_id = 0;
@@ -2808,8 +2923,10 @@ static void emit_main_chunk(CG *c) {
     wat_append(out, "  )\n");
     c->cur_is_int = NULL;
     c->cur_is_float = NULL;
+    c->cur_func_slot = NULL;
     free(isint);
     free(isfloat);
+    free(fslot);
 }
 
 /* Emit the `$str_data` passive data segment: every interned byte of the
@@ -2992,7 +3109,10 @@ int codegen_module(const ParseResult *pr, const char *src_name,
     wat_append(out, "  ;; --- user functions ---\n");
 
     for (size_t i = 0; i < pr->funcs.count; i++) {
-        emit_user_function(&c, pr->funcs.items[i]);
+        emit_user_function(&c, pr->funcs.items[i], 0);
+        /* Direct-args entry for the lever-3 fast call path (non-vararg only). */
+        if (c.opt_int && !pr->funcs.items[i]->is_vararg)
+            emit_user_function(&c, pr->funcs.items[i], 1);
         if (!c.ok) break;
     }
 
