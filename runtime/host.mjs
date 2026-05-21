@@ -17,7 +17,7 @@ if (!wasmPath) {
 
 let instance;
 const helpers = makeHelpers({ getInstance: () => instance, formatFloat, cFormatG });
-const { luaToString, formatSpec, parseLuaNumber, osDate, osGetenv } = helpers;
+const { luaToString, formatSpec, parseLuaNumber, osDate, osGetenv, objId } = helpers;
 
 // Optional override for deterministic tests: if LUA2WASM_TEST_TIME is set
 // (decimal unix seconds), `os.time()` and the implicit `os.date()` "now"
@@ -191,6 +191,7 @@ function osTmpname() {
     host: {
         print:     (v) => { process.stdout.write(luaToString(v) + "\n"); },
         write_raw: (v) => { process.stdout.write(luaToString(v)); },
+        obj_id:    (v) => objId(v),
         write_err: (v) => { process.stderr.write(luaToString(v)); },
         warn:      (v) => { process.stderr.write("Lua warning: " + luaToString(v) + "\n"); },
         fmt:       (kind, i, f, prec) => {

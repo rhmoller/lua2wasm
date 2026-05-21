@@ -142,6 +142,20 @@ export function makeHelpers({ getInstance, formatFloat, cFormatG }) {
         return new TextDecoder().decode(out);
     }
 
+    // Stable, distinct per-object identity for the "type: 0xADDR" forms of
+    // tostring / string.format("%p") on functions and strings. WasmGC objects
+    // exposed to JS keep their identity across calls, so a WeakMap assigns each
+    // a lazily-allocated id (only paid when an address is actually rendered).
+    // Tables already carry their own struct $id and don't use this.
+    const objIds = new WeakMap();
+    let nextObjId = 0;
+    function objId(v) {
+        if (v === null || typeof v !== "object") return 0;
+        let id = objIds.get(v);
+        if (id === undefined) { id = (nextObjId = (nextObjId + 1) | 0); objIds.set(v, id); }
+        return id;
+    }
+
     function luaToString(v) {
         if (v === null || v === undefined) return "nil";
         const tag = exp().lua_tag(v);
@@ -540,6 +554,7 @@ export function makeHelpers({ getInstance, formatFloat, cFormatG }) {
     return {
         readLuaString,
         luaToString,
+        objId,
         writeFmtBuf,
         formatSpec,
         parseLuaNumber,

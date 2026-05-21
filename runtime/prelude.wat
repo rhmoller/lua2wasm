@@ -55,6 +55,9 @@
 
   (import "host" "print" (func $host_print (param anyref)))
   (import "host" "write_raw" (func $host_write_raw (param anyref)))
+  ;; Stable, distinct per-object id for the address form of tostring / %p on
+  ;; functions and strings (tables carry their own struct $id).
+  (import "host" "obj_id" (func $host_obj_id (param anyref) (result i32)))
   (import "host" "warn"  (func $host_warn  (param anyref)))
   ;; host_write_err: stderr counterpart to host_write_raw. Used by the
   ;; io.stderr file handle's :write method.
@@ -1019,7 +1022,7 @@
     (if (ref.test (ref $LuaClosure) (local.get $v))
       (then (return (call $obj_addr_string
         (array.new_data $LuaArr $str_data (i32.const 36) (i32.const 8))
-        (i32.const 0)))))   ;; "function"
+        (call $host_obj_id (local.get $v))))))   ;; "function"
     ;; Unknown type: nil placeholder so we never trap.
     (struct.new $LuaString
       (array.new_data $LuaArr $str_data (i32.const 0) (i32.const 3))))
@@ -5980,14 +5983,14 @@
   ;; string.format("%p", v): an address-bearing value (string, table,
   ;; function) formats as "0x<addr>"; everything else (nil, number, boolean)
   ;; is "(null)" — matching reference lua_topointer. Tables use their unique
-  ;; $id; strings/functions share a constant address (per tostring).
+  ;; struct $id; strings/functions get a stable, distinct host-assigned id.
   (func $fmt_ptr (param $v anyref) (result (ref $LuaString))
     (if (ref.test (ref $LuaTable) (local.get $v))
       (then (return (call $ptr_hex
         (struct.get $LuaTable $id (ref.cast (ref $LuaTable) (local.get $v)))))))
     (if (i32.or (ref.test (ref $LuaString) (local.get $v))
                 (ref.test (ref $LuaClosure) (local.get $v)))
-      (then (return (call $ptr_hex (i32.const 0)))))
+      (then (return (call $ptr_hex (call $host_obj_id (local.get $v))))))
     (struct.new $LuaString (array.new_fixed $LuaArr 6
       (i32.const 40) (i32.const 110) (i32.const 117)
       (i32.const 108) (i32.const 108) (i32.const 41))))   ;; "(null)"

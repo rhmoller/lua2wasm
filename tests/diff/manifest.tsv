@@ -95,7 +95,7 @@ pass	table_insert_remove_bounds	insert/remove raise on out-of-range pos / wrong 
 #
 # -- tractable: fixes in progress (flip to `pass` as each lands) --
 xfail	math_arg_coerce	math.* coerce numeric strings; non-number raises catchable "number expected"
-xfail	obj_addr_distinct	function tostring/%p carries a stable, distinct per-object address
+pass	obj_addr_distinct	function tostring/%p carries a stable, distinct per-object address
 pass	compare_type_msg	order-compare error names operand types (two table values / table with number)
 pass	mt_name	__name renames an object in tostring and type-aware compare errors
 xfail	deep_recursion	deep non-tail recursion raises a catchable "stack overflow"
