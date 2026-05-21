@@ -1,0 +1,1 @@
+lua5.5: goto_into_scope.lua:10: <goto skip> at line 7 jumps into the scope of 'x'

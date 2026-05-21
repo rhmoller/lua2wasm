@@ -89,5 +89,26 @@ pass	float_tostring_15g	float tostring widened to %.15g; %.17g fallback when nee
 pass	table_insert_remove_bounds	insert/remove raise on out-of-range pos / wrong arity
 #
 # Captured bugs (xfail) ----------------------------------------------------
-# (none — all captured differences resolved. Note: error-message *wording* and
-# chunk-name formatting are intentionally not tracked; only semantic behavior.)
+# Found by the 2026-05-21 sweep over README "incomplete/partial features" and
+# "runtime sharp edges". Note: error-message *wording* and chunk-name
+# formatting are intentionally not tracked; only semantic behavior.
+#
+# -- tractable: fixes in progress (flip to `pass` as each lands) --
+xfail	math_arg_coerce	math.* coerce numeric strings; non-number raises catchable "number expected"
+xfail	obj_addr_distinct	function tostring/%p carries a stable, distinct per-object address
+xfail	compare_type_msg	order-compare error names operand types (two table values / table with number)
+xfail	mt_name	__name renames an object in tostring and type-aware compare errors
+xfail	deep_recursion	deep non-tail recursion raises a catchable "stack overflow"
+xfail	os_difftime	os.difftime(t2,t1) returns the second difference as a float
+xfail	os_setlocale	os.setlocale query/"C" returns "C"
+xfail	io_default_files	io.input()/io.output() return default handles; io.write routes through them
+xfail	close_early_exit	<close> runs __close on return/break/goto/error exits, reverse order
+#
+# -- blocked by hard constraints / missing metadata (kept captured) --
+xfail	nan_sign	tostring(0/0) sign is platform-dependent (WASM canonicalises NaN positive)
+xfail	mt_gc	__gc finalizers impossible: no bundled GC, no WasmGC finalization hook
+xfail	mt_mode	__mode weak tables impossible: WasmGC has no weak references
+xfail	collectgarbage_count	no managed GC to report live memory for "count"
+xfail	debug_getinfo	nparams/nups/isvararg/linedefined need codegen debug metadata we don't retain
+xfail	strict_global	Lua 5.5 strict-global rejection is compile-time (harness sees <compile-fail>)
+xfail	goto_into_scope	reject goto into a local's scope — compile-time parity (needs parser machinery)
