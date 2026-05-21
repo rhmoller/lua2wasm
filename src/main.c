@@ -1,25 +1,35 @@
+/* fileno(), fstat() and S_ISREG are POSIX, not ISO C; the build uses
+ * strict -std=c23 (no GNU extensions), so request them explicitly. */
+#define _POSIX_C_SOURCE 200809L
+
 #include "codegen.h"
 #include "lexer.h"
 #include "parser.h"
 #include "wat_builder.h"
+#include "xalloc.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 static char *read_file(const char *path) {
     FILE *f = fopen(path, "rb");
     if (!f) { perror(path); return NULL; }
-    fseek(f, 0, SEEK_END);
-    long n = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    if (n < 0) { fclose(f); return NULL; }
-    char *buf = malloc((size_t)n + 1);
-    if (!buf) {
-        fprintf(stderr, "%s: out of memory reading %ld bytes\n", path, n);
+    /* Reject anything that isn't a regular file up front — fopen("rb") on a
+     * directory "succeeds" on many platforms, then fseek/fread misbehave. */
+    struct stat st;
+    if (fstat(fileno(f), &st) != 0) { perror(path); fclose(f); return NULL; }
+    if (!S_ISREG(st.st_mode)) {
+        fprintf(stderr, "%s: not a regular file\n", path);
         fclose(f);
         return NULL;
     }
+    if (fseek(f, 0, SEEK_END) != 0) { perror(path); fclose(f); return NULL; }
+    long n = ftell(f);
+    if (n < 0) { perror(path); fclose(f); return NULL; }
+    if (fseek(f, 0, SEEK_SET) != 0) { perror(path); fclose(f); return NULL; }
+    char *buf = xmalloc((size_t)n + 1);
     size_t got = fread(buf, 1, (size_t)n, f);
     if (got != (size_t)n) {
         fprintf(stderr, "%s: short read (%zu of %ld bytes)\n", path, got, n);
@@ -51,13 +61,17 @@ static void usage(const char *prog) {
         prog);
 }
 
-/* Extract module name from a path: basename without .lua suffix. */
-static void module_name_of(const char *path, char *out, size_t cap) {
+/* Extract module name from a path: basename without .lua suffix.
+ * Returns 0 on success, -1 if the basename didn't fit in `cap`
+ * (truncation would mis-key require(), so the caller must error out). */
+static int module_name_of(const char *path, char *out, size_t cap) {
     const char *base = strrchr(path, '/');
     base = base ? base + 1 : path;
-    snprintf(out, cap, "%s", base);
+    int w = snprintf(out, cap, "%s", base);
+    if (w < 0 || (size_t)w >= cap) return -1;
     size_t n = strlen(out);
     if (n >= 4 && strcmp(out + n - 4, ".lua") == 0) out[n - 4] = '\0';
+    return 0;
 }
 
 #define MAX_MODULES 32
@@ -99,36 +113,33 @@ int main(int argc, char **argv) {
     char *src = entry_src;
     char *combined = NULL;
     if (n_modules > 0) {
-        size_t total = 0;
-        char *mod_srcs[MAX_MODULES];
+        /* Use a growable WatBuilder rather than a hand-estimated buffer:
+         * it grows exactly as needed and aborts (via xalloc) on OOM, so
+         * there's no unchecked size estimate to get wrong. */
+        WatBuilder cb;
+        wat_init(&cb);
         char mod_names[MAX_MODULES][128];
         for (int i = 0; i < n_modules; i++) {
-            mod_srcs[i] = read_file(modules[i]);
-            if (!mod_srcs[i]) return 1;
-            strip_shebang(mod_srcs[i]);
-            module_name_of(modules[i], mod_names[i], sizeof(mod_names[i]));
-            /* approx: wrapper + name + content + end-newline */
-            total += strlen(mod_srcs[i]) + strlen(mod_names[i]) + 64;
+            char *ms = read_file(modules[i]);
+            if (!ms) { wat_free(&cb); return 1; }
+            strip_shebang(ms);
+            if (module_name_of(modules[i], mod_names[i],
+                               sizeof(mod_names[i])) != 0) {
+                fprintf(stderr, "%s: module name too long (max %zu)\n",
+                        modules[i], sizeof(mod_names[i]) - 1);
+                free(ms);
+                wat_free(&cb);
+                return 1;
+            }
+            wat_appendf(&cb, "package.preload[\"%s\"]=function()\n",
+                        mod_names[i]);
+            wat_append(&cb, ms);
+            wat_append(&cb, "\nend\n");
+            free(ms);
         }
-        total += strlen(entry_src) + 1;
-        combined = malloc(total);
-        if (!combined) return 1;
-        size_t off = 0;
-        for (int i = 0; i < n_modules; i++) {
-            int w = snprintf(combined + off, total - off,
-                "package.preload[\"%s\"]=function()\n", mod_names[i]);
-            off += (size_t)w;
-            size_t ml = strlen(mod_srcs[i]);
-            memcpy(combined + off, mod_srcs[i], ml);
-            off += ml;
-            w = snprintf(combined + off, total - off, "\nend\n");
-            off += (size_t)w;
-            free(mod_srcs[i]);
-        }
-        size_t el = strlen(entry_src);
-        memcpy(combined + off, entry_src, el);
-        off += el;
-        combined[off] = '\0';
+        wat_append(&cb, entry_src);
+        /* Hand off the builder's buffer as the owned source string. */
+        combined = cb.buf;
         free(entry_src);
         src = combined;
     }
@@ -153,7 +164,12 @@ int main(int argc, char **argv) {
     const char *base = strrchr(in, '/');
     base = base ? base + 1 : in;
     char src_name[128];
-    snprintf(src_name, sizeof(src_name), "%s", base);
+    int sn_w = snprintf(src_name, sizeof(src_name), "%s", base);
+    if (sn_w < 0 || (size_t)sn_w >= sizeof(src_name)) {
+        fprintf(stderr, "%s: source name too long (max %zu)\n",
+                in, sizeof(src_name) - 1);
+        return 1;
+    }
     size_t sn_len = strlen(src_name);
     if (sn_len >= 4 && strcmp(src_name + sn_len - 4, ".lua") == 0) {
         src_name[sn_len - 4] = '\0';

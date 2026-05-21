@@ -40,7 +40,15 @@ void wat_appendf(WatBuilder *w, const char *fmt, ...) {
     va_copy(ap2, ap);
     int needed = vsnprintf(NULL, 0, fmt, ap);
     va_end(ap);
-    if (needed < 0) { va_end(ap2); return; }
+    if (needed < 0) {
+        /* A negative return from vsnprintf is an encoding error — a
+         * programming bug in the format string, not a recoverable
+         * condition. Silently returning would emit a corrupt WAT file,
+         * so abort with a diagnostic (matching the xalloc convention). */
+        va_end(ap2);
+        fprintf(stderr, "lua2wasm: wat_appendf: vsnprintf failed for format \"%s\"\n", fmt);
+        abort();
+    }
     ensure(w, (size_t)needed);
     vsnprintf(w->buf + w->used, w->cap - w->used, fmt, ap2);
     va_end(ap2);
