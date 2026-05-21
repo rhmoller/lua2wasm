@@ -133,6 +133,60 @@ host has zero Lua-specific runtime; everything that *is* the Lua VM lives in
 the produced `.wasm`. A program that defines a closure and calls it once
 fits in 5 KB; the full milestone-8 OO demo fits in 5.5 KB.
 
+## Performance
+
+Does the "no linear memory, everything is a host-GC object" model cost
+runtime speed? **It doesn't have to.** Hand-writing the *ideal* WAT for a
+numeric loop — plain `i64`/`f64` locals, no boxing — runs at par with (or
+faster than) reference Lua 5.5's bytecode interpreter on V8. The baseline gap
+is *representation overhead*, not the execution substrate: boxed floats,
+per-call argument/result arrays, and generic `anyref` dispatch through runtime
+helpers. So it's recoverable by generating better code.
+
+An opt-in specialization pass (set `LUA2WASM_OPT_INT=1` when compiling) closes
+it for monomorphic code. **Default output is unchanged** — byte-identical with
+the flag off — so the optimization is purely additive. Measured under Node/V8,
+timed inside the script with `os.clock()` so process startup is excluded
+(numbers vary by machine; compare the columns, not the absolutes):
+
+| tight-loop workload      | reference `lua5.5` | lua2wasm (default) | lua2wasm (`LUA2WASM_OPT_INT`) |
+|--------------------------|-------------------:|-------------------:|------------------------------:|
+| 20M integer ops          | 0.07 s             | 0.36 s             | **0.05 s** |
+| 20M float ops            | 0.05 s             | 0.38 s             | **0.05 s** |
+| 20M function calls       | 0.22 s             | 0.55 s             | **0.04 s** |
+| recursive `fib(34)`      | 0.18 s             | 0.31 s             | **0.05 s** |
+| 5M `t[i]=i` then sum     | 0.06 s             | 0.24 s             | **0.14 s** |
+
+What the pass does, all within the WasmGC model (no linear memory, no deopt):
+
+- **Unboxes locals, parameters, returns, and recursion.** A whole-program
+  fixpoint infers which slots, function parameters, and return values are
+  monomorphically `int` or `float`, and declares them as raw `i64`/`f64`.
+  Integer and float are kept *distinct* (Lua semantics: `3*3` is `9`, `3.0*3.0`
+  is `9.0`), so a value seen as both stays boxed.
+- **Specializes arithmetic and comparisons** to native `i64`/`f64` opcodes;
+  comparisons in `if`/`while`/`repeat` use the `i32` result directly, skipping
+  the boxed boolean and the truthiness helper.
+- **Direct calls.** A call to a statically-bound local function — including a
+  self-recursive one — goes to a typed entry that takes unpacked, unboxed
+  arguments and returns an unboxed value, skipping the per-call argument and
+  result arrays. End to end, `s = s + f(i)` in a loop compiles to an `i64.add`
+  over a direct call with no allocation.
+
+Independently, tables use a **hybrid array + hash representation** (always on,
+not gated): integer keys `1..n` live in a dense array part for O(1) sequential
+access, with everything else in an open-addressing hash — the same shape
+reference Lua uses. Genuinely dynamic table values still box, so a `sum += t[i]`
+loop stays a few times off reference; numeric scalar code is where the model
+shines.
+
+The honest ceiling: genuinely *dynamic* float or big-integer code **must** box
+(WasmGC has no way to put a raw `f64`/64-bit int in an `anyref`, and NaN-boxing
+needs linear memory — which this project forbids), and an AOT compiler with no
+deoptimization can't speculate the way a tracing JIT does. Conservative static
+specialization plus a boxed generic fallback is the model's ceiling — and for
+ordinary numeric and call-heavy code, that ceiling is at or below reference Lua.
+
 ## Targets
 
 Anything with current WASM-GC + reference-types + exception-handling
@@ -210,6 +264,14 @@ sans `.lua`. `require("util")` in any source (entry or module) walks
 `package.preload`, calls the loader on first hit, and caches the result
 in `package.loaded` — the standard Lua semantics, statically wired.
 
+To enable the experimental numeric/call specialization pass (see
+[Performance](#performance)), set the environment variable when compiling;
+it only changes the emitted code, not the CLI invocation:
+
+```sh
+LUA2WASM_OPT_INT=1 ./build/lua2wasm input.lua -o output.wat
+```
+
 ## Packaging
 
 `scripts/package-html.sh` wraps a compiled `.wasm` into a single
@@ -254,7 +316,7 @@ flowchart LR
 | `src/emscripten_entry.c` | One-function entry point used when the compiler is itself compiled to WASM for the playground   |
 | `runtime/host.mjs`       | Reference host: instantiates a compiled module and renders `print` output                        |
 | `runtime/playground.html`| CodeMirror editor + in-browser compile + Binaryen.js wat→wasm + execute                          |
-| `tests/`                 | µnit unit tests + bash end-to-end fixtures (currently 108 in CTest, all green); `scripts/smoke-official-tests.sh` runs the AOT pipeline over every file in [`official-tests/lua-5.5.0-tests/`](https://www.lua.org/tests/) for a compatibility scorecard |
+| `tests/`                 | µnit unit tests + bash end-to-end fixtures (currently 124 in CTest, all green); `scripts/smoke-official-tests.sh` runs the AOT pipeline over every file in [`official-tests/lua-5.5.0-tests/`](https://www.lua.org/tests/) for a compatibility scorecard |
 
 ## Deferred / planned
 
