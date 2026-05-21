@@ -2163,10 +2163,12 @@ static void emit_library_tables(CG *c, const unsigned char *gref, int nb) {
                 const char *handle;
                 size_t      handle_len;
                 const char *method_glob;
+                int         fd;             /* host fd; io.type reads __fd */
+                const char *default_global; /* capture as a default io file, or NULL */
             } HANDLES[] = {
-                { "stdout", 6, "io_handle_write"     },
-                { "stderr", 6, "io_handle_err_write" },
-                { "stdin",  5, NULL                  },
+                { "stdout", 6, "io_handle_write",     1, "$g_io_output" },
+                { "stderr", 6, "io_handle_err_write", 2, NULL           },
+                { "stdin",  5, NULL,                  0, "$g_io_input"  },
             };
             StrRef wkey = strpool_add(&c->strs, "write", 5);
             StrRef rkey = strpool_add(&c->strs, "read",  4);
@@ -2180,8 +2182,16 @@ static void emit_library_tables(CG *c, const unsigned char *gref, int nb) {
                     emit_tab_set_global(out, "$h", rkey, "io_handle_read");
                 emit_tab_set_global(out, "$h", ckey, "io_handle_noop");
                 emit_tab_set_global(out, "$h", fkey, "io_handle_noop");
+                /* __fd so io.type reports "file" for the standard streams. */
+                char fdexpr[48];
+                snprintf(fdexpr, sizeof fdexpr,
+                         "(call $make_int (i64.const %d))", HANDLES[hi].fd);
+                emit_tab_set_str(c, "(local.get $h)", "__fd", 4, fdexpr);
                 emit_tab_set_str(c, "(local.get $tab)", HANDLES[hi].handle,
                                  HANDLES[hi].handle_len, "(local.get $h)");
+                if (HANDLES[hi].default_global)
+                    wat_appendf(out, "    (global.set %s (local.get $h))\n",
+                                HANDLES[hi].default_global);
             }
         }
         /* utf8.charpattern: the Lua-pattern string that matches one

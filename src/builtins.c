@@ -88,11 +88,13 @@ static const struct {
     { "offset",    6, "$builtin_utf8_offset",    BLT_LIB_UTF8 },
     { "codes",     5, "$builtin_utf8_codes",     BLT_LIB_UTF8 },
     /* io library */
-    { "write", 5, "$builtin_io_write", BLT_LIB_IO },
-    { "read",  4, "$builtin_io_read",  BLT_LIB_IO },
-    { "open",  4, "$builtin_io_open",  BLT_LIB_IO },
-    { "lines", 5, "$builtin_io_lines", BLT_LIB_IO },
-    { "type",  4, "$io_type",          BLT_LIB_IO },
+    { "write",  5, "$builtin_io_write",  BLT_LIB_IO },
+    { "read",   4, "$builtin_io_read",   BLT_LIB_IO },
+    { "open",   4, "$builtin_io_open",   BLT_LIB_IO },
+    { "lines",  5, "$builtin_io_lines",  BLT_LIB_IO },
+    { "type",   4, "$io_type",           BLT_LIB_IO },
+    { "output", 6, "$builtin_io_output", BLT_LIB_IO },
+    { "input",  5, "$builtin_io_input",  BLT_LIB_IO },
     /* File-handle methods. Leading underscore keeps the standard io-table
      * install loop from registering them as io._* keys; codegen emits a
      * dedicated installation step that wires them onto the three stdio

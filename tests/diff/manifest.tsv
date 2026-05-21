@@ -101,7 +101,7 @@ pass	mt_name	__name renames an object in tostring and type-aware compare errors
 pass	deep_recursion	deep non-tail recursion raises a catchable "stack overflow"
 pass	os_difftime	os.difftime(t2,t1) returns the second difference as a float
 pass	os_setlocale	os.setlocale query/"C" returns "C"
-xfail	io_default_files	io.input()/io.output() return default handles; io.write routes through them
+pass	io_default_files	io.input()/io.output() return default handles; io.write routes through them
 xfail	close_early_exit	<close> runs __close on return/break/goto/error exits, reverse order
 #
 # -- blocked by hard constraints / missing metadata (kept captured) --

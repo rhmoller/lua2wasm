@@ -1325,6 +1325,10 @@
   ;; this table. \$stdlib_init populates it; codegen emits \$tab_get /
   ;; \$tab_set against it for every global read/write.
   (global $g_globals (mut (ref null $LuaTable)) (ref.null $LuaTable))
+  ;; Default I/O files for bare io.write / io.read. Initialised to the stdout
+  ;; and stdin handles in $stdlib_init; io.output(f) / io.input(f) reassign them.
+  (global $g_io_output (mut (ref null $LuaTable)) (ref.null $LuaTable))
+  (global $g_io_input  (mut (ref null $LuaTable)) (ref.null $LuaTable))
   (global $g_tab_str    (mut (ref null $LuaString)) (ref.null $LuaString))
   (global $g_empty_str  (mut (ref null $LuaString)) (ref.null $LuaString))
   ;; Shared metatable for all strings: {__index = string}. Built lazily by
@@ -2138,28 +2142,47 @@
       (then (throw $LuaError (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 155) (i32.const 18))))))
     (call $args_slice (local.get $args) (local.get $idx)))
 
-  ;; io.write — like print but no trailing newline, no tab between args
+  ;; Invoke method $mkey on file handle $h with ($h, $args...) — i.e. as
+  ;; `h:mkey(args...)`. Used to route bare io.write / io.read through the
+  ;; current default output / input file so io.output(f) / io.input(f)
+  ;; redirection takes effect.
+  (func $io_via_default (param $h (ref $LuaTable)) (param $mkey (ref $LuaString))
+                        (param $args (ref $ArgArr)) (result (ref $ArgArr))
+    (local $m anyref) (local $n i32) (local $na (ref $ArgArr))
+    (local.set $m (call $tab_get_raw (local.get $h) (local.get $mkey)))
+    (local.set $n (array.len (local.get $args)))
+    (local.set $na (array.new $ArgArr (ref.null any) (i32.add (local.get $n) (i32.const 1))))
+    (array.set $ArgArr (local.get $na) (i32.const 0) (local.get $h))
+    (array.copy $ArgArr $ArgArr (local.get $na) (i32.const 1)
+                                (local.get $args) (i32.const 0) (local.get $n))
+    (call $lua_call (ref.cast (ref $LuaClosure) (local.get $m)) (local.get $na)))
+
+  ;; io.write(...) — route through the default output file's :write method.
   (func $builtin_io_write (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
-    (local $n i32) (local $i i32) (local $acc anyref)
-    (local.set $n (array.len (local.get $args)))
-    (if (i32.eqz (local.get $n)) (then (return (global.get $g_empty_args))))
-    (if (i32.eq (local.get $n) (i32.const 1))
-      (then
-        (call $host_write_raw (call $args_at (local.get $args) (i32.const 0)))
-        (return (global.get $g_empty_args))))
-    ;; Tostring each arg first so nil/bool/table render via the
-    ;; standard rules instead of tripping concat's type check.
-    (local.set $acc (call $lua_tostring (call $args_at (local.get $args) (i32.const 0))))
-    (local.set $i (i32.const 1))
-    (block $done (loop $lp
-      (br_if $done (i32.ge_s (local.get $i) (local.get $n)))
-      (local.set $acc (call $lua_concat (local.get $acc)
-                       (call $lua_tostring (call $args_at (local.get $args) (local.get $i)))))
-      (local.set $i (i32.add (local.get $i) (i32.const 1)))
-      (br $lp)))
-    (call $host_write_raw (local.get $acc))
-    (global.get $g_empty_args))
+    (call $io_via_default (ref.as_non_null (global.get $g_io_output))
+      (struct.new $LuaString (array.new_fixed $LuaArr 5
+        (i32.const 119) (i32.const 114) (i32.const 105) (i32.const 116) (i32.const 101)))  ;; "write"
+      (local.get $args)))
+
+  ;; io.output([file]) — with a file-handle argument, make it the default
+  ;; output; always return the (resulting) default output file.
+  (func $builtin_io_output (type $LuaFn)
+    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
+    (if (i32.gt_s (array.len (local.get $args)) (i32.const 0))
+      (then (if (ref.test (ref $LuaTable) (call $args_at (local.get $args) (i32.const 0)))
+        (then (global.set $g_io_output (ref.cast (ref $LuaTable)
+          (call $args_at (local.get $args) (i32.const 0))))))))
+    (array.new_fixed $ArgArr 1 (ref.as_non_null (global.get $g_io_output))))
+
+  ;; io.input([file]) — same for the default input file.
+  (func $builtin_io_input (type $LuaFn)
+    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
+    (if (i32.gt_s (array.len (local.get $args)) (i32.const 0))
+      (then (if (ref.test (ref $LuaTable) (call $args_at (local.get $args) (i32.const 0)))
+        (then (global.set $g_io_input (ref.cast (ref $LuaTable)
+          (call $args_at (local.get $args) (i32.const 0))))))))
+    (array.new_fixed $ArgArr 1 (ref.as_non_null (global.get $g_io_input))))
 
   ;; --- shared read core for io.read and file:read ---
   ;; A read source is identified by an i32 $fd: -1 means "the stdin host"
@@ -2296,9 +2319,13 @@
     (local.get $out))
 
   ;; io.read(...): read from stdin (fd -1), one result per format arg.
+  ;; io.read(...) — route through the default input file's :read method.
   (func $builtin_io_read (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
-    (call $io_read_impl (local.get $args) (i32.const 0) (i32.const -1)))
+    (call $io_via_default (ref.as_non_null (global.get $g_io_input))
+      (struct.new $LuaString (array.new_fixed $LuaArr 4
+        (i32.const 114) (i32.const 101) (i32.const 97) (i32.const 100)))  ;; "read"
+      (local.get $args)))
 
   ;; File-handle methods over the host's stdio. The standard streams
   ;; don't have file objects to back them — the methods just route to
