@@ -1691,8 +1691,8 @@ static const char PRELUDE[] = {
  * LITERAL_SLAB below; verify_literal_slab() checks that LITERAL_PREFIX and
  * that map agree, so an edit to one without the other fails the build
  * instead of silently corrupting messages or reading past the slab. */
-#define LITERAL_PREFIX "niltruefalse<float>numberstringtablefunctionboolean__index__add__eq\tLua 5.5'for' step is zeroattempt to call a non-function value__callmodule '' not loadedvalue out of rangedata does not fitinvalid UTF-8 codeattempt to perform arithmeticattempt to index a valuetable index is niltable index is NaNtoo largeyearmonthdayhourminsecwdayydayisdsttable overflowout of limitsmissing sizevariable-length formatnot power of 2invalid formatattempt to divide by zeroattempt to perform 'n%0'attempt to compare two values'__tostring' must return a string'__newindex' chain too long; possible loopattempt to close a non-closable valuevalue expectedcannot change a protected metatablestring expectedtable expectedtable or string expectedinvalid replacement valuestring contains zeros<no error object>invalid value in table for 'concat'base out of rangeposition out of boundsinitial position is a continuation bytefield missing in date tablewrong number of arguments"
-#define LITERAL_PREFIX_LEN 950
+#define LITERAL_PREFIX "niltruefalse<float>numberstringtablefunctionboolean__index__add__eq\tLua 5.5'for' step is zeroattempt to call a non-function value__callmodule '' not loadedvalue out of rangedata does not fitinvalid UTF-8 codeattempt to perform arithmeticattempt to index a valuetable index is niltable index is NaNtoo largeyearmonthdayhourminsecwdayydayisdsttable overflowout of limitsmissing sizevariable-length formatnot power of 2invalid formatattempt to divide by zeroattempt to perform 'n%0'attempt to compare two values'__tostring' must return a string'__newindex' chain too long; possible loopattempt to close a non-closable valuevalue expectedcannot change a protected metatablestring expectedtable expectedtable or string expectedinvalid replacement valuestring contains zeros<no error object>invalid value in table for 'concat'base out of rangeposition out of boundsinitial position is a continuation bytefield missing in date tablewrong number of argumentsnumber expected, got "
+#define LITERAL_PREFIX_LEN 971
 static_assert(sizeof(LITERAL_PREFIX) - 1 == LITERAL_PREFIX_LEN,
               "LITERAL_PREFIX_LEN must match the byte length of LITERAL_PREFIX");
 
@@ -1745,6 +1745,7 @@ static const struct { unsigned off; const char *s; } LITERAL_SLAB[] = {
     {859, "initial position is a continuation byte" }, /* $builtin_utf8_offset */
     {898, "field missing in date table" },          /* $os_date_field */
     {925, "wrong number of arguments" },            /* $builtin_table_insert */
+    {950, "number expected, got " },                /* $as_float_co / $as_int_co */
 };
 
 /* Returns the offending entry's string on drift between LITERAL_PREFIX and

@@ -3377,6 +3377,24 @@
     (array.new_fixed $ArgArr 1 (call $fmt_buf_to_str (call $host_os_tmpname))))
 
   ;; --- math library ---
+  ;; Coerce a math-library argument to f64: numbers pass through, numeric
+  ;; strings parse (per tonumber), anything else raises a catchable
+  ;; "number expected, got <type>" with the file:line prefix — instead of an
+  ;; uncatchable illegal-cast trap. (Arithmetic operators already coerce via
+  ;; $coerce_num; this brings the math library in line.) The is_int dispatch
+  ;; in floor/ceil/abs/fmod still tests the *original* arg, so a numeric
+  ;; string yields a float result, matching reference's lua_isinteger check.
+  (func $throw_number_expected (param $v anyref)
+    (call $throw_at_top (ref.cast (ref $LuaString) (call $lua_concat
+      (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 950) (i32.const 21)))
+      (struct.new $LuaString (call $basic_type_bytes (local.get $v)))))))
+  (func $as_float_co (param $v anyref) (result f64)
+    (local $c anyref)
+    (local.set $c (call $coerce_num (local.get $v)))
+    (if (ref.is_null (local.get $c))
+      (then (call $throw_number_expected (local.get $v)) (unreachable)))
+    (call $as_float (local.get $c)))
+
   (func $builtin_math_floor (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
     (local $v anyref)
@@ -3384,7 +3402,7 @@
     (if (call $is_int (local.get $v))
       (then (return (array.new_fixed $ArgArr 1 (local.get $v)))))
     (array.new_fixed $ArgArr 1
-      (call $make_int (i64.trunc_f64_s (f64.floor (call $as_float (local.get $v)))))))
+      (call $make_int (i64.trunc_f64_s (f64.floor (call $as_float_co (local.get $v)))))))
 
   (func $builtin_math_abs (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
@@ -3397,19 +3415,19 @@
           (then (local.set $i (i64.sub (i64.const 0) (local.get $i)))))
         (return (array.new_fixed $ArgArr 1 (call $make_int (local.get $i))))))
     (array.new_fixed $ArgArr 1
-      (call $make_float (f64.abs (call $as_float (local.get $v))))))
+      (call $make_float (f64.abs (call $as_float_co (local.get $v))))))
 
   (func $builtin_math_sqrt (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
     (array.new_fixed $ArgArr 1
-      (call $make_float (f64.sqrt (call $as_float
+      (call $make_float (f64.sqrt (call $as_float_co
         (call $args_at (local.get $args) (i32.const 0)))))))
 
   ;; Transcendentals all route through host_math with a kind index.
   (func $math_via_host (param $kind i32) (param $args (ref $ArgArr)) (result (ref $ArgArr))
     (array.new_fixed $ArgArr 1
       (call $make_float (call $host_math (local.get $kind)
-        (call $as_float (call $args_at (local.get $args) (i32.const 0)))))))
+        (call $as_float_co (call $args_at (local.get $args) (i32.const 0)))))))
   (func $builtin_math_sin  (type $LuaFn) (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
     (call $math_via_host (i32.const 0) (local.get $args)))
   (func $builtin_math_cos  (type $LuaFn) (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
@@ -3426,8 +3444,8 @@
     (if (i32.gt_u (array.len (local.get $args)) (i32.const 1))
       (then (return (array.new_fixed $ArgArr 1
         (call $make_float (call $host_math2 (i32.const 0)
-          (call $as_float (call $args_at (local.get $args) (i32.const 0)))
-          (call $as_float (call $args_at (local.get $args) (i32.const 1)))))))))
+          (call $as_float_co (call $args_at (local.get $args) (i32.const 0)))
+          (call $as_float_co (call $args_at (local.get $args) (i32.const 1)))))))))
     (call $math_via_host (i32.const 5) (local.get $args)))
   (func $builtin_math_exp  (type $LuaFn) (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
     (call $math_via_host (i32.const 6) (local.get $args)))
@@ -3439,8 +3457,8 @@
     (local $x f64) (local $base f64) (local $lx f64) (local $lb f64)
     (if (i32.gt_u (array.len (local.get $args)) (i32.const 1))
       (then
-        (local.set $x (call $as_float (call $args_at (local.get $args) (i32.const 0))))
-        (local.set $base (call $as_float (call $args_at (local.get $args) (i32.const 1))))
+        (local.set $x (call $as_float_co (call $args_at (local.get $args) (i32.const 0))))
+        (local.set $base (call $as_float_co (call $args_at (local.get $args) (i32.const 1))))
         (if (f64.eq (local.get $base) (f64.const 2))
           (then (return (array.new_fixed $ArgArr 1 (call $make_float
             (call $host_math (i32.const 8) (local.get $x)))))))
@@ -3471,8 +3489,8 @@
         (return (array.new_fixed $ArgArr 1
           (call $make_int (i64.rem_s (call $as_int (local.get $a))
                                       (local.get $iy)))))))
-    (local.set $fx (call $as_float (local.get $a)))
-    (local.set $fy (call $as_float (local.get $b)))
+    (local.set $fx (call $as_float_co (local.get $a)))
+    (local.set $fy (call $as_float_co (local.get $b)))
     (array.new_fixed $ArgArr 1
       (call $make_float
         (f64.sub (local.get $fx)
@@ -3486,7 +3504,7 @@
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
     (local $x f64) (local $ip f64) (local $fp f64)
     (local $out (ref $ArgArr)) (local $head anyref)
-    (local.set $x (call $as_float (call $args_at (local.get $args) (i32.const 0))))
+    (local.set $x (call $as_float_co (call $args_at (local.get $args) (i32.const 0))))
     (local.set $ip (f64.trunc (local.get $x)))
     ;; Naive `x - ip` is NaN when x is ±inf (inf - inf). Reference Lua
     ;; (and IEEE-754 libm modf) returns ±0 for the fractional part when
@@ -3681,7 +3699,7 @@
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
     (array.new_fixed $ArgArr 1
       (call $make_float
-        (f64.mul (call $as_float (call $args_at (local.get $args) (i32.const 0)))
+        (f64.mul (call $as_float_co (call $args_at (local.get $args) (i32.const 0)))
                  (f64.const 57.29577951308232)))))   ;; 180 / pi
 
   ;; math.rad(x) — degrees to radians.
@@ -3689,7 +3707,7 @@
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
     (array.new_fixed $ArgArr 1
       (call $make_float
-        (f64.mul (call $as_float (call $args_at (local.get $args) (i32.const 0)))
+        (f64.mul (call $as_float_co (call $args_at (local.get $args) (i32.const 0)))
                  (f64.const 0.017453292519943295))))) ;; pi / 180
 
   (func $builtin_math_ceil (type $LuaFn)
@@ -3699,7 +3717,7 @@
     (if (call $is_int (local.get $v))
       (then (return (array.new_fixed $ArgArr 1 (local.get $v)))))
     (array.new_fixed $ArgArr 1
-      (call $make_int (i64.trunc_f64_s (f64.ceil (call $as_float (local.get $v)))))))
+      (call $make_int (i64.trunc_f64_s (f64.ceil (call $as_float_co (local.get $v)))))))
 
   ;; math.min/max: pick the smaller/larger of args[0..n-1] using $num_lt.
   (func $builtin_math_min (type $LuaFn)
