@@ -282,6 +282,18 @@
 
   (func $lua_add (param $a anyref) (param $b anyref) (result anyref)
     (local $ca anyref) (local $cb anyref)
+    ;; Fast path: small-int + small-int (both i31). i31.get_s sign-extends the
+    ;; 31-bit payload; the i64 sum is exact and $make_int re-boxes (i31 or
+    ;; $LuaInt) identically to the general path below.
+    (if (i32.and (ref.test (ref i31) (local.get $a)) (ref.test (ref i31) (local.get $b)))
+      (then (return (call $make_int (i64.add
+        (i64.extend_i32_s (i31.get_s (ref.cast (ref i31) (local.get $a))))
+        (i64.extend_i32_s (i31.get_s (ref.cast (ref i31) (local.get $b)))))))))
+    ;; Fast path: float + float.
+    (if (i32.and (ref.test (ref $LuaFloat) (local.get $a)) (ref.test (ref $LuaFloat) (local.get $b)))
+      (then (return (call $make_float (f64.add
+        (struct.get $LuaFloat $v (ref.cast (ref $LuaFloat) (local.get $a)))
+        (struct.get $LuaFloat $v (ref.cast (ref $LuaFloat) (local.get $b))))))))
     (local.set $ca (call $coerce_num (local.get $a)))
     (local.set $cb (call $coerce_num (local.get $b)))
     (if (i32.and (call $is_numlike (local.get $ca)) (call $is_numlike (local.get $cb)))
@@ -296,6 +308,14 @@
 
   (func $lua_sub (param $a anyref) (param $b anyref) (result anyref)
     (local $ca anyref) (local $cb anyref)
+    (if (i32.and (ref.test (ref i31) (local.get $a)) (ref.test (ref i31) (local.get $b)))
+      (then (return (call $make_int (i64.sub
+        (i64.extend_i32_s (i31.get_s (ref.cast (ref i31) (local.get $a))))
+        (i64.extend_i32_s (i31.get_s (ref.cast (ref i31) (local.get $b)))))))))
+    (if (i32.and (ref.test (ref $LuaFloat) (local.get $a)) (ref.test (ref $LuaFloat) (local.get $b)))
+      (then (return (call $make_float (f64.sub
+        (struct.get $LuaFloat $v (ref.cast (ref $LuaFloat) (local.get $a)))
+        (struct.get $LuaFloat $v (ref.cast (ref $LuaFloat) (local.get $b))))))))
     (local.set $ca (call $coerce_num (local.get $a)))
     (local.set $cb (call $coerce_num (local.get $b)))
     (if (i32.and (call $is_numlike (local.get $ca)) (call $is_numlike (local.get $cb)))
@@ -310,6 +330,16 @@
 
   (func $lua_mul (param $a anyref) (param $b anyref) (result anyref)
     (local $ca anyref) (local $cb anyref)
+    ;; Two sign-extended 31-bit values multiply within i64 range (≈60 bits), so
+    ;; the product is exact; $make_int re-boxes as the general path would.
+    (if (i32.and (ref.test (ref i31) (local.get $a)) (ref.test (ref i31) (local.get $b)))
+      (then (return (call $make_int (i64.mul
+        (i64.extend_i32_s (i31.get_s (ref.cast (ref i31) (local.get $a))))
+        (i64.extend_i32_s (i31.get_s (ref.cast (ref i31) (local.get $b)))))))))
+    (if (i32.and (ref.test (ref $LuaFloat) (local.get $a)) (ref.test (ref $LuaFloat) (local.get $b)))
+      (then (return (call $make_float (f64.mul
+        (struct.get $LuaFloat $v (ref.cast (ref $LuaFloat) (local.get $a)))
+        (struct.get $LuaFloat $v (ref.cast (ref $LuaFloat) (local.get $b))))))))
     (local.set $ca (call $coerce_num (local.get $a)))
     (local.set $cb (call $coerce_num (local.get $b)))
     (if (i32.and (call $is_numlike (local.get $ca)) (call $is_numlike (local.get $cb)))
@@ -325,6 +355,11 @@
   ;; / always yields float (Lua 5.4/5.5)
   (func $lua_div (param $a anyref) (param $b anyref) (result anyref)
     (local $ca anyref) (local $cb anyref)
+    ;; Fast path: float / float (/ always yields float, so no int special-case).
+    (if (i32.and (ref.test (ref $LuaFloat) (local.get $a)) (ref.test (ref $LuaFloat) (local.get $b)))
+      (then (return (call $make_float (f64.div
+        (struct.get $LuaFloat $v (ref.cast (ref $LuaFloat) (local.get $a)))
+        (struct.get $LuaFloat $v (ref.cast (ref $LuaFloat) (local.get $b))))))))
     (local.set $ca (call $coerce_num (local.get $a)))
     (local.set $cb (call $coerce_num (local.get $b)))
     (if (i32.and (call $is_numlike (local.get $ca)) (call $is_numlike (local.get $cb)))
@@ -1294,6 +1329,34 @@
           (local.set $i (i32.add (local.get $i) (i32.const 1)))
           (br $lp)))))
 
+  ;; Raw read of a 1-based integer key: hits the dense $arr part directly when
+  ;; in range (no key boxing, no $as_arr_key, no __index chain), else falls back
+  ;; to the hash part. Used by table.sort/insert/remove/move and table.concat,
+  ;; which must not consult __index (a present array key is always raw).
+  (func $tab_get_arr_idx (param $t (ref $LuaTable)) (param $idx i32) (result anyref)
+    (if (i32.and (i32.ge_s (local.get $idx) (i32.const 1))
+                 (i32.le_s (local.get $idx) (struct.get $LuaTable $alen (local.get $t))))
+      (then (return (array.get $TArr
+        (ref.as_non_null (struct.get $LuaTable $arr (local.get $t)))
+        (i32.sub (local.get $idx) (i32.const 1))))))
+    (call $tab_get_hash (local.get $t)
+      (call $make_int (i64.extend_i32_s (local.get $idx)))))
+
+  ;; Raw write of a 1-based integer key, mirroring $tab_get_arr_idx. An in-range
+  ;; overwrite hits $arr directly; everything else (append/grow/delete/sparse)
+  ;; defers to the boxed-key raw setter, which keeps the dense prefix invariant.
+  (func $tab_set_arr_idx (param $t (ref $LuaTable)) (param $idx i32) (param $v anyref)
+    (if (i32.and (i32.and (i32.ge_s (local.get $idx) (i32.const 1))
+                          (i32.le_s (local.get $idx) (struct.get $LuaTable $alen (local.get $t))))
+                 (i32.eqz (ref.is_null (local.get $v))))
+      (then
+        (array.set $TArr
+          (ref.as_non_null (struct.get $LuaTable $arr (local.get $t)))
+          (i32.sub (local.get $idx) (i32.const 1)) (local.get $v))
+        (return)))
+    (call $tab_set (local.get $t)
+      (call $make_int (i64.extend_i32_s (local.get $idx))) (local.get $v)))
+
   ;; Raw lookup `t[k]` (no metamethods): array part fast path, else hash part.
   (func $tab_get_raw (param $t (ref $LuaTable)) (param $k anyref) (result anyref)
     (local $val i64) (local $ok i32) (local $alen i32)
@@ -1702,16 +1765,29 @@
         (then (throw $LuaError (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 541) (i32.const 42))))))
       (br $top))))
 
-  ;; Length via array-border rule: count k=1,2,3,... while t[k] is non-nil.
+  ;; Raw array-border length (the `#` operator's table case; __len is handled in
+  ;; $lua_len). A border n satisfies t[n] ~= nil and t[n+1] == nil. Raw access
+  ;; only — __index must NOT be consulted (consulting it would also never
+  ;; terminate when __index returns non-nil for every key).
+  ;;
+  ;; Fast path: the dense prefix is hole-free, so $alen is itself a non-nil run.
+  ;; If nothing in the hash part continues it (t[alen+1] is nil) then $alen is a
+  ;; border. Otherwise keep walking the hash part from there until the run ends.
   (func $tab_len (param $t (ref $LuaTable)) (result i32)
-    (local $i i32) (local $k anyref)
-    (local.set $i (i32.const 1))
+    (local $i i32) (local $alen i32)
+    (local.set $alen (struct.get $LuaTable $alen (local.get $t)))
+    ;; Common case: the sequence lives entirely in the array part.
+    (if (ref.is_null (call $tab_get_hash (local.get $t)
+          (call $make_int (i64.extend_i32_s (i32.add (local.get $alen) (i32.const 1))))))
+      (then (return (local.get $alen))))
+    ;; The run spills into the hash part; continue raw from alen+1.
+    (local.set $i (i32.add (local.get $alen) (i32.const 1)))
     (block $done (loop $lp
-      (local.set $k (call $tab_get (local.get $t) (ref.i31 (local.get $i))))
-      (br_if $done (ref.is_null (local.get $k)))
+      (br_if $done (ref.is_null (call $tab_get_hash (local.get $t)
+        (call $make_int (i64.extend_i32_s (i32.add (local.get $i) (i32.const 1)))))))
       (local.set $i (i32.add (local.get $i) (i32.const 1)))
       (br $lp)))
-    (i32.sub (local.get $i) (i32.const 1)))
+    (local.get $i))
 
   ;; --- numeric-for helper ---
   (func $for_step_positive (param $s anyref) (result i32)
@@ -4194,25 +4270,25 @@
     (local $pivot anyref) (local $tmp anyref) (local $a anyref)
     (block $exit (loop $top
       (br_if $exit (i32.ge_s (local.get $lo) (local.get $hi)))
-      (local.set $pivot (call $tab_get (local.get $t) (ref.i31 (local.get $hi))))
+      (local.set $pivot (call $tab_get_arr_idx (local.get $t) (local.get $hi)))
       (local.set $i (i32.sub (local.get $lo) (i32.const 1)))
       (local.set $j (local.get $lo))
       (block $pdone (loop $ploop
         (br_if $pdone (i32.ge_s (local.get $j) (local.get $hi)))
-        (local.set $a (call $tab_get (local.get $t) (ref.i31 (local.get $j))))
+        (local.set $a (call $tab_get_arr_idx (local.get $t) (local.get $j)))
         (if (call $cmp_lt (local.get $cmp) (local.get $a) (local.get $pivot))
           (then
             (local.set $i (i32.add (local.get $i) (i32.const 1)))
-            (local.set $tmp (call $tab_get (local.get $t) (ref.i31 (local.get $i))))
-            (call $tab_set (local.get $t) (ref.i31 (local.get $i)) (local.get $a))
-            (call $tab_set (local.get $t) (ref.i31 (local.get $j)) (local.get $tmp))))
+            (local.set $tmp (call $tab_get_arr_idx (local.get $t) (local.get $i)))
+            (call $tab_set_arr_idx (local.get $t) (local.get $i) (local.get $a))
+            (call $tab_set_arr_idx (local.get $t) (local.get $j) (local.get $tmp))))
         (local.set $j (i32.add (local.get $j) (i32.const 1)))
         (br $ploop)))
       ;; place pivot at index $i+1
       (local.set $i (i32.add (local.get $i) (i32.const 1)))
-      (local.set $tmp (call $tab_get (local.get $t) (ref.i31 (local.get $i))))
-      (call $tab_set (local.get $t) (ref.i31 (local.get $i)) (local.get $pivot))
-      (call $tab_set (local.get $t) (ref.i31 (local.get $hi)) (local.get $tmp))
+      (local.set $tmp (call $tab_get_arr_idx (local.get $t) (local.get $i)))
+      (call $tab_set_arr_idx (local.get $t) (local.get $i) (local.get $pivot))
+      (call $tab_set_arr_idx (local.get $t) (local.get $hi) (local.get $tmp))
       ;; recurse smaller, iterate larger
       (if (i32.lt_s (i32.sub (local.get $i) (local.get $lo))
                     (i32.sub (local.get $hi) (local.get $i)))
