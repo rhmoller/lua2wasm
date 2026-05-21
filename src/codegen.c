@@ -130,6 +130,7 @@ typedef struct {
      * function), so a call f(args) of matching arity can skip the $ArgArr and
      * invoke the function's direct-args entry $user_N_da. */
     const LuaFunc **cur_func_slot;
+    int ret_single;          /* emitting a $user_N_da1 body: return one anyref */
     int cur_n_params;
     /* goto/label state */
     int next_label_id;      /* fresh per function body */
@@ -707,6 +708,20 @@ static void emit_call_array(CG *c, const Expr *e, int depth) {
 
 /* In expression context we want a single anyref; wrap with $args_first. */
 static void emit_call(CG *c, const Expr *e, int depth) {
+    const LuaFunc *dt = direct_call_target(c, e);
+    if (dt) {
+        /* Single-value direct call: invoke the $user_N_da1 entry, which returns
+         * one anyref directly — no $ArgArr and no $args_first. */
+        emit_indent(c, depth);
+        wat_appendf(c->w, "(call $user_%d_da1\n", dt->func_idx);
+        emit_indent(c, depth + 1); wat_append(c->w, "(ref.cast (ref $LuaClosure)\n");
+        emit_expr(c, e->as.call.callee, depth + 2);
+        emit_indent(c, depth + 1); wat_append(c->w, ")\n");
+        for (size_t i = 0; i < e->as.call.nargs; i++)
+            emit_expr(c, e->as.call.args[i], depth + 1);
+        emit_indent(c, depth); wat_append(c->w, ")\n");
+        return;
+    }
     emit_indent(c, depth); wat_append(c->w, "(call $args_first\n");
     emit_call_array(c, e, depth + 1);
     emit_indent(c, depth); wat_append(c->w, ")\n");
@@ -1526,6 +1541,29 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
                 emit_indent(c, depth); wat_append(c->w, "return\n");
                 break;
             }
+            if (c->ret_single) {
+                /* Single-value-return entry ($user_N_da1): produce exactly one
+                 * anyref. A non-vararg body never uses `...`, so a lone
+                 * multi-value tail here is a call, adjusted to one by emit_expr.
+                 * Extra return values still evaluate (side effects), in order. */
+                if (n_values == 0) {
+                    emit_indent(c, depth); wat_append(c->w, "(return (ref.null any))\n");
+                } else if (n_values == 1) {
+                    emit_indent(c, depth); wat_append(c->w, "(return\n");
+                    emit_expr(c, s->as.return_stmt.values[0], depth + 1);
+                    emit_indent(c, depth); wat_append(c->w, ")\n");
+                } else {
+                    emit_indent(c, depth); wat_append(c->w, "(local.set $tmp_any\n");
+                    emit_expr(c, s->as.return_stmt.values[0], depth + 1);
+                    emit_indent(c, depth); wat_append(c->w, ")\n");
+                    for (int i = 1; i < n_values; i++) {
+                        emit_expr(c, s->as.return_stmt.values[i], depth);
+                        emit_indent(c, depth); wat_append(c->w, "drop\n");
+                    }
+                    emit_indent(c, depth); wat_append(c->w, "(return (local.get $tmp_any))\n");
+                }
+                break;
+            }
             /* Tail-call optimization: exactly `return f(args)` or
              * `return obj:m(args)` (not parenthesized, which forces adjust-to-
              * one and so isn't a tail call). */
@@ -2291,15 +2329,17 @@ static const char *verify_literal_slab(void) {
 }
 
 /* Emit the body of one user function. */
-static void emit_user_function(CG *c, const LuaFunc *fn, int direct) {
+static void emit_user_function(CG *c, const LuaFunc *fn, int direct, int ret_single) {
     WatBuilder *w = c->w;
     if (direct) {
         /* Direct-args entry: closure + one anyref param per declared parameter,
-         * no $args/$ArgArr. Same body and array-based return as $user_N. */
-        wat_appendf(w, "  (func $user_%d_da (param $closure (ref $LuaClosure))",
-                    fn->func_idx);
+         * no $args/$ArgArr. ret_single ($user_N_da1) returns a single anyref
+         * (no result array); otherwise ($user_N_da) the array-based return.
+         * Same body as $user_N either way. */
+        wat_appendf(w, "  (func $user_%d_%s (param $closure (ref $LuaClosure))",
+                    fn->func_idx, ret_single ? "da1" : "da");
         for (int i = 0; i < fn->n_params; i++) wat_appendf(w, " (param $p%d anyref)", i);
-        wat_append(w, " (result (ref $ArgArr))\n");
+        wat_append(w, ret_single ? " (result anyref)\n" : " (result (ref $ArgArr))\n");
     } else {
         wat_appendf(w,
             "  (func $user_%d (type $LuaFn) "
@@ -2409,13 +2449,18 @@ static void emit_user_function(CG *c, const LuaFunc *fn, int direct) {
     }
 
     int was_in_main = c->in_main;
+    int prev_ret_single = c->ret_single;
     c->in_main = 0;
+    c->ret_single = ret_single;
     if (c->ok) emit_block(c, &fn->body, 2);
     c->next_label_id = saved_next_id_pre;
     c->in_main = was_in_main;
+    c->ret_single = prev_ret_single;
 
-    /* Default trailing return — empty results array. */
-    wat_append(w, "    (global.get $g_empty_args)\n");
+    /* Default trailing return — nil for the single-value entry, else the
+     * empty results array. */
+    wat_append(w, ret_single ? "    (ref.null any)\n"
+                             : "    (global.get $g_empty_args)\n");
     wat_append(w, "  )\n");
 
     /* Declare so the funcref is usable in const init / closures. The direct
@@ -3109,10 +3154,14 @@ int codegen_module(const ParseResult *pr, const char *src_name,
     wat_append(out, "  ;; --- user functions ---\n");
 
     for (size_t i = 0; i < pr->funcs.count; i++) {
-        emit_user_function(&c, pr->funcs.items[i], 0);
-        /* Direct-args entry for the lever-3 fast call path (non-vararg only). */
-        if (c.opt_int && !pr->funcs.items[i]->is_vararg)
-            emit_user_function(&c, pr->funcs.items[i], 1);
+        emit_user_function(&c, pr->funcs.items[i], 0, 0);
+        /* Direct-call fast entries (non-vararg only): _da returns the result
+         * array (multi-value call contexts), _da1 returns a single anyref
+         * (single-value contexts — no result-array allocation). */
+        if (c.opt_int && !pr->funcs.items[i]->is_vararg) {
+            emit_user_function(&c, pr->funcs.items[i], 1, 0);
+            emit_user_function(&c, pr->funcs.items[i], 1, 1);
+        }
         if (!c.ok) break;
     }
 
