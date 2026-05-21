@@ -1630,13 +1630,16 @@
       (if (i32.eqz (ref.test (ref $LuaTable) (local.get $v)))
         (then (call $throw_lit (i32.const 237) (i32.const 24))))   ;; "attempt to index a value"
       (local.set $t (ref.cast (ref $LuaTable) (local.get $v)))
-      ;; If key is already present, raw-set (no MM consulted).
-      (if (i32.ge_s (call $tab_find (local.get $t) (local.get $k)) (i32.const 0))
-        (then (call $tab_set (local.get $t) (local.get $k) (local.get $val))
-              (br $exit)))
-      ;; Look up __newindex on the metatable.
+      ;; No metatable -> always a raw set (the common case; skips the presence
+      ;; check entirely).
       (local.set $mt (struct.get $LuaTable $meta (local.get $t)))
       (if (ref.is_null (local.get $mt))
+        (then (call $tab_set (local.get $t) (local.get $k) (local.get $val))
+              (br $exit)))
+      ;; Metatable present: __newindex only fires for an ABSENT key. Presence
+      ;; must consider the array part too (tab_get_raw), not just the hash —
+      ;; otherwise an array-part key would spuriously trigger __newindex.
+      (if (i32.eqz (ref.is_null (call $tab_get_raw (local.get $t) (local.get $k))))
         (then (call $tab_set (local.get $t) (local.get $k) (local.get $val))
               (br $exit)))
       (local.set $mm (call $tab_get_raw (ref.as_non_null (local.get $mt))
