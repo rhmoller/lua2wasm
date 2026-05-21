@@ -46,13 +46,22 @@ char *lua2wasm_compile_ex(const char *source, int tree_shake) {
     WatBuilder w = {0};
 
     TokenList toks = lex(source);
-    if (!toks.ok) { result = make_err("ERROR(lex): ", toks.err); goto cleanup; }
+    if (!toks.ok) {
+        result = make_err("ERROR(lex): ", toks.err);
+        goto cleanup;
+    }
 
-    node_pool_init(&pool); have_pool = 1;
-    pr = parse(&toks, &pool); have_parse = 1;
-    if (!pr.ok) { result = make_err("ERROR(parse): ", pr.error); goto cleanup; }
+    node_pool_init(&pool);
+    have_pool = 1;
+    pr = parse(&toks, &pool);
+    have_parse = 1;
+    if (!pr.ok) {
+        result = make_err("ERROR(parse): ", pr.error);
+        goto cleanup;
+    }
 
-    wat_init(&w); have_wat = 1;
+    wat_init(&w);
+    have_wat = 1;
     char errbuf[256] = {0};
     /* Playground compiles the inline buffer with no filename; use "input".
      * Tree-shake is opt-in via the UI toggle (passed in tree_shake). */
@@ -67,9 +76,9 @@ char *lua2wasm_compile_ex(const char *source, int tree_shake) {
     w.buf = NULL;
 
 cleanup:
-    if (have_wat)   wat_free(&w);
+    if (have_wat) wat_free(&w);
     if (have_parse) parse_result_free(&pr);
-    if (have_pool)  node_pool_free(&pool);
+    if (have_pool) node_pool_free(&pool);
     tokenlist_free(&toks);
     return result;
 }

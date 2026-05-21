@@ -147,7 +147,7 @@ static const struct {
 };
 /* clang-format on */
 
-#define N (sizeof(BUILTINS)/sizeof(BUILTINS[0]))
+#define N (sizeof(BUILTINS) / sizeof(BUILTINS[0]))
 
 int lookup_builtin(const char *name, size_t name_len) {
     for (size_t i = 0; i < N; i++) {

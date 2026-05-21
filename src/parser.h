@@ -5,7 +5,7 @@
 #include "lexer.h"
 
 typedef struct {
-    LuaFunc **items;        /* all user-defined functions, in declaration order */
+    LuaFunc **items; /* all user-defined functions, in declaration order */
     size_t count;
 } FuncTable;
 

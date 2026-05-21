@@ -10,50 +10,50 @@ typedef enum {
 
     /* literals */
     TOK_IDENT,
-    TOK_INT,        /* integer literal */
-    TOK_FLOAT,      /* float literal */
-    TOK_STRING,     /* "..." or '...' - decoded into Token.str_buf */
+    TOK_INT,    /* integer literal */
+    TOK_FLOAT,  /* float literal */
+    TOK_STRING, /* "..." or '...' - decoded into Token.str_buf */
 
     /* punctuation */
-    TOK_LPAREN,     /* ( */
-    TOK_RPAREN,     /* ) */
-    TOK_LBRACE,     /* { */
-    TOK_RBRACE,     /* } */
-    TOK_LBRACKET,   /* [ */
-    TOK_RBRACKET,   /* ] */
-    TOK_COMMA,      /* , */
-    TOK_SEMI,       /* ; */
-    TOK_COLON,      /* : */
-    TOK_DBLCOLON,   /* :: */
-    TOK_DOT,        /* .  */
-    TOK_CONCAT,     /* .. */
-    TOK_ELLIPSIS,   /* ... */
-    TOK_ASSIGN,     /* = */
+    TOK_LPAREN,   /* ( */
+    TOK_RPAREN,   /* ) */
+    TOK_LBRACE,   /* { */
+    TOK_RBRACE,   /* } */
+    TOK_LBRACKET, /* [ */
+    TOK_RBRACKET, /* ] */
+    TOK_COMMA,    /* , */
+    TOK_SEMI,     /* ; */
+    TOK_COLON,    /* : */
+    TOK_DBLCOLON, /* :: */
+    TOK_DOT,      /* .  */
+    TOK_CONCAT,   /* .. */
+    TOK_ELLIPSIS, /* ... */
+    TOK_ASSIGN,   /* = */
 
     /* arithmetic */
-    TOK_PLUS,       /* + */
-    TOK_MINUS,      /* - */
-    TOK_STAR,       /* * */
-    TOK_SLASH,      /* / */
-    TOK_DSLASH,     /* // floor div */
-    TOK_PERCENT,    /* % */
-    TOK_CARET,      /* ^ */
-    TOK_HASH,       /* # length */
+    TOK_PLUS,    /* + */
+    TOK_MINUS,   /* - */
+    TOK_STAR,    /* * */
+    TOK_SLASH,   /* / */
+    TOK_DSLASH,  /* // floor div */
+    TOK_PERCENT, /* % */
+    TOK_CARET,   /* ^ */
+    TOK_HASH,    /* # length */
 
     /* comparison */
-    TOK_EQ,         /* == */
-    TOK_NEQ,        /* ~= */
-    TOK_LT,         /* < */
-    TOK_LE,         /* <= */
-    TOK_GT,         /* > */
-    TOK_GE,         /* >= */
+    TOK_EQ,  /* == */
+    TOK_NEQ, /* ~= */
+    TOK_LT,  /* < */
+    TOK_LE,  /* <= */
+    TOK_GT,  /* > */
+    TOK_GE,  /* >= */
 
     /* bitwise (lexed; codegen later) */
-    TOK_AMP,        /* & */
-    TOK_PIPE,       /* | */
-    TOK_TILDE,      /* ~ */
-    TOK_SHL,        /* << */
-    TOK_SHR,        /* >> */
+    TOK_AMP,   /* & */
+    TOK_PIPE,  /* | */
+    TOK_TILDE, /* ~ */
+    TOK_SHL,   /* << */
+    TOK_SHR,   /* >> */
 
     /* keywords */
     TOK_KW_AND,
@@ -82,13 +82,13 @@ typedef enum {
 
 typedef struct {
     TokKind kind;
-    const char *start;      /* points into source for IDENT and raw spans */
-    size_t len;             /* length of span in source */
+    const char *start; /* points into source for IDENT and raw spans */
+    size_t len;        /* length of span in source */
     int line;
     /* literal payload */
-    int64_t i_val;          /* TOK_INT */
-    double f_val;           /* TOK_FLOAT */
-    char *str_buf;          /* TOK_STRING: decoded bytes (owned), str_len long */
+    int64_t i_val; /* TOK_INT */
+    double f_val;  /* TOK_FLOAT */
+    char *str_buf; /* TOK_STRING: decoded bytes (owned), str_len long */
     size_t str_len;
 } Token;
 

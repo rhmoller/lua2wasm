@@ -13,10 +13,10 @@
 
 /* Fixed-size codegen working-set caps. Each has an explicit overflow guard at
  * its use site that raises a codegen error (never silently truncates). */
-#define MAX_BREAK_DEPTH       64   /* nested loop break targets */
-#define MAX_BLOCK_LABELS      64   /* ::labels:: declared in one block */
-#define MAX_CLOSE_SLOTS       32   /* <close> locals declared in one block */
-#define MAX_DISPATCH_IDS     128   /* label-bearing blocks per function */
+#define MAX_BREAK_DEPTH  64  /* nested loop break targets */
+#define MAX_BLOCK_LABELS 64  /* ::labels:: declared in one block */
+#define MAX_CLOSE_SLOTS  32  /* <close> locals declared in one block */
+#define MAX_DISPATCH_IDS 128 /* label-bearing blocks per function */
 
 /* ============================================================
  * Codegen v3a.
@@ -61,19 +61,19 @@
  * scan-resolved (lowest) offset, so dedup decisions and emitted byte offsets
  * are identical to the index-free version. */
 typedef struct {
-    size_t hash;     /* FNV-1a of the run's bytes (run hashed at insert time) */
-    size_t offset;   /* its resolved offset in the byte array */
-    size_t len;      /* its length, for collision verification */
-    int    used;     /* slot occupied */
+    size_t hash;   /* FNV-1a of the run's bytes (run hashed at insert time) */
+    size_t offset; /* its resolved offset in the byte array */
+    size_t len;    /* its length, for collision verification */
+    int used;      /* slot occupied */
 } StrIdxSlot;
 
 typedef struct {
     char *bytes;
     size_t used;
     size_t cap;
-    StrIdxSlot *idx;   /* open-addressing index; NULL until first insert */
-    size_t idx_cap;    /* power-of-two capacity */
-    size_t idx_count;  /* occupied slots */
+    StrIdxSlot *idx;  /* open-addressing index; NULL until first insert */
+    size_t idx_cap;   /* power-of-two capacity */
+    size_t idx_count; /* occupied slots */
 } StrPool;
 
 typedef struct {
@@ -82,10 +82,10 @@ typedef struct {
 } StrRef;
 
 static size_t strpool_hash(const char *bytes, size_t len) {
-    size_t h = 1469598103934665603u;          /* FNV-1a 64-bit offset basis */
+    size_t h = 1469598103934665603u; /* FNV-1a 64-bit offset basis */
     for (size_t i = 0; i < len; i++) {
         h ^= (unsigned char)bytes[i];
-        h *= 1099511628211u;                   /* FNV prime */
+        h *= 1099511628211u; /* FNV prime */
     }
     return h;
 }
@@ -93,7 +93,7 @@ static size_t strpool_hash(const char *bytes, size_t len) {
 /* Brute-force fallback: find an existing run of exactly these bytes anywhere
  * in the pool (substring overlap allowed). Returns SIZE_MAX if absent. */
 static size_t strpool_scan(const StrPool *p, const char *bytes, size_t len) {
-    if (len == 0) return 0;            /* zero bytes read => any offset works */
+    if (len == 0) return 0; /* zero bytes read => any offset works */
     if (len > p->used) return SIZE_MAX;
     for (size_t i = 0; i + len <= p->used; i++)
         if (memcmp(p->bytes + i, bytes, len) == 0) return i;
@@ -123,10 +123,10 @@ static void strpool_index_put(StrPool *p, size_t hash, size_t offset, size_t len
     while (p->idx[i].used) {
         if (p->idx[i].hash == hash && p->idx[i].len == len &&
             p->idx[i].offset == offset)
-            return;                            /* already present */
+            return; /* already present */
         i = (i + 1) & mask;
     }
-    p->idx[i] = (StrIdxSlot){ .hash = hash, .offset = offset, .len = len, .used = 1 };
+    p->idx[i] = (StrIdxSlot){.hash = hash, .offset = offset, .len = len, .used = 1};
     p->idx_count++;
 }
 
@@ -151,7 +151,7 @@ static size_t strpool_index_get(const StrPool *p, size_t hash,
  * repeated keys (metamethod names, "__index", library keys) single-copy in
  * the emitted $str_data segment. */
 static StrRef strpool_add(StrPool *p, const char *bytes, size_t len) {
-    if (len == 0) return (StrRef){ .offset = 0, .len = 0 };
+    if (len == 0) return (StrRef){.offset = 0, .len = 0};
     size_t hash = strpool_hash(bytes, len);
     size_t found = strpool_index_get(p, hash, bytes, len);
     if (found == SIZE_MAX) {
@@ -160,7 +160,7 @@ static StrRef strpool_add(StrPool *p, const char *bytes, size_t len) {
     }
     if (found != SIZE_MAX) {
         strpool_index_put(p, hash, found, len);
-        return (StrRef){ .offset = found, .len = len };
+        return (StrRef){.offset = found, .len = len};
     }
     if (p->used + len > p->cap) {
         size_t new_cap = p->cap ? p->cap : 64;
@@ -168,7 +168,7 @@ static StrRef strpool_add(StrPool *p, const char *bytes, size_t len) {
         p->bytes = xrealloc(p->bytes, new_cap);
         p->cap = new_cap;
     }
-    StrRef r = { .offset = p->used, .len = len };
+    StrRef r = {.offset = p->used, .len = len};
     memcpy(p->bytes + p->used, bytes, len);
     p->used += len;
     strpool_index_put(p, hash, r.offset, len);
@@ -192,9 +192,9 @@ static void strpool_free(StrPool *p) {
  * emit_block can wrap each label-bearing block in a (loop $dispatch_BID)
  * and route gotos through a br_table on $next_BID. */
 typedef struct LabelScope {
-    Stmt **labels;          /* pointers to STMT_LABEL nodes in this block */
+    Stmt **labels; /* pointers to STMT_LABEL nodes in this block */
     int n;
-    int cur_idx;            /* updated during walk: current stmt index */
+    int cur_idx; /* updated during walk: current stmt index */
     struct LabelScope *parent;
 } LabelScope;
 
@@ -204,27 +204,30 @@ typedef struct LabelScope {
  * both must stay boxed (NT_ANY) — unboxing it to one machine type would change
  * the result. The lattice is therefore NT_UNSET (top, "no evidence yet") above
  * the two incomparable concretes NT_INT / NT_FLOAT, above NT_ANY (bottom). */
-typedef enum { NT_ANY = 0, NT_INT, NT_FLOAT, NT_UNSET } NumTy;
+typedef enum { NT_ANY = 0,
+               NT_INT,
+               NT_FLOAT,
+               NT_UNSET } NumTy;
 typedef struct {
-    NumTy *param_ty;   /* [n_params]; NULL when n_params == 0 */
-    int    n_params;
-    NumTy  ret_ty;     /* single-value return type, NT_ANY if not monomorphic */
-    int    has_site;   /* a direct-call site somewhere targets this function */
+    NumTy *param_ty; /* [n_params]; NULL when n_params == 0 */
+    int n_params;
+    NumTy ret_ty; /* single-value return type, NT_ANY if not monomorphic */
+    int has_site; /* a direct-call site somewhere targets this function */
 } FuncSig;
 
 /* ----- codegen context ----- */
 typedef struct {
     WatBuilder *w;
-    const ParseResult *pr;   /* for VAR_GLOBAL name lookup */
+    const ParseResult *pr; /* for VAR_GLOBAL name lookup */
     StrPool strs;
     int next_label;
-    int in_main;            /* 1 while emitting $main body, 0 inside user fn */
-    int break_labels[MAX_BREAK_DEPTH];   /* break targets for nested while/for/repeat */
+    int in_main;                       /* 1 while emitting $main body, 0 inside user fn */
+    int break_labels[MAX_BREAK_DEPTH]; /* break targets for nested while/for/repeat */
     int break_depth;
-    int for_depth;          /* nesting depth of numeric/generic for-loops;
-                             * indexes per-level $for_* scratch locals so a
-                             * nested loop can't clobber the enclosing loop's
-                             * stop/step or iterator state */
+    int for_depth; /* nesting depth of numeric/generic for-loops;
+                    * indexes per-level $for_* scratch locals so a
+                    * nested loop can't clobber the enclosing loop's
+                    * stop/step or iterator state */
     /* Escape-analysis context for the currently-emitted body: cur_captured[s]
      * != 0 means slot s must be heap-boxed (some descendant function captures
      * it); cur_captured[s] == 0 lets the slot be a plain wasm anyref. Set
@@ -237,14 +240,14 @@ typedef struct {
      * inline i64 ops, boxed to a Lua value only at use-site boundaries. */
     int opt_int;
     const unsigned char *cur_is_int;
-    const unsigned char *cur_is_float;   /* slots proven float-only -> unboxed f64 */
+    const unsigned char *cur_is_float; /* slots proven float-only -> unboxed f64 */
     /* Direct-call PoC (lever 3): cur_func_slot[s] != NULL means local slot s is
      * statically bound to that LuaFunc (a non-captured, never-reassigned local
      * function), so a call f(args) of matching arity can skip the $ArgArr and
      * invoke the function's direct-args entry $user_N_da. */
     const LuaFunc **cur_func_slot;
-    int ret_single;          /* emitting a $user_N_da1 body: return one value */
-    NumTy cur_ret_ty;        /* result type of the $user_N_da1 body being emitted */
+    int ret_single;   /* emitting a $user_N_da1 body: return one value */
+    NumTy cur_ret_ty; /* result type of the $user_N_da1 body being emitted */
     /* Whole-program inferred signatures, indexed by func_idx (opt_int only). */
     FuncSig *sigs;
     int n_sigs;
@@ -262,7 +265,7 @@ typedef struct {
     const LuaFunc **cur_upval_func; /* upvalue->LuaFunc map for that body */
     int cur_n_params;
     /* goto/label state */
-    int next_label_id;      /* fresh per function body */
+    int next_label_id;       /* fresh per function body */
     LabelScope *label_scope; /* innermost first */
     char err[256];
     int ok;
@@ -332,11 +335,11 @@ static void la_block(CG *c, const Block *b, LabelAnalysisScope *parent);
 
 static void la_recurse_stmt(CG *c, Stmt *s, LabelAnalysisScope *scope) {
     switch (s->kind) {
-    case STMT_DO:      la_block(c, &s->as.do_stmt.body,    scope); break;
-    case STMT_WHILE:   la_block(c, &s->as.while_stmt.body, scope); break;
-    case STMT_REPEAT:  la_block(c, &s->as.repeat.body,     scope); break;
-    case STMT_FOR_NUM: la_block(c, &s->as.for_num.body,    scope); break;
-    case STMT_FOR_GEN: la_block(c, &s->as.for_gen.body,    scope); break;
+    case STMT_DO: la_block(c, &s->as.do_stmt.body, scope); break;
+    case STMT_WHILE: la_block(c, &s->as.while_stmt.body, scope); break;
+    case STMT_REPEAT: la_block(c, &s->as.repeat.body, scope); break;
+    case STMT_FOR_NUM: la_block(c, &s->as.for_num.body, scope); break;
+    case STMT_FOR_GEN: la_block(c, &s->as.for_gen.body, scope); break;
     case STMT_IF:
         for (size_t i = 0; i < s->as.if_stmt.narms; i++)
             la_block(c, &s->as.if_stmt.arms[i].body, scope);
@@ -351,7 +354,7 @@ static void la_recurse_stmt(CG *c, Stmt *s, LabelAnalysisScope *scope) {
 }
 
 static void la_block(CG *c, const Block *b, LabelAnalysisScope *parent) {
-    LabelAnalysisScope scope = { .n = 0, .parent = parent };
+    LabelAnalysisScope scope = {.n = 0, .parent = parent};
     /* Pass 1: collect labels, dedup, assign ids. */
     for (size_t i = 0; i < b->count; i++) {
         Stmt *st = b->items[i];
@@ -368,8 +371,8 @@ static void la_block(CG *c, const Block *b, LabelAnalysisScope *parent) {
                 char msg[128];
                 int n = (int)(st->as.label.name_len < 80 ? st->as.label.name_len : 80);
                 snprintf(msg, sizeof(msg),
-                    "label '%.*s' already defined in this block",
-                    n, st->as.label.name);
+                         "label '%.*s' already defined in this block",
+                         n, st->as.label.name);
                 cg_error(c, msg);
                 return;
             }
@@ -394,7 +397,7 @@ static void la_block(CG *c, const Block *b, LabelAnalysisScope *parent) {
                 char msg[128];
                 int n = (int)(st->as.label.name_len < 80 ? st->as.label.name_len : 80);
                 snprintf(msg, sizeof(msg),
-                    "no visible label '%.*s' for goto", n, st->as.label.name);
+                         "no visible label '%.*s' for goto", n, st->as.label.name);
                 cg_error(c, msg);
                 return;
             }
@@ -418,9 +421,9 @@ static int i31_fits(int64_t v) {
 static void emit_expr(CG *c, const Expr *e, int depth);
 static void emit_block(CG *c, const Block *b, int depth);
 static void emit_stmt(CG *c, const Stmt *s, int depth);
-static int  expr_is_int(CG *c, const Expr *e);
+static int expr_is_int(CG *c, const Expr *e);
 static void emit_int_expr(CG *c, const Expr *e, int depth);
-static int  expr_is_float(CG *c, const Expr *e);
+static int expr_is_float(CG *c, const Expr *e);
 static void emit_float_expr(CG *c, const Expr *e, int depth);
 static void emit_num_as_f64(CG *c, const Expr *e, int depth);
 
@@ -446,9 +449,9 @@ static void emit_float_literal(CG *c, double v, int depth) {
 static void emit_pooled_string(CG *c, StrRef r, int depth) {
     emit_indent(c, depth);
     wat_appendf(c->w,
-        "(struct.new $LuaString "
-        "(array.new_data $LuaArr $str_data (i32.const %zu) (i32.const %zu)))\n",
-        r.offset, r.len);
+                "(struct.new $LuaString "
+                "(array.new_data $LuaArr $str_data (i32.const %zu) (i32.const %zu)))\n",
+                r.offset, r.len);
 }
 
 static void emit_string_literal(CG *c, const char *bytes, size_t len, int depth) {
@@ -465,9 +468,9 @@ static void emit_string_literal(CG *c, const char *bytes, size_t len, int depth)
 static void emit_global_key(CG *c, const char *name, size_t name_len) {
     StrRef sr = strpool_add(&c->strs, name, name_len);
     wat_appendf(c->w,
-        "(struct.new $LuaString (array.new_data $LuaArr $str_data\n"
-        "        (i32.const %zu) (i32.const %zu)))\n",
-        sr.offset, sr.len);
+                "(struct.new $LuaString (array.new_data $LuaArr $str_data\n"
+                "        (i32.const %zu) (i32.const %zu)))\n",
+                sr.offset, sr.len);
 }
 
 /* `(call $tab_set (local.get $tgt) "key" (global.get $g_<glob>))` — the
@@ -476,21 +479,21 @@ static void emit_global_key(CG *c, const char *name, size_t name_len) {
 static void emit_tab_set_global(WatBuilder *out, const char *tgt,
                                 StrRef key, const char *glob) {
     wat_appendf(out,
-        "    (call $tab_set (local.get %s)\n"
-        "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
-        "        (i32.const %zu) (i32.const %zu)))\n"
-        "      (global.get $g_%s))\n",
-        tgt, key.offset, key.len, glob);
+                "    (call $tab_set (local.get %s)\n"
+                "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
+                "        (i32.const %zu) (i32.const %zu)))\n"
+                "      (global.get $g_%s))\n",
+                tgt, key.offset, key.len, glob);
 }
 
 /* `(global.set <glob> "<s>")` — set a wasm global to an interned string. */
 static void emit_global_set_str(CG *c, const char *glob, const char *s, size_t len) {
     StrRef sr = strpool_add(&c->strs, s, len);
     wat_appendf(c->w,
-        "    (global.set %s\n"
-        "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
-        "        (i32.const %zu) (i32.const %zu))))\n",
-        glob, sr.offset, sr.len);
+                "    (global.set %s\n"
+                "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
+                "        (i32.const %zu) (i32.const %zu))))\n",
+                glob, sr.offset, sr.len);
 }
 
 /* `(call $tab_set <target> "<key>" <value>)` where <target> and <value>
@@ -500,11 +503,11 @@ static void emit_tab_set_str(CG *c, const char *target,
                              const char *key, size_t klen, const char *value) {
     StrRef sr = strpool_add(&c->strs, key, klen);
     wat_appendf(c->w,
-        "    (call $tab_set %s\n"
-        "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
-        "        (i32.const %zu) (i32.const %zu)))\n"
-        "      %s)\n",
-        target, sr.offset, sr.len, value);
+                "    (call $tab_set %s\n"
+                "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
+                "        (i32.const %zu) (i32.const %zu)))\n"
+                "      %s)\n",
+                target, sr.offset, sr.len, value);
 }
 
 /* `(call $tab_set <target> "<key>" "<val>")` — install a string-valued
@@ -514,12 +517,12 @@ static void emit_tab_set_strval(CG *c, const char *target, const char *key,
     StrRef ks = strpool_add(&c->strs, key, klen);
     StrRef vs = strpool_add(&c->strs, val, vlen);
     wat_appendf(c->w,
-        "    (call $tab_set %s\n"
-        "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
-        "        (i32.const %zu) (i32.const %zu)))\n"
-        "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
-        "        (i32.const %zu) (i32.const %zu))))\n",
-        target, ks.offset, ks.len, vs.offset, vs.len);
+                "    (call $tab_set %s\n"
+                "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
+                "        (i32.const %zu) (i32.const %zu)))\n"
+                "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
+                "        (i32.const %zu) (i32.const %zu))))\n",
+                target, ks.offset, ks.len, vs.offset, vs.len);
 }
 
 static void emit_global_read(CG *c, const char *name, size_t name_len, int depth) {
@@ -527,38 +530,40 @@ static void emit_global_read(CG *c, const char *name, size_t name_len, int depth
     wat_append(c->w, "(call $tab_get (ref.as_non_null (global.get $g_globals))\n");
     emit_indent(c, depth + 1);
     emit_global_key(c, name, name_len);
-    emit_indent(c, depth); wat_append(c->w, ")\n");
+    emit_indent(c, depth);
+    wat_append(c->w, ")\n");
 }
 
 static void emit_var_read(CG *c, VarKind kind, int idx, int depth) {
     switch (kind) {
-        case VAR_LOCAL:
-            emit_indent(c, depth);
-            if (slot_is_boxed(c, idx)) {
-                wat_appendf(c->w, "(struct.get $Box $v (local.get $L%d))\n", idx);
-            } else {
-                wat_appendf(c->w, "(local.get $L%d)\n", idx);
-            }
-            break;
-        case VAR_UPVAL:
-            emit_indent(c, depth);
-            wat_appendf(c->w,
-                "(struct.get $Box $v (array.get $UpvalArr "
-                "(struct.get $LuaClosure $upvals (local.get $closure)) "
-                "(i32.const %d)))\n", idx);
-            break;
-        case VAR_BUILTIN: {
-            /* Read via $g_globals so user reassignment is honoured. */
-            const char *name = builtin_name(idx);
-            emit_global_read(c, name, strlen(name), depth);
-            break;
+    case VAR_LOCAL:
+        emit_indent(c, depth);
+        if (slot_is_boxed(c, idx)) {
+            wat_appendf(c->w, "(struct.get $Box $v (local.get $L%d))\n", idx);
+        } else {
+            wat_appendf(c->w, "(local.get $L%d)\n", idx);
         }
-        case VAR_GLOBAL: {
-            const char *name = c->pr->globals.items[idx].name;
-            size_t nl = c->pr->globals.items[idx].name_len;
-            emit_global_read(c, name, nl, depth);
-            break;
-        }
+        break;
+    case VAR_UPVAL:
+        emit_indent(c, depth);
+        wat_appendf(c->w,
+                    "(struct.get $Box $v (array.get $UpvalArr "
+                    "(struct.get $LuaClosure $upvals (local.get $closure)) "
+                    "(i32.const %d)))\n",
+                    idx);
+        break;
+    case VAR_BUILTIN: {
+        /* Read via $g_globals so user reassignment is honoured. */
+        const char *name = builtin_name(idx);
+        emit_global_read(c, name, strlen(name), depth);
+        break;
+    }
+    case VAR_GLOBAL: {
+        const char *name = c->pr->globals.items[idx].name;
+        size_t nl = c->pr->globals.items[idx].name_len;
+        emit_global_read(c, name, nl, depth);
+        break;
+    }
     }
 }
 
@@ -569,23 +574,24 @@ static void emit_var_read(CG *c, VarKind kind, int idx, int depth) {
 static void emit_box_ref(CG *c, VarKind kind, int idx, int depth) {
     emit_indent(c, depth);
     switch (kind) {
-        case VAR_LOCAL:
-            if (!slot_is_boxed(c, idx)) {
-                cg_error(c, "internal: emit_box_ref on unboxed local");
-                return;
-            }
-            wat_appendf(c->w, "(local.get $L%d)\n", idx);
-            break;
-        case VAR_UPVAL:
-            wat_appendf(c->w,
-                "(array.get $UpvalArr "
-                "(struct.get $LuaClosure $upvals (local.get $closure)) "
-                "(i32.const %d))\n", idx);
-            break;
-        case VAR_BUILTIN:
-        case VAR_GLOBAL:
-            cg_error(c, "cannot take a box reference to a builtin/global");
-            break;
+    case VAR_LOCAL:
+        if (!slot_is_boxed(c, idx)) {
+            cg_error(c, "internal: emit_box_ref on unboxed local");
+            return;
+        }
+        wat_appendf(c->w, "(local.get $L%d)\n", idx);
+        break;
+    case VAR_UPVAL:
+        wat_appendf(c->w,
+                    "(array.get $UpvalArr "
+                    "(struct.get $LuaClosure $upvals (local.get $closure)) "
+                    "(i32.const %d))\n",
+                    idx);
+        break;
+    case VAR_BUILTIN:
+    case VAR_GLOBAL:
+        cg_error(c, "cannot take a box reference to a builtin/global");
+        break;
     }
 }
 
@@ -594,52 +600,56 @@ static void emit_box_ref(CG *c, VarKind kind, int idx, int depth) {
 static void emit_target_open(CG *c, const AssignTarget *t, int depth) {
     if (t->kind == TGT_VAR) {
         switch (t->as.var.kind) {
-            case VAR_LOCAL:
-                if (slot_is_boxed(c, t->as.var.idx)) {
-                    emit_indent(c, depth); wat_append(c->w, "(struct.set $Box $v\n");
-                    emit_box_ref(c, VAR_LOCAL, t->as.var.idx, depth + 1);
-                } else {
-                    emit_indent(c, depth);
-                    wat_appendf(c->w, "(local.set $L%d\n", t->as.var.idx);
-                }
-                break;
-            case VAR_UPVAL:
-                emit_indent(c, depth); wat_append(c->w, "(struct.set $Box $v\n");
-                emit_box_ref(c, t->as.var.kind, t->as.var.idx, depth + 1);
-                break;
-            case VAR_BUILTIN:
-            case VAR_GLOBAL: {
-                /* Assignment to any global (including a name that
-                 * happens to also be a builtin like `print`) routes
-                 * through $g_globals via $tab_set. */
-                const char *name;
-                size_t name_len;
-                if (t->as.var.kind == VAR_BUILTIN) {
-                    name = builtin_name(t->as.var.idx);
-                    name_len = strlen(name);
-                } else {
-                    name = c->pr->globals.items[t->as.var.idx].name;
-                    name_len = c->pr->globals.items[t->as.var.idx].name_len;
-                }
+        case VAR_LOCAL:
+            if (slot_is_boxed(c, t->as.var.idx)) {
                 emit_indent(c, depth);
-                wat_append(c->w, "(call $tab_set (ref.as_non_null (global.get $g_globals))\n");
-                emit_indent(c, depth + 1);
-                emit_global_key(c, name, name_len);
-                break;
+                wat_append(c->w, "(struct.set $Box $v\n");
+                emit_box_ref(c, VAR_LOCAL, t->as.var.idx, depth + 1);
+            } else {
+                emit_indent(c, depth);
+                wat_appendf(c->w, "(local.set $L%d\n", t->as.var.idx);
             }
+            break;
+        case VAR_UPVAL:
+            emit_indent(c, depth);
+            wat_append(c->w, "(struct.set $Box $v\n");
+            emit_box_ref(c, t->as.var.kind, t->as.var.idx, depth + 1);
+            break;
+        case VAR_BUILTIN:
+        case VAR_GLOBAL: {
+            /* Assignment to any global (including a name that
+             * happens to also be a builtin like `print`) routes
+             * through $g_globals via $tab_set. */
+            const char *name;
+            size_t name_len;
+            if (t->as.var.kind == VAR_BUILTIN) {
+                name = builtin_name(t->as.var.idx);
+                name_len = strlen(name);
+            } else {
+                name = c->pr->globals.items[t->as.var.idx].name;
+                name_len = c->pr->globals.items[t->as.var.idx].name_len;
+            }
+            emit_indent(c, depth);
+            wat_append(c->w, "(call $tab_set (ref.as_non_null (global.get $g_globals))\n");
+            emit_indent(c, depth + 1);
+            emit_global_key(c, name, name_len);
+            break;
+        }
         }
     } else if (c->opt_int && expr_is_int(c, t->as.index.key)) {
         /* Int-typed key: $lua_tabset_ik takes the raw i64 (no make_int /
          * $as_arr_key) and still dispatches __newindex. The value is emitted
          * by the caller between open and close. */
-        emit_indent(c, depth); wat_append(c->w, "(call $lua_tabset_ik\n");
+        emit_indent(c, depth);
+        wat_append(c->w, "(call $lua_tabset_ik\n");
         emit_expr(c, t->as.index.table, depth + 1);
         emit_int_expr(c, t->as.index.key, depth + 1);
     } else {
         /* User-code assignment goes through \$lua_tabset so __newindex
          * has a chance to fire. Table constructors emit \$tab_set
          * directly since freshly built tables have no metatable. */
-        emit_indent(c, depth); wat_append(c->w, "(call $lua_tabset\n");
+        emit_indent(c, depth);
+        wat_append(c->w, "(call $lua_tabset\n");
         emit_expr(c, t->as.index.table, depth + 1);
         emit_expr(c, t->as.index.key, depth + 1);
     }
@@ -647,34 +657,35 @@ static void emit_target_open(CG *c, const AssignTarget *t, int depth) {
 /* Close an emit_target_open() expression. The target is the same one passed to
  * open, but every target shape closes with a single `)`, so it isn't needed. */
 static void emit_target_close(CG *c, int depth) {
-    emit_indent(c, depth); wat_append(c->w, ")\n");
+    emit_indent(c, depth);
+    wat_append(c->w, ")\n");
 }
 
 /* ----- binary / unary ops ----- */
 static const char *binop_helper(BinOp op) {
     switch (op) {
-        case BIN_ADD:    return "$lua_add";
-        case BIN_SUB:    return "$lua_sub";
-        case BIN_MUL:    return "$lua_mul";
-        case BIN_DIV:    return "$lua_div";
-        case BIN_FDIV:   return "$lua_fdiv";
-        case BIN_MOD:    return "$lua_mod";
-        case BIN_POW:    return "$lua_pow";
-        case BIN_CONCAT: return "$lua_concat";
-        case BIN_EQ:     return "$lua_eq";
-        case BIN_NEQ:    return "$lua_neq";
-        case BIN_LT:     return "$lua_lt";
-        case BIN_LE:     return "$lua_le";
-        case BIN_GT:     return "$lua_gt";
-        case BIN_GE:     return "$lua_ge";
-        case BIN_BAND:   return "$lua_band";
-        case BIN_BOR:    return "$lua_bor";
-        case BIN_BXOR:   return "$lua_bxor";
-        case BIN_SHL:    return "$lua_shl";
-        case BIN_SHR:    return "$lua_shr";
-        /* BIN_AND / BIN_OR are short-circuiting and handled in emit_binop
-         * before reaching here; any other value is a codegen bug. */
-        default:         return NULL;
+    case BIN_ADD: return "$lua_add";
+    case BIN_SUB: return "$lua_sub";
+    case BIN_MUL: return "$lua_mul";
+    case BIN_DIV: return "$lua_div";
+    case BIN_FDIV: return "$lua_fdiv";
+    case BIN_MOD: return "$lua_mod";
+    case BIN_POW: return "$lua_pow";
+    case BIN_CONCAT: return "$lua_concat";
+    case BIN_EQ: return "$lua_eq";
+    case BIN_NEQ: return "$lua_neq";
+    case BIN_LT: return "$lua_lt";
+    case BIN_LE: return "$lua_le";
+    case BIN_GT: return "$lua_gt";
+    case BIN_GE: return "$lua_ge";
+    case BIN_BAND: return "$lua_band";
+    case BIN_BOR: return "$lua_bor";
+    case BIN_BXOR: return "$lua_bxor";
+    case BIN_SHL: return "$lua_shl";
+    case BIN_SHR: return "$lua_shr";
+    /* BIN_AND / BIN_OR are short-circuiting and handled in emit_binop
+     * before reaching here; any other value is a codegen bug. */
+    default: return NULL;
     }
 }
 
@@ -685,8 +696,12 @@ static const char *binop_helper(BinOp op) {
 static int cmp_numeric_kind(CG *c, const Expr *e) {
     if (!c->opt_int || e->kind != EXPR_BINOP) return 0;
     switch (e->as.binop.op) {
-    case BIN_LT: case BIN_LE: case BIN_GT: case BIN_GE:
-    case BIN_EQ: case BIN_NEQ: break;
+    case BIN_LT:
+    case BIN_LE:
+    case BIN_GT:
+    case BIN_GE:
+    case BIN_EQ:
+    case BIN_NEQ: break;
     default: return 0;
     }
     const Expr *l = e->as.binop.lhs, *r = e->as.binop.rhs;
@@ -697,15 +712,19 @@ static int cmp_numeric_kind(CG *c, const Expr *e) {
 
 /* Emit a same-type numeric comparison (cmp_numeric_kind != 0) as a raw i32. */
 static void emit_cmp_i32(CG *c, const Expr *e, int depth, int kind) {
-    static const char *iops[] = { "i64.lt_s","i64.le_s","i64.gt_s","i64.ge_s","i64.eq","i64.ne" };
-    static const char *fops[] = { "f64.lt","f64.le","f64.gt","f64.ge","f64.eq","f64.ne" };
+    static const char *iops[] = {"i64.lt_s", "i64.le_s", "i64.gt_s", "i64.ge_s", "i64.eq", "i64.ne"};
+    static const char *fops[] = {"f64.lt", "f64.le", "f64.gt", "f64.ge", "f64.eq", "f64.ne"};
     int j;
     switch (e->as.binop.op) {
-    case BIN_LT: j = 0; break; case BIN_LE: j = 1; break;
-    case BIN_GT: j = 2; break; case BIN_GE: j = 3; break;
-    case BIN_EQ: j = 4; break; default: j = 5; break;   /* BIN_NEQ */
+    case BIN_LT: j = 0; break;
+    case BIN_LE: j = 1; break;
+    case BIN_GT: j = 2; break;
+    case BIN_GE: j = 3; break;
+    case BIN_EQ: j = 4; break;
+    default: j = 5; break; /* BIN_NEQ */
     }
-    emit_indent(c, depth); wat_appendf(c->w, "(%s\n", kind == 1 ? iops[j] : fops[j]);
+    emit_indent(c, depth);
+    wat_appendf(c->w, "(%s\n", kind == 1 ? iops[j] : fops[j]);
     if (kind == 1) {
         emit_int_expr(c, e->as.binop.lhs, depth + 1);
         emit_int_expr(c, e->as.binop.rhs, depth + 1);
@@ -713,16 +732,21 @@ static void emit_cmp_i32(CG *c, const Expr *e, int depth, int kind) {
         emit_num_as_f64(c, e->as.binop.lhs, depth + 1);
         emit_num_as_f64(c, e->as.binop.rhs, depth + 1);
     }
-    emit_indent(c, depth); wat_append(c->w, ")\n");
+    emit_indent(c, depth);
+    wat_append(c->w, ")\n");
 }
 
 /* Emit `e` as an i32 truthiness (0/1). A numeric comparison becomes a direct
  * iXX/fXX compare, skipping the boxed boolean and $lua_truthy. */
 static void emit_truthy(CG *c, const Expr *e, int depth) {
     int k = cmp_numeric_kind(c, e);
-    if (k) { emit_cmp_i32(c, e, depth, k); return; }
+    if (k) {
+        emit_cmp_i32(c, e, depth, k);
+        return;
+    }
     emit_expr(c, e, depth);
-    emit_indent(c, depth); wat_append(c->w, "(call $lua_truthy)\n");
+    emit_indent(c, depth);
+    wat_append(c->w, "(call $lua_truthy)\n");
 }
 
 static void emit_binop(CG *c, const Expr *e, int depth) {
@@ -733,35 +757,52 @@ static void emit_binop(CG *c, const Expr *e, int depth) {
         wat_appendf(c->w, "(block $sc_%d (result anyref)\n", label);
 
         emit_expr(c, e->as.binop.lhs, depth + 1);
-        emit_indent(c, depth + 1); wat_append(c->w, "local.set $tmp_any\n");
-        emit_indent(c, depth + 1); wat_append(c->w, "(call $lua_truthy (local.get $tmp_any))\n");
-        emit_indent(c, depth + 1); wat_append(c->w, "(if (then\n");
+        emit_indent(c, depth + 1);
+        wat_append(c->w, "local.set $tmp_any\n");
+        emit_indent(c, depth + 1);
+        wat_append(c->w, "(call $lua_truthy (local.get $tmp_any))\n");
+        emit_indent(c, depth + 1);
+        wat_append(c->w, "(if (then\n");
         if (op == BIN_AND) {
             emit_expr(c, e->as.binop.rhs, depth + 2);
-            emit_indent(c, depth + 2); wat_appendf(c->w, "br $sc_%d\n", label);
-            emit_indent(c, depth + 1); wat_append(c->w, "))\n");
-            emit_indent(c, depth + 1); wat_append(c->w, "local.get $tmp_any\n");
+            emit_indent(c, depth + 2);
+            wat_appendf(c->w, "br $sc_%d\n", label);
+            emit_indent(c, depth + 1);
+            wat_append(c->w, "))\n");
+            emit_indent(c, depth + 1);
+            wat_append(c->w, "local.get $tmp_any\n");
         } else {
-            emit_indent(c, depth + 2); wat_append(c->w, "local.get $tmp_any\n");
-            emit_indent(c, depth + 2); wat_appendf(c->w, "br $sc_%d\n", label);
-            emit_indent(c, depth + 1); wat_append(c->w, "))\n");
+            emit_indent(c, depth + 2);
+            wat_append(c->w, "local.get $tmp_any\n");
+            emit_indent(c, depth + 2);
+            wat_appendf(c->w, "br $sc_%d\n", label);
+            emit_indent(c, depth + 1);
+            wat_append(c->w, "))\n");
             emit_expr(c, e->as.binop.rhs, depth + 1);
         }
-        emit_indent(c, depth); wat_append(c->w, ")\n");
+        emit_indent(c, depth);
+        wat_append(c->w, ")\n");
         return;
     }
     int ck = cmp_numeric_kind(c, e);
     if (ck) {
         /* Value context: materialize the i32 compare as a Lua boolean. */
-        emit_indent(c, depth); wat_append(c->w, "(select (result anyref)\n");
-        emit_indent(c, depth + 1); wat_append(c->w, "(global.get $g_true)\n");
-        emit_indent(c, depth + 1); wat_append(c->w, "(global.get $g_false)\n");
+        emit_indent(c, depth);
+        wat_append(c->w, "(select (result anyref)\n");
+        emit_indent(c, depth + 1);
+        wat_append(c->w, "(global.get $g_true)\n");
+        emit_indent(c, depth + 1);
+        wat_append(c->w, "(global.get $g_false)\n");
         emit_cmp_i32(c, e, depth + 1, ck);
-        emit_indent(c, depth); wat_append(c->w, ")\n");
+        emit_indent(c, depth);
+        wat_append(c->w, ")\n");
         return;
     }
     const char *helper = binop_helper(op);
-    if (!helper) { cg_error(c, "internal: unhandled binary operator"); return; }
+    if (!helper) {
+        cg_error(c, "internal: unhandled binary operator");
+        return;
+    }
     emit_expr(c, e->as.binop.lhs, depth);
     emit_expr(c, e->as.binop.rhs, depth);
     emit_indent(c, depth);
@@ -772,17 +813,17 @@ static void emit_unop(CG *c, const Expr *e, int depth) {
     emit_expr(c, e->as.unop.operand, depth);
     emit_indent(c, depth);
     switch (e->as.unop.op) {
-        case UN_NEG:  wat_append(c->w, "(call $lua_neg)\n");  break;
-        case UN_NOT:  wat_append(c->w, "(call $lua_not)\n");  break;
-        case UN_LEN:  wat_append(c->w, "(call $lua_len)\n");  break;
-        case UN_BNOT: wat_append(c->w, "(call $lua_bnot)\n"); break;
+    case UN_NEG: wat_append(c->w, "(call $lua_neg)\n"); break;
+    case UN_NOT: wat_append(c->w, "(call $lua_not)\n"); break;
+    case UN_LEN: wat_append(c->w, "(call $lua_len)\n"); break;
+    case UN_BNOT: wat_append(c->w, "(call $lua_bnot)\n"); break;
     }
 }
 
 /* An expression whose value in a multi-value position is a full $ArgArr
  * (call/method-call/vararg) rather than a single anyref. */
 static int is_multival_tail(const Expr *e) {
-    if (e->paren) return 0;   /* `(f())` is adjusted to a single value */
+    if (e->paren) return 0; /* `(f())` is adjusted to a single value */
     return e->kind == EXPR_CALL ||
            e->kind == EXPR_METHOD_CALL ||
            e->kind == EXPR_VARARG;
@@ -822,7 +863,7 @@ static const LuaFunc *direct_call_target(CG *c, const Expr *e) {
     } else if (callee->as.var.kind == VAR_UPVAL) {
         if (c->cur_upval_func && idx >= 0) {
             K = c->cur_upval_func[idx];
-            if (K && K->func_idx != c->cur_func_idx) K = NULL;  /* self-recursion only */
+            if (K && K->func_idx != c->cur_func_idx) K = NULL; /* self-recursion only */
         }
     }
     if (!K || K->is_vararg || (int)e->as.call.nargs != K->n_params) return NULL;
@@ -866,9 +907,9 @@ static void emit_typed_args(CG *c, const Expr *e, const FuncSig *sg, int depth) 
     for (size_t i = 0; i < e->as.call.nargs; i++) {
         NumTy pt = (sg && sg->param_ty) ? sg->param_ty[i] : NT_ANY;
         const Expr *a = e->as.call.args[i];
-        if (pt == NT_INT)        emit_int_expr(c, a, depth);
+        if (pt == NT_INT) emit_int_expr(c, a, depth);
         else if (pt == NT_FLOAT) emit_num_as_f64(c, a, depth);
-        else                     emit_expr(c, a, depth);
+        else emit_expr(c, a, depth);
     }
 }
 
@@ -879,18 +920,22 @@ static void emit_typed_direct_call1(CG *c, const Expr *e, const LuaFunc *K, int 
     const FuncSig *sg = target_sig(c, K);
     emit_indent(c, depth);
     wat_appendf(c->w, "(call $user_%d_da1\n", K->func_idx);
-    emit_indent(c, depth + 1); wat_append(c->w, "(ref.cast (ref $LuaClosure)\n");
+    emit_indent(c, depth + 1);
+    wat_append(c->w, "(ref.cast (ref $LuaClosure)\n");
     emit_expr(c, e->as.call.callee, depth + 2);
-    emit_indent(c, depth + 1); wat_append(c->w, ")\n");
+    emit_indent(c, depth + 1);
+    wat_append(c->w, ")\n");
     emit_typed_args(c, e, sg, depth + 1);
-    emit_indent(c, depth); wat_append(c->w, ")\n");
+    emit_indent(c, depth);
+    wat_append(c->w, ")\n");
 }
 
 /* Build a (ref $ArgArr) from a sequence of argument expressions, splicing
  * the trailing expression's full multi-value result if it is a call or `...`. */
 static void emit_args_array(CG *c, Expr **args, size_t nargs, int depth) {
     if (nargs == 0) {
-        emit_indent(c, depth); wat_append(c->w, "(global.get $g_empty_args)\n");
+        emit_indent(c, depth);
+        wat_append(c->w, "(global.get $g_empty_args)\n");
         return;
     }
     int last_mv = is_multival_tail(args[nargs - 1]);
@@ -898,21 +943,26 @@ static void emit_args_array(CG *c, Expr **args, size_t nargs, int depth) {
         emit_indent(c, depth);
         wat_appendf(c->w, "(array.new_fixed $ArgArr %zu\n", nargs);
         for (size_t i = 0; i < nargs; i++) emit_expr(c, args[i], depth + 1);
-        emit_indent(c, depth); wat_append(c->w, ")\n");
+        emit_indent(c, depth);
+        wat_append(c->w, ")\n");
         return;
     }
     size_t singles = nargs - 1;
-    emit_indent(c, depth); wat_append(c->w, "(call $merge_args\n");
+    emit_indent(c, depth);
+    wat_append(c->w, "(call $merge_args\n");
     if (singles == 0) {
-        emit_indent(c, depth + 1); wat_append(c->w, "(global.get $g_empty_args)\n");
+        emit_indent(c, depth + 1);
+        wat_append(c->w, "(global.get $g_empty_args)\n");
     } else {
         emit_indent(c, depth + 1);
         wat_appendf(c->w, "(array.new_fixed $ArgArr %zu\n", singles);
         for (size_t i = 0; i < singles; i++) emit_expr(c, args[i], depth + 2);
-        emit_indent(c, depth + 1); wat_append(c->w, ")\n");
+        emit_indent(c, depth + 1);
+        wat_append(c->w, ")\n");
     }
     emit_multival_array(c, args[nargs - 1], depth + 1);
-    emit_indent(c, depth); wat_append(c->w, ")\n");
+    emit_indent(c, depth);
+    wat_append(c->w, ")\n");
 }
 
 /* Look up `obj:m` via $lua_index (which routes strings through the string
@@ -920,12 +970,15 @@ static void emit_args_array(CG *c, Expr **args, size_t nargs, int depth) {
  *   (call $lua_index (local.get $tmp_any) <pooled method name> (i32.const line))
  * Shared by the value and tail-call method forms. */
 static void emit_method_lookup(CG *c, StrRef method, int line, int depth) {
-    emit_indent(c, depth); wat_append(c->w, "(call $lua_index\n");
-    emit_indent(c, depth + 1); wat_append(c->w, "(local.get $tmp_any)\n");
+    emit_indent(c, depth);
+    wat_append(c->w, "(call $lua_index\n");
+    emit_indent(c, depth + 1);
+    wat_append(c->w, "(local.get $tmp_any)\n");
     emit_pooled_string(c, method, depth + 1);
     emit_indent(c, depth + 1);
     wat_appendf(c->w, "(i32.const %d)\n", line);
-    emit_indent(c, depth); wat_append(c->w, ")\n");
+    emit_indent(c, depth);
+    wat_append(c->w, ")\n");
 }
 
 /* Emit the method-call argument array [recv] ++ method-args, at `depth`:
@@ -935,20 +988,24 @@ static void emit_method_lookup(CG *c, StrRef method, int line, int depth) {
 static void emit_method_args_array(CG *c, const Expr *e, int depth) {
     size_t mna = e->as.method_call.nargs;
     int has_mv = mna > 0 && is_multival_tail(e->as.method_call.args[mna - 1]);
-    emit_indent(c, depth); wat_append(c->w, "(call $merge_args\n");
+    emit_indent(c, depth);
+    wat_append(c->w, "(call $merge_args\n");
     emit_indent(c, depth + 1);
     wat_append(c->w, "(array.new_fixed $ArgArr 1 (local.get $tmp_any))\n");
     if (mna == 0) {
-        emit_indent(c, depth + 1); wat_append(c->w, "(global.get $g_empty_args)\n");
+        emit_indent(c, depth + 1);
+        wat_append(c->w, "(global.get $g_empty_args)\n");
     } else if (!has_mv) {
         emit_indent(c, depth + 1);
         wat_appendf(c->w, "(array.new_fixed $ArgArr %zu\n", mna);
         for (size_t i = 0; i < mna; i++) emit_expr(c, e->as.method_call.args[i], depth + 2);
-        emit_indent(c, depth + 1); wat_append(c->w, ")\n");
+        emit_indent(c, depth + 1);
+        wat_append(c->w, ")\n");
     } else {
         emit_args_array(c, e->as.method_call.args, mna, depth + 1);
     }
-    emit_indent(c, depth); wat_append(c->w, ")\n");
+    emit_indent(c, depth);
+    wat_append(c->w, ")\n");
 }
 
 /* Emit a call returning (ref $ArgArr) — the full multi-value result. */
@@ -958,16 +1015,20 @@ static void emit_call_array(CG *c, const Expr *e, int depth) {
          * method via $lua_index (which redirects strings through the
          * `string` library), then call with receiver prepended. */
         StrRef sr = strpool_add(&c->strs, e->as.method_call.method, e->as.method_call.method_len);
-        emit_indent(c, depth); wat_append(c->w, "(local.set $tmp_any\n");
+        emit_indent(c, depth);
+        wat_append(c->w, "(local.set $tmp_any\n");
         emit_expr(c, e->as.method_call.recv, depth + 1);
-        emit_indent(c, depth); wat_append(c->w, ")\n");
-        emit_indent(c, depth); wat_append(c->w, "(call $lua_call_any\n");
+        emit_indent(c, depth);
+        wat_append(c->w, ")\n");
+        emit_indent(c, depth);
+        wat_append(c->w, "(call $lua_call_any\n");
         emit_method_lookup(c, sr, e->line, depth + 1);
         /* args = [recv] ++ method args */
         emit_method_args_array(c, e, depth + 1);
         emit_indent(c, depth + 1);
         wat_appendf(c->w, "(i32.const %d)\n", e->line);
-        emit_indent(c, depth); wat_append(c->w, ")\n");
+        emit_indent(c, depth);
+        wat_append(c->w, ")\n");
         return;
     }
     const LuaFunc *dt = direct_call_target(c, e);
@@ -979,19 +1040,24 @@ static void emit_call_array(CG *c, const Expr *e, int depth) {
          * the project's "error position not tracked" stance.) */
         emit_indent(c, depth);
         wat_appendf(c->w, "(call $user_%d_da\n", dt->func_idx);
-        emit_indent(c, depth + 1); wat_append(c->w, "(ref.cast (ref $LuaClosure)\n");
+        emit_indent(c, depth + 1);
+        wat_append(c->w, "(ref.cast (ref $LuaClosure)\n");
         emit_expr(c, e->as.call.callee, depth + 2);
-        emit_indent(c, depth + 1); wat_append(c->w, ")\n");
+        emit_indent(c, depth + 1);
+        wat_append(c->w, ")\n");
         emit_typed_args(c, e, target_sig(c, dt), depth + 1);
-        emit_indent(c, depth); wat_append(c->w, ")\n");
+        emit_indent(c, depth);
+        wat_append(c->w, ")\n");
         return;
     }
-    emit_indent(c, depth); wat_append(c->w, "(call $lua_call_any\n");
+    emit_indent(c, depth);
+    wat_append(c->w, "(call $lua_call_any\n");
     emit_expr(c, e->as.call.callee, depth + 1);
     emit_args_array(c, e->as.call.args, e->as.call.nargs, depth + 1);
     emit_indent(c, depth + 1);
     wat_appendf(c->w, "(i32.const %d)\n", e->line);
-    emit_indent(c, depth); wat_append(c->w, ")\n");
+    emit_indent(c, depth);
+    wat_append(c->w, ")\n");
 }
 
 /* In expression context we want a single anyref; wrap with $args_first. */
@@ -1005,9 +1071,11 @@ static void emit_call(CG *c, const Expr *e, int depth) {
         emit_typed_direct_call1(c, e, dt, depth);
         return;
     }
-    emit_indent(c, depth); wat_append(c->w, "(call $args_first\n");
+    emit_indent(c, depth);
+    wat_append(c->w, "(call $args_first\n");
     emit_call_array(c, e, depth + 1);
-    emit_indent(c, depth); wat_append(c->w, ")\n");
+    emit_indent(c, depth);
+    wat_append(c->w, ")\n");
 }
 
 /* Tail-call dispatch shared by the regular and method forms. Assumes the
@@ -1022,12 +1090,14 @@ static void emit_tail_dispatch(CG *c, int line, int depth) {
      * caller's. */
     emit_indent(c, depth);
     wat_append(c->w, "(if (ref.test (ref $LuaClosure) (local.get $tmp_callee))\n");
-    emit_indent(c, depth + 1); wat_append(c->w, "(then\n");
+    emit_indent(c, depth + 1);
+    wat_append(c->w, "(then\n");
     emit_indent(c, depth + 2);
     wat_appendf(c->w, "(call $replace_top_call_frame (i32.const %d))\n", line);
     emit_indent(c, depth + 2);
     wat_append(c->w, "(local.set $tmp_clo (ref.cast (ref $LuaClosure) (local.get $tmp_callee)))\n");
-    emit_indent(c, depth + 2); wat_append(c->w, "(return_call_ref $LuaFn\n");
+    emit_indent(c, depth + 2);
+    wat_append(c->w, "(return_call_ref $LuaFn\n");
     emit_indent(c, depth + 3);
     wat_append(c->w, "(ref.as_non_null (local.get $tmp_clo))\n");
     emit_indent(c, depth + 3);
@@ -1037,9 +1107,9 @@ static void emit_tail_dispatch(CG *c, int line, int depth) {
     /* Slow path: __call walk / typed error. */
     emit_indent(c, depth);
     wat_appendf(c->w,
-        "(return (call $lua_call_any (local.get $tmp_callee) "
-        "(ref.as_non_null (local.get $tmp_args)) (i32.const %d)))\n",
-        line);
+                "(return (call $lua_call_any (local.get $tmp_callee) "
+                "(ref.as_non_null (local.get $tmp_args)) (i32.const %d)))\n",
+                line);
 }
 
 /* `return obj:m(args)` — the method-call tail form. Mirrors emit_call_array's
@@ -1052,15 +1122,21 @@ static void emit_tail_dispatch(CG *c, int line, int depth) {
 static void emit_tail_method_call(CG *c, const Expr *e, int depth) {
     StrRef sr = strpool_add(&c->strs, e->as.method_call.method,
                             e->as.method_call.method_len);
-    emit_indent(c, depth); wat_append(c->w, "(local.set $tmp_any\n");
+    emit_indent(c, depth);
+    wat_append(c->w, "(local.set $tmp_any\n");
     emit_expr(c, e->as.method_call.recv, depth + 1);
-    emit_indent(c, depth); wat_append(c->w, ")\n");
-    emit_indent(c, depth); wat_append(c->w, "(local.set $tmp_callee\n");
+    emit_indent(c, depth);
+    wat_append(c->w, ")\n");
+    emit_indent(c, depth);
+    wat_append(c->w, "(local.set $tmp_callee\n");
     emit_method_lookup(c, sr, e->line, depth + 1);
-    emit_indent(c, depth); wat_append(c->w, ")\n");
-    emit_indent(c, depth); wat_append(c->w, "(local.set $tmp_args\n");
+    emit_indent(c, depth);
+    wat_append(c->w, ")\n");
+    emit_indent(c, depth);
+    wat_append(c->w, "(local.set $tmp_args\n");
     emit_method_args_array(c, e, depth + 1);
-    emit_indent(c, depth); wat_append(c->w, ")\n");
+    emit_indent(c, depth);
+    wat_append(c->w, ")\n");
     emit_tail_dispatch(c, e->line, depth);
 }
 
@@ -1075,12 +1151,16 @@ static void emit_tail_call(CG *c, const Expr *e, int depth) {
      * a method-call argument (e.g. `f(s:gmatch(...))`) reuses $tmp_any for
      * its receiver while we build the args array below, which would clobber
      * the callee. */
-    emit_indent(c, depth); wat_append(c->w, "(local.set $tmp_callee\n");
+    emit_indent(c, depth);
+    wat_append(c->w, "(local.set $tmp_callee\n");
     emit_expr(c, e->as.call.callee, depth + 1);
-    emit_indent(c, depth); wat_append(c->w, ")\n");
-    emit_indent(c, depth); wat_append(c->w, "(local.set $tmp_args\n");
+    emit_indent(c, depth);
+    wat_append(c->w, ")\n");
+    emit_indent(c, depth);
+    wat_append(c->w, "(local.set $tmp_args\n");
     emit_args_array(c, e->as.call.args, e->as.call.nargs, depth + 1);
-    emit_indent(c, depth); wat_append(c->w, ")\n");
+    emit_indent(c, depth);
+    wat_append(c->w, ")\n");
     emit_tail_dispatch(c, e->line, depth);
 }
 
@@ -1104,9 +1184,11 @@ static void emit_function_expr(CG *c, const LuaFunc *fn, int depth) {
             VarKind k = (u->src == UPVAL_FROM_LOCAL) ? VAR_LOCAL : VAR_UPVAL;
             emit_box_ref(c, k, u->idx, depth + 2);
         }
-        emit_indent(c, depth + 1); wat_append(c->w, ")\n");
+        emit_indent(c, depth + 1);
+        wat_append(c->w, ")\n");
     }
-    emit_indent(c, depth); wat_append(c->w, ")\n");
+    emit_indent(c, depth);
+    wat_append(c->w, ")\n");
 }
 
 /* ----- table operations ----- */
@@ -1118,20 +1200,24 @@ static void emit_index_expr(CG *c, const Expr *e, int depth) {
      * $lua_index_ik fast path takes the raw i64 (no make_int / $as_arr_key)
      * and hits the array part directly. */
     if (c->opt_int && expr_is_int(c, e->as.index.key)) {
-        emit_indent(c, depth); wat_append(c->w, "(call $lua_index_ik\n");
+        emit_indent(c, depth);
+        wat_append(c->w, "(call $lua_index_ik\n");
         emit_expr(c, e->as.index.table, depth + 1);
         emit_int_expr(c, e->as.index.key, depth + 1);
         emit_indent(c, depth + 1);
         wat_appendf(c->w, "(i32.const %d)\n", e->line);
-        emit_indent(c, depth); wat_append(c->w, ")\n");
+        emit_indent(c, depth);
+        wat_append(c->w, ")\n");
         return;
     }
-    emit_indent(c, depth); wat_append(c->w, "(call $lua_index\n");
+    emit_indent(c, depth);
+    wat_append(c->w, "(call $lua_index\n");
     emit_expr(c, e->as.index.table, depth + 1);
     emit_expr(c, e->as.index.key, depth + 1);
     emit_indent(c, depth + 1);
     wat_appendf(c->w, "(i32.const %d)\n", e->line);
-    emit_indent(c, depth); wat_append(c->w, ")\n");
+    emit_indent(c, depth);
+    wat_append(c->w, ")\n");
 }
 
 static void emit_table_ctor(CG *c, const Expr *e, int depth) {
@@ -1140,8 +1226,10 @@ static void emit_table_ctor(CG *c, const Expr *e, int depth) {
      * expression from outside (works inside array.new_fixed arg lists,
      * function calls, etc.) but uses stack-form internally to keep the
      * in-progress table on the operand stack across entries. */
-    emit_indent(c, depth); wat_append(c->w, "(block (result anyref)\n");
-    emit_indent(c, depth + 1); wat_append(c->w, "(call $tab_new)\n");
+    emit_indent(c, depth);
+    wat_append(c->w, "(block (result anyref)\n");
+    emit_indent(c, depth + 1);
+    wat_append(c->w, "(call $tab_new)\n");
     int pos_idx = 1;
     /* If the final entry is positional AND a multi-value tail (call/vararg),
      * we splice all of its values rather than just taking the first. */
@@ -1151,8 +1239,10 @@ static void emit_table_ctor(CG *c, const Expr *e, int depth) {
     int last_normal = splice_last ? n - 1 : n;
     for (int i = 0; i < last_normal; i++) {
         TableEntry *ent = &e->as.table_ctor.entries[i];
-        emit_indent(c, depth + 1); wat_append(c->w, "local.tee $tmp_tab\n");
-        emit_indent(c, depth + 1); wat_append(c->w, "(ref.as_non_null (local.get $tmp_tab))\n");
+        emit_indent(c, depth + 1);
+        wat_append(c->w, "local.tee $tmp_tab\n");
+        emit_indent(c, depth + 1);
+        wat_append(c->w, "(ref.as_non_null (local.get $tmp_tab))\n");
         if (ent->kind == TENT_POSITIONAL) {
             emit_indent(c, depth + 1);
             wat_appendf(c->w, "(ref.i31 (i32.const %d))\n", pos_idx++);
@@ -1160,18 +1250,25 @@ static void emit_table_ctor(CG *c, const Expr *e, int depth) {
             emit_expr(c, ent->key, depth + 1);
         }
         emit_expr(c, ent->value, depth + 1);
-        emit_indent(c, depth + 1); wat_append(c->w, "call $tab_set\n");
+        emit_indent(c, depth + 1);
+        wat_append(c->w, "call $tab_set\n");
     }
     if (splice_last) {
         /* (call $tab_append_args (local.tee $tmp_tab) (i32.const pos_idx) <args>) */
-        emit_indent(c, depth + 1); wat_append(c->w, "local.tee $tmp_tab\n");
-        emit_indent(c, depth + 1); wat_append(c->w, "(call $tab_append_args\n");
-        emit_indent(c, depth + 2); wat_append(c->w, "(ref.as_non_null (local.get $tmp_tab))\n");
-        emit_indent(c, depth + 2); wat_appendf(c->w, "(i32.const %d)\n", pos_idx);
+        emit_indent(c, depth + 1);
+        wat_append(c->w, "local.tee $tmp_tab\n");
+        emit_indent(c, depth + 1);
+        wat_append(c->w, "(call $tab_append_args\n");
+        emit_indent(c, depth + 2);
+        wat_append(c->w, "(ref.as_non_null (local.get $tmp_tab))\n");
+        emit_indent(c, depth + 2);
+        wat_appendf(c->w, "(i32.const %d)\n", pos_idx);
         emit_multival_array(c, e->as.table_ctor.entries[n - 1].value, depth + 2);
-        emit_indent(c, depth + 1); wat_append(c->w, ")\n");
+        emit_indent(c, depth + 1);
+        wat_append(c->w, ")\n");
     }
-    emit_indent(c, depth); wat_append(c->w, ")\n");
+    emit_indent(c, depth);
+    wat_append(c->w, ")\n");
 }
 
 /* ----- integer-specialization PoC (LUA2WASM_OPT_INT) ----- */
@@ -1195,15 +1292,19 @@ static int expr_is_int(CG *c, const Expr *e) {
         return e->as.var.kind == VAR_LOCAL && slot_is_int(c, e->as.var.idx);
     case EXPR_BINOP:
         switch (e->as.binop.op) {
-        case BIN_ADD: case BIN_SUB: case BIN_MUL:
-        case BIN_FDIV: case BIN_MOD:
-        case BIN_BAND: case BIN_BOR: case BIN_BXOR:
+        case BIN_ADD:
+        case BIN_SUB:
+        case BIN_MUL:
+        case BIN_FDIV:
+        case BIN_MOD:
+        case BIN_BAND:
+        case BIN_BOR:
+        case BIN_BXOR:
             return expr_is_int(c, e->as.binop.lhs) && expr_is_int(c, e->as.binop.rhs);
         default: return 0;
         }
     case EXPR_UNOP:
-        return (e->as.unop.op == UN_NEG || e->as.unop.op == UN_BNOT)
-            && expr_is_int(c, e->as.unop.operand);
+        return (e->as.unop.op == UN_NEG || e->as.unop.op == UN_BNOT) && expr_is_int(c, e->as.unop.operand);
     case EXPR_CALL: {
         /* A direct call to an int-returning function, callable with typed args
          * from here, yields a raw i64 (its $user_N_da1 returns i64). */
@@ -1229,13 +1330,17 @@ static void emit_int_expr(CG *c, const Expr *e, int depth) {
         return;
     case EXPR_UNOP:
         if (e->as.unop.op == UN_NEG) {
-            emit_indent(c, depth); wat_append(c->w, "(i64.sub (i64.const 0)\n");
+            emit_indent(c, depth);
+            wat_append(c->w, "(i64.sub (i64.const 0)\n");
             emit_int_expr(c, e->as.unop.operand, depth + 1);
-            emit_indent(c, depth); wat_append(c->w, ")\n");
+            emit_indent(c, depth);
+            wat_append(c->w, ")\n");
         } else { /* UN_BNOT */
-            emit_indent(c, depth); wat_append(c->w, "(i64.xor (i64.const -1)\n");
+            emit_indent(c, depth);
+            wat_append(c->w, "(i64.xor (i64.const -1)\n");
             emit_int_expr(c, e->as.unop.operand, depth + 1);
-            emit_indent(c, depth); wat_append(c->w, ")\n");
+            emit_indent(c, depth);
+            wat_append(c->w, ")\n");
         }
         return;
     case EXPR_BINOP: {
@@ -1245,18 +1350,19 @@ static void emit_int_expr(CG *c, const Expr *e, int depth) {
         case BIN_SUB: op = "i64.sub"; break;
         case BIN_MUL: op = "i64.mul"; break;
         case BIN_BAND: op = "i64.and"; break;
-        case BIN_BOR:  op = "i64.or";  break;
+        case BIN_BOR: op = "i64.or"; break;
         case BIN_BXOR: op = "i64.xor"; break;
         case BIN_FDIV: fn = "$idiv_floor"; break;
-        case BIN_MOD:  fn = "$imod_floor"; break;
+        case BIN_MOD: fn = "$imod_floor"; break;
         default: break;
         }
         emit_indent(c, depth);
         if (fn) wat_appendf(c->w, "(call %s\n", fn);
-        else    wat_appendf(c->w, "(%s\n", op);
+        else wat_appendf(c->w, "(%s\n", op);
         emit_int_expr(c, e->as.binop.lhs, depth + 1);
         emit_int_expr(c, e->as.binop.rhs, depth + 1);
-        emit_indent(c, depth); wat_append(c->w, ")\n");
+        emit_indent(c, depth);
+        wat_append(c->w, ")\n");
         return;
     }
     case EXPR_CALL:
@@ -1290,8 +1396,10 @@ static int expr_is_float(CG *c, const Expr *e) {
         int ln = expr_is_int(c, l) || expr_is_float(c, l);
         int rn = expr_is_int(c, r) || expr_is_float(c, r);
         switch (e->as.binop.op) {
-        case BIN_DIV: return ln && rn;                               /* always float */
-        case BIN_ADD: case BIN_SUB: case BIN_MUL:
+        case BIN_DIV: return ln && rn; /* always float */
+        case BIN_ADD:
+        case BIN_SUB:
+        case BIN_MUL:
             return ln && rn && (expr_is_float(c, l) || expr_is_float(c, r));
         default: return 0;
         }
@@ -1312,11 +1420,16 @@ static int expr_is_float(CG *c, const Expr *e) {
 /* Emit a numeric (int- or float-typed) expression as a raw f64, converting an
  * integer operand with f64.convert_i64_s. */
 static void emit_num_as_f64(CG *c, const Expr *e, int depth) {
-    if (expr_is_float(c, e)) { emit_float_expr(c, e, depth); return; }
+    if (expr_is_float(c, e)) {
+        emit_float_expr(c, e, depth);
+        return;
+    }
     /* must be integer-typed (the only other case expr_is_float admits) */
-    emit_indent(c, depth); wat_append(c->w, "(f64.convert_i64_s\n");
+    emit_indent(c, depth);
+    wat_append(c->w, "(f64.convert_i64_s\n");
     emit_int_expr(c, e, depth + 1);
-    emit_indent(c, depth); wat_append(c->w, ")\n");
+    emit_indent(c, depth);
+    wat_append(c->w, ")\n");
 }
 
 /* Emit `e` (which must satisfy expr_is_float) as a raw f64 on the wasm stack. */
@@ -1332,9 +1445,11 @@ static void emit_float_expr(CG *c, const Expr *e, int depth) {
         wat_appendf(c->w, "(local.get $L%d)\n", e->as.var.idx);
         return;
     case EXPR_UNOP: /* UN_NEG */
-        emit_indent(c, depth); wat_append(c->w, "(f64.neg\n");
+        emit_indent(c, depth);
+        wat_append(c->w, "(f64.neg\n");
         emit_num_as_f64(c, e->as.unop.operand, depth + 1);
-        emit_indent(c, depth); wat_append(c->w, ")\n");
+        emit_indent(c, depth);
+        wat_append(c->w, ")\n");
         return;
     case EXPR_BINOP: {
         const char *op = "f64.add";
@@ -1345,10 +1460,12 @@ static void emit_float_expr(CG *c, const Expr *e, int depth) {
         case BIN_DIV: op = "f64.div"; break;
         default: break;
         }
-        emit_indent(c, depth); wat_appendf(c->w, "(%s\n", op);
+        emit_indent(c, depth);
+        wat_appendf(c->w, "(%s\n", op);
         emit_num_as_f64(c, e->as.binop.lhs, depth + 1);
         emit_num_as_f64(c, e->as.binop.rhs, depth + 1);
-        emit_indent(c, depth); wat_append(c->w, ")\n");
+        emit_indent(c, depth);
+        wat_append(c->w, ")\n");
         return;
     }
     case EXPR_CALL:
@@ -1366,7 +1483,14 @@ static void emit_float_expr(CG *c, const Expr *e, int depth) {
 static void int_kill_block(CG *c, const Block *b, unsigned char *out, int *changed);
 
 static void int_kill_stmt(CG *c, const Stmt *s, unsigned char *out, int *changed) {
-    #define KILL(slot) do { int _s=(slot); if (_s>=0 && _s<c->cur_n_locals && out[_s]) { out[_s]=0; *changed=1; } } while (0)
+#define KILL(slot)                                        \
+    do {                                                  \
+        int _s = (slot);                                  \
+        if (_s >= 0 && _s < c->cur_n_locals && out[_s]) { \
+            out[_s] = 0;                                  \
+            *changed = 1;                                 \
+        }                                                 \
+    } while (0)
     switch (s->kind) {
     case STMT_LOCAL: {
         int nn = s->as.local.n_names, nv = s->as.local.n_values;
@@ -1391,9 +1515,7 @@ static void int_kill_stmt(CG *c, const Stmt *s, unsigned char *out, int *changed
     }
     case STMT_FOR_NUM: {
         const Expr *st = s->as.for_num.step;
-        if (!(expr_is_int(c, s->as.for_num.start)
-              && expr_is_int(c, s->as.for_num.stop)
-              && (st == NULL || expr_is_int(c, st))))
+        if (!(expr_is_int(c, s->as.for_num.start) && expr_is_int(c, s->as.for_num.stop) && (st == NULL || expr_is_int(c, st))))
             KILL(s->as.for_num.local_idx);
         int_kill_block(c, &s->as.for_num.body, out, changed);
         break;
@@ -1408,12 +1530,12 @@ static void int_kill_stmt(CG *c, const Stmt *s, unsigned char *out, int *changed
             int_kill_block(c, &s->as.if_stmt.arms[a].body, out, changed);
         if (s->as.if_stmt.has_else) int_kill_block(c, &s->as.if_stmt.else_body, out, changed);
         break;
-    case STMT_WHILE:  int_kill_block(c, &s->as.while_stmt.body, out, changed); break;
-    case STMT_DO:     int_kill_block(c, &s->as.do_stmt.body,    out, changed); break;
-    case STMT_REPEAT: int_kill_block(c, &s->as.repeat.body,     out, changed); break;
+    case STMT_WHILE: int_kill_block(c, &s->as.while_stmt.body, out, changed); break;
+    case STMT_DO: int_kill_block(c, &s->as.do_stmt.body, out, changed); break;
+    case STMT_REPEAT: int_kill_block(c, &s->as.repeat.body, out, changed); break;
     default: break;
     }
-    #undef KILL
+#undef KILL
 }
 
 static void int_kill_block(CG *c, const Block *b, unsigned char *out, int *changed) {
@@ -1433,7 +1555,10 @@ static void compute_int_slots(CG *c, const Block *body, int n_locals, int n_para
                               const unsigned char *captured, unsigned char *out,
                               const NumTy *param_seed) {
     for (int i = 0; i < n_locals; i++) {
-        if (captured && captured[i]) { out[i] = 0; continue; }
+        if (captured && captured[i]) {
+            out[i] = 0;
+            continue;
+        }
         out[i] = (i >= n_params) ||
                  (param_seed && (param_seed[i] == NT_INT || param_seed[i] == NT_UNSET));
     }
@@ -1442,7 +1567,10 @@ static void compute_int_slots(CG *c, const Block *body, int n_locals, int n_para
     c->cur_is_int = out;
     c->cur_n_locals = n_locals;
     int changed = 1;
-    while (changed) { changed = 0; int_kill_block(c, body, out, &changed); }
+    while (changed) {
+        changed = 0;
+        int_kill_block(c, body, out, &changed);
+    }
     c->cur_is_int = saved;
     c->cur_n_locals = saved_n;
 }
@@ -1453,7 +1581,14 @@ static void compute_int_slots(CG *c, const Block *body, int n_locals, int n_para
 static void float_kill_block(CG *c, const Block *b, unsigned char *out, int *changed);
 
 static void float_kill_stmt(CG *c, const Stmt *s, unsigned char *out, int *changed) {
-    #define KILLF(slot) do { int _s=(slot); if (_s>=0 && _s<c->cur_n_locals && out[_s]) { out[_s]=0; *changed=1; } } while (0)
+#define KILLF(slot)                                       \
+    do {                                                  \
+        int _s = (slot);                                  \
+        if (_s >= 0 && _s < c->cur_n_locals && out[_s]) { \
+            out[_s] = 0;                                  \
+            *changed = 1;                                 \
+        }                                                 \
+    } while (0)
     switch (s->kind) {
     case STMT_LOCAL: {
         int nn = s->as.local.n_names, nv = s->as.local.n_values;
@@ -1487,12 +1622,12 @@ static void float_kill_stmt(CG *c, const Stmt *s, unsigned char *out, int *chang
             float_kill_block(c, &s->as.if_stmt.arms[a].body, out, changed);
         if (s->as.if_stmt.has_else) float_kill_block(c, &s->as.if_stmt.else_body, out, changed);
         break;
-    case STMT_WHILE:  float_kill_block(c, &s->as.while_stmt.body, out, changed); break;
-    case STMT_DO:     float_kill_block(c, &s->as.do_stmt.body,    out, changed); break;
-    case STMT_REPEAT: float_kill_block(c, &s->as.repeat.body,     out, changed); break;
+    case STMT_WHILE: float_kill_block(c, &s->as.while_stmt.body, out, changed); break;
+    case STMT_DO: float_kill_block(c, &s->as.do_stmt.body, out, changed); break;
+    case STMT_REPEAT: float_kill_block(c, &s->as.repeat.body, out, changed); break;
     default: break;
     }
-    #undef KILLF
+#undef KILLF
 }
 
 static void float_kill_block(CG *c, const Block *b, unsigned char *out, int *changed) {
@@ -1506,7 +1641,10 @@ static void compute_float_slots(CG *c, const Block *body, int n_locals, int n_pa
                                 const unsigned char *captured, unsigned char *out,
                                 const NumTy *param_seed) {
     for (int i = 0; i < n_locals; i++) {
-        if ((captured && captured[i]) || (c->cur_is_int && c->cur_is_int[i])) { out[i] = 0; continue; }
+        if ((captured && captured[i]) || (c->cur_is_int && c->cur_is_int[i])) {
+            out[i] = 0;
+            continue;
+        }
         out[i] = (i >= n_params) || (param_seed && param_seed[i] == NT_FLOAT);
     }
     const unsigned char *saved = c->cur_is_float;
@@ -1514,7 +1652,10 @@ static void compute_float_slots(CG *c, const Block *body, int n_locals, int n_pa
     c->cur_is_float = out;
     c->cur_n_locals = n_locals;
     int changed = 1;
-    while (changed) { changed = 0; float_kill_block(c, body, out, &changed); }
+    while (changed) {
+        changed = 0;
+        float_kill_block(c, body, out, &changed);
+    }
     c->cur_is_float = saved;
     c->cur_n_locals = saved_n;
 }
@@ -1541,8 +1682,7 @@ static void func_slot_walk_stmt(const Stmt *s, const LuaFunc **out,
     case STMT_ASSIGN:
         for (int j = 0; j < s->as.assign.n_targets; j++) {
             AssignTarget *t = &s->as.assign.targets[j];
-            if (t->kind == TGT_VAR && t->as.var.kind == VAR_LOCAL
-                && t->as.var.idx >= 0 && t->as.var.idx < n)
+            if (t->kind == TGT_VAR && t->as.var.kind == VAR_LOCAL && t->as.var.idx >= 0 && t->as.var.idx < n)
                 reassigned[t->as.var.idx] = 1;
         }
         break;
@@ -1551,11 +1691,11 @@ static void func_slot_walk_stmt(const Stmt *s, const LuaFunc **out,
             func_slot_walk(&s->as.if_stmt.arms[a].body, out, reassigned, n);
         if (s->as.if_stmt.has_else) func_slot_walk(&s->as.if_stmt.else_body, out, reassigned, n);
         break;
-    case STMT_WHILE:   func_slot_walk(&s->as.while_stmt.body, out, reassigned, n); break;
-    case STMT_DO:      func_slot_walk(&s->as.do_stmt.body,    out, reassigned, n); break;
-    case STMT_REPEAT:  func_slot_walk(&s->as.repeat.body,     out, reassigned, n); break;
-    case STMT_FOR_NUM: func_slot_walk(&s->as.for_num.body,    out, reassigned, n); break;
-    case STMT_FOR_GEN: func_slot_walk(&s->as.for_gen.body,    out, reassigned, n); break;
+    case STMT_WHILE: func_slot_walk(&s->as.while_stmt.body, out, reassigned, n); break;
+    case STMT_DO: func_slot_walk(&s->as.do_stmt.body, out, reassigned, n); break;
+    case STMT_REPEAT: func_slot_walk(&s->as.repeat.body, out, reassigned, n); break;
+    case STMT_FOR_NUM: func_slot_walk(&s->as.for_num.body, out, reassigned, n); break;
+    case STMT_FOR_GEN: func_slot_walk(&s->as.for_gen.body, out, reassigned, n); break;
     default: break;
     }
 }
@@ -1576,9 +1716,9 @@ static void func_slot_walk(const Block *b, const LuaFunc **out,
  * the captured-exclusion used to guard against; we now check it precisely. */
 
 typedef struct {
-    const LuaFunc **slot_func;   /* [n_locals]  slot -> bound LuaFunc (or NULL) */
-    unsigned char  *reass_local; /* [n_locals]  slot assigned somewhere in body */
-    unsigned char  *reass_upval; /* [n_upvalues] upvalue assigned in body (or NULL) */
+    const LuaFunc **slot_func;  /* [n_locals]  slot -> bound LuaFunc (or NULL) */
+    unsigned char *reass_local; /* [n_locals]  slot assigned somewhere in body */
+    unsigned char *reass_upval; /* [n_upvalues] upvalue assigned in body (or NULL) */
     int n_locals, n_upvalues;
 } BindAccum;
 
@@ -1605,8 +1745,7 @@ static void bind_walk_stmt(const Stmt *s, BindAccum *a) {
             if (t->kind != TGT_VAR) continue;
             if (t->as.var.kind == VAR_LOCAL && t->as.var.idx >= 0 && t->as.var.idx < a->n_locals)
                 a->reass_local[t->as.var.idx] = 1;
-            else if (t->as.var.kind == VAR_UPVAL && a->reass_upval
-                     && t->as.var.idx >= 0 && t->as.var.idx < a->n_upvalues)
+            else if (t->as.var.kind == VAR_UPVAL && a->reass_upval && t->as.var.idx >= 0 && t->as.var.idx < a->n_upvalues)
                 a->reass_upval[t->as.var.idx] = 1;
         }
         break;
@@ -1614,11 +1753,11 @@ static void bind_walk_stmt(const Stmt *s, BindAccum *a) {
         for (size_t k = 0; k < s->as.if_stmt.narms; k++) bind_walk_block(&s->as.if_stmt.arms[k].body, a);
         if (s->as.if_stmt.has_else) bind_walk_block(&s->as.if_stmt.else_body, a);
         break;
-    case STMT_WHILE:   bind_walk_block(&s->as.while_stmt.body, a); break;
-    case STMT_DO:      bind_walk_block(&s->as.do_stmt.body,    a); break;
-    case STMT_REPEAT:  bind_walk_block(&s->as.repeat.body,     a); break;
-    case STMT_FOR_NUM: bind_walk_block(&s->as.for_num.body,    a); break;
-    case STMT_FOR_GEN: bind_walk_block(&s->as.for_gen.body,    a); break;
+    case STMT_WHILE: bind_walk_block(&s->as.while_stmt.body, a); break;
+    case STMT_DO: bind_walk_block(&s->as.do_stmt.body, a); break;
+    case STMT_REPEAT: bind_walk_block(&s->as.repeat.body, a); break;
+    case STMT_FOR_NUM: bind_walk_block(&s->as.for_num.body, a); break;
+    case STMT_FOR_GEN: bind_walk_block(&s->as.for_gen.body, a); break;
     default: break; /* nested function literals are walked on their own row */
     }
 }
@@ -1629,8 +1768,14 @@ static void bind_walk_block(const Block *b, BindAccum *a) {
 /* The slot_func map (and its length) for a given enclosing scope; func_idx == -1
  * is the main chunk. */
 static const LuaFunc **bind_slot_map(CG *c, int func_idx, int *n_out) {
-    if (func_idx == -1) { *n_out = c->pr->main_n_locals; return c->main_slot_func; }
-    if (func_idx < 0 || func_idx >= c->n_sigs) { *n_out = 0; return NULL; }
+    if (func_idx == -1) {
+        *n_out = c->pr->main_n_locals;
+        return c->main_slot_func;
+    }
+    if (func_idx < 0 || func_idx >= c->n_sigs) {
+        *n_out = 0;
+        return NULL;
+    }
     *n_out = c->pr->funcs.items[func_idx]->n_locals;
     return c->bind_slot[func_idx];
 }
@@ -1639,18 +1784,27 @@ static const LuaFunc **bind_slot_map(CG *c, int func_idx, int *n_out) {
  * originates. *of == -1 means the main chunk; *of == -2 means unresolvable. */
 static void resolve_upval_origin(CG *c, int func_idx, int u, int *of, int *os) {
     const LuaFunc *F = c->pr->funcs.items[func_idx];
-    if (!F->upvalues || u < 0 || u >= F->n_upvalues) { *of = -2; *os = -1; return; }
+    if (!F->upvalues || u < 0 || u >= F->n_upvalues) {
+        *of = -2;
+        *os = -1;
+        return;
+    }
     UpvalueRef ref = F->upvalues[u];
-    if (ref.src == UPVAL_FROM_LOCAL) { *of = F->parent_idx; *os = ref.idx; }
-    else if (F->parent_idx >= 0)     resolve_upval_origin(c, F->parent_idx, ref.idx, of, os);
-    else                             { *of = -2; *os = -1; }   /* main has no upvalues */
+    if (ref.src == UPVAL_FROM_LOCAL) {
+        *of = F->parent_idx;
+        *os = ref.idx;
+    } else if (F->parent_idx >= 0) resolve_upval_origin(c, F->parent_idx, ref.idx, of, os);
+    else {
+        *of = -2;
+        *os = -1;
+    } /* main has no upvalues */
 }
 
 /* Build c->bind_slot / c->bind_upval / c->main_slot_func. */
 static void compute_func_bindings(CG *c, const ParseResult *pr) {
     int n = (int)pr->funcs.count;
-    c->n_binds = n;   /* free_func_bindings frees exactly this many rows */
-    c->bind_slot  = calloc(n ? n : 1, sizeof *c->bind_slot);
+    c->n_binds = n; /* free_func_bindings frees exactly this many rows */
+    c->bind_slot = calloc(n ? n : 1, sizeof *c->bind_slot);
     c->bind_upval = calloc(n ? n : 1, sizeof *c->bind_upval);
     c->main_slot_func = calloc(pr->main_n_locals ? pr->main_n_locals : 1, sizeof(const LuaFunc *));
     unsigned char **reass_upval = calloc(n ? n : 1, sizeof *reass_upval);
@@ -1658,20 +1812,22 @@ static void compute_func_bindings(CG *c, const ParseResult *pr) {
     /* Pass 1: per-scope bindings; drop directly-reassigned local bindings. */
     {
         unsigned char *rl = calloc(pr->main_n_locals ? pr->main_n_locals : 1, 1);
-        BindAccum a = { c->main_slot_func, rl, NULL, pr->main_n_locals, 0 };
+        BindAccum a = {c->main_slot_func, rl, NULL, pr->main_n_locals, 0};
         bind_walk_block(&pr->main_body, &a);
-        for (int s = 0; s < pr->main_n_locals; s++) if (rl[s]) c->main_slot_func[s] = NULL;
+        for (int s = 0; s < pr->main_n_locals; s++)
+            if (rl[s]) c->main_slot_func[s] = NULL;
         free(rl);
     }
     for (int f = 0; f < n; f++) {
         const LuaFunc *F = pr->funcs.items[f];
-        c->bind_slot[f]  = calloc(F->n_locals ? F->n_locals : 1, sizeof(const LuaFunc *));
+        c->bind_slot[f] = calloc(F->n_locals ? F->n_locals : 1, sizeof(const LuaFunc *));
         c->bind_upval[f] = calloc(F->n_upvalues ? F->n_upvalues : 1, sizeof(const LuaFunc *));
-        reass_upval[f]   = calloc(F->n_upvalues ? F->n_upvalues : 1, 1);
+        reass_upval[f] = calloc(F->n_upvalues ? F->n_upvalues : 1, 1);
         unsigned char *rl = calloc(F->n_locals ? F->n_locals : 1, 1);
-        BindAccum a = { c->bind_slot[f], rl, reass_upval[f], F->n_locals, F->n_upvalues };
+        BindAccum a = {c->bind_slot[f], rl, reass_upval[f], F->n_locals, F->n_upvalues};
         bind_walk_block(&F->body, &a);
-        for (int s = 0; s < F->n_locals; s++) if (rl[s]) c->bind_slot[f][s] = NULL;
+        for (int s = 0; s < F->n_locals; s++)
+            if (rl[s]) c->bind_slot[f][s] = NULL;
         free(rl);
     }
 
@@ -1681,8 +1837,10 @@ static void compute_func_bindings(CG *c, const ParseResult *pr) {
         const LuaFunc *F = pr->funcs.items[f];
         for (int u = 0; u < F->n_upvalues; u++) {
             if (!reass_upval[f][u]) continue;
-            int of, os; resolve_upval_origin(c, f, u, &of, &os);
-            int nn; const LuaFunc **m = bind_slot_map(c, of, &nn);
+            int of, os;
+            resolve_upval_origin(c, f, u, &of, &os);
+            int nn;
+            const LuaFunc **m = bind_slot_map(c, of, &nn);
             if (m && os >= 0 && os < nn) m[os] = NULL;
         }
     }
@@ -1691,8 +1849,10 @@ static void compute_func_bindings(CG *c, const ParseResult *pr) {
     for (int f = 0; f < n; f++) {
         const LuaFunc *F = pr->funcs.items[f];
         for (int u = 0; u < F->n_upvalues; u++) {
-            int of, os; resolve_upval_origin(c, f, u, &of, &os);
-            int nn; const LuaFunc **m = bind_slot_map(c, of, &nn);
+            int of, os;
+            resolve_upval_origin(c, f, u, &of, &os);
+            int nn;
+            const LuaFunc **m = bind_slot_map(c, of, &nn);
             c->bind_upval[f][u] = (m && os >= 0 && os < nn) ? m[os] : NULL;
         }
         free(reass_upval[f]);
@@ -1701,11 +1861,16 @@ static void compute_func_bindings(CG *c, const ParseResult *pr) {
 }
 
 static void free_func_bindings(CG *c) {
-    if (c->bind_slot)  for (int i = 0; i < c->n_binds; i++) free((void *)c->bind_slot[i]);
-    if (c->bind_upval) for (int i = 0; i < c->n_binds; i++) free((void *)c->bind_upval[i]);
-    free(c->bind_slot);  c->bind_slot = NULL;
-    free(c->bind_upval); c->bind_upval = NULL;
-    free(c->main_slot_func); c->main_slot_func = NULL;
+    if (c->bind_slot)
+        for (int i = 0; i < c->n_binds; i++) free((void *)c->bind_slot[i]);
+    if (c->bind_upval)
+        for (int i = 0; i < c->n_binds; i++) free((void *)c->bind_upval[i]);
+    free(c->bind_slot);
+    c->bind_slot = NULL;
+    free(c->bind_upval);
+    c->bind_upval = NULL;
+    free(c->main_slot_func);
+    c->main_slot_func = NULL;
     c->n_binds = 0;
 }
 
@@ -1727,7 +1892,7 @@ static void free_func_bindings(CG *c) {
 static NumTy num_meet(NumTy a, NumTy b) {
     if (a == NT_UNSET) return b;
     if (b == NT_UNSET) return a;
-    return a == b ? a : NT_ANY;   /* INT vs FLOAT (or any disagreement) -> ANY */
+    return a == b ? a : NT_ANY; /* INT vs FLOAT (or any disagreement) -> ANY */
 }
 
 /* Does every path through the block end in a `return`? Conservative: only the
@@ -1737,7 +1902,7 @@ static int block_always_returns(const Block *b);
 static int stmt_always_returns(const Stmt *s) {
     switch (s->kind) {
     case STMT_RETURN: return 1;
-    case STMT_DO:     return block_always_returns(&s->as.do_stmt.body);
+    case STMT_DO: return block_always_returns(&s->as.do_stmt.body);
     case STMT_IF:
         if (!s->as.if_stmt.has_else) return 0;
         for (size_t a = 0; a < s->as.if_stmt.narms; a++)
@@ -1758,19 +1923,19 @@ static void ret_scan_stmt(CG *c, const Stmt *s, NumTy *acc) {
     switch (s->kind) {
     case STMT_RETURN:
         *acc = num_meet(*acc, s->as.return_stmt.n_values == 1
-                              ? expr_num_ty(c, s->as.return_stmt.values[0])
-                              : NT_ANY);
+                                  ? expr_num_ty(c, s->as.return_stmt.values[0])
+                                  : NT_ANY);
         return;
     case STMT_IF:
         for (size_t a = 0; a < s->as.if_stmt.narms; a++)
             ret_scan_block(c, &s->as.if_stmt.arms[a].body, acc);
         if (s->as.if_stmt.has_else) ret_scan_block(c, &s->as.if_stmt.else_body, acc);
         return;
-    case STMT_WHILE:   ret_scan_block(c, &s->as.while_stmt.body, acc); return;
-    case STMT_DO:      ret_scan_block(c, &s->as.do_stmt.body,    acc); return;
-    case STMT_REPEAT:  ret_scan_block(c, &s->as.repeat.body,     acc); return;
-    case STMT_FOR_NUM: ret_scan_block(c, &s->as.for_num.body,    acc); return;
-    case STMT_FOR_GEN: ret_scan_block(c, &s->as.for_gen.body,    acc); return;
+    case STMT_WHILE: ret_scan_block(c, &s->as.while_stmt.body, acc); return;
+    case STMT_DO: ret_scan_block(c, &s->as.do_stmt.body, acc); return;
+    case STMT_REPEAT: ret_scan_block(c, &s->as.repeat.body, acc); return;
+    case STMT_FOR_NUM: ret_scan_block(c, &s->as.for_num.body, acc); return;
+    case STMT_FOR_GEN: ret_scan_block(c, &s->as.for_gen.body, acc); return;
     default: return;
     }
 }
@@ -1785,7 +1950,7 @@ static NumTy compute_ret_ty(CG *c, const LuaFunc *fn) {
     if (!block_always_returns(&fn->body)) return NT_ANY;
     NumTy acc = NT_UNSET;
     ret_scan_block(c, &fn->body, &acc);
-    return acc == NT_UNSET ? NT_ANY : acc;   /* UNSET only if no returns at all */
+    return acc == NT_UNSET ? NT_ANY : acc; /* UNSET only if no returns at all */
 }
 
 /* Walk a body in the current context and, at each direct-call site, narrow the
@@ -1805,7 +1970,10 @@ static void infer_sites_expr(CG *c, const Expr *e, int *changed) {
             for (size_t i = 0; i < e->as.call.nargs && (int)i < sg->n_params; i++) {
                 if (sg->param_ty[i] == NT_ANY) continue;
                 NumTy nw = num_meet(sg->param_ty[i], expr_num_ty(c, e->as.call.args[i]));
-                if (nw != sg->param_ty[i]) { sg->param_ty[i] = nw; *changed = 1; }
+                if (nw != sg->param_ty[i]) {
+                    sg->param_ty[i] = nw;
+                    *changed = 1;
+                }
             }
         }
         return;
@@ -1848,7 +2016,7 @@ static void infer_sites_stmt(CG *c, const Stmt *s, int *changed) {
         }
         for (int i = 0; i < s->as.assign.n_values; i++) infer_sites_expr(c, s->as.assign.values[i], changed);
         break;
-    case STMT_EXPR:   infer_sites_expr(c, s->as.expr_stmt.expr, changed); break;
+    case STMT_EXPR: infer_sites_expr(c, s->as.expr_stmt.expr, changed); break;
     case STMT_RETURN:
         for (int i = 0; i < s->as.return_stmt.n_values; i++) infer_sites_expr(c, s->as.return_stmt.values[i], changed);
         break;
@@ -1912,13 +2080,21 @@ static void infer_step_body(CG *c, const Block *body, int n_locals, int n_params
     infer_sites_block(c, body, changed);
     if (fn) {
         NumTy r = compute_ret_ty(c, fn);
-        if (r != c->sigs[fn->func_idx].ret_ty) { c->sigs[fn->func_idx].ret_ty = r; *changed = 1; }
+        if (r != c->sigs[fn->func_idx].ret_ty) {
+            c->sigs[fn->func_idx].ret_ty = r;
+            *changed = 1;
+        }
     }
 
-    c->cur_is_int = p_int; c->cur_is_float = p_float; c->cur_func_slot = p_fs;
-    c->cur_upval_func = p_uv; c->cur_n_locals = p_nl; c->cur_n_params = p_np;
+    c->cur_is_int = p_int;
+    c->cur_is_float = p_float;
+    c->cur_func_slot = p_fs;
+    c->cur_upval_func = p_uv;
+    c->cur_n_locals = p_nl;
+    c->cur_n_params = p_np;
     c->cur_func_idx = p_fi;
-    free(isint); free(isfloat);
+    free(isint);
+    free(isfloat);
 }
 
 /* Allocate and infer c->sigs for every user function. */
@@ -1930,7 +2106,7 @@ static void infer_signatures(CG *c, const ParseResult *pr) {
         const LuaFunc *fn = pr->funcs.items[i];
         FuncSig *sg = &c->sigs[i];
         sg->n_params = fn->n_params;
-        sg->ret_ty = NT_INT;            /* optimistic; narrows downward */
+        sg->ret_ty = NT_INT; /* optimistic; narrows downward */
         sg->has_site = 0;
         sg->param_ty = fn->n_params ? calloc(fn->n_params, sizeof(NumTy)) : NULL;
         /* A parameter is eligible for unboxing only if it is never reassigned
@@ -1941,9 +2117,10 @@ static void infer_signatures(CG *c, const ParseResult *pr) {
         func_slot_walk(&fn->body, scratch, reassigned, nl);
         for (int p = 0; p < fn->n_params; p++) {
             int pinned = reassigned[p] || (fn->captured && fn->captured[p]);
-            sg->param_ty[p] = pinned ? NT_ANY : NT_UNSET;  /* narrowed by sites */
+            sg->param_ty[p] = pinned ? NT_ANY : NT_UNSET; /* narrowed by sites */
         }
-        free(reassigned); free(scratch);
+        free(reassigned);
+        free(scratch);
     }
 
     int changed = 1;
@@ -1987,46 +2164,58 @@ static void emit_expr(CG *c, const Expr *e, int depth) {
     /* Integer-specialized value used in a Lua-value (anyref) context: emit the
      * unboxed i64 and box it. EXPR_INT keeps its existing path. */
     if (c->opt_int && e->kind != EXPR_INT && expr_is_int(c, e)) {
-        emit_indent(c, depth); wat_append(c->w, "(call $make_int\n");
+        emit_indent(c, depth);
+        wat_append(c->w, "(call $make_int\n");
         emit_int_expr(c, e, depth + 1);
-        emit_indent(c, depth); wat_append(c->w, ")\n");
+        emit_indent(c, depth);
+        wat_append(c->w, ")\n");
         return;
     }
     if (c->opt_int && e->kind != EXPR_FLOAT && expr_is_float(c, e)) {
-        emit_indent(c, depth); wat_append(c->w, "(call $make_float\n");
+        emit_indent(c, depth);
+        wat_append(c->w, "(call $make_float\n");
         emit_float_expr(c, e, depth + 1);
-        emit_indent(c, depth); wat_append(c->w, ")\n");
+        emit_indent(c, depth);
+        wat_append(c->w, ")\n");
         return;
     }
     switch (e->kind) {
-        case EXPR_NIL:
-            emit_indent(c, depth); wat_append(c->w, "(ref.null any)\n"); break;
-        case EXPR_TRUE:
-            emit_indent(c, depth); wat_append(c->w, "(global.get $g_true)\n"); break;
-        case EXPR_FALSE:
-            emit_indent(c, depth); wat_append(c->w, "(global.get $g_false)\n"); break;
-        case EXPR_INT:    emit_int_literal(c, e->as.i_val, depth); break;
-        case EXPR_FLOAT:  emit_float_literal(c, e->as.f_val, depth); break;
-        case EXPR_STRING: emit_string_literal(c, e->as.s.bytes, e->as.s.len, depth); break;
-        case EXPR_VAR:    emit_var_read(c, e->as.var.kind, e->as.var.idx, depth); break;
-        case EXPR_CALL:   emit_call(c, e, depth); break;
-        case EXPR_BINOP:  emit_binop(c, e, depth); break;
-        case EXPR_UNOP:   emit_unop(c, e, depth); break;
-        case EXPR_FUNCTION: emit_function_expr(c, e->as.func_expr.func, depth); break;
-        case EXPR_INDEX:  emit_index_expr(c, e, depth); break;
-        case EXPR_TABLE:  emit_table_ctor(c, e, depth); break;
-        case EXPR_METHOD_CALL: {
-            /* Single-value context: wrap in $args_first. */
-            emit_indent(c, depth); wat_append(c->w, "(call $args_first\n");
-            emit_call_array(c, e, depth + 1);
-            emit_indent(c, depth); wat_append(c->w, ")\n");
-            break;
-        }
-        case EXPR_VARARG:
-            emit_indent(c, depth);
-            wat_append(c->w,
-                "(call $args_first (local.get $varargs))\n");
-            break;
+    case EXPR_NIL:
+        emit_indent(c, depth);
+        wat_append(c->w, "(ref.null any)\n");
+        break;
+    case EXPR_TRUE:
+        emit_indent(c, depth);
+        wat_append(c->w, "(global.get $g_true)\n");
+        break;
+    case EXPR_FALSE:
+        emit_indent(c, depth);
+        wat_append(c->w, "(global.get $g_false)\n");
+        break;
+    case EXPR_INT: emit_int_literal(c, e->as.i_val, depth); break;
+    case EXPR_FLOAT: emit_float_literal(c, e->as.f_val, depth); break;
+    case EXPR_STRING: emit_string_literal(c, e->as.s.bytes, e->as.s.len, depth); break;
+    case EXPR_VAR: emit_var_read(c, e->as.var.kind, e->as.var.idx, depth); break;
+    case EXPR_CALL: emit_call(c, e, depth); break;
+    case EXPR_BINOP: emit_binop(c, e, depth); break;
+    case EXPR_UNOP: emit_unop(c, e, depth); break;
+    case EXPR_FUNCTION: emit_function_expr(c, e->as.func_expr.func, depth); break;
+    case EXPR_INDEX: emit_index_expr(c, e, depth); break;
+    case EXPR_TABLE: emit_table_ctor(c, e, depth); break;
+    case EXPR_METHOD_CALL: {
+        /* Single-value context: wrap in $args_first. */
+        emit_indent(c, depth);
+        wat_append(c->w, "(call $args_first\n");
+        emit_call_array(c, e, depth + 1);
+        emit_indent(c, depth);
+        wat_append(c->w, ")\n");
+        break;
+    }
+    case EXPR_VARARG:
+        emit_indent(c, depth);
+        wat_append(c->w,
+                   "(call $args_first (local.get $varargs))\n");
+        break;
     }
 }
 
@@ -2036,8 +2225,8 @@ static void emit_expr(CG *c, const Expr *e, int depth) {
 static void emit_args_at(CG *c, int idx, int depth) {
     emit_indent(c, depth);
     wat_appendf(c->w,
-        "(call $args_at (ref.as_non_null (local.get $tmp_args)) (i32.const %d))\n",
-        idx);
+                "(call $args_at (ref.as_non_null (local.get $tmp_args)) (i32.const %d))\n",
+                idx);
 }
 
 /* Helper: emit code that pushes the i-th distributed value of a multi-value
@@ -2069,7 +2258,8 @@ static void emit_distributed_value(CG *c, int i, int n_values, Expr **values,
     if (last_call) {
         emit_args_at(c, i - (n_values - 1), depth);
     } else {
-        emit_indent(c, depth); wat_append(c->w, "(ref.null any)\n");
+        emit_indent(c, depth);
+        wat_append(c->w, "(ref.null any)\n");
     }
 }
 
@@ -2082,27 +2272,29 @@ static void emit_assign(CG *c, const Stmt *s, int depth) {
                      is_multival_tail(s->as.assign.values[n_values - 1]));
     if (n_targets == 1) {
         AssignTarget *t = &s->as.assign.targets[0];
-        if (t->kind == TGT_VAR && t->as.var.kind == VAR_LOCAL
-            && slot_is_int(c, t->as.var.idx)) {
+        if (t->kind == TGT_VAR && t->as.var.kind == VAR_LOCAL && slot_is_int(c, t->as.var.idx)) {
             emit_indent(c, depth);
             wat_appendf(c->w, "(local.set $L%d\n", t->as.var.idx);
             emit_int_expr(c, s->as.assign.values[0], depth + 1);
-            emit_indent(c, depth); wat_append(c->w, ")\n");
+            emit_indent(c, depth);
+            wat_append(c->w, ")\n");
             return;
         }
-        if (t->kind == TGT_VAR && t->as.var.kind == VAR_LOCAL
-            && slot_is_float(c, t->as.var.idx)) {
+        if (t->kind == TGT_VAR && t->as.var.kind == VAR_LOCAL && slot_is_float(c, t->as.var.idx)) {
             emit_indent(c, depth);
             wat_appendf(c->w, "(local.set $L%d\n", t->as.var.idx);
             emit_float_expr(c, s->as.assign.values[0], depth + 1);
-            emit_indent(c, depth); wat_append(c->w, ")\n");
+            emit_indent(c, depth);
+            wat_append(c->w, ")\n");
             return;
         }
         emit_target_open(c, t, depth);
         if (last_call) {
-            emit_indent(c, depth + 1); wat_append(c->w, "(call $args_first\n");
+            emit_indent(c, depth + 1);
+            wat_append(c->w, "(call $args_first\n");
             emit_multival_array(c, s->as.assign.values[0], depth + 2);
-            emit_indent(c, depth + 1); wat_append(c->w, ")\n");
+            emit_indent(c, depth + 1);
+            wat_append(c->w, ")\n");
         } else {
             emit_expr(c, s->as.assign.values[0], depth + 1);
         }
@@ -2124,36 +2316,47 @@ static void emit_assign(CG *c, const Stmt *s, int depth) {
      * builds the full $tmp_args array via emit_args_array.) */
     int has_index = 0;
     for (int i = 0; i < n_targets; i++)
-        if (s->as.assign.targets[i].kind != TGT_VAR) { has_index = 1; break; }
+        if (s->as.assign.targets[i].kind != TGT_VAR) {
+            has_index = 1;
+            break;
+        }
     if (has_index) {
         emit_indent(c, depth);
         wat_appendf(c->w,
-            "(local.set $tmp_lhs_t (array.new $ArgArr (ref.null any) "
-            "(i32.const %d)))\n", n_targets);
+                    "(local.set $tmp_lhs_t (array.new $ArgArr (ref.null any) "
+                    "(i32.const %d)))\n",
+                    n_targets);
         emit_indent(c, depth);
         wat_appendf(c->w,
-            "(local.set $tmp_lhs_k (array.new $ArgArr (ref.null any) "
-            "(i32.const %d)))\n", n_targets);
+                    "(local.set $tmp_lhs_k (array.new $ArgArr (ref.null any) "
+                    "(i32.const %d)))\n",
+                    n_targets);
         for (int i = 0; i < n_targets; i++) {
             AssignTarget *t = &s->as.assign.targets[i];
             if (t->kind == TGT_VAR) continue;
             emit_indent(c, depth);
             wat_appendf(c->w,
-                "(array.set $ArgArr (ref.as_non_null (local.get $tmp_lhs_t)) "
-                "(i32.const %d)\n", i);
+                        "(array.set $ArgArr (ref.as_non_null (local.get $tmp_lhs_t)) "
+                        "(i32.const %d)\n",
+                        i);
             emit_expr(c, t->as.index.table, depth + 1);
-            emit_indent(c, depth); wat_append(c->w, ")\n");
+            emit_indent(c, depth);
+            wat_append(c->w, ")\n");
             emit_indent(c, depth);
             wat_appendf(c->w,
-                "(array.set $ArgArr (ref.as_non_null (local.get $tmp_lhs_k)) "
-                "(i32.const %d)\n", i);
+                        "(array.set $ArgArr (ref.as_non_null (local.get $tmp_lhs_k)) "
+                        "(i32.const %d)\n",
+                        i);
             emit_expr(c, t->as.index.key, depth + 1);
-            emit_indent(c, depth); wat_append(c->w, ")\n");
+            emit_indent(c, depth);
+            wat_append(c->w, ")\n");
         }
     }
-    emit_indent(c, depth); wat_append(c->w, "(local.set $tmp_args\n");
+    emit_indent(c, depth);
+    wat_append(c->w, "(local.set $tmp_args\n");
     emit_args_array(c, s->as.assign.values, n_values, depth + 1);
-    emit_indent(c, depth); wat_append(c->w, ")\n");
+    emit_indent(c, depth);
+    wat_append(c->w, ")\n");
     for (int i = n_targets - 1; i >= 0; i--) {
         AssignTarget *t = &s->as.assign.targets[i];
         if (t->kind == TGT_VAR) {
@@ -2163,17 +2366,21 @@ static void emit_assign(CG *c, const Stmt *s, int depth) {
         } else {
             /* index target: store via pre-evaluated table+key so
              * __newindex still fires (matches emit_target_open). */
-            emit_indent(c, depth); wat_append(c->w, "(call $lua_tabset\n");
+            emit_indent(c, depth);
+            wat_append(c->w, "(call $lua_tabset\n");
             emit_indent(c, depth + 1);
             wat_appendf(c->w,
-                "(array.get $ArgArr (ref.as_non_null (local.get $tmp_lhs_t)) "
-                "(i32.const %d))\n", i);
+                        "(array.get $ArgArr (ref.as_non_null (local.get $tmp_lhs_t)) "
+                        "(i32.const %d))\n",
+                        i);
             emit_indent(c, depth + 1);
             wat_appendf(c->w,
-                "(array.get $ArgArr (ref.as_non_null (local.get $tmp_lhs_k)) "
-                "(i32.const %d))\n", i);
+                        "(array.get $ArgArr (ref.as_non_null (local.get $tmp_lhs_k)) "
+                        "(i32.const %d))\n",
+                        i);
             emit_args_at(c, i, depth + 1);
-            emit_indent(c, depth); wat_append(c->w, ")\n");
+            emit_indent(c, depth);
+            wat_append(c->w, ")\n");
         }
     }
 }
@@ -2188,9 +2395,11 @@ static void emit_return(CG *c, const Stmt *s, int depth) {
          * evaluation, then exit. */
         for (int i = 0; i < n_values; i++) {
             emit_expr(c, s->as.return_stmt.values[i], depth);
-            emit_indent(c, depth); wat_append(c->w, "drop\n");
+            emit_indent(c, depth);
+            wat_append(c->w, "drop\n");
         }
-        emit_indent(c, depth); wat_append(c->w, "return\n");
+        emit_indent(c, depth);
+        wat_append(c->w, "return\n");
         return;
     }
     if (c->ret_single) {
@@ -2199,10 +2408,12 @@ static void emit_return(CG *c, const Stmt *s, int depth) {
          * only when every return is a single numeric value, so emit it
          * raw (i64/f64). */
         if ((c->cur_ret_ty == NT_INT || c->cur_ret_ty == NT_FLOAT) && n_values == 1) {
-            emit_indent(c, depth); wat_append(c->w, "(return\n");
+            emit_indent(c, depth);
+            wat_append(c->w, "(return\n");
             if (c->cur_ret_ty == NT_INT) emit_int_expr(c, s->as.return_stmt.values[0], depth + 1);
-            else                         emit_num_as_f64(c, s->as.return_stmt.values[0], depth + 1);
-            emit_indent(c, depth); wat_append(c->w, ")\n");
+            else emit_num_as_f64(c, s->as.return_stmt.values[0], depth + 1);
+            emit_indent(c, depth);
+            wat_append(c->w, ")\n");
             return;
         }
         /* ret_ty == ANY: produce a single anyref. A non-vararg body never
@@ -2210,29 +2421,34 @@ static void emit_return(CG *c, const Stmt *s, int depth) {
          * to one by emit_expr. Extra return values still evaluate (side
          * effects), in order. */
         if (n_values == 0) {
-            emit_indent(c, depth); wat_append(c->w, "(return (ref.null any))\n");
+            emit_indent(c, depth);
+            wat_append(c->w, "(return (ref.null any))\n");
         } else if (n_values == 1) {
-            emit_indent(c, depth); wat_append(c->w, "(return\n");
+            emit_indent(c, depth);
+            wat_append(c->w, "(return\n");
             emit_expr(c, s->as.return_stmt.values[0], depth + 1);
-            emit_indent(c, depth); wat_append(c->w, ")\n");
+            emit_indent(c, depth);
+            wat_append(c->w, ")\n");
         } else {
-            emit_indent(c, depth); wat_append(c->w, "(local.set $tmp_any\n");
+            emit_indent(c, depth);
+            wat_append(c->w, "(local.set $tmp_any\n");
             emit_expr(c, s->as.return_stmt.values[0], depth + 1);
-            emit_indent(c, depth); wat_append(c->w, ")\n");
+            emit_indent(c, depth);
+            wat_append(c->w, ")\n");
             for (int i = 1; i < n_values; i++) {
                 emit_expr(c, s->as.return_stmt.values[i], depth);
-                emit_indent(c, depth); wat_append(c->w, "drop\n");
+                emit_indent(c, depth);
+                wat_append(c->w, "drop\n");
             }
-            emit_indent(c, depth); wat_append(c->w, "(return (local.get $tmp_any))\n");
+            emit_indent(c, depth);
+            wat_append(c->w, "(return (local.get $tmp_any))\n");
         }
         return;
     }
     /* Tail-call optimization: exactly `return f(args)` or
      * `return obj:m(args)` (not parenthesized, which forces adjust-to-
      * one and so isn't a tail call). */
-    if (n_values == 1 && !s->as.return_stmt.values[0]->paren
-        && (s->as.return_stmt.values[0]->kind == EXPR_CALL
-            || s->as.return_stmt.values[0]->kind == EXPR_METHOD_CALL)) {
+    if (n_values == 1 && !s->as.return_stmt.values[0]->paren && (s->as.return_stmt.values[0]->kind == EXPR_CALL || s->as.return_stmt.values[0]->kind == EXPR_METHOD_CALL)) {
         emit_tail_call(c, s->as.return_stmt.values[0], depth);
         return;
     }
@@ -2243,7 +2459,8 @@ static void emit_return(CG *c, const Stmt *s, int depth) {
     } else {
         emit_args_array(c, s->as.return_stmt.values, n_values, depth);
     }
-    emit_indent(c, depth); wat_append(c->w, "return\n");
+    emit_indent(c, depth);
+    wat_append(c->w, "return\n");
 }
 
 static void emit_for_num(CG *c, const Stmt *s, int depth) {
@@ -2258,27 +2475,40 @@ static void emit_for_num(CG *c, const Stmt *s, int depth) {
         int fd = c->for_depth;
         const Expr *st = s->as.for_num.step;
         char step_s[40];
-        int sign;   /* +1/-1 known at compile time; 0 = runtime */
-        if (!st) { snprintf(step_s, sizeof step_s, "(i64.const 1)"); sign = 1; }
-        else if (st->kind == EXPR_INT && st->as.i_val != 0) {
+        int sign; /* +1/-1 known at compile time; 0 = runtime */
+        if (!st) {
+            snprintf(step_s, sizeof step_s, "(i64.const 1)");
+            sign = 1;
+        } else if (st->kind == EXPR_INT && st->as.i_val != 0) {
             snprintf(step_s, sizeof step_s, "(i64.const %lld)", (long long)st->as.i_val);
             sign = st->as.i_val > 0 ? 1 : -1;
-        } else { snprintf(step_s, sizeof step_s, "(local.get $ifor_step_%d)", fd); sign = 0; }
-        emit_indent(c, depth); wat_appendf(c->w, "(local.set $L%d\n", slot);
+        } else {
+            snprintf(step_s, sizeof step_s, "(local.get $ifor_step_%d)", fd);
+            sign = 0;
+        }
+        emit_indent(c, depth);
+        wat_appendf(c->w, "(local.set $L%d\n", slot);
         emit_int_expr(c, s->as.for_num.start, depth + 1);
-        emit_indent(c, depth); wat_append(c->w, ")\n");
-        emit_indent(c, depth); wat_appendf(c->w, "(local.set $ifor_stop_%d\n", fd);
+        emit_indent(c, depth);
+        wat_append(c->w, ")\n");
+        emit_indent(c, depth);
+        wat_appendf(c->w, "(local.set $ifor_stop_%d\n", fd);
         emit_int_expr(c, s->as.for_num.stop, depth + 1);
-        emit_indent(c, depth); wat_append(c->w, ")\n");
+        emit_indent(c, depth);
+        wat_append(c->w, ")\n");
         if (sign == 0) {
-            emit_indent(c, depth); wat_appendf(c->w, "(local.set $ifor_step_%d\n", fd);
+            emit_indent(c, depth);
+            wat_appendf(c->w, "(local.set $ifor_step_%d\n", fd);
             emit_int_expr(c, st, depth + 1);
-            emit_indent(c, depth); wat_append(c->w, ")\n");
+            emit_indent(c, depth);
+            wat_append(c->w, ")\n");
             emit_indent(c, depth);
             wat_appendf(c->w, "(if (i64.eqz %s) (then (call $throw_lit (i32.const 75) (i32.const 18))))\n", step_s);
         }
-        emit_indent(c, depth); wat_appendf(c->w, "(block $brk_%d\n", label);
-        emit_indent(c, depth + 1); wat_appendf(c->w, "(loop $cont_%d\n", label);
+        emit_indent(c, depth);
+        wat_appendf(c->w, "(block $brk_%d\n", label);
+        emit_indent(c, depth + 1);
+        wat_appendf(c->w, "(loop $cont_%d\n", label);
         emit_indent(c, depth + 2);
         if (sign == 1)
             wat_appendf(c->w, "(br_if $brk_%d (i64.gt_s (local.get $L%d) (local.get $ifor_stop_%d)))\n", label, slot, fd);
@@ -2286,8 +2516,8 @@ static void emit_for_num(CG *c, const Stmt *s, int depth) {
             wat_appendf(c->w, "(br_if $brk_%d (i64.lt_s (local.get $L%d) (local.get $ifor_stop_%d)))\n", label, slot, fd);
         else
             wat_appendf(c->w,
-                "(if (i64.gt_s %s (i64.const 0)) (then (br_if $brk_%d (i64.gt_s (local.get $L%d) (local.get $ifor_stop_%d)))) (else (br_if $brk_%d (i64.lt_s (local.get $L%d) (local.get $ifor_stop_%d)))))\n",
-                step_s, label, slot, fd, label, slot, fd);
+                        "(if (i64.gt_s %s (i64.const 0)) (then (br_if $brk_%d (i64.gt_s (local.get $L%d) (local.get $ifor_stop_%d)))) (else (br_if $brk_%d (i64.lt_s (local.get $L%d) (local.get $ifor_stop_%d)))))\n",
+                        step_s, label, slot, fd, label, slot, fd);
         c->for_depth++;
         emit_block(c, &s->as.for_num.body, depth + 2);
         c->for_depth--;
@@ -2300,13 +2530,16 @@ static void emit_for_num(CG *c, const Stmt *s, int depth) {
             wat_appendf(c->w, "(br_if $brk_%d (i64.gt_s (local.get $ifor_next_%d) (local.get $L%d)))\n", label, fd, slot);
         else
             wat_appendf(c->w,
-                "(if (i64.gt_s %s (i64.const 0)) (then (br_if $brk_%d (i64.lt_s (local.get $ifor_next_%d) (local.get $L%d)))) (else (br_if $brk_%d (i64.gt_s (local.get $ifor_next_%d) (local.get $L%d)))))\n",
-                step_s, label, fd, slot, label, fd, slot);
+                        "(if (i64.gt_s %s (i64.const 0)) (then (br_if $brk_%d (i64.lt_s (local.get $ifor_next_%d) (local.get $L%d)))) (else (br_if $brk_%d (i64.gt_s (local.get $ifor_next_%d) (local.get $L%d)))))\n",
+                        step_s, label, fd, slot, label, fd, slot);
         emit_indent(c, depth + 2);
         wat_appendf(c->w, "(local.set $L%d (local.get $ifor_next_%d))\n", slot, fd);
-        emit_indent(c, depth + 2); wat_appendf(c->w, "br $cont_%d\n", label);
-        emit_indent(c, depth + 1); wat_append(c->w, ")\n");
-        emit_indent(c, depth);     wat_append(c->w, ")\n");
+        emit_indent(c, depth + 2);
+        wat_appendf(c->w, "br $cont_%d\n", label);
+        emit_indent(c, depth + 1);
+        wat_append(c->w, ")\n");
+        emit_indent(c, depth);
+        wat_append(c->w, ")\n");
         c->break_depth--;
         return;
     }
@@ -2318,7 +2551,7 @@ static void emit_for_num(CG *c, const Stmt *s, int depth) {
     snprintf(f_stop, sizeof f_stop, "$for_stop_%d", fd);
     snprintf(f_step, sizeof f_step, "$for_step_%d", fd);
     snprintf(f_next, sizeof f_next, "$for_next_%d", fd);
-    snprintf(f_cur,  sizeof f_cur,  "$for_cur_%d",  fd);
+    snprintf(f_cur, sizeof f_cur, "$for_cur_%d", fd);
     /* The running counter lives in a scratch local; stash stop/step
      * alongside. When the control variable is captured (boxed), the
      * counter must stay separate from the user-visible $Box so that
@@ -2333,17 +2566,23 @@ static void emit_for_num(CG *c, const Stmt *s, int depth) {
         wat_appendf(c->w, "(local.set $L%d\n", slot);
     }
     emit_expr(c, s->as.for_num.start, depth + 1);
-    emit_indent(c, depth); wat_append(c->w, ")\n");
-    emit_indent(c, depth); wat_appendf(c->w, "(local.set %s\n", f_stop);
+    emit_indent(c, depth);
+    wat_append(c->w, ")\n");
+    emit_indent(c, depth);
+    wat_appendf(c->w, "(local.set %s\n", f_stop);
     emit_expr(c, s->as.for_num.stop, depth + 1);
-    emit_indent(c, depth); wat_append(c->w, ")\n");
-    emit_indent(c, depth); wat_appendf(c->w, "(local.set %s\n", f_step);
+    emit_indent(c, depth);
+    wat_append(c->w, ")\n");
+    emit_indent(c, depth);
+    wat_appendf(c->w, "(local.set %s\n", f_step);
     if (s->as.for_num.step) {
         emit_expr(c, s->as.for_num.step, depth + 1);
     } else {
-        emit_indent(c, depth + 1); wat_append(c->w, "(ref.i31 (i32.const 1))\n");
+        emit_indent(c, depth + 1);
+        wat_append(c->w, "(ref.i31 (i32.const 1))\n");
     }
-    emit_indent(c, depth); wat_append(c->w, ")\n");
+    emit_indent(c, depth);
+    wat_append(c->w, ")\n");
     emit_indent(c, depth);
     wat_appendf(c->w, "(call $for_check_step (local.get %s))\n", f_step);
     /* Settle the control variable's type up front: if init or step is
@@ -2351,42 +2590,48 @@ static void emit_for_num(CG *c, const Stmt *s, int depth) {
      * local that holds the running value. */
     char counter_loc[24];
     if (boxed) snprintf(counter_loc, sizeof counter_loc, "%s", f_cur);
-    else       snprintf(counter_loc, sizeof counter_loc, "$L%d", slot);
+    else snprintf(counter_loc, sizeof counter_loc, "$L%d", slot);
     emit_indent(c, depth);
     wat_appendf(c->w,
-        "(local.set %s (call $for_coerce (local.get %s) (local.get %s)))\n",
-        counter_loc, counter_loc, f_step);
+                "(local.set %s (call $for_coerce (local.get %s) (local.get %s)))\n",
+                counter_loc, counter_loc, f_step);
     emit_indent(c, depth);
     wat_appendf(c->w,
-        "(local.set %s (call $for_coerce (local.get %s) (local.get %s)))\n",
-        f_step, f_step, counter_loc);
+                "(local.set %s (call $for_coerce (local.get %s) (local.get %s)))\n",
+                f_step, f_step, counter_loc);
 
-    emit_indent(c, depth); wat_appendf(c->w, "(block $brk_%d\n", label);
-    emit_indent(c, depth + 1); wat_appendf(c->w, "(loop $cont_%d\n", label);
+    emit_indent(c, depth);
+    wat_appendf(c->w, "(block $brk_%d\n", label);
+    emit_indent(c, depth + 1);
+    wat_appendf(c->w, "(loop $cont_%d\n", label);
     /* terminate? */
     emit_indent(c, depth + 2);
     wat_appendf(c->w,
-        "(if (call $for_step_positive (local.get %s))\n", f_step);
-    emit_indent(c, depth + 2); wat_append(c->w, "  (then\n");
+                "(if (call $for_step_positive (local.get %s))\n", f_step);
+    emit_indent(c, depth + 2);
+    wat_append(c->w, "  (then\n");
     char load_buf[80];
     if (boxed) snprintf(load_buf, sizeof(load_buf), "(local.get %s)", f_cur);
-    else       snprintf(load_buf, sizeof(load_buf), "(local.get $L%d)", slot);
+    else snprintf(load_buf, sizeof(load_buf), "(local.get $L%d)", slot);
     emit_indent(c, depth + 2);
     wat_appendf(c->w,
-        "    (br_if $brk_%d (i32.eqz (call $num_le\n"
-        "      %s\n"
-        "      (local.get %s)))))\n", label, load_buf, f_stop);
-    emit_indent(c, depth + 2); wat_append(c->w, "  (else\n");
+                "    (br_if $brk_%d (i32.eqz (call $num_le\n"
+                "      %s\n"
+                "      (local.get %s)))))\n",
+                label, load_buf, f_stop);
+    emit_indent(c, depth + 2);
+    wat_append(c->w, "  (else\n");
     emit_indent(c, depth + 2);
     wat_appendf(c->w,
-        "    (br_if $brk_%d (i32.eqz (call $num_le\n"
-        "      (local.get %s)\n"
-        "      %s)))))\n", label, f_stop, load_buf);
+                "    (br_if $brk_%d (i32.eqz (call $num_le\n"
+                "      (local.get %s)\n"
+                "      %s)))))\n",
+                label, f_stop, load_buf);
     /* Fresh per-iteration binding for a captured control variable. */
     if (boxed) {
         emit_indent(c, depth + 2);
         wat_appendf(c->w,
-            "(local.set $L%d (struct.new $Box %s))\n", slot, load_buf);
+                    "(local.set $L%d (struct.new $Box %s))\n", slot, load_buf);
     }
     /* body */
     c->for_depth++;
@@ -2400,19 +2645,23 @@ static void emit_for_num(CG *c, const Stmt *s, int depth) {
                 f_next, load_buf, f_step);
     emit_indent(c, depth + 2);
     wat_appendf(c->w,
-        "(br_if $brk_%d (call $for_overflowed %s (local.get %s) "
-        "(local.get %s)))\n", label, load_buf, f_step, f_next);
+                "(br_if $brk_%d (call $for_overflowed %s (local.get %s) "
+                "(local.get %s)))\n",
+                label, load_buf, f_step, f_next);
     emit_indent(c, depth + 2);
     if (boxed) {
         wat_appendf(c->w,
-            "(local.set %s (local.get %s))\n", f_cur, f_next);
+                    "(local.set %s (local.get %s))\n", f_cur, f_next);
     } else {
         wat_appendf(c->w,
-            "(local.set $L%d (local.get %s))\n", slot, f_next);
+                    "(local.set $L%d (local.get %s))\n", slot, f_next);
     }
-    emit_indent(c, depth + 2); wat_appendf(c->w, "br $cont_%d\n", label);
-    emit_indent(c, depth + 1); wat_append(c->w, ")\n");
-    emit_indent(c, depth);     wat_append(c->w, ")\n");
+    emit_indent(c, depth + 2);
+    wat_appendf(c->w, "br $cont_%d\n", label);
+    emit_indent(c, depth + 1);
+    wat_append(c->w, ")\n");
+    emit_indent(c, depth);
+    wat_append(c->w, ")\n");
     c->break_depth--;
 }
 
@@ -2432,19 +2681,27 @@ static void emit_for_gen(CG *c, const Stmt *s, int depth) {
     snprintf(f_state, sizeof f_state, "$for_state_%d", fd);
     snprintf(f_k, sizeof f_k, "$for_k_%d", fd);
     int n_exprs = s->as.for_gen.n_exprs;
-    emit_indent(c, depth); wat_append(c->w, "(local.set $tmp_args\n");
+    emit_indent(c, depth);
+    wat_append(c->w, "(local.set $tmp_args\n");
     emit_args_array(c, s->as.for_gen.exprs, n_exprs, depth + 1);
-    emit_indent(c, depth); wat_append(c->w, ")\n");
+    emit_indent(c, depth);
+    wat_append(c->w, ")\n");
     /* iter = args[0]; state = args[1]; k = args[2]. */
-    emit_indent(c, depth); wat_appendf(c->w,
-        "(local.set %s "
-        "(call $args_at (ref.as_non_null (local.get $tmp_args)) (i32.const 0)))\n", f_iter);
-    emit_indent(c, depth); wat_appendf(c->w,
-        "(local.set %s "
-        "(call $args_at (ref.as_non_null (local.get $tmp_args)) (i32.const 1)))\n", f_state);
-    emit_indent(c, depth); wat_appendf(c->w,
-        "(local.set %s "
-        "(call $args_at (ref.as_non_null (local.get $tmp_args)) (i32.const 2)))\n", f_k);
+    emit_indent(c, depth);
+    wat_appendf(c->w,
+                "(local.set %s "
+                "(call $args_at (ref.as_non_null (local.get $tmp_args)) (i32.const 0)))\n",
+                f_iter);
+    emit_indent(c, depth);
+    wat_appendf(c->w,
+                "(local.set %s "
+                "(call $args_at (ref.as_non_null (local.get $tmp_args)) (i32.const 1)))\n",
+                f_state);
+    emit_indent(c, depth);
+    wat_appendf(c->w,
+                "(local.set %s "
+                "(call $args_at (ref.as_non_null (local.get $tmp_args)) (i32.const 2)))\n",
+                f_k);
 
     /* Pre-allocate boxes (or just nil-init the local) per loop var. */
     for (int i = 0; i < s->as.for_gen.n_names; i++) {
@@ -2452,38 +2709,46 @@ static void emit_for_gen(CG *c, const Stmt *s, int depth) {
         emit_indent(c, depth);
         if (slot_is_boxed(c, li)) {
             wat_appendf(c->w,
-                "(local.set $L%d (struct.new $Box (ref.null any)))\n", li);
+                        "(local.set $L%d (struct.new $Box (ref.null any)))\n", li);
         } else {
             wat_appendf(c->w, "(local.set $L%d (ref.null any))\n", li);
         }
     }
 
-    emit_indent(c, depth); wat_appendf(c->w, "(block $brk_%d\n", label);
-    emit_indent(c, depth + 1); wat_appendf(c->w, "(loop $cont_%d\n", label);
+    emit_indent(c, depth);
+    wat_appendf(c->w, "(block $brk_%d\n", label);
+    emit_indent(c, depth + 1);
+    wat_appendf(c->w, "(loop $cont_%d\n", label);
     /* Call iter(state, k). The iterator can be any callable (a
      * closure, or a table with __call) — go through $lua_call_any
      * so a wrong type produces a typed error instead of a trap. */
-    emit_indent(c, depth + 2); wat_append(c->w, "(local.set $tmp_args\n");
-    emit_indent(c, depth + 3); wat_append(c->w, "(call $lua_call_any\n");
-    emit_indent(c, depth + 4); wat_appendf(c->w, "(local.get %s)\n", f_iter);
+    emit_indent(c, depth + 2);
+    wat_append(c->w, "(local.set $tmp_args\n");
+    emit_indent(c, depth + 3);
+    wat_append(c->w, "(call $lua_call_any\n");
+    emit_indent(c, depth + 4);
+    wat_appendf(c->w, "(local.get %s)\n", f_iter);
     emit_indent(c, depth + 4);
     wat_appendf(c->w,
-        "(array.new_fixed $ArgArr 2 (local.get %s) (local.get %s))\n", f_state, f_k);
+                "(array.new_fixed $ArgArr 2 (local.get %s) (local.get %s))\n", f_state, f_k);
     emit_indent(c, depth + 4);
     wat_appendf(c->w, "(i32.const %d)\n", s->line);
-    emit_indent(c, depth + 3); wat_append(c->w, ")\n");
-    emit_indent(c, depth + 2); wat_append(c->w, ")\n");
+    emit_indent(c, depth + 3);
+    wat_append(c->w, ")\n");
+    emit_indent(c, depth + 2);
+    wat_append(c->w, ")\n");
     /* terminate if results[0] is nil */
     emit_indent(c, depth + 2);
     wat_appendf(c->w,
-        "(br_if $brk_%d (ref.is_null "
-        "(call $args_at (ref.as_non_null (local.get $tmp_args)) (i32.const 0))))\n",
-        label);
+                "(br_if $brk_%d (ref.is_null "
+                "(call $args_at (ref.as_non_null (local.get $tmp_args)) (i32.const 0))))\n",
+                label);
     /* update k to results[0] */
     emit_indent(c, depth + 2);
     wat_appendf(c->w,
-        "(local.set %s "
-        "(call $args_at (ref.as_non_null (local.get $tmp_args)) (i32.const 0)))\n", f_k);
+                "(local.set %s "
+                "(call $args_at (ref.as_non_null (local.get $tmp_args)) (i32.const 0)))\n",
+                f_k);
     /* Bind loop vars from results. A captured var gets a FRESH $Box
      * each iteration so closures over it see distinct values
      * (Lua 5.4+ semantics), rather than sharing one mutated cell. */
@@ -2492,23 +2757,28 @@ static void emit_for_gen(CG *c, const Stmt *s, int depth) {
         emit_indent(c, depth + 2);
         if (slot_is_boxed(c, li)) {
             wat_appendf(c->w,
-                "(local.set $L%d (struct.new $Box "
-                "(call $args_at (ref.as_non_null (local.get $tmp_args)) "
-                "(i32.const %d))))\n", li, i);
+                        "(local.set $L%d (struct.new $Box "
+                        "(call $args_at (ref.as_non_null (local.get $tmp_args)) "
+                        "(i32.const %d))))\n",
+                        li, i);
         } else {
             wat_appendf(c->w,
-                "(local.set $L%d "
-                "(call $args_at (ref.as_non_null (local.get $tmp_args)) "
-                "(i32.const %d)))\n", li, i);
+                        "(local.set $L%d "
+                        "(call $args_at (ref.as_non_null (local.get $tmp_args)) "
+                        "(i32.const %d)))\n",
+                        li, i);
         }
     }
     /* body */
     c->for_depth++;
     emit_block(c, &s->as.for_gen.body, depth + 2);
     c->for_depth--;
-    emit_indent(c, depth + 2); wat_appendf(c->w, "br $cont_%d\n", label);
-    emit_indent(c, depth + 1); wat_append(c->w, ")\n");
-    emit_indent(c, depth);     wat_append(c->w, ")\n");
+    emit_indent(c, depth + 2);
+    wat_appendf(c->w, "br $cont_%d\n", label);
+    emit_indent(c, depth + 1);
+    wat_append(c->w, ")\n");
+    emit_indent(c, depth);
+    wat_append(c->w, ")\n");
     c->break_depth--;
 }
 
@@ -2516,209 +2786,240 @@ static void emit_for_gen(CG *c, const Stmt *s, int depth) {
 static void emit_stmt(CG *c, const Stmt *s, int depth) {
     if (!c->ok) return;
     switch (s->kind) {
-        case STMT_LOCAL: {
-            int n_names = s->as.local.n_names;
-            int n_values = s->as.local.n_values;
-            int last_call = (n_values > 0 &&
-                             is_multival_tail(s->as.local.values[n_values - 1]));
-            if (last_call) {
-                emit_indent(c, depth); wat_append(c->w, "(local.set $tmp_args\n");
-                emit_multival_array(c, s->as.local.values[n_values - 1], depth + 1);
-                emit_indent(c, depth); wat_append(c->w, ")\n");
-            }
-            for (int i = 0; i < n_names; i++) {
-                int slot = s->as.local.local_idxs[i];
-                if (slot_is_int(c, slot)) {
-                    /* i64 slot: analysis guarantees a matching single int value. */
-                    emit_indent(c, depth);
-                    wat_appendf(c->w, "(local.set $L%d\n", slot);
-                    emit_int_expr(c, s->as.local.values[i], depth + 1);
-                    emit_indent(c, depth); wat_append(c->w, ")\n");
-                    continue;
-                }
-                if (slot_is_float(c, slot)) {
-                    emit_indent(c, depth);
-                    wat_appendf(c->w, "(local.set $L%d\n", slot);
-                    emit_float_expr(c, s->as.local.values[i], depth + 1);
-                    emit_indent(c, depth); wat_append(c->w, ")\n");
-                    continue;
-                }
-                int boxed = slot_is_boxed(c, slot);
-                emit_indent(c, depth);
-                if (boxed) {
-                    wat_appendf(c->w, "(local.set $L%d (struct.new $Box\n", slot);
-                } else {
-                    wat_appendf(c->w, "(local.set $L%d\n", slot);
-                }
-                if (n_values == 0) {
-                    emit_indent(c, depth + 1); wat_append(c->w, "(ref.null any)\n");
-                } else {
-                    emit_distributed_value(c, i, n_values, s->as.local.values,
-                                           last_call, depth + 1);
-                }
-                emit_indent(c, depth);
-                wat_append(c->w, boxed ? "))\n" : ")\n");
-            }
-            break;
-        }
-
-        case STMT_ASSIGN:
-            emit_assign(c, s, depth);
-            break;
-
-        case STMT_EXPR:
-            /* Call as statement: get array, drop it. */
-            emit_call_array(c, s->as.expr_stmt.expr, depth);
-            emit_indent(c, depth); wat_append(c->w, "drop\n");
-            break;
-
-        case STMT_DO:
-            emit_block(c, &s->as.do_stmt.body, depth);
-            break;
-
-        case STMT_RETURN:
-            emit_return(c, s, depth);
-            break;
-
-        case STMT_WHILE: {
-            int label = c->next_label++;
-            if (!push_break_label(c, label)) break;
-            emit_indent(c, depth); wat_appendf(c->w, "(block $brk_%d\n", label);
-            emit_indent(c, depth + 1); wat_appendf(c->w, "(loop $cont_%d\n", label);
-            emit_truthy(c, s->as.while_stmt.cond, depth + 2);
-            emit_indent(c, depth + 2); wat_append(c->w, "i32.eqz\n");
-            emit_indent(c, depth + 2); wat_appendf(c->w, "br_if $brk_%d\n", label);
-            emit_block(c, &s->as.while_stmt.body, depth + 2);
-            emit_indent(c, depth + 2); wat_appendf(c->w, "br $cont_%d\n", label);
-            emit_indent(c, depth + 1); wat_append(c->w, ")\n");
-            emit_indent(c, depth);     wat_append(c->w, ")\n");
-            c->break_depth--;
-            break;
-        }
-
-        case STMT_REPEAT: {
-            int label = c->next_label++;
-            if (!push_break_label(c, label)) break;
-            emit_indent(c, depth); wat_appendf(c->w, "(block $brk_%d\n", label);
-            emit_indent(c, depth + 1); wat_appendf(c->w, "(loop $cont_%d\n", label);
-            emit_block(c, &s->as.repeat.body, depth + 2);
-            emit_truthy(c, s->as.repeat.cond, depth + 2);
-            emit_indent(c, depth + 2); wat_append(c->w, "i32.eqz\n");
-            emit_indent(c, depth + 2); wat_appendf(c->w, "br_if $cont_%d\n", label);
-            emit_indent(c, depth + 1); wat_append(c->w, ")\n");
-            emit_indent(c, depth);     wat_append(c->w, ")\n");
-            c->break_depth--;
-            break;
-        }
-
-        case STMT_BREAK: {
-            if (c->break_depth == 0) {
-                cg_error(c, "break outside loop"); break;
-            }
-            int label = c->break_labels[c->break_depth - 1];
+    case STMT_LOCAL: {
+        int n_names = s->as.local.n_names;
+        int n_values = s->as.local.n_values;
+        int last_call = (n_values > 0 &&
+                         is_multival_tail(s->as.local.values[n_values - 1]));
+        if (last_call) {
             emit_indent(c, depth);
-            wat_appendf(c->w, "br $brk_%d\n", label);
-            break;
-        }
-
-        case STMT_GOTO: {
-            /* Dispatch lowering: set the target block's $next, then re-enter
-             * its dispatch loop. The local and label are function-scoped, so
-             * this works from inside arbitrarily nested blocks/loops. */
+            wat_append(c->w, "(local.set $tmp_args\n");
+            emit_multival_array(c, s->as.local.values[n_values - 1], depth + 1);
             emit_indent(c, depth);
-            wat_appendf(c->w, "(local.set $next_%d (i32.const %d))\n",
-                s->as.label.block_dispatch_id, s->as.label.target_segment_idx);
-            emit_indent(c, depth);
-            wat_appendf(c->w, "(br $dispatch_%d)\n", s->as.label.block_dispatch_id);
-            break;
+            wat_append(c->w, ")\n");
         }
-
-        case STMT_LABEL:
-            /* Wrappers are emitted by emit_block; the label statement
-             * itself produces no code at its position. */
-            break;
-
-        case STMT_FOR_NUM:
-            emit_for_num(c, s, depth);
-            break;
-
-        case STMT_FOR_GEN:
-            emit_for_gen(c, s, depth);
-            break;
-
-        case STMT_GLOBAL: {
-            int n_names = s->as.global_decl.n_names;
-            int n_values = s->as.global_decl.n_values;
-            if (n_values == 0) break;
-            int last_call = (n_values > 0 &&
-                             is_multival_tail(s->as.global_decl.values[n_values - 1]));
-            if (last_call) {
-                emit_indent(c, depth); wat_append(c->w, "(local.set $tmp_args\n");
-                emit_multival_array(c, s->as.global_decl.values[n_values - 1], depth + 1);
-                emit_indent(c, depth); wat_append(c->w, ")\n");
-            }
-            for (int i = 0; i < n_names; i++) {
-                int gi = s->as.global_decl.global_idxs[i];
-                const char *gname = c->pr->globals.items[gi].name;
-                size_t gnl = c->pr->globals.items[gi].name_len;
-                emit_indent(c, depth);
-                wat_append(c->w, "(call $tab_set (ref.as_non_null (global.get $g_globals))\n");
-                emit_indent(c, depth + 1);
-                emit_global_key(c, gname, gnl);
-                if (n_values == 0) {
-                    emit_indent(c, depth + 1); wat_append(c->w, "(ref.null any)\n");
-                } else {
-                    emit_distributed_value(c, i, n_values, s->as.global_decl.values,
-                                           last_call, depth + 1);
-                }
-                emit_indent(c, depth); wat_append(c->w, ")\n");
-            }
-            break;
-        }
-
-        case STMT_IF: {
-            int label = c->next_label++;
-            emit_indent(c, depth);
-            wat_appendf(c->w, "(block $if_end_%d\n", label);
-            for (size_t i = 0; i < s->as.if_stmt.narms; i++) {
-                IfArm *a = &s->as.if_stmt.arms[i];
-                emit_truthy(c, a->cond, depth + 1);
-                emit_indent(c, depth + 1); wat_append(c->w, "(if (then\n");
-                emit_block(c, &a->body, depth + 2);
-                emit_indent(c, depth + 2); wat_appendf(c->w, "br $if_end_%d\n", label);
-                emit_indent(c, depth + 1); wat_append(c->w, "))\n");
-            }
-            if (s->as.if_stmt.has_else) {
-                emit_block(c, &s->as.if_stmt.else_body, depth + 1);
-            }
-            emit_indent(c, depth); wat_append(c->w, ")\n");
-            break;
-        }
-
-        case STMT_LOCAL_FUNC: {
-            int slot = s->as.local_func.local_idx;
-            int boxed = slot_is_boxed(c, slot);
-            /* If the slot is captured (e.g. by the closure itself for
-             * recursion), pre-allocate the box with nil so the function body
-             * can see its own slot; then store the closure into the box.
-             * If not captured, simply build the closure and store it. */
-            if (boxed) {
-                emit_indent(c, depth);
-                wat_appendf(c->w,
-                    "(local.set $L%d (struct.new $Box (ref.null any)))\n", slot);
-                emit_indent(c, depth); wat_append(c->w, "(struct.set $Box $v\n");
-                emit_indent(c, depth + 1);
-                wat_appendf(c->w, "(local.get $L%d)\n", slot);
-                emit_function_expr(c, s->as.local_func.func, depth + 1);
-                emit_indent(c, depth); wat_append(c->w, ")\n");
-            } else {
+        for (int i = 0; i < n_names; i++) {
+            int slot = s->as.local.local_idxs[i];
+            if (slot_is_int(c, slot)) {
+                /* i64 slot: analysis guarantees a matching single int value. */
                 emit_indent(c, depth);
                 wat_appendf(c->w, "(local.set $L%d\n", slot);
-                emit_function_expr(c, s->as.local_func.func, depth + 1);
-                emit_indent(c, depth); wat_append(c->w, ")\n");
+                emit_int_expr(c, s->as.local.values[i], depth + 1);
+                emit_indent(c, depth);
+                wat_append(c->w, ")\n");
+                continue;
             }
+            if (slot_is_float(c, slot)) {
+                emit_indent(c, depth);
+                wat_appendf(c->w, "(local.set $L%d\n", slot);
+                emit_float_expr(c, s->as.local.values[i], depth + 1);
+                emit_indent(c, depth);
+                wat_append(c->w, ")\n");
+                continue;
+            }
+            int boxed = slot_is_boxed(c, slot);
+            emit_indent(c, depth);
+            if (boxed) {
+                wat_appendf(c->w, "(local.set $L%d (struct.new $Box\n", slot);
+            } else {
+                wat_appendf(c->w, "(local.set $L%d\n", slot);
+            }
+            if (n_values == 0) {
+                emit_indent(c, depth + 1);
+                wat_append(c->w, "(ref.null any)\n");
+            } else {
+                emit_distributed_value(c, i, n_values, s->as.local.values,
+                                       last_call, depth + 1);
+            }
+            emit_indent(c, depth);
+            wat_append(c->w, boxed ? "))\n" : ")\n");
+        }
+        break;
+    }
+
+    case STMT_ASSIGN:
+        emit_assign(c, s, depth);
+        break;
+
+    case STMT_EXPR:
+        /* Call as statement: get array, drop it. */
+        emit_call_array(c, s->as.expr_stmt.expr, depth);
+        emit_indent(c, depth);
+        wat_append(c->w, "drop\n");
+        break;
+
+    case STMT_DO:
+        emit_block(c, &s->as.do_stmt.body, depth);
+        break;
+
+    case STMT_RETURN:
+        emit_return(c, s, depth);
+        break;
+
+    case STMT_WHILE: {
+        int label = c->next_label++;
+        if (!push_break_label(c, label)) break;
+        emit_indent(c, depth);
+        wat_appendf(c->w, "(block $brk_%d\n", label);
+        emit_indent(c, depth + 1);
+        wat_appendf(c->w, "(loop $cont_%d\n", label);
+        emit_truthy(c, s->as.while_stmt.cond, depth + 2);
+        emit_indent(c, depth + 2);
+        wat_append(c->w, "i32.eqz\n");
+        emit_indent(c, depth + 2);
+        wat_appendf(c->w, "br_if $brk_%d\n", label);
+        emit_block(c, &s->as.while_stmt.body, depth + 2);
+        emit_indent(c, depth + 2);
+        wat_appendf(c->w, "br $cont_%d\n", label);
+        emit_indent(c, depth + 1);
+        wat_append(c->w, ")\n");
+        emit_indent(c, depth);
+        wat_append(c->w, ")\n");
+        c->break_depth--;
+        break;
+    }
+
+    case STMT_REPEAT: {
+        int label = c->next_label++;
+        if (!push_break_label(c, label)) break;
+        emit_indent(c, depth);
+        wat_appendf(c->w, "(block $brk_%d\n", label);
+        emit_indent(c, depth + 1);
+        wat_appendf(c->w, "(loop $cont_%d\n", label);
+        emit_block(c, &s->as.repeat.body, depth + 2);
+        emit_truthy(c, s->as.repeat.cond, depth + 2);
+        emit_indent(c, depth + 2);
+        wat_append(c->w, "i32.eqz\n");
+        emit_indent(c, depth + 2);
+        wat_appendf(c->w, "br_if $cont_%d\n", label);
+        emit_indent(c, depth + 1);
+        wat_append(c->w, ")\n");
+        emit_indent(c, depth);
+        wat_append(c->w, ")\n");
+        c->break_depth--;
+        break;
+    }
+
+    case STMT_BREAK: {
+        if (c->break_depth == 0) {
+            cg_error(c, "break outside loop");
             break;
         }
+        int label = c->break_labels[c->break_depth - 1];
+        emit_indent(c, depth);
+        wat_appendf(c->w, "br $brk_%d\n", label);
+        break;
+    }
+
+    case STMT_GOTO: {
+        /* Dispatch lowering: set the target block's $next, then re-enter
+         * its dispatch loop. The local and label are function-scoped, so
+         * this works from inside arbitrarily nested blocks/loops. */
+        emit_indent(c, depth);
+        wat_appendf(c->w, "(local.set $next_%d (i32.const %d))\n",
+                    s->as.label.block_dispatch_id, s->as.label.target_segment_idx);
+        emit_indent(c, depth);
+        wat_appendf(c->w, "(br $dispatch_%d)\n", s->as.label.block_dispatch_id);
+        break;
+    }
+
+    case STMT_LABEL:
+        /* Wrappers are emitted by emit_block; the label statement
+         * itself produces no code at its position. */
+        break;
+
+    case STMT_FOR_NUM:
+        emit_for_num(c, s, depth);
+        break;
+
+    case STMT_FOR_GEN:
+        emit_for_gen(c, s, depth);
+        break;
+
+    case STMT_GLOBAL: {
+        int n_names = s->as.global_decl.n_names;
+        int n_values = s->as.global_decl.n_values;
+        if (n_values == 0) break;
+        int last_call = (n_values > 0 &&
+                         is_multival_tail(s->as.global_decl.values[n_values - 1]));
+        if (last_call) {
+            emit_indent(c, depth);
+            wat_append(c->w, "(local.set $tmp_args\n");
+            emit_multival_array(c, s->as.global_decl.values[n_values - 1], depth + 1);
+            emit_indent(c, depth);
+            wat_append(c->w, ")\n");
+        }
+        for (int i = 0; i < n_names; i++) {
+            int gi = s->as.global_decl.global_idxs[i];
+            const char *gname = c->pr->globals.items[gi].name;
+            size_t gnl = c->pr->globals.items[gi].name_len;
+            emit_indent(c, depth);
+            wat_append(c->w, "(call $tab_set (ref.as_non_null (global.get $g_globals))\n");
+            emit_indent(c, depth + 1);
+            emit_global_key(c, gname, gnl);
+            if (n_values == 0) {
+                emit_indent(c, depth + 1);
+                wat_append(c->w, "(ref.null any)\n");
+            } else {
+                emit_distributed_value(c, i, n_values, s->as.global_decl.values,
+                                       last_call, depth + 1);
+            }
+            emit_indent(c, depth);
+            wat_append(c->w, ")\n");
+        }
+        break;
+    }
+
+    case STMT_IF: {
+        int label = c->next_label++;
+        emit_indent(c, depth);
+        wat_appendf(c->w, "(block $if_end_%d\n", label);
+        for (size_t i = 0; i < s->as.if_stmt.narms; i++) {
+            IfArm *a = &s->as.if_stmt.arms[i];
+            emit_truthy(c, a->cond, depth + 1);
+            emit_indent(c, depth + 1);
+            wat_append(c->w, "(if (then\n");
+            emit_block(c, &a->body, depth + 2);
+            emit_indent(c, depth + 2);
+            wat_appendf(c->w, "br $if_end_%d\n", label);
+            emit_indent(c, depth + 1);
+            wat_append(c->w, "))\n");
+        }
+        if (s->as.if_stmt.has_else) {
+            emit_block(c, &s->as.if_stmt.else_body, depth + 1);
+        }
+        emit_indent(c, depth);
+        wat_append(c->w, ")\n");
+        break;
+    }
+
+    case STMT_LOCAL_FUNC: {
+        int slot = s->as.local_func.local_idx;
+        int boxed = slot_is_boxed(c, slot);
+        /* If the slot is captured (e.g. by the closure itself for
+         * recursion), pre-allocate the box with nil so the function body
+         * can see its own slot; then store the closure into the box.
+         * If not captured, simply build the closure and store it. */
+        if (boxed) {
+            emit_indent(c, depth);
+            wat_appendf(c->w,
+                        "(local.set $L%d (struct.new $Box (ref.null any)))\n", slot);
+            emit_indent(c, depth);
+            wat_append(c->w, "(struct.set $Box $v\n");
+            emit_indent(c, depth + 1);
+            wat_appendf(c->w, "(local.get $L%d)\n", slot);
+            emit_function_expr(c, s->as.local_func.func, depth + 1);
+            emit_indent(c, depth);
+            wat_append(c->w, ")\n");
+        } else {
+            emit_indent(c, depth);
+            wat_appendf(c->w, "(local.set $L%d\n", slot);
+            emit_function_expr(c, s->as.local_func.func, depth + 1);
+            emit_indent(c, depth);
+            wat_append(c->w, ")\n");
+        }
+        break;
+    }
     }
 }
 
@@ -2750,11 +3051,12 @@ static void emit_close_calls(CG *c, const int *slots, int n, int depth) {
         emit_indent(c, depth);
         if (slot_is_boxed(c, slot)) {
             wat_appendf(c->w,
-                "(call $do_close (struct.get $Box $v (local.get $L%d)) "
-                "(ref.null any))\n", slot);
+                        "(call $do_close (struct.get $Box $v (local.get $L%d)) "
+                        "(ref.null any))\n",
+                        slot);
         } else {
             wat_appendf(c->w,
-                "(call $do_close (local.get $L%d) (ref.null any))\n", slot);
+                        "(call $do_close (local.get $L%d) (ref.null any))\n", slot);
         }
     }
 }
@@ -2798,7 +3100,10 @@ static void emit_block(CG *c, const Block *b, int depth) {
     /* Fast path: no labels in this block, no wrappers needed. */
     int has_labels = 0;
     for (size_t i = 0; i < b->count; i++) {
-        if (b->items[i]->kind == STMT_LABEL) { has_labels = 1; break; }
+        if (b->items[i]->kind == STMT_LABEL) {
+            has_labels = 1;
+            break;
+        }
     }
     int close_slots[MAX_CLOSE_SLOTS];
     int n_close = collect_close_slots(b, close_slots, MAX_CLOSE_SLOTS);
@@ -2811,7 +3116,7 @@ static void emit_block(CG *c, const Block *b, int depth) {
     /* Compute segment boundaries: seg_start[k] = index of the first stmt
      * in segment k (k = 0..N). Segment 0 starts at 0; segment k>=1 starts
      * at the position AFTER the k-th label statement. */
-    int seg_start[MAX_BLOCK_LABELS + 1];        /* one slot per label + sentinel */
+    int seg_start[MAX_BLOCK_LABELS + 1]; /* one slot per label + sentinel */
     int N = 0;
     int bid = -1;
     seg_start[0] = 0;
@@ -2820,10 +3125,13 @@ static void emit_block(CG *c, const Block *b, int depth) {
         if (st->kind != STMT_LABEL) continue;
         if (N == 0) bid = st->as.label.block_dispatch_id;
         N++;
-        if (N >= MAX_BLOCK_LABELS) { cg_error(c, "too many labels in one block (limit 64)"); return; }
+        if (N >= MAX_BLOCK_LABELS) {
+            cg_error(c, "too many labels in one block (limit 64)");
+            return;
+        }
         seg_start[N] = (int)i + 1;
     }
-    int seg_end_N = (int)b->count;              /* end of segment N */
+    int seg_end_N = (int)b->count; /* end of segment N */
 
     /* Reset the dispatch state on entry: $next_BID is a function-scoped
      * local, so a previous entry (e.g. a previous iteration of an
@@ -2898,11 +3206,11 @@ static void emit_block(CG *c, const Block *b, int depth) {
 static void collect_dispatch_ids(CG *c, const Block *b, int *out, int *n, int cap);
 static void collect_dispatch_ids_stmt(CG *c, const Stmt *s, int *out, int *n, int cap) {
     switch (s->kind) {
-    case STMT_DO:      collect_dispatch_ids(c, &s->as.do_stmt.body,    out, n, cap); break;
-    case STMT_WHILE:   collect_dispatch_ids(c, &s->as.while_stmt.body, out, n, cap); break;
-    case STMT_REPEAT:  collect_dispatch_ids(c, &s->as.repeat.body,     out, n, cap); break;
-    case STMT_FOR_NUM: collect_dispatch_ids(c, &s->as.for_num.body,    out, n, cap); break;
-    case STMT_FOR_GEN: collect_dispatch_ids(c, &s->as.for_gen.body,    out, n, cap); break;
+    case STMT_DO: collect_dispatch_ids(c, &s->as.do_stmt.body, out, n, cap); break;
+    case STMT_WHILE: collect_dispatch_ids(c, &s->as.while_stmt.body, out, n, cap); break;
+    case STMT_REPEAT: collect_dispatch_ids(c, &s->as.repeat.body, out, n, cap); break;
+    case STMT_FOR_NUM: collect_dispatch_ids(c, &s->as.for_num.body, out, n, cap); break;
+    case STMT_FOR_GEN: collect_dispatch_ids(c, &s->as.for_gen.body, out, n, cap); break;
     case STMT_IF:
         for (size_t i = 0; i < s->as.if_stmt.narms; i++)
             collect_dispatch_ids(c, &s->as.if_stmt.arms[i].body, out, n, cap);
@@ -2917,7 +3225,10 @@ static void collect_dispatch_ids(CG *c, const Block *b, int *out, int *n, int ca
     for (size_t i = 0; i < b->count; i++) {
         const Stmt *st = b->items[i];
         if (st->kind == STMT_LABEL) {
-            if (*n >= cap) { cg_error(c, "too many label-bearing blocks in one function"); return; }
+            if (*n >= cap) {
+                cg_error(c, "too many label-bearing blocks in one function");
+                return;
+            }
             out[(*n)++] = st->as.label.block_dispatch_id;
             break;
         }
@@ -2941,9 +3252,9 @@ static int max_for_nesting(const Block *b) {
         switch (s->kind) {
         case STMT_FOR_NUM: d = 1 + max_for_nesting(&s->as.for_num.body); break;
         case STMT_FOR_GEN: d = 1 + max_for_nesting(&s->as.for_gen.body); break;
-        case STMT_WHILE:   d = max_for_nesting(&s->as.while_stmt.body); break;
-        case STMT_REPEAT:  d = max_for_nesting(&s->as.repeat.body); break;
-        case STMT_DO:      d = max_for_nesting(&s->as.do_stmt.body); break;
+        case STMT_WHILE: d = max_for_nesting(&s->as.while_stmt.body); break;
+        case STMT_REPEAT: d = max_for_nesting(&s->as.repeat.body); break;
+        case STMT_DO: d = max_for_nesting(&s->as.do_stmt.body); break;
         case STMT_IF:
             for (size_t a = 0; a < s->as.if_stmt.narms; a++) {
                 int da = max_for_nesting(&s->as.if_stmt.arms[a].body);
@@ -2966,11 +3277,13 @@ static void emit_for_scratch_locals(WatBuilder *w, const Block *body) {
     int levels = max_for_nesting(body);
     for (int d = 0; d < levels; d++) {
         wat_appendf(w,
-            "    (local $for_stop_%d anyref) (local $for_step_%d anyref)"
-            " (local $for_next_%d anyref) (local $for_cur_%d anyref)\n", d, d, d, d);
+                    "    (local $for_stop_%d anyref) (local $for_step_%d anyref)"
+                    " (local $for_next_%d anyref) (local $for_cur_%d anyref)\n",
+                    d, d, d, d);
         wat_appendf(w,
-            "    (local $for_iter_%d anyref) (local $for_state_%d anyref)"
-            " (local $for_k_%d anyref)\n", d, d, d);
+                    "    (local $for_iter_%d anyref) (local $for_state_%d anyref)"
+                    " (local $for_k_%d anyref)\n",
+                    d, d, d);
     }
 }
 
@@ -2980,8 +3293,7 @@ static void emit_for_scratch_locals(WatBuilder *w, const Block *body) {
 
 static const char PRELUDE[] = {
 #embed "prelude.wat"
-, '\0'
-};
+    , '\0'};
 
 /* The first LITERAL_PREFIX_LEN bytes of $str_data are reserved error
  * messages and field names that prelude.wat addresses by *absolute* offset
@@ -2989,7 +3301,7 @@ static const char PRELUDE[] = {
  * LITERAL_SLAB below; verify_literal_slab() checks that LITERAL_PREFIX and
  * that map agree, so an edit to one without the other fails the build
  * instead of silently corrupting messages or reading past the slab. */
-#define LITERAL_PREFIX "niltruefalse<float>numberstringtablefunctionboolean__index__add__eq\tLua 5.5'for' step is zeroattempt to call a non-function value__callmodule '' not loadedvalue out of rangedata does not fitinvalid UTF-8 codeattempt to perform arithmeticattempt to index a valuetable index is niltable index is NaNtoo largeyearmonthdayhourminsecwdayydayisdsttable overflowout of limitsmissing sizevariable-length formatnot power of 2invalid formatattempt to divide by zeroattempt to perform 'n%0'attempt to compare two values'__tostring' must return a string'__newindex' chain too long; possible loopattempt to close a non-closable valuevalue expectedcannot change a protected metatablestring expectedtable expectedtable or string expectedinvalid replacement valuestring contains zeros<no error object>invalid value in table for 'concat'base out of rangeposition out of boundsinitial position is a continuation bytefield missing in date tablewrong number of argumentsnumber expected, got stack overflownumber has no integer representation"
+#define LITERAL_PREFIX     "niltruefalse<float>numberstringtablefunctionboolean__index__add__eq\tLua 5.5'for' step is zeroattempt to call a non-function value__callmodule '' not loadedvalue out of rangedata does not fitinvalid UTF-8 codeattempt to perform arithmeticattempt to index a valuetable index is niltable index is NaNtoo largeyearmonthdayhourminsecwdayydayisdsttable overflowout of limitsmissing sizevariable-length formatnot power of 2invalid formatattempt to divide by zeroattempt to perform 'n%0'attempt to compare two values'__tostring' must return a string'__newindex' chain too long; possible loopattempt to close a non-closable valuevalue expectedcannot change a protected metatablestring expectedtable expectedtable or string expectedinvalid replacement valuestring contains zeros<no error object>invalid value in table for 'concat'base out of rangeposition out of boundsinitial position is a continuation bytefield missing in date tablewrong number of argumentsnumber expected, got stack overflownumber has no integer representation"
 #define LITERAL_PREFIX_LEN 1021
 static_assert(sizeof(LITERAL_PREFIX) - 1 == LITERAL_PREFIX_LEN,
               "LITERAL_PREFIX_LEN must match the byte length of LITERAL_PREFIX");
@@ -2998,54 +3310,75 @@ static_assert(sizeof(LITERAL_PREFIX) - 1 == LITERAL_PREFIX_LEN,
  * into prelude.wat and the bytes that must live there. Offsets are
  * contiguous (each = previous offset + previous length); the trailing
  * comment names the prelude consumer. */
-static const struct { unsigned off; const char *s; } LITERAL_SLAB[] = {
-    {  0, "nil"        }, {  3, "true"    }, {  7, "false"   }, { 12, "<float>"  },
-    { 19, "number"     }, { 25, "string"  }, { 31, "table"   }, { 36, "function" },
-    { 44, "boolean"    }, { 51, "__index" }, { 58, "__add"   }, { 63, "__eq"     },
-    { 67, "\t"         }, { 68, "Lua 5.5" },
-    { 75, "'for' step is zero" },                 /* $for_check_step */
-    { 93, "attempt to call a non-function value" },/* $lua_call_any */
-    {129, "__call"     },                          /* $g_mkey_call */
-    {135, "module '"   }, {143, "' not loaded" },  /* $builtin_require */
-    {155, "value out of range" },                  /* $builtin_string_char, … */
-    {173, "data does not fit" },                   /* $builtin_string_unpack */
-    {190, "invalid UTF-8 code" },                  /* $builtin_utf8_codepoint, … */
-    {208, "attempt to perform arithmetic" },       /* $arith_mm */
-    {237, "attempt to index a value" },            /* $lua_tabset, $lua_index */
-    {261, "table index is nil" },                  /* $builtin_rawset, $tab_set */
-    {279, "table index is NaN" },                  /* $builtin_rawset, $tab_set */
-    {297, "too large"  },                          /* $builtin_string_rep */
-    {306, "year" }, {310, "month"}, {315, "day"  }, {318, "hour" }, /* os.date("*t") */
-    {322, "min"  }, {325, "sec"  }, {328, "wday" }, {332, "yday" }, {336, "isdst"},
-    {341, "table overflow" },                      /* $tab_grow size guard */
-    {355, "out of limits" },                       /* pack size/align validation */
-    {368, "missing size" },                        /* pack 'c' missing [N] */
-    {380, "variable-length format" },              /* packsize on 's'/'z' */
-    {402, "not power of 2" },                       /* pack '!N' validation */
-    {416, "invalid format" },                       /* packsize 'c' overflow */
-    {430, "attempt to divide by zero" },           /* $lua_fdiv divisor 0 */
-    {455, "attempt to perform 'n%0'" },            /* $lua_mod divisor 0 */
-    {479, "attempt to compare two values" },       /* $compare_mm */
-    {508, "'__tostring' must return a string" },   /* $lua_tostring */
-    {541, "'__newindex' chain too long; possible loop" }, /* $lua_tabset */
-    {583, "attempt to close a non-closable value" },/* $do_close */
-    {620, "value expected" },                      /* pcall/xpcall/select */
-    {634, "cannot change a protected metatable" }, /* $builtin_setmetatable */
-    {669, "string expected" },                     /* require/os.getenv */
-    {684, "table expected" },                      /* $builtin_rawget */
-    {698, "table or string expected" },            /* $builtin_rawlen */
-    {722, "invalid replacement value" },           /* gsub replacement paths */
-    {747, "string contains zeros" },               /* $builtin_string_pack 'z' */
-    {768, "<no error object>" },                    /* $err_or_noobj */
-    {785, "invalid value in table for 'concat'" },  /* $builtin_table_concat */
-    {820, "base out of range" },                    /* $builtin_tonumber */
-    {837, "position out of bounds" },               /* $builtin_utf8_offset */
-    {859, "initial position is a continuation byte" }, /* $builtin_utf8_offset */
-    {898, "field missing in date table" },          /* $os_date_field */
-    {925, "wrong number of arguments" },            /* $builtin_table_insert */
-    {950, "number expected, got " },                /* $as_float_co / $as_int_co */
-    {971, "stack overflow" },                       /* $push_call_frame depth guard */
-    {985, "number has no integer representation" },  /* $as_int_co */
+static const struct {
+    unsigned off;
+    const char *s;
+} LITERAL_SLAB[] = {
+    {0, "nil"},
+    {3, "true"},
+    {7, "false"},
+    {12, "<float>"},
+    {19, "number"},
+    {25, "string"},
+    {31, "table"},
+    {36, "function"},
+    {44, "boolean"},
+    {51, "__index"},
+    {58, "__add"},
+    {63, "__eq"},
+    {67, "\t"},
+    {68, "Lua 5.5"},
+    {75, "'for' step is zero"},                   /* $for_check_step */
+    {93, "attempt to call a non-function value"}, /* $lua_call_any */
+    {129, "__call"},                              /* $g_mkey_call */
+    {135, "module '"},
+    {143, "' not loaded"},                  /* $builtin_require */
+    {155, "value out of range"},            /* $builtin_string_char, … */
+    {173, "data does not fit"},             /* $builtin_string_unpack */
+    {190, "invalid UTF-8 code"},            /* $builtin_utf8_codepoint, … */
+    {208, "attempt to perform arithmetic"}, /* $arith_mm */
+    {237, "attempt to index a value"},      /* $lua_tabset, $lua_index */
+    {261, "table index is nil"},            /* $builtin_rawset, $tab_set */
+    {279, "table index is NaN"},            /* $builtin_rawset, $tab_set */
+    {297, "too large"},                     /* $builtin_string_rep */
+    {306, "year"},
+    {310, "month"},
+    {315, "day"},
+    {318, "hour"}, /* os.date("*t") */
+    {322, "min"},
+    {325, "sec"},
+    {328, "wday"},
+    {332, "yday"},
+    {336, "isdst"},
+    {341, "table overflow"},                             /* $tab_grow size guard */
+    {355, "out of limits"},                              /* pack size/align validation */
+    {368, "missing size"},                               /* pack 'c' missing [N] */
+    {380, "variable-length format"},                     /* packsize on 's'/'z' */
+    {402, "not power of 2"},                             /* pack '!N' validation */
+    {416, "invalid format"},                             /* packsize 'c' overflow */
+    {430, "attempt to divide by zero"},                  /* $lua_fdiv divisor 0 */
+    {455, "attempt to perform 'n%0'"},                   /* $lua_mod divisor 0 */
+    {479, "attempt to compare two values"},              /* $compare_mm */
+    {508, "'__tostring' must return a string"},          /* $lua_tostring */
+    {541, "'__newindex' chain too long; possible loop"}, /* $lua_tabset */
+    {583, "attempt to close a non-closable value"},      /* $do_close */
+    {620, "value expected"},                             /* pcall/xpcall/select */
+    {634, "cannot change a protected metatable"},        /* $builtin_setmetatable */
+    {669, "string expected"},                            /* require/os.getenv */
+    {684, "table expected"},                             /* $builtin_rawget */
+    {698, "table or string expected"},                   /* $builtin_rawlen */
+    {722, "invalid replacement value"},                  /* gsub replacement paths */
+    {747, "string contains zeros"},                      /* $builtin_string_pack 'z' */
+    {768, "<no error object>"},                          /* $err_or_noobj */
+    {785, "invalid value in table for 'concat'"},        /* $builtin_table_concat */
+    {820, "base out of range"},                          /* $builtin_tonumber */
+    {837, "position out of bounds"},                     /* $builtin_utf8_offset */
+    {859, "initial position is a continuation byte"},    /* $builtin_utf8_offset */
+    {898, "field missing in date table"},                /* $os_date_field */
+    {925, "wrong number of arguments"},                  /* $builtin_table_insert */
+    {950, "number expected, got "},                      /* $as_float_co / $as_int_co */
+    {971, "stack overflow"},                             /* $push_call_frame depth guard */
+    {985, "number has no integer representation"},       /* $as_int_co */
 };
 
 /* Returns the offending entry's string on drift between LITERAL_PREFIX and
@@ -3067,14 +3400,16 @@ static const char *verify_literal_slab(void) {
 
 /* WAT type keyword for an inferred numeric type. */
 static const char *num_wat_ty(NumTy t) {
-    return t == NT_INT ? "i64" : t == NT_FLOAT ? "f64" : "anyref";
+    return t == NT_INT ? "i64" : t == NT_FLOAT ? "f64"
+                                               : "anyref";
 }
 
 /* Emit the body of one user function. */
 static void emit_user_function(CG *c, const LuaFunc *fn, int direct, int ret_single) {
     WatBuilder *w = c->w;
     const FuncSig *sg = (c->opt_int && fn->func_idx >= 0 && fn->func_idx < c->n_sigs)
-                            ? &c->sigs[fn->func_idx] : NULL;
+                            ? &c->sigs[fn->func_idx]
+                            : NULL;
     /* Typed direct entries seed their parameter slots from the signature; the
      * generic entry and the main chunk leave parameters boxed. */
     const NumTy *param_seed = (direct && sg) ? sg->param_ty : NULL;
@@ -3090,13 +3425,13 @@ static void emit_user_function(CG *c, const LuaFunc *fn, int direct, int ret_sin
             wat_appendf(w, " (param $p%d %s)", i,
                         num_wat_ty(param_seed ? param_seed[i] : NT_ANY));
         if (ret_single) wat_appendf(w, " (result %s)\n", num_wat_ty(ret_ty));
-        else            wat_append(w, " (result (ref $ArgArr))\n");
+        else wat_append(w, " (result (ref $ArgArr))\n");
     } else {
         wat_appendf(w,
-            "  (func $user_%d (type $LuaFn) "
-            "(param $closure (ref $LuaClosure)) "
-            "(param $args (ref $ArgArr)) (result (ref $ArgArr))\n",
-            fn->func_idx);
+                    "  (func $user_%d (type $LuaFn) "
+                    "(param $closure (ref $LuaClosure)) "
+                    "(param $args (ref $ArgArr)) (result (ref $ArgArr))\n",
+                    fn->func_idx);
     }
 
     /* Wire escape-analysis state for this body. */
@@ -3156,7 +3491,8 @@ static void emit_user_function(CG *c, const LuaFunc *fn, int direct, int ret_sin
         int lv = max_for_nesting(&fn->body);
         for (int d = 0; d < lv; d++)
             wat_appendf(w, "    (local $ifor_stop_%d i64) (local $ifor_step_%d i64)"
-                           " (local $ifor_next_%d i64)\n", d, d, d);
+                           " (local $ifor_next_%d i64)\n",
+                        d, d, d);
     }
     if (fn->is_vararg) {
         /* Non-null: prologue always writes $varargs before first use. */
@@ -3166,7 +3502,8 @@ static void emit_user_function(CG *c, const LuaFunc *fn, int direct, int ret_sin
      * function so STMT_GOTO can target them and emit_block can read them
      * in br_table. Default-zero i32 ⇒ first dispatch lands in segment 0. */
     {
-        int bids[MAX_DISPATCH_IDS]; int n = 0;
+        int bids[MAX_DISPATCH_IDS];
+        int n = 0;
         collect_dispatch_ids(c, &fn->body, bids, &n, MAX_DISPATCH_IDS);
         for (int i = 0; i < n; i++) {
             wat_appendf(w, "    (local $next_%d i32)\n", bids[i]);
@@ -3177,8 +3514,8 @@ static void emit_user_function(CG *c, const LuaFunc *fn, int direct, int ret_sin
     for (int i = 0; i < fn->n_params; i++) {
         char src[64];
         int sn = direct
-            ? snprintf(src, sizeof src, "(local.get $p%d)", i)
-            : snprintf(src, sizeof src, "(call $args_at (local.get $args) (i32.const %d))", i);
+                     ? snprintf(src, sizeof src, "(local.get $p%d)", i)
+                     : snprintf(src, sizeof src, "(call $args_at (local.get $args) (i32.const %d))", i);
         if (sn < 0 || (size_t)sn >= sizeof src) {
             cg_error(c, "param-extraction expression too long");
             return;
@@ -3190,8 +3527,9 @@ static void emit_user_function(CG *c, const LuaFunc *fn, int direct, int ret_sin
     }
     if (fn->is_vararg) {
         wat_appendf(w,
-            "    (local.set $varargs (call $args_slice "
-            "(local.get $args) (i32.const %d)))\n", fn->n_params);
+                    "    (local.set $varargs (call $args_slice "
+                    "(local.get $args) (i32.const %d)))\n",
+                    fn->n_params);
     }
     /* Eager-initialise every captured local that isn't a parameter to a
      * placeholder $Box. Lua semantics guarantees a local's declaration
@@ -3203,7 +3541,7 @@ static void emit_user_function(CG *c, const LuaFunc *fn, int direct, int ret_sin
     for (int i = fn->n_params; i < fn->n_locals; i++) {
         if (fn->captured && fn->captured[i]) {
             wat_appendf(w,
-                "    (local.set $L%d (struct.new $Box (ref.null any)))\n", i);
+                        "    (local.set $L%d (struct.new $Box (ref.null any)))\n", i);
         }
     }
 
@@ -3223,9 +3561,8 @@ static void emit_user_function(CG *c, const LuaFunc *fn, int direct, int ret_sin
      * always returns (block_always_returns), so this default is dead but must
      * still type-check; otherwise it is nil / the empty results array. */
     if (ret_single)
-        wat_appendf(w, "    %s\n", ret_ty == NT_INT ? "(i64.const 0)"
-                                 : ret_ty == NT_FLOAT ? "(f64.const 0)"
-                                 : "(ref.null any)");
+        wat_appendf(w, "    %s\n", ret_ty == NT_INT ? "(i64.const 0)" : ret_ty == NT_FLOAT ? "(f64.const 0)"
+                                                                                           : "(ref.null any)");
     else
         wat_append(w, "    (global.get $g_empty_args)\n");
     wat_append(w, "  )\n");
@@ -3253,8 +3590,8 @@ static void emit_user_function(CG *c, const LuaFunc *fn, int direct, int ret_sin
  * emitting closure globals, _G entries, and library installations
  * that nothing in the program touches. */
 typedef struct {
-    unsigned char *live;      /* builtin idx -> 1 if referenced */
-    unsigned char *gref;      /* pr->globals idx -> 1 if referenced */
+    unsigned char *live; /* builtin idx -> 1 if referenced */
+    unsigned char *gref; /* pr->globals idx -> 1 if referenced */
     int n_builtins;
     int n_globals;
 } LiveSet;
@@ -3274,119 +3611,119 @@ static void ts_mark_var(LiveSet *L, VarKind k, int idx) {
 static void ts_mark_expr(LiveSet *L, const Expr *e) {
     if (!e) return;
     switch (e->kind) {
-        case EXPR_VAR: ts_mark_var(L, e->as.var.kind, e->as.var.idx); break;
-        case EXPR_CALL:
-            ts_mark_expr(L, e->as.call.callee);
-            for (size_t i = 0; i < e->as.call.nargs; i++)
-                ts_mark_expr(L, e->as.call.args[i]);
-            break;
-        case EXPR_BINOP:
-            ts_mark_expr(L, e->as.binop.lhs);
-            ts_mark_expr(L, e->as.binop.rhs);
-            break;
-        case EXPR_UNOP: ts_mark_expr(L, e->as.unop.operand); break;
-        case EXPR_FUNCTION:
-            ts_mark_block(L, &e->as.func_expr.func->body);
-            break;
-        case EXPR_INDEX:
-            ts_mark_expr(L, e->as.index.table);
-            ts_mark_expr(L, e->as.index.key);
-            break;
-        case EXPR_TABLE:
-            for (int i = 0; i < e->as.table_ctor.n_entries; i++) {
-                ts_mark_expr(L, e->as.table_ctor.entries[i].key);
-                ts_mark_expr(L, e->as.table_ctor.entries[i].value);
-            }
-            break;
-        case EXPR_METHOD_CALL:
-            ts_mark_expr(L, e->as.method_call.recv);
-            for (size_t i = 0; i < e->as.method_call.nargs; i++)
-                ts_mark_expr(L, e->as.method_call.args[i]);
-            break;
-        default: break;  /* literals, vararg — no refs */
+    case EXPR_VAR: ts_mark_var(L, e->as.var.kind, e->as.var.idx); break;
+    case EXPR_CALL:
+        ts_mark_expr(L, e->as.call.callee);
+        for (size_t i = 0; i < e->as.call.nargs; i++)
+            ts_mark_expr(L, e->as.call.args[i]);
+        break;
+    case EXPR_BINOP:
+        ts_mark_expr(L, e->as.binop.lhs);
+        ts_mark_expr(L, e->as.binop.rhs);
+        break;
+    case EXPR_UNOP: ts_mark_expr(L, e->as.unop.operand); break;
+    case EXPR_FUNCTION:
+        ts_mark_block(L, &e->as.func_expr.func->body);
+        break;
+    case EXPR_INDEX:
+        ts_mark_expr(L, e->as.index.table);
+        ts_mark_expr(L, e->as.index.key);
+        break;
+    case EXPR_TABLE:
+        for (int i = 0; i < e->as.table_ctor.n_entries; i++) {
+            ts_mark_expr(L, e->as.table_ctor.entries[i].key);
+            ts_mark_expr(L, e->as.table_ctor.entries[i].value);
+        }
+        break;
+    case EXPR_METHOD_CALL:
+        ts_mark_expr(L, e->as.method_call.recv);
+        for (size_t i = 0; i < e->as.method_call.nargs; i++)
+            ts_mark_expr(L, e->as.method_call.args[i]);
+        break;
+    default: break; /* literals, vararg — no refs */
     }
 }
 
 static void ts_mark_stmt(LiveSet *L, const Stmt *s) {
     if (!s) return;
     switch (s->kind) {
-        case STMT_LOCAL:
-            for (int i = 0; i < s->as.local.n_values; i++)
-                ts_mark_expr(L, s->as.local.values[i]);
-            break;
-        case STMT_ASSIGN:
-            for (int i = 0; i < s->as.assign.n_targets; i++) {
-                const AssignTarget *t = &s->as.assign.targets[i];
-                if (t->kind == TGT_INDEX) {
-                    ts_mark_expr(L, t->as.index.table);
-                    ts_mark_expr(L, t->as.index.key);
-                } else {
-                    ts_mark_var(L, t->as.var.kind, t->as.var.idx);
-                }
+    case STMT_LOCAL:
+        for (int i = 0; i < s->as.local.n_values; i++)
+            ts_mark_expr(L, s->as.local.values[i]);
+        break;
+    case STMT_ASSIGN:
+        for (int i = 0; i < s->as.assign.n_targets; i++) {
+            const AssignTarget *t = &s->as.assign.targets[i];
+            if (t->kind == TGT_INDEX) {
+                ts_mark_expr(L, t->as.index.table);
+                ts_mark_expr(L, t->as.index.key);
+            } else {
+                ts_mark_var(L, t->as.var.kind, t->as.var.idx);
             }
-            for (int i = 0; i < s->as.assign.n_values; i++)
-                ts_mark_expr(L, s->as.assign.values[i]);
-            break;
-        case STMT_EXPR: ts_mark_expr(L, s->as.expr_stmt.expr); break;
-        case STMT_IF:
-            for (size_t i = 0; i < s->as.if_stmt.narms; i++) {
-                ts_mark_expr(L, s->as.if_stmt.arms[i].cond);
-                ts_mark_block(L, &s->as.if_stmt.arms[i].body);
-            }
-            if (s->as.if_stmt.has_else)
-                ts_mark_block(L, &s->as.if_stmt.else_body);
-            break;
-        case STMT_WHILE:
-            ts_mark_expr(L, s->as.while_stmt.cond);
-            ts_mark_block(L, &s->as.while_stmt.body);
-            break;
-        case STMT_DO: ts_mark_block(L, &s->as.do_stmt.body); break;
-        case STMT_RETURN:
-            for (int i = 0; i < s->as.return_stmt.n_values; i++)
-                ts_mark_expr(L, s->as.return_stmt.values[i]);
-            break;
-        case STMT_LOCAL_FUNC:
-            ts_mark_block(L, &s->as.local_func.func->body);
-            break;
-        case STMT_FOR_NUM:
-            ts_mark_expr(L, s->as.for_num.start);
-            ts_mark_expr(L, s->as.for_num.stop);
-            ts_mark_expr(L, s->as.for_num.step);
-            ts_mark_block(L, &s->as.for_num.body);
-            break;
-        case STMT_FOR_GEN:
-            for (int i = 0; i < s->as.for_gen.n_exprs; i++)
-                ts_mark_expr(L, s->as.for_gen.exprs[i]);
-            ts_mark_block(L, &s->as.for_gen.body);
-            break;
-        case STMT_REPEAT:
-            ts_mark_block(L, &s->as.repeat.body);
-            ts_mark_expr(L, s->as.repeat.cond);
-            break;
-        case STMT_GLOBAL:
-            for (int i = 0; i < s->as.global_decl.n_values; i++)
-                ts_mark_expr(L, s->as.global_decl.values[i]);
-            break;
-        default: break;  /* BREAK, GOTO, LABEL — no refs */
+        }
+        for (int i = 0; i < s->as.assign.n_values; i++)
+            ts_mark_expr(L, s->as.assign.values[i]);
+        break;
+    case STMT_EXPR: ts_mark_expr(L, s->as.expr_stmt.expr); break;
+    case STMT_IF:
+        for (size_t i = 0; i < s->as.if_stmt.narms; i++) {
+            ts_mark_expr(L, s->as.if_stmt.arms[i].cond);
+            ts_mark_block(L, &s->as.if_stmt.arms[i].body);
+        }
+        if (s->as.if_stmt.has_else)
+            ts_mark_block(L, &s->as.if_stmt.else_body);
+        break;
+    case STMT_WHILE:
+        ts_mark_expr(L, s->as.while_stmt.cond);
+        ts_mark_block(L, &s->as.while_stmt.body);
+        break;
+    case STMT_DO: ts_mark_block(L, &s->as.do_stmt.body); break;
+    case STMT_RETURN:
+        for (int i = 0; i < s->as.return_stmt.n_values; i++)
+            ts_mark_expr(L, s->as.return_stmt.values[i]);
+        break;
+    case STMT_LOCAL_FUNC:
+        ts_mark_block(L, &s->as.local_func.func->body);
+        break;
+    case STMT_FOR_NUM:
+        ts_mark_expr(L, s->as.for_num.start);
+        ts_mark_expr(L, s->as.for_num.stop);
+        ts_mark_expr(L, s->as.for_num.step);
+        ts_mark_block(L, &s->as.for_num.body);
+        break;
+    case STMT_FOR_GEN:
+        for (int i = 0; i < s->as.for_gen.n_exprs; i++)
+            ts_mark_expr(L, s->as.for_gen.exprs[i]);
+        ts_mark_block(L, &s->as.for_gen.body);
+        break;
+    case STMT_REPEAT:
+        ts_mark_block(L, &s->as.repeat.body);
+        ts_mark_expr(L, s->as.repeat.cond);
+        break;
+    case STMT_GLOBAL:
+        for (int i = 0; i < s->as.global_decl.n_values; i++)
+            ts_mark_expr(L, s->as.global_decl.values[i]);
+        break;
+    default: break; /* BREAK, GOTO, LABEL — no refs */
     }
 }
 
 /* Map a global name to a BuiltinClass if it's one of the pre-declared
  * library tables. Returns -1 otherwise. */
 static int class_for_global(const char *name, size_t name_len) {
-    if (name_len == 4 && memcmp(name, "math", 4) == 0)   return BLT_LIB_MATH;
+    if (name_len == 4 && memcmp(name, "math", 4) == 0) return BLT_LIB_MATH;
     if (name_len == 6 && memcmp(name, "string", 6) == 0) return BLT_LIB_STRING;
-    if (name_len == 2 && memcmp(name, "io", 2) == 0)     return BLT_LIB_IO;
-    if (name_len == 5 && memcmp(name, "table", 5) == 0)  return BLT_LIB_TABLE;
-    if (name_len == 4 && memcmp(name, "utf8", 4) == 0)   return BLT_LIB_UTF8;
-    if (name_len == 5 && memcmp(name, "debug", 5) == 0)  return BLT_LIB_DEBUG;
-    if (name_len == 2 && memcmp(name, "os", 2) == 0)     return BLT_LIB_OS;
+    if (name_len == 2 && memcmp(name, "io", 2) == 0) return BLT_LIB_IO;
+    if (name_len == 5 && memcmp(name, "table", 5) == 0) return BLT_LIB_TABLE;
+    if (name_len == 4 && memcmp(name, "utf8", 4) == 0) return BLT_LIB_UTF8;
+    if (name_len == 5 && memcmp(name, "debug", 5) == 0) return BLT_LIB_DEBUG;
+    if (name_len == 2 && memcmp(name, "os", 2) == 0) return BLT_LIB_OS;
     return -1;
 }
 
 static void compute_live_set(const ParseResult *pr, int n_builtins,
                              unsigned char *live, unsigned char *gref) {
-    LiveSet L = { live, gref, n_builtins, (int)pr->globals.count };
+    LiveSet L = {live, gref, n_builtins, (int)pr->globals.count};
     ts_mark_block(&L, &pr->main_body);
     for (size_t i = 0; i < pr->funcs.count; i++)
         ts_mark_block(&L, &pr->funcs.items[i]->body);
@@ -3432,9 +3769,9 @@ static void compute_live_set(const ParseResult *pr, int n_builtins,
          * Cost is a handful of closures even when the program never opens
          * a file; the prelude bodies referencing them are unconditional. */
         if (c == BLT_LIB_IO &&
-            (strcmp(n, "_file_read")  == 0 || strcmp(n, "_file_write") == 0 ||
+            (strcmp(n, "_file_read") == 0 || strcmp(n, "_file_write") == 0 ||
              strcmp(n, "_file_close") == 0 || strcmp(n, "_file_flush") == 0 ||
-             strcmp(n, "_file_seek")  == 0 || strcmp(n, "_file_lines") == 0 ||
+             strcmp(n, "_file_seek") == 0 || strcmp(n, "_file_lines") == 0 ||
              strcmp(n, "_io_lines_iter") == 0)) {
             live[i] = 1;
         }
@@ -3460,22 +3797,25 @@ static void emit_library_tables(CG *c, const unsigned char *gref, int nb) {
             emit_tab_set_strval(c, G, "_VERSION", 8, "Lua 5.5", 7);
             continue;
         }
-        if (glen == 2 && memcmp(gname, "_G", 2) == 0) continue;  /* installed above */
-        if (!gref[gi]) continue;  /* tree-shake: library not referenced */
+        if (glen == 2 && memcmp(gname, "_G", 2) == 0) continue; /* installed above */
+        if (!gref[gi]) continue;                                /* tree-shake: library not referenced */
         if (glen == 7 && memcmp(gname, "package", 7) == 0) {
             /* Milestone 25: package = { loaded = {}, preload = {} }.
              * No builtins live under this table; require() walks it.
              * We also stub package.path, package.cpath, package.config so
              * tests that probe `type(package.path) == "string"` pass. */
             wat_append(out, "    (local.set $tab (call $tab_new))\n");
-            static const struct { const char *key; const char *val; } PKG_STR[] = {
-                { "loaded",  NULL },     /* table — handled separately */
-                { "preload", NULL },
-                { "path",    "" },       /* empty: there's no filesystem here */
-                { "cpath",   "" },
-                { "config",  "/\n;\n?\n!\n-\n" }, /* the stock Lua default */
+            static const struct {
+                const char *key;
+                const char *val;
+            } PKG_STR[] = {
+                {"loaded", NULL}, /* table — handled separately */
+                {"preload", NULL},
+                {"path", ""}, /* empty: there's no filesystem here */
+                {"cpath", ""},
+                {"config", "/\n;\n?\n!\n-\n"}, /* the stock Lua default */
             };
-            for (size_t pi = 0; pi < sizeof(PKG_STR)/sizeof(PKG_STR[0]); pi++) {
+            for (size_t pi = 0; pi < sizeof(PKG_STR) / sizeof(PKG_STR[0]); pi++) {
                 size_t klen = strlen(PKG_STR[pi].key);
                 if (PKG_STR[pi].val == NULL)
                     emit_tab_set_str(c, "(local.get $tab)", PKG_STR[pi].key, klen,
@@ -3518,13 +3858,13 @@ static void emit_library_tables(CG *c, const unsigned char *gref, int nb) {
         /* Plain-value constants for the math library. */
         if (cls == BLT_LIB_MATH) {
             emit_tab_set_str(c, "(local.get $tab)", "pi", 2,
-                "(struct.new $LuaFloat (f64.const 3.141592653589793))");
+                             "(struct.new $LuaFloat (f64.const 3.141592653589793))");
             emit_tab_set_str(c, "(local.get $tab)", "huge", 4,
-                "(struct.new $LuaFloat (f64.const inf))");
+                             "(struct.new $LuaFloat (f64.const inf))");
             emit_tab_set_str(c, "(local.get $tab)", "maxinteger", 10,
-                "(call $make_int (i64.const 9223372036854775807))");
+                             "(call $make_int (i64.const 9223372036854775807))");
             emit_tab_set_str(c, "(local.get $tab)", "mininteger", 10,
-                "(call $make_int (i64.const -9223372036854775808))");
+                             "(call $make_int (i64.const -9223372036854775808))");
         }
         /* io.stdout / io.stderr / io.stdin: build a sub-table per
          * stream, populated with the relevant file-handle methods. The
@@ -3538,20 +3878,20 @@ static void emit_library_tables(CG *c, const unsigned char *gref, int nb) {
              * the rest take a writer matching the handle's stream. */
             static const struct {
                 const char *handle;
-                size_t      handle_len;
+                size_t handle_len;
                 const char *method_glob;
-                int         fd;             /* host fd; io.type reads __fd */
+                int fd;                     /* host fd; io.type reads __fd */
                 const char *default_global; /* capture as a default io file, or NULL */
             } HANDLES[] = {
-                { "stdout", 6, "io_handle_write",     1, "$g_io_output" },
-                { "stderr", 6, "io_handle_err_write", 2, NULL           },
-                { "stdin",  5, NULL,                  0, "$g_io_input"  },
+                {"stdout", 6, "io_handle_write", 1, "$g_io_output"},
+                {"stderr", 6, "io_handle_err_write", 2, NULL},
+                {"stdin", 5, NULL, 0, "$g_io_input"},
             };
             StrRef wkey = strpool_add(&c->strs, "write", 5);
-            StrRef rkey = strpool_add(&c->strs, "read",  4);
+            StrRef rkey = strpool_add(&c->strs, "read", 4);
             StrRef ckey = strpool_add(&c->strs, "close", 5);
             StrRef fkey = strpool_add(&c->strs, "flush", 5);
-            for (size_t hi = 0; hi < sizeof(HANDLES)/sizeof(HANDLES[0]); hi++) {
+            for (size_t hi = 0; hi < sizeof(HANDLES) / sizeof(HANDLES[0]); hi++) {
                 wat_append(out, "    (local.set $h (call $tab_new))\n");
                 if (HANDLES[hi].method_glob)
                     emit_tab_set_global(out, "$h", wkey, HANDLES[hi].method_glob);
@@ -3595,8 +3935,15 @@ static void emit_require_bridge(CG *c, const unsigned char *gref) {
      * package.loaded once, and forward each library reference into it. */
     {
         static const char *LIB_NAMES[] = {
-            "math", "string", "io", "table", "utf8", "debug", "package",
-            "os", "coroutine",
+            "math",
+            "string",
+            "io",
+            "table",
+            "utf8",
+            "debug",
+            "package",
+            "os",
+            "coroutine",
         };
         int need_any = 0;
         for (size_t li = 0; li < sizeof(LIB_NAMES) / sizeof(LIB_NAMES[0]); li++) {
@@ -3605,7 +3952,8 @@ static void emit_require_bridge(CG *c, const unsigned char *gref) {
                 if (pr->globals.items[gi].name_len == llen &&
                     memcmp(pr->globals.items[gi].name, LIB_NAMES[li], llen) == 0 &&
                     gref[gi]) {
-                    need_any = 1; break;
+                    need_any = 1;
+                    break;
                 }
             }
             if (need_any) break;
@@ -3616,39 +3964,45 @@ static void emit_require_bridge(CG *c, const unsigned char *gref) {
         for (size_t gi = 0; gi < pr->globals.count; gi++) {
             if (pr->globals.items[gi].name_len == 7 &&
                 memcmp(pr->globals.items[gi].name, "package", 7) == 0 &&
-                gref[gi]) { have_package = 1; break; }
+                gref[gi]) {
+                have_package = 1;
+                break;
+            }
         }
         if (need_any && have_package) {
-            StrRef pkg_k    = strpool_add(&c->strs, "package", 7);
-            StrRef loaded_k = strpool_add(&c->strs, "loaded",  6);
+            StrRef pkg_k = strpool_add(&c->strs, "package", 7);
+            StrRef loaded_k = strpool_add(&c->strs, "loaded", 6);
             wat_appendf(out,
-                "    (local.set $tab (ref.cast (ref $LuaTable)\n"
-                "      (call $tab_get\n"
-                "        (ref.cast (ref $LuaTable) (call $tab_get\n"
-                "          (ref.as_non_null (global.get $g_globals))\n"
-                "          (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
-                "            (i32.const %zu) (i32.const %zu)))))\n"
-                "        (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
-                "          (i32.const %zu) (i32.const %zu))))))\n",
-                pkg_k.offset, pkg_k.len, loaded_k.offset, loaded_k.len);
+                        "    (local.set $tab (ref.cast (ref $LuaTable)\n"
+                        "      (call $tab_get\n"
+                        "        (ref.cast (ref $LuaTable) (call $tab_get\n"
+                        "          (ref.as_non_null (global.get $g_globals))\n"
+                        "          (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
+                        "            (i32.const %zu) (i32.const %zu)))))\n"
+                        "        (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
+                        "          (i32.const %zu) (i32.const %zu))))))\n",
+                        pkg_k.offset, pkg_k.len, loaded_k.offset, loaded_k.len);
             for (size_t li = 0; li < sizeof(LIB_NAMES) / sizeof(LIB_NAMES[0]); li++) {
                 size_t llen = strlen(LIB_NAMES[li]);
                 int gi_found = -1;
                 for (size_t gi = 0; gi < pr->globals.count; gi++) {
                     if (pr->globals.items[gi].name_len == llen &&
                         memcmp(pr->globals.items[gi].name, LIB_NAMES[li], llen) == 0 &&
-                        gref[gi]) { gi_found = (int)gi; break; }
+                        gref[gi]) {
+                        gi_found = (int)gi;
+                        break;
+                    }
                 }
                 if (gi_found < 0) continue;
                 StrRef name_k = strpool_add(&c->strs, LIB_NAMES[li], llen);
                 wat_appendf(out,
-                    "    (call $tab_set (local.get $tab)\n"
-                    "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
-                    "        (i32.const %zu) (i32.const %zu)))\n"
-                    "      (call $tab_get (ref.as_non_null (global.get $g_globals))\n"
-                    "        (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
-                    "          (i32.const %zu) (i32.const %zu)))))\n",
-                    name_k.offset, name_k.len, name_k.offset, name_k.len);
+                            "    (call $tab_set (local.get $tab)\n"
+                            "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
+                            "        (i32.const %zu) (i32.const %zu)))\n"
+                            "      (call $tab_get (ref.as_non_null (global.get $g_globals))\n"
+                            "        (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
+                            "          (i32.const %zu) (i32.const %zu)))))\n",
+                            name_k.offset, name_k.len, name_k.offset, name_k.len);
             }
         }
     }
@@ -3706,10 +4060,12 @@ static void emit_main_chunk(CG *c) {
         int lv = max_for_nesting(&pr->main_body);
         for (int d = 0; d < lv; d++)
             wat_appendf(out, "    (local $ifor_stop_%d i64) (local $ifor_step_%d i64)"
-                            " (local $ifor_next_%d i64)\n", d, d, d);
+                             " (local $ifor_next_%d i64)\n",
+                        d, d, d);
     }
     {
-        int bids[MAX_DISPATCH_IDS]; int n = 0;
+        int bids[MAX_DISPATCH_IDS];
+        int n = 0;
         collect_dispatch_ids(c, &pr->main_body, bids, &n, MAX_DISPATCH_IDS);
         for (int i = 0; i < n; i++) {
             wat_appendf(out, "    (local $next_%d i32)\n", bids[i]);
@@ -3721,7 +4077,7 @@ static void emit_main_chunk(CG *c) {
     for (int i = 0; i < pr->main_n_locals; i++) {
         if (pr->main_captured && pr->main_captured[i]) {
             wat_appendf(out,
-                "    (local.set $L%d (struct.new $Box (ref.null any)))\n", i);
+                        "    (local.set $L%d (struct.new $Box (ref.null any)))\n", i);
         }
     }
 
@@ -3746,7 +4102,7 @@ static void emit_data_segment(CG *c) {
         unsigned char b = (unsigned char)c->strs.bytes[i];
         if (b == '"' || b == '\\') wat_appendf(out, "\\%02x", b);
         else if (b >= 0x20 && b < 0x7f) {
-            char tmp[2] = { (char)b, 0 };
+            char tmp[2] = {(char)b, 0};
             wat_append(out, tmp);
         } else {
             wat_appendf(out, "\\%02x", b);
@@ -3762,11 +4118,12 @@ int codegen_module(const ParseResult *pr, const char *src_name,
     if (slab_err) {
         snprintf(err, errlen,
                  "codegen: literal slab drift at \"%s\" — LITERAL_PREFIX and "
-                 "the prelude.wat offset map disagree", slab_err);
+                 "the prelude.wat offset map disagree",
+                 slab_err);
         return 0;
     }
 
-    CG c = { .w = out, .pr = pr, .ok = 1, .in_main = 1 };
+    CG c = {.w = out, .pr = pr, .ok = 1, .in_main = 1};
     /* Integer-specialization PoC: opt-in via env so the default pipeline and
      * golden output are byte-for-byte unchanged. */
     c.opt_int = getenv("LUA2WASM_OPT_INT") != NULL;
@@ -3795,7 +4152,8 @@ int codegen_module(const ParseResult *pr, const char *src_name,
     unsigned char *gref = calloc(pr->globals.count + 1, 1);
     if (!live || !gref) {
         snprintf(err, errlen, "out of memory");
-        free(live); free(gref);
+        free(live);
+        free(gref);
         return 0;
     }
     if (tree_shake) {
@@ -3820,9 +4178,9 @@ int codegen_module(const ParseResult *pr, const char *src_name,
     for (int i = 0; i < nb; i++) {
         if (!live[i]) continue;
         wat_appendf(out,
-            "  (global $g_%s (ref $LuaClosure)\n"
-            "    (struct.new $LuaClosure (ref.func %s) (global.get $g_empty_upvals)))\n",
-            builtin_func_name(i) + 1, builtin_func_name(i));
+                    "  (global $g_%s (ref $LuaClosure)\n"
+                    "    (struct.new $LuaClosure (ref.func %s) (global.get $g_empty_upvals)))\n",
+                    builtin_func_name(i) + 1, builtin_func_name(i));
     }
 
     /* User-declared globals used to get a per-name $g_user_N wasm slot.
@@ -3838,53 +4196,56 @@ int codegen_module(const ParseResult *pr, const char *src_name,
                     " (local $h (ref $LuaTable))\n");
     /* Initialize the metamethod-name globals from the strpool. Keys are
      * deduplicated by strpool_add. */
-    static const struct { const char *name; const char *key; } MKEYS[] = {
-        { "$g_mkey_index",      "__index"     },
-        { "$g_mkey_newindex",   "__newindex"  },
-        { "$g_mkey_add",        "__add"       },
-        { "$g_mkey_sub",        "__sub"       },
-        { "$g_mkey_mul",        "__mul"       },
-        { "$g_mkey_div",        "__div"       },
-        { "$g_mkey_mod",        "__mod"       },
-        { "$g_mkey_pow",        "__pow"       },
-        { "$g_mkey_unm",        "__unm"       },
-        { "$g_mkey_idiv",       "__idiv"      },
-        { "$g_mkey_band",       "__band"      },
-        { "$g_mkey_bor",        "__bor"       },
-        { "$g_mkey_bxor",       "__bxor"      },
-        { "$g_mkey_shl",        "__shl"       },
-        { "$g_mkey_shr",        "__shr"       },
-        { "$g_mkey_bnot",       "__bnot"      },
-        { "$g_mkey_concat",     "__concat"    },
-        { "$g_mkey_len",        "__len"       },
-        { "$g_mkey_eq",         "__eq"        },
-        { "$g_mkey_lt",         "__lt"        },
-        { "$g_mkey_le",         "__le"        },
-        { "$g_mkey_call",       "__call"      },
-        { "$g_mkey_close",      "__close"     },
-        { "$g_mkey_tostring",   "__tostring"  },
-        { "$g_mkey_metatable",  "__metatable" },
-        { "$g_mkey_name",       "__name"      },
+    static const struct {
+        const char *name;
+        const char *key;
+    } MKEYS[] = {
+        {"$g_mkey_index", "__index"},
+        {"$g_mkey_newindex", "__newindex"},
+        {"$g_mkey_add", "__add"},
+        {"$g_mkey_sub", "__sub"},
+        {"$g_mkey_mul", "__mul"},
+        {"$g_mkey_div", "__div"},
+        {"$g_mkey_mod", "__mod"},
+        {"$g_mkey_pow", "__pow"},
+        {"$g_mkey_unm", "__unm"},
+        {"$g_mkey_idiv", "__idiv"},
+        {"$g_mkey_band", "__band"},
+        {"$g_mkey_bor", "__bor"},
+        {"$g_mkey_bxor", "__bxor"},
+        {"$g_mkey_shl", "__shl"},
+        {"$g_mkey_shr", "__shr"},
+        {"$g_mkey_bnot", "__bnot"},
+        {"$g_mkey_concat", "__concat"},
+        {"$g_mkey_len", "__len"},
+        {"$g_mkey_eq", "__eq"},
+        {"$g_mkey_lt", "__lt"},
+        {"$g_mkey_le", "__le"},
+        {"$g_mkey_call", "__call"},
+        {"$g_mkey_close", "__close"},
+        {"$g_mkey_tostring", "__tostring"},
+        {"$g_mkey_metatable", "__metatable"},
+        {"$g_mkey_name", "__name"},
     };
-    for (size_t k = 0; k < sizeof(MKEYS)/sizeof(MKEYS[0]); k++)
+    for (size_t k = 0; k < sizeof(MKEYS) / sizeof(MKEYS[0]); k++)
         emit_global_set_str(&c, MKEYS[k].name, MKEYS[k].key, strlen(MKEYS[k].key));
     /* "\t" used by print when joining args. */
     emit_global_set_str(&c, "$g_tab_str", "\t", 1);
     wat_appendf(out,
-        "    (global.set $g_empty_str\n"
-        "      (struct.new $LuaString (array.new $LuaArr (i32.const 0) (i32.const 0))))\n"
-        "    (global.set $fmt_buf\n"
-        "      (array.new $LuaArr (i32.const 0) (i32.const %d)))\n"
-        "    (global.set $call_lines\n"
-        "      (array.new $LineArr (i32.const 0) (i32.const 256)))\n",
-        LUA_FMT_BUF_CAP);
+                "    (global.set $g_empty_str\n"
+                "      (struct.new $LuaString (array.new $LuaArr (i32.const 0) (i32.const 0))))\n"
+                "    (global.set $fmt_buf\n"
+                "      (array.new $LuaArr (i32.const 0) (i32.const %d)))\n"
+                "    (global.set $call_lines\n"
+                "      (array.new $LineArr (i32.const 0) (i32.const 256)))\n",
+                LUA_FMT_BUF_CAP);
     /* Source name used by error() and debug.traceback. */
     if (src_name) {
         emit_global_set_str(&c, "$g_src_name", src_name, strlen(src_name));
     } else {
         wat_append(out,
-            "    (global.set $g_src_name\n"
-            "      (struct.new $LuaString (array.new $LuaArr (i32.const 0) (i32.const 0))))\n");
+                   "    (global.set $g_src_name\n"
+                   "      (struct.new $LuaString (array.new $LuaArr (i32.const 0) (i32.const 0))))\n");
     }
     /* Create the global-environment table $g_globals. Every Lua global
      * (user-declared, library, builtin) is installed as an entry below;
@@ -3900,7 +4261,7 @@ int codegen_module(const ParseResult *pr, const char *src_name,
         if (builtin_class(bi) != BLT_TOPLEVEL) continue;
         if (!live[bi]) continue;
         const char *key = builtin_name(bi);
-        if (key[0] == '_') continue;   /* internal-only (e.g. _ipairs_iter) */
+        if (key[0] == '_') continue; /* internal-only (e.g. _ipairs_iter) */
         char val[128];
         int vn = snprintf(val, sizeof(val), "(global.get $g_%s)",
                           builtin_func_name(bi) + 1);
@@ -3951,13 +4312,15 @@ int codegen_module(const ParseResult *pr, const char *src_name,
     if (!c.ok) {
         snprintf(err, errlen, "%s", c.err);
         strpool_free(&c.strs);
-        free(live); free(gref);
+        free(live);
+        free(gref);
         free_func_bindings(&c);
         free_signatures(&c);
         return 0;
     }
     strpool_free(&c.strs);
-    free(live); free(gref);
+    free(live);
+    free(gref);
     free_func_bindings(&c);
     free_signatures(&c);
     return 1;

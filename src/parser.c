@@ -22,11 +22,11 @@
  * locals/upvalues. This matches Lua semantics.
  * ============================================================ */
 
-#define MAX_LOCALS_PER_FN    256
-#define MAX_UPVALS_PER_FN    64
-#define MAX_FRAME_DEPTH      32
-#define MAX_FUNCS            256
-#define MAX_GLOBALS          256
+#define MAX_LOCALS_PER_FN 256
+#define MAX_UPVALS_PER_FN 64
+#define MAX_FRAME_DEPTH   32
+#define MAX_FUNCS         256
+#define MAX_GLOBALS       256
 
 /* ------------------------------------------------------------------
  * Growable scratch buffer for parsing item lists (call args, table entries,
@@ -39,12 +39,15 @@
 typedef struct {
     void *data;
     size_t count;
-    size_t cap;       /* in elements */
-    size_t elem;      /* element size in bytes */
+    size_t cap;  /* in elements */
+    size_t elem; /* element size in bytes */
 } ItemBuf;
 
 static void ib_init(ItemBuf *b, size_t elem) {
-    b->data = NULL; b->count = 0; b->cap = 0; b->elem = elem;
+    b->data = NULL;
+    b->count = 0;
+    b->cap = 0;
+    b->elem = elem;
 }
 /* Return a pointer to a fresh, zeroed slot at the end of the buffer. */
 static void *ib_push(ItemBuf *b) {
@@ -67,23 +70,26 @@ static void *ib_finish(ItemBuf *b, NodePool *pool) {
     b->data = NULL;
     return out;
 }
-static void ib_free(ItemBuf *b) { free(b->data); b->data = NULL; }
+static void ib_free(ItemBuf *b) {
+    free(b->data);
+    b->data = NULL;
+}
 
 typedef struct {
     const char *name;
     size_t name_len;
-    int slot;       /* wasm local index inside this function */
-    int attrib;     /* 0 = none, 1 = <const>, 2 = <close> (milestone 23) */
+    int slot;   /* wasm local index inside this function */
+    int attrib; /* 0 = none, 1 = <const>, 2 = <close> (milestone 23) */
 } LocalSlot;
 
 typedef struct {
     LocalSlot locals[MAX_LOCALS_PER_FN];
-    int local_count;       /* current count (block-rewindable) */
-    int next_slot;         /* monotonic: never reused (see note on finding 2 in
-                            * frame_rewind for why slots are not reclaimed) */
+    int local_count; /* current count (block-rewindable) */
+    int next_slot;   /* monotonic: never reused (see note on finding 2 in
+                      * frame_rewind for why slots are not reclaimed) */
     UpvalueRef upvalues[MAX_UPVALS_PER_FN];
     int n_upvalues;
-    int is_vararg;         /* `...` is bound in this frame's scope */
+    int is_vararg; /* `...` is bound in this frame's scope */
     /* Escape-analysis: captured[s] == 1 iff slot s is referenced as an
      * upvalue by some descendant function. Set lazily during name
      * resolution; consumed when the LuaFunc is finalised. */
@@ -96,11 +102,11 @@ typedef struct {
     NodePool *pool;
 
     FuncFrame frames[MAX_FRAME_DEPTH];
-    int frame_depth;       /* index of innermost frame; 0 = top-level */
+    int frame_depth; /* index of innermost frame; 0 = top-level */
 
     LuaFunc *funcs[MAX_FUNCS];
     int n_funcs;
-    int cur_fn;            /* func_idx being parsed; -1 = main chunk */
+    int cur_fn; /* func_idx being parsed; -1 = main chunk */
 
     GlobalDecl globals[MAX_GLOBALS];
     int n_globals;
@@ -120,7 +126,7 @@ static int globals_declare(Parser *p, const char *name, size_t name_len) {
     int existing = globals_lookup(p, name, name_len);
     if (existing >= 0) return existing;
     if (p->n_globals >= MAX_GLOBALS) return -1;
-    p->globals[p->n_globals] = (GlobalDecl){ .name = name, .name_len = name_len };
+    p->globals[p->n_globals] = (GlobalDecl){.name = name, .name_len = name_len};
     return p->n_globals++;
 }
 
@@ -141,7 +147,10 @@ static void set_error(Parser *p, const char *msg) {
 }
 
 static int match(Parser *p, TokKind k) {
-    if (peek(p)->kind == k) { advance(p); return 1; }
+    if (peek(p)->kind == k) {
+        advance(p);
+        return 1;
+    }
     return 0;
 }
 static int expect(Parser *p, TokKind k, const char *what) {
@@ -181,7 +190,7 @@ static int frame_declare(FuncFrame *f, const char *name, size_t name_len) {
     if (f->local_count >= MAX_LOCALS_PER_FN) return -1;
     int slot = f->next_slot++;
     f->locals[f->local_count++] = (LocalSlot){
-        .name = name, .name_len = name_len, .slot = slot, .attrib = 0 };
+        .name = name, .name_len = name_len, .slot = slot, .attrib = 0};
     return slot;
 }
 
@@ -224,7 +233,7 @@ static int frame_add_upvalue(FuncFrame *f, UpvalSource src, int idx) {
         if (f->upvalues[i].src == src && f->upvalues[i].idx == idx) return i;
     }
     if (f->n_upvalues >= MAX_UPVALS_PER_FN) return -1;
-    f->upvalues[f->n_upvalues] = (UpvalueRef){ .src = src, .idx = idx };
+    f->upvalues[f->n_upvalues] = (UpvalueRef){.src = src, .idx = idx};
     return f->n_upvalues++;
 }
 
@@ -254,10 +263,17 @@ static int resolve_in_frame(Parser *p, int frame_idx, const char *name, size_t n
          * `global x` prefix. Strict mode (compile error on undeclared) is a
          * future opt-in. */
         int b = lookup_builtin(name, name_len);
-        if (b >= 0) { *out_kind = VAR_BUILTIN; *out_idx = b; return 1; }
+        if (b >= 0) {
+            *out_kind = VAR_BUILTIN;
+            *out_idx = b;
+            return 1;
+        }
         int g = globals_lookup(p, name, name_len);
         if (g < 0) g = globals_declare(p, name, name_len);
-        if (g < 0) { set_error(p, "too many globals"); return 0; }
+        if (g < 0) {
+            set_error(p, "too many globals");
+            return 0;
+        }
         *out_kind = VAR_GLOBAL;
         *out_idx = g;
         return 1;
@@ -334,50 +350,59 @@ static int resolve_name(Parser *p, const char *name, size_t name_len,
 
 static int prec_of(TokKind k) {
     switch (k) {
-        case TOK_KW_OR: return PREC_OR;
-        case TOK_KW_AND: return PREC_AND;
-        case TOK_EQ: case TOK_NEQ: case TOK_LT: case TOK_LE:
-        case TOK_GT: case TOK_GE: return PREC_CMP;
-        case TOK_PIPE:  return PREC_BOR;
-        case TOK_TILDE: return PREC_BXOR;
-        case TOK_AMP:   return PREC_BAND;
-        case TOK_SHL: case TOK_SHR: return PREC_SHIFT;
-        case TOK_CONCAT: return PREC_CONCAT;
-        case TOK_PLUS: case TOK_MINUS: return PREC_ADD;
-        case TOK_STAR: case TOK_SLASH: case TOK_DSLASH: case TOK_PERCENT: return PREC_MUL;
-        case TOK_CARET: return PREC_POW;
-        default: return PREC_NONE;
+    case TOK_KW_OR: return PREC_OR;
+    case TOK_KW_AND: return PREC_AND;
+    case TOK_EQ:
+    case TOK_NEQ:
+    case TOK_LT:
+    case TOK_LE:
+    case TOK_GT:
+    case TOK_GE: return PREC_CMP;
+    case TOK_PIPE: return PREC_BOR;
+    case TOK_TILDE: return PREC_BXOR;
+    case TOK_AMP: return PREC_BAND;
+    case TOK_SHL:
+    case TOK_SHR: return PREC_SHIFT;
+    case TOK_CONCAT: return PREC_CONCAT;
+    case TOK_PLUS:
+    case TOK_MINUS: return PREC_ADD;
+    case TOK_STAR:
+    case TOK_SLASH:
+    case TOK_DSLASH:
+    case TOK_PERCENT: return PREC_MUL;
+    case TOK_CARET: return PREC_POW;
+    default: return PREC_NONE;
     }
 }
 
 static BinOp binop_of(TokKind k) {
     switch (k) {
-        case TOK_PLUS:    return BIN_ADD;
-        case TOK_MINUS:   return BIN_SUB;
-        case TOK_STAR:    return BIN_MUL;
-        case TOK_SLASH:   return BIN_DIV;
-        case TOK_DSLASH:  return BIN_FDIV;
-        case TOK_PERCENT: return BIN_MOD;
-        case TOK_CARET:   return BIN_POW;
-        case TOK_AMP:     return BIN_BAND;
-        case TOK_PIPE:    return BIN_BOR;
-        case TOK_TILDE:   return BIN_BXOR;
-        case TOK_SHL:     return BIN_SHL;
-        case TOK_SHR:     return BIN_SHR;
-        case TOK_CONCAT:  return BIN_CONCAT;
-        case TOK_EQ:      return BIN_EQ;
-        case TOK_NEQ:     return BIN_NEQ;
-        case TOK_LT:      return BIN_LT;
-        case TOK_LE:      return BIN_LE;
-        case TOK_GT:      return BIN_GT;
-        case TOK_GE:      return BIN_GE;
-        case TOK_KW_AND:  return BIN_AND;
-        case TOK_KW_OR:   return BIN_OR;
-        default:
-            /* Unreachable: parse_prec only calls binop_of after prec_of(k)
-             * confirmed k is a binary operator. Don't mask a bug by silently
-             * folding an unexpected kind to BIN_ADD. */
-            __builtin_unreachable();
+    case TOK_PLUS: return BIN_ADD;
+    case TOK_MINUS: return BIN_SUB;
+    case TOK_STAR: return BIN_MUL;
+    case TOK_SLASH: return BIN_DIV;
+    case TOK_DSLASH: return BIN_FDIV;
+    case TOK_PERCENT: return BIN_MOD;
+    case TOK_CARET: return BIN_POW;
+    case TOK_AMP: return BIN_BAND;
+    case TOK_PIPE: return BIN_BOR;
+    case TOK_TILDE: return BIN_BXOR;
+    case TOK_SHL: return BIN_SHL;
+    case TOK_SHR: return BIN_SHR;
+    case TOK_CONCAT: return BIN_CONCAT;
+    case TOK_EQ: return BIN_EQ;
+    case TOK_NEQ: return BIN_NEQ;
+    case TOK_LT: return BIN_LT;
+    case TOK_LE: return BIN_LE;
+    case TOK_GT: return BIN_GT;
+    case TOK_GE: return BIN_GE;
+    case TOK_KW_AND: return BIN_AND;
+    case TOK_KW_OR: return BIN_OR;
+    default:
+        /* Unreachable: parse_prec only calls binop_of after prec_of(k)
+         * confirmed k is a binary operator. Don't mask a bug by silently
+         * folding an unexpected kind to BIN_ADD. */
+        __builtin_unreachable();
     }
 }
 
@@ -404,116 +429,132 @@ static Expr *parse_primary(Parser *p) {
     const Token *t = peek(p);
     int line = t->line;
     switch (t->kind) {
-        case TOK_KW_NIL:   advance(p); return expr_new(p->pool, EXPR_NIL,   line);
-        case TOK_KW_TRUE:  advance(p); return expr_new(p->pool, EXPR_TRUE,  line);
-        case TOK_KW_FALSE: advance(p); return expr_new(p->pool, EXPR_FALSE, line);
-        case TOK_INT: {
-            advance(p);
-            Expr *e = expr_new(p->pool, EXPR_INT, line);
-            e->as.i_val = t->i_val;
-            return e;
-        }
-        case TOK_FLOAT: {
-            advance(p);
-            Expr *e = expr_new(p->pool, EXPR_FLOAT, line);
-            e->as.f_val = t->f_val;
-            return e;
-        }
-        case TOK_STRING: {
-            advance(p);
-            Expr *e = expr_new(p->pool, EXPR_STRING, line);
-            e->as.s.bytes = t->str_buf;
-            e->as.s.len = t->str_len;
-            return e;
-        }
-        case TOK_IDENT: {
-            advance(p);
-            Expr *e = expr_new(p->pool, EXPR_VAR, line);
-            e->as.var.name = t->start;
-            e->as.var.name_len = t->len;
-            VarKind kind;
-            int idx;
-            if (!resolve_name(p, t->start, t->len, &kind, &idx)) {
-                char buf[160];
-                snprintf(buf, sizeof(buf),
-                    "undefined variable `%.*s`",
-                    (int)t->len, t->start);
-                set_error(p, buf);
-                return NULL;
-            }
-            e->as.var.kind = kind;
-            e->as.var.idx = idx;
-            return e;
-        }
-        case TOK_LPAREN: {
-            advance(p);
-            Expr *inner = parse_expr(p);
-            if (!p->ok) return NULL;
-            expect(p, TOK_RPAREN, ")");
-            if (!p->ok) return NULL;
-            /* Parentheses adjust a multi-value expression to one value. */
-            inner->paren = 1;
-            return inner;
-        }
-        case TOK_ELLIPSIS: {
-            advance(p);
-            if (!cur_frame(p)->is_vararg) {
-                set_error(p, "cannot use `...` outside a vararg function");
-                return NULL;
-            }
-            return expr_new(p->pool, EXPR_VARARG, line);
-        }
-        case TOK_KW_FUNCTION: {
-            advance(p);
-            LuaFunc *fn = parse_function_body(p, line);
-            if (!p->ok) return NULL;
-            Expr *e = expr_new(p->pool, EXPR_FUNCTION, line);
-            e->as.func_expr.func = fn;
-            return e;
-        }
-        case TOK_LBRACE: {
-            advance(p); /* { */
-            ItemBuf buf; ib_init(&buf, sizeof(TableEntry));
-            while (peek(p)->kind != TOK_RBRACE && peek(p)->kind != TOK_EOF) {
-                TableEntry *ent = ib_push(&buf);
-                if (peek(p)->kind == TOK_LBRACKET) {
-                    advance(p);
-                    Expr *k = parse_expr(p);
-                    if (!p->ok) { ib_free(&buf); return NULL; }
-                    expect(p, TOK_RBRACKET, "]");
-                    expect(p, TOK_ASSIGN, "=");
-                    Expr *v = parse_expr(p);
-                    if (!p->ok) { ib_free(&buf); return NULL; }
-                    ent->kind = TENT_KEY_EXPR;
-                    ent->key = k; ent->value = v;
-                } else if (peek(p)->kind == TOK_IDENT &&
-                           peek_at(p, 1)->kind == TOK_ASSIGN) {
-                    const Token *nm = advance(p);
-                    advance(p); /* = */
-                    Expr *v = parse_expr(p);
-                    if (!p->ok) { ib_free(&buf); return NULL; }
-                    Expr *k = expr_new(p->pool, EXPR_STRING, nm->line);
-                    k->as.s.bytes = nm->start;
-                    k->as.s.len = nm->len;
-                    ent->kind = TENT_KEY_EXPR;
-                    ent->key = k; ent->value = v;
-                } else {
-                    Expr *v = parse_expr(p);
-                    if (!p->ok) { ib_free(&buf); return NULL; }
-                    ent->kind = TENT_POSITIONAL;
-                    ent->key = NULL; ent->value = v;
-                }
-                if (!match(p, TOK_COMMA) && !match(p, TOK_SEMI)) break;
-            }
-            expect(p, TOK_RBRACE, "}");
-            Expr *e = expr_new(p->pool, EXPR_TABLE, line);
-            e->as.table_ctor.n_entries = (int)buf.count;
-            e->as.table_ctor.entries = ib_finish(&buf, p->pool);
-            return e;
-        }
-        default:
-            set_error(p, "expected expression");
+    case TOK_KW_NIL: advance(p); return expr_new(p->pool, EXPR_NIL, line);
+    case TOK_KW_TRUE: advance(p); return expr_new(p->pool, EXPR_TRUE, line);
+    case TOK_KW_FALSE: advance(p); return expr_new(p->pool, EXPR_FALSE, line);
+    case TOK_INT: {
+        advance(p);
+        Expr *e = expr_new(p->pool, EXPR_INT, line);
+        e->as.i_val = t->i_val;
+        return e;
+    }
+    case TOK_FLOAT: {
+        advance(p);
+        Expr *e = expr_new(p->pool, EXPR_FLOAT, line);
+        e->as.f_val = t->f_val;
+        return e;
+    }
+    case TOK_STRING: {
+        advance(p);
+        Expr *e = expr_new(p->pool, EXPR_STRING, line);
+        e->as.s.bytes = t->str_buf;
+        e->as.s.len = t->str_len;
+        return e;
+    }
+    case TOK_IDENT: {
+        advance(p);
+        Expr *e = expr_new(p->pool, EXPR_VAR, line);
+        e->as.var.name = t->start;
+        e->as.var.name_len = t->len;
+        VarKind kind;
+        int idx;
+        if (!resolve_name(p, t->start, t->len, &kind, &idx)) {
+            char buf[160];
+            snprintf(buf, sizeof(buf),
+                     "undefined variable `%.*s`",
+                     (int)t->len, t->start);
+            set_error(p, buf);
             return NULL;
+        }
+        e->as.var.kind = kind;
+        e->as.var.idx = idx;
+        return e;
+    }
+    case TOK_LPAREN: {
+        advance(p);
+        Expr *inner = parse_expr(p);
+        if (!p->ok) return NULL;
+        expect(p, TOK_RPAREN, ")");
+        if (!p->ok) return NULL;
+        /* Parentheses adjust a multi-value expression to one value. */
+        inner->paren = 1;
+        return inner;
+    }
+    case TOK_ELLIPSIS: {
+        advance(p);
+        if (!cur_frame(p)->is_vararg) {
+            set_error(p, "cannot use `...` outside a vararg function");
+            return NULL;
+        }
+        return expr_new(p->pool, EXPR_VARARG, line);
+    }
+    case TOK_KW_FUNCTION: {
+        advance(p);
+        LuaFunc *fn = parse_function_body(p, line);
+        if (!p->ok) return NULL;
+        Expr *e = expr_new(p->pool, EXPR_FUNCTION, line);
+        e->as.func_expr.func = fn;
+        return e;
+    }
+    case TOK_LBRACE: {
+        advance(p); /* { */
+        ItemBuf buf;
+        ib_init(&buf, sizeof(TableEntry));
+        while (peek(p)->kind != TOK_RBRACE && peek(p)->kind != TOK_EOF) {
+            TableEntry *ent = ib_push(&buf);
+            if (peek(p)->kind == TOK_LBRACKET) {
+                advance(p);
+                Expr *k = parse_expr(p);
+                if (!p->ok) {
+                    ib_free(&buf);
+                    return NULL;
+                }
+                expect(p, TOK_RBRACKET, "]");
+                expect(p, TOK_ASSIGN, "=");
+                Expr *v = parse_expr(p);
+                if (!p->ok) {
+                    ib_free(&buf);
+                    return NULL;
+                }
+                ent->kind = TENT_KEY_EXPR;
+                ent->key = k;
+                ent->value = v;
+            } else if (peek(p)->kind == TOK_IDENT &&
+                       peek_at(p, 1)->kind == TOK_ASSIGN) {
+                const Token *nm = advance(p);
+                advance(p); /* = */
+                Expr *v = parse_expr(p);
+                if (!p->ok) {
+                    ib_free(&buf);
+                    return NULL;
+                }
+                Expr *k = expr_new(p->pool, EXPR_STRING, nm->line);
+                k->as.s.bytes = nm->start;
+                k->as.s.len = nm->len;
+                ent->kind = TENT_KEY_EXPR;
+                ent->key = k;
+                ent->value = v;
+            } else {
+                Expr *v = parse_expr(p);
+                if (!p->ok) {
+                    ib_free(&buf);
+                    return NULL;
+                }
+                ent->kind = TENT_POSITIONAL;
+                ent->key = NULL;
+                ent->value = v;
+            }
+            if (!match(p, TOK_COMMA) && !match(p, TOK_SEMI)) break;
+        }
+        expect(p, TOK_RBRACE, "}");
+        Expr *e = expr_new(p->pool, EXPR_TABLE, line);
+        e->as.table_ctor.n_entries = (int)buf.count;
+        e->as.table_ctor.entries = ib_finish(&buf, p->pool);
+        return e;
+    }
+    default:
+        set_error(p, "expected expression");
+        return NULL;
     }
 }
 
@@ -527,11 +568,15 @@ static Expr *parse_prefix_chain(Parser *p) {
         if (k == TOK_LPAREN) {
             int call_line = peek(p)->line;
             advance(p);
-            ItemBuf args; ib_init(&args, sizeof(Expr *));
+            ItemBuf args;
+            ib_init(&args, sizeof(Expr *));
             if (peek(p)->kind != TOK_RPAREN) {
                 do {
                     Expr *a = parse_expr(p);
-                    if (!p->ok) { ib_free(&args); return NULL; }
+                    if (!p->ok) {
+                        ib_free(&args);
+                        return NULL;
+                    }
                     *(Expr **)ib_push(&args) = a;
                 } while (match(p, TOK_COMMA));
             }
@@ -543,7 +588,10 @@ static Expr *parse_prefix_chain(Parser *p) {
             e = call;
         } else if (k == TOK_DOT) {
             advance(p);
-            if (peek(p)->kind != TOK_IDENT) { set_error(p, "expected field name after '.'"); return NULL; }
+            if (peek(p)->kind != TOK_IDENT) {
+                set_error(p, "expected field name after '.'");
+                return NULL;
+            }
             e = make_index(p->pool, e, advance(p));
         } else if (k == TOK_LBRACKET) {
             int line = peek(p)->line;
@@ -580,9 +628,13 @@ static Expr *parse_prefix_chain(Parser *p) {
             /* method call: recv:name(args) | recv:name "str" | recv:name {tbl} */
             int line = peek(p)->line;
             advance(p); /* : */
-            if (peek(p)->kind != TOK_IDENT) { set_error(p, "expected method name after ':'"); return NULL; }
+            if (peek(p)->kind != TOK_IDENT) {
+                set_error(p, "expected method name after ':'");
+                return NULL;
+            }
             const Token *nm = advance(p);
-            ItemBuf args; ib_init(&args, sizeof(Expr *));
+            ItemBuf args;
+            ib_init(&args, sizeof(Expr *));
             TokKind ak = peek(p)->kind;
             if (ak == TOK_STRING) {
                 const Token *st = advance(p);
@@ -592,14 +644,20 @@ static Expr *parse_prefix_chain(Parser *p) {
                 *(Expr **)ib_push(&args) = arg;
             } else if (ak == TOK_LBRACE) {
                 Expr *arg = parse_primary(p);
-                if (!p->ok) { ib_free(&args); return NULL; }
+                if (!p->ok) {
+                    ib_free(&args);
+                    return NULL;
+                }
                 *(Expr **)ib_push(&args) = arg;
             } else {
                 expect(p, TOK_LPAREN, "(");
                 if (peek(p)->kind != TOK_RPAREN) {
                     do {
                         Expr *a = parse_expr(p);
-                        if (!p->ok) { ib_free(&args); return NULL; }
+                        if (!p->ok) {
+                            ib_free(&args);
+                            return NULL;
+                        }
                         *(Expr **)ib_push(&args) = a;
                     } while (match(p, TOK_COMMA));
                 }
@@ -621,10 +679,10 @@ static Expr *parse_unary(Parser *p) {
     const Token *t = peek(p);
     int line = t->line;
     UnOp op;
-    if (t->kind == TOK_MINUS)        op = UN_NEG;
-    else if (t->kind == TOK_KW_NOT)  op = UN_NOT;
-    else if (t->kind == TOK_HASH)    op = UN_LEN;
-    else if (t->kind == TOK_TILDE)   op = UN_BNOT;
+    if (t->kind == TOK_MINUS) op = UN_NEG;
+    else if (t->kind == TOK_KW_NOT) op = UN_NOT;
+    else if (t->kind == TOK_HASH) op = UN_LEN;
+    else if (t->kind == TOK_TILDE) op = UN_BNOT;
     else return parse_prefix_chain(p);
     advance(p);
     Expr *operand = parse_prec(p, PREC_UNARY);
@@ -671,7 +729,8 @@ static void parse_block1(Parser *p, Block *out, TokKind stop) {
 
 static int is_block_end(TokKind k, const TokKind *stops, int n_stops) {
     if (k == TOK_EOF) return 1;
-    for (int i = 0; i < n_stops; i++) if (k == stops[i]) return 1;
+    for (int i = 0; i < n_stops; i++)
+        if (k == stops[i]) return 1;
     return 0;
 }
 
@@ -683,7 +742,8 @@ static int is_block_end(TokKind k, const TokKind *stops, int n_stops) {
 static int parse_attribute(Parser *p) {
     advance(p); /* < */
     if (peek(p)->kind != TOK_IDENT) {
-        set_error(p, "expected attribute name after '<'"); return -1;
+        set_error(p, "expected attribute name after '<'");
+        return -1;
     }
     const Token *a = advance(p);
     int attrib;
@@ -691,8 +751,14 @@ static int parse_attribute(Parser *p) {
         attrib = 1;
     else if (a->len == 5 && memcmp(a->start, "close", 5) == 0)
         attrib = 2;
-    else { set_error(p, "unknown attribute"); return -1; }
-    if (!match(p, TOK_GT)) { set_error(p, "expected '>' after attribute"); return -1; }
+    else {
+        set_error(p, "unknown attribute");
+        return -1;
+    }
+    if (!match(p, TOK_GT)) {
+        set_error(p, "expected '>' after attribute");
+        return -1;
+    }
     return attrib;
 }
 
@@ -703,12 +769,18 @@ static Stmt *parse_local(Parser *p) {
     /* local function name(...) ... end */
     if (peek(p)->kind == TOK_KW_FUNCTION) {
         advance(p); /* function */
-        if (peek(p)->kind != TOK_IDENT) { set_error(p, "expected function name"); return NULL; }
+        if (peek(p)->kind != TOK_IDENT) {
+            set_error(p, "expected function name");
+            return NULL;
+        }
         const Token *name = advance(p);
         /* Declare the name in the current scope BEFORE parsing the body, so
          * the body can recursively reference itself. */
         int slot = frame_declare(cur_frame(p), name->start, name->len);
-        if (slot < 0) { set_error(p, "too many locals"); return NULL; }
+        if (slot < 0) {
+            set_error(p, "too many locals");
+            return NULL;
+        }
         LuaFunc *fn = parse_function_body(p, line);
         if (!p->ok) return NULL;
         Stmt *s = stmt_new(p->pool, STMT_LOCAL_FUNC, line);
@@ -729,10 +801,20 @@ static Stmt *parse_local(Parser *p) {
         default_attrib = parse_attribute(p);
         if (default_attrib < 0) return NULL;
     }
-    if (peek(p)->kind != TOK_IDENT) { set_error(p, "expected identifier after `local`"); return NULL; }
-    ItemBuf names; ib_init(&names, sizeof(const Token *));
-    ItemBuf attribs_b; ib_init(&attribs_b, sizeof(int));
-    #define LOCAL_FAIL() do { ib_free(&names); ib_free(&attribs_b); return NULL; } while (0)
+    if (peek(p)->kind != TOK_IDENT) {
+        set_error(p, "expected identifier after `local`");
+        return NULL;
+    }
+    ItemBuf names;
+    ib_init(&names, sizeof(const Token *));
+    ItemBuf attribs_b;
+    ib_init(&attribs_b, sizeof(int));
+#define LOCAL_FAIL()         \
+    do {                     \
+        ib_free(&names);     \
+        ib_free(&attribs_b); \
+        return NULL;         \
+    } while (0)
     *(const Token **)ib_push(&names) = advance(p);
     *(int *)ib_push(&attribs_b) = default_attrib;
     /* Optional <attrib> immediately after the name (per-name overrides prefix). */
@@ -742,7 +824,10 @@ static Stmt *parse_local(Parser *p) {
         ((int *)attribs_b.data)[attribs_b.count - 1] = a;
     }
     while (match(p, TOK_COMMA)) {
-        if (peek(p)->kind != TOK_IDENT) { set_error(p, "expected identifier"); LOCAL_FAIL(); }
+        if (peek(p)->kind != TOK_IDENT) {
+            set_error(p, "expected identifier");
+            LOCAL_FAIL();
+        }
         *(const Token **)ib_push(&names) = advance(p);
         *(int *)ib_push(&attribs_b) = default_attrib;
         if (peek(p)->kind == TOK_LT) {
@@ -755,11 +840,15 @@ static Stmt *parse_local(Parser *p) {
     const Token **names_buf = names.data;
     int *attribs_buf = attribs_b.data;
     /* Parse RHS values BEFORE declaring locals — Lua scoping rule. */
-    ItemBuf vals; ib_init(&vals, sizeof(Expr *));
+    ItemBuf vals;
+    ib_init(&vals, sizeof(Expr *));
     if (match(p, TOK_ASSIGN)) {
         do {
             Expr *v = parse_expr(p);
-            if (!p->ok) { ib_free(&vals); LOCAL_FAIL(); }
+            if (!p->ok) {
+                ib_free(&vals);
+                LOCAL_FAIL();
+            }
             *(Expr **)ib_push(&vals) = v;
         } while (match(p, TOK_COMMA));
     }
@@ -769,7 +858,11 @@ static Stmt *parse_local(Parser *p) {
     int any_attrib = 0;
     for (int i = 0; i < n_names; i++) {
         int slot = frame_declare(cur_frame(p), names_buf[i]->start, names_buf[i]->len);
-        if (slot < 0) { set_error(p, "too many locals"); ib_free(&vals); LOCAL_FAIL(); }
+        if (slot < 0) {
+            set_error(p, "too many locals");
+            ib_free(&vals);
+            LOCAL_FAIL();
+        }
         local_idxs[i] = slot;
         if (attribs_buf[i]) {
             FuncFrame *f = cur_frame(p);
@@ -795,37 +888,50 @@ static Stmt *parse_local(Parser *p) {
     }
     ib_free(&names);
     ib_free(&attribs_b);
-    #undef LOCAL_FAIL
+#undef LOCAL_FAIL
     return s;
 }
 
 static Stmt *parse_if(Parser *p) {
     /* An if/elseif arm body ends at the next else/elseif/end. */
-    static const TokKind ARM_STOPS[] = { TOK_KW_ELSE, TOK_KW_ELSEIF, TOK_KW_END };
+    static const TokKind ARM_STOPS[] = {TOK_KW_ELSE, TOK_KW_ELSEIF, TOK_KW_END};
     int line = peek(p)->line;
     advance(p);
-    ItemBuf arms; ib_init(&arms, sizeof(IfArm));
+    ItemBuf arms;
+    ib_init(&arms, sizeof(IfArm));
     Expr *cond = parse_expr(p);
-    if (!p->ok) { ib_free(&arms); return NULL; }
+    if (!p->ok) {
+        ib_free(&arms);
+        return NULL;
+    }
     expect(p, TOK_KW_THEN, "then");
     Block body = {0};
     int mark = frame_mark(cur_frame(p));
     parse_block(p, &body, ARM_STOPS, 3);
     frame_rewind(cur_frame(p), mark);
-    if (!p->ok) { ib_free(&arms); return NULL; }
-    *(IfArm *)ib_push(&arms) = (IfArm){ .cond = cond, .body = body };
+    if (!p->ok) {
+        ib_free(&arms);
+        return NULL;
+    }
+    *(IfArm *)ib_push(&arms) = (IfArm){.cond = cond, .body = body};
 
     while (peek(p)->kind == TOK_KW_ELSEIF) {
         advance(p);
         Expr *c = parse_expr(p);
-        if (!p->ok) { ib_free(&arms); return NULL; }
+        if (!p->ok) {
+            ib_free(&arms);
+            return NULL;
+        }
         expect(p, TOK_KW_THEN, "then");
         Block b = {0};
         int m = frame_mark(cur_frame(p));
         parse_block(p, &b, ARM_STOPS, 3);
         frame_rewind(cur_frame(p), m);
-        if (!p->ok) { ib_free(&arms); return NULL; }
-        *(IfArm *)ib_push(&arms) = (IfArm){ .cond = c, .body = b };
+        if (!p->ok) {
+            ib_free(&arms);
+            return NULL;
+        }
+        *(IfArm *)ib_push(&arms) = (IfArm){.cond = c, .body = b};
     }
 
     int has_else = 0;
@@ -835,7 +941,10 @@ static Stmt *parse_if(Parser *p) {
         int m = frame_mark(cur_frame(p));
         parse_block1(p, &else_body, TOK_KW_END);
         frame_rewind(cur_frame(p), m);
-        if (!p->ok) { ib_free(&arms); return NULL; }
+        if (!p->ok) {
+            ib_free(&arms);
+            return NULL;
+        }
     }
     expect(p, TOK_KW_END, "end (of if)");
 
@@ -887,11 +996,15 @@ static int looks_like_block_end(TokKind k) {
 static Stmt *parse_return(Parser *p) {
     int line = peek(p)->line;
     advance(p);
-    ItemBuf vals; ib_init(&vals, sizeof(Expr *));
+    ItemBuf vals;
+    ib_init(&vals, sizeof(Expr *));
     if (!looks_like_block_end(peek(p)->kind)) {
         do {
             Expr *v = parse_expr(p);
-            if (!p->ok) { ib_free(&vals); return NULL; }
+            if (!p->ok) {
+                ib_free(&vals);
+                return NULL;
+            }
             *(Expr **)ib_push(&vals) = v;
         } while (match(p, TOK_COMMA));
     }
@@ -938,18 +1051,27 @@ static Stmt *parse_ident_stmt(Parser *p) {
      * the assignment writes a new entry in _G. Codegen routes it through
      * \$g_globals just like any other global write. */
 
-    ItemBuf targets; ib_init(&targets, sizeof(AssignTarget));
+    ItemBuf targets;
+    ib_init(&targets, sizeof(AssignTarget));
     *(AssignTarget *)ib_push(&targets) = expr_to_target(first);
     while (match(p, TOK_COMMA)) {
         Expr *t = parse_prefix_chain(p);
-        if (!p->ok) { ib_free(&targets); return NULL; }
+        if (!p->ok) {
+            ib_free(&targets);
+            return NULL;
+        }
         if (t->kind != EXPR_VAR && t->kind != EXPR_INDEX) {
-            set_error(p, "invalid assignment target"); ib_free(&targets); return NULL;
+            set_error(p, "invalid assignment target");
+            ib_free(&targets);
+            return NULL;
         }
         *(AssignTarget *)ib_push(&targets) = expr_to_target(t);
     }
     expect(p, TOK_ASSIGN, "= (assignment)");
-    if (!p->ok) { ib_free(&targets); return NULL; }
+    if (!p->ok) {
+        ib_free(&targets);
+        return NULL;
+    }
     /* <const> enforcement: reject assignment to const locals.
      * Only checks the current frame; reassignment via upvalue is rare
      * and we don't track attribs through the upvalue table yet. */
@@ -960,14 +1082,21 @@ static Stmt *parse_ident_stmt(Parser *p) {
             int a = frame_local_attrib_by_slot(cur_frame(p),
                                                tgt[i].as.var.idx);
             if (a == 1) {
-                set_error(p, "attempt to assign to const variable"); ib_free(&targets); return NULL;
+                set_error(p, "attempt to assign to const variable");
+                ib_free(&targets);
+                return NULL;
             }
         }
     }
-    ItemBuf vals; ib_init(&vals, sizeof(Expr *));
+    ItemBuf vals;
+    ib_init(&vals, sizeof(Expr *));
     do {
         Expr *v = parse_expr(p);
-        if (!p->ok) { ib_free(&targets); ib_free(&vals); return NULL; }
+        if (!p->ok) {
+            ib_free(&targets);
+            ib_free(&vals);
+            return NULL;
+        }
         *(Expr **)ib_push(&vals) = v;
     } while (match(p, TOK_COMMA));
     Stmt *s = stmt_new(p->pool, STMT_ASSIGN, line);
@@ -981,7 +1110,10 @@ static Stmt *parse_ident_stmt(Parser *p) {
 static Stmt *parse_for(Parser *p) {
     int line = peek(p)->line;
     advance(p); /* for */
-    if (peek(p)->kind != TOK_IDENT) { set_error(p, "expected identifier after `for`"); return NULL; }
+    if (peek(p)->kind != TOK_IDENT) {
+        set_error(p, "expected identifier after `for`");
+        return NULL;
+    }
     const Token *first = advance(p);
     if (peek(p)->kind == TOK_ASSIGN) {
         /* numeric */
@@ -999,8 +1131,11 @@ static Stmt *parse_for(Parser *p) {
         expect(p, TOK_KW_DO, "do");
         int mark = frame_mark(cur_frame(p));
         int slot = frame_declare(cur_frame(p), first->start, first->len);
-        if (slot < 0) { set_error(p, "too many locals"); return NULL; }
-        frame_mark_last_const(cur_frame(p));  /* numeric control var is const */
+        if (slot < 0) {
+            set_error(p, "too many locals");
+            return NULL;
+        }
+        frame_mark_last_const(cur_frame(p)); /* numeric control var is const */
         Block body = {0};
         parse_block1(p, &body, TOK_KW_END);
         frame_rewind(cur_frame(p), mark);
@@ -1017,17 +1152,27 @@ static Stmt *parse_for(Parser *p) {
         return s;
     }
     /* generic: for k [, v, ...] in expr_list do ... end */
-    ItemBuf names; ib_init(&names, sizeof(const Token *));
+    ItemBuf names;
+    ib_init(&names, sizeof(const Token *));
     *(const Token **)ib_push(&names) = first;
     while (match(p, TOK_COMMA)) {
-        if (peek(p)->kind != TOK_IDENT) { set_error(p, "expected name"); ib_free(&names); return NULL; }
+        if (peek(p)->kind != TOK_IDENT) {
+            set_error(p, "expected name");
+            ib_free(&names);
+            return NULL;
+        }
         *(const Token **)ib_push(&names) = advance(p);
     }
     expect(p, TOK_KW_IN, "in");
-    ItemBuf exprs; ib_init(&exprs, sizeof(Expr *));
+    ItemBuf exprs;
+    ib_init(&exprs, sizeof(Expr *));
     do {
         Expr *e = parse_expr(p);
-        if (!p->ok) { ib_free(&names); ib_free(&exprs); return NULL; }
+        if (!p->ok) {
+            ib_free(&names);
+            ib_free(&exprs);
+            return NULL;
+        }
         *(Expr **)ib_push(&exprs) = e;
     } while (match(p, TOK_COMMA));
     expect(p, TOK_KW_DO, "do");
@@ -1039,7 +1184,12 @@ static Stmt *parse_for(Parser *p) {
     size_t *lens_arr = node_pool_alloc(p->pool, sizeof(size_t) * n_names);
     for (int i = 0; i < n_names; i++) {
         int slot = frame_declare(cur_frame(p), names_toks[i]->start, names_toks[i]->len);
-        if (slot < 0) { set_error(p, "too many locals"); ib_free(&names); ib_free(&exprs); return NULL; }
+        if (slot < 0) {
+            set_error(p, "too many locals");
+            ib_free(&names);
+            ib_free(&exprs);
+            return NULL;
+        }
         /* Lua 5.5: only the first (control) variable of a generic for is
          * const; the remaining variables are ordinary assignable locals. */
         if (i == 0) frame_mark_last_const(cur_frame(p));
@@ -1052,7 +1202,10 @@ static Stmt *parse_for(Parser *p) {
     parse_block1(p, &body, TOK_KW_END);
     frame_rewind(cur_frame(p), mark);
     expect(p, TOK_KW_END, "end (of for)");
-    if (!p->ok) { ib_free(&exprs); return NULL; }
+    if (!p->ok) {
+        ib_free(&exprs);
+        return NULL;
+    }
     Stmt *s = stmt_new(p->pool, STMT_FOR_GEN, line);
     s->as.for_gen.n_names = n_names;
     s->as.for_gen.names = names_arr;
@@ -1146,18 +1299,32 @@ static Stmt *parse_global(Parser *p) {
         return NULL; /* parse_block ignores NULL — no AST node needed */
     }
 
-    if (peek(p)->kind != TOK_IDENT) { set_error(p, "expected identifier after `global`"); return NULL; }
-    ItemBuf names; ib_init(&names, sizeof(const Token *));
+    if (peek(p)->kind != TOK_IDENT) {
+        set_error(p, "expected identifier after `global`");
+        return NULL;
+    }
+    ItemBuf names;
+    ib_init(&names, sizeof(const Token *));
     *(const Token **)ib_push(&names) = advance(p);
     /* Per-name attribute after the first name. */
     if (peek(p)->kind == TOK_LT) {
-        if (parse_attribute(p) < 0) { ib_free(&names); return NULL; }
+        if (parse_attribute(p) < 0) {
+            ib_free(&names);
+            return NULL;
+        }
     }
     while (match(p, TOK_COMMA)) {
-        if (peek(p)->kind != TOK_IDENT) { set_error(p, "expected identifier"); ib_free(&names); return NULL; }
+        if (peek(p)->kind != TOK_IDENT) {
+            set_error(p, "expected identifier");
+            ib_free(&names);
+            return NULL;
+        }
         *(const Token **)ib_push(&names) = advance(p);
         if (peek(p)->kind == TOK_LT) {
-            if (parse_attribute(p) < 0) { ib_free(&names); return NULL; }
+            if (parse_attribute(p) < 0) {
+                ib_free(&names);
+                return NULL;
+            }
         }
     }
     int n_names = (int)names.count;
@@ -1166,15 +1333,23 @@ static Stmt *parse_global(Parser *p) {
     int *global_idxs = node_pool_alloc(p->pool, sizeof(int) * n_names);
     for (int i = 0; i < n_names; i++) {
         int idx = globals_declare(p, names_buf[i]->start, names_buf[i]->len);
-        if (idx < 0) { set_error(p, "too many globals"); ib_free(&names); return NULL; }
+        if (idx < 0) {
+            set_error(p, "too many globals");
+            ib_free(&names);
+            return NULL;
+        }
         global_idxs[i] = idx;
     }
     ib_free(&names);
-    ItemBuf vals; ib_init(&vals, sizeof(Expr *));
+    ItemBuf vals;
+    ib_init(&vals, sizeof(Expr *));
     if (match(p, TOK_ASSIGN)) {
         do {
             Expr *v = parse_expr(p);
-            if (!p->ok) { ib_free(&vals); return NULL; }
+            if (!p->ok) {
+                ib_free(&vals);
+                return NULL;
+            }
             *(Expr **)ib_push(&vals) = v;
         } while (match(p, TOK_COMMA));
     }
@@ -1197,19 +1372,25 @@ static Stmt *parse_global(Parser *p) {
 static Stmt *parse_function_stmt(Parser *p) {
     int line = peek(p)->line;
     advance(p); /* function */
-    if (peek(p)->kind != TOK_IDENT) { set_error(p, "expected function name"); return NULL; }
+    if (peek(p)->kind != TOK_IDENT) {
+        set_error(p, "expected function name");
+        return NULL;
+    }
     const Token *first = advance(p);
     VarKind kind;
     int idx;
     if (!resolve_name(p, first->start, first->len, &kind, &idx)) {
         char buf[160];
         snprintf(buf, sizeof(buf),
-            "function `%.*s` is not declared (add `global %.*s` first or use `local function`)",
-            (int)first->len, first->start, (int)first->len, first->start);
+                 "function `%.*s` is not declared (add `global %.*s` first or use `local function`)",
+                 (int)first->len, first->start, (int)first->len, first->start);
         set_error(p, buf);
         return NULL;
     }
-    if (kind == VAR_BUILTIN) { set_error(p, "cannot redefine a builtin"); return NULL; }
+    if (kind == VAR_BUILTIN) {
+        set_error(p, "cannot redefine a builtin");
+        return NULL;
+    }
     /* Build the base expression for the path. */
     Expr *base = expr_new(p->pool, EXPR_VAR, line);
     base->as.var.name = first->start;
@@ -1220,14 +1401,20 @@ static Stmt *parse_function_stmt(Parser *p) {
     /* Walk .NAME chain (intermediate field access). */
     while (peek(p)->kind == TOK_DOT) {
         advance(p);
-        if (peek(p)->kind != TOK_IDENT) { set_error(p, "expected name after '.'"); return NULL; }
+        if (peek(p)->kind != TOK_IDENT) {
+            set_error(p, "expected name after '.'");
+            return NULL;
+        }
         base = make_index(p->pool, base, advance(p));
     }
     /* Optional :METHOD suffix. */
     int with_self = 0;
     if (peek(p)->kind == TOK_COLON) {
         advance(p);
-        if (peek(p)->kind != TOK_IDENT) { set_error(p, "expected name after ':'"); return NULL; }
+        if (peek(p)->kind != TOK_IDENT) {
+            set_error(p, "expected name after ':'");
+            return NULL;
+        }
         base = make_index(p->pool, base, advance(p));
         with_self = 1;
     }
@@ -1251,43 +1438,43 @@ static Stmt *parse_function_stmt(Parser *p) {
 
 static Stmt *parse_stmt(Parser *p) {
     switch (peek(p)->kind) {
-        case TOK_SEMI: advance(p); return NULL;
-        case TOK_KW_LOCAL:    return parse_local(p);
-        case TOK_KW_FUNCTION: return parse_function_stmt(p);
-        case TOK_KW_IF:     return parse_if(p);
-        case TOK_KW_WHILE:  return parse_while(p);
-        case TOK_KW_DO:     return parse_do(p);
-        case TOK_KW_RETURN: return parse_return(p);
-        case TOK_KW_FOR:    return parse_for(p);
-        case TOK_KW_REPEAT: return parse_repeat(p);
-        case TOK_KW_BREAK:  return parse_break(p);
-        case TOK_KW_GOTO:   return parse_goto(p);
-        case TOK_DBLCOLON:  return parse_label(p);
-        case TOK_LPAREN:
-            /* `(prefixexp)(args)` or `(prefixexp):method(args)` are valid
-             * statements — `parse_ident_stmt` already walks a prefix chain
-             * via `parse_prefix_chain`, which handles a paren-grouped primary. */
-            return parse_ident_stmt(p);
-        case TOK_IDENT: {
-            /* `global` is a contextual keyword: it introduces a declaration
-             * only when followed by a name, `function`, an attribute `<`, or
-             * the wildcard `*`. In any other position (`global = 5`,
-             * `global.x = 1`, `global()`, `global:m()`) it is an ordinary
-             * identifier, so fall through to the assignment/call parser. The
-             * lexer keeps it as a plain TOK_IDENT; we disambiguate here. */
-            const Token *t = peek(p);
-            if (t->len == 6 && memcmp(t->start, "global", 6) == 0) {
-                TokKind nxt = peek_at(p, 1)->kind;
-                if (nxt == TOK_IDENT || nxt == TOK_KW_FUNCTION ||
-                    nxt == TOK_LT || nxt == TOK_STAR) {
-                    return parse_global(p);
-                }
+    case TOK_SEMI: advance(p); return NULL;
+    case TOK_KW_LOCAL: return parse_local(p);
+    case TOK_KW_FUNCTION: return parse_function_stmt(p);
+    case TOK_KW_IF: return parse_if(p);
+    case TOK_KW_WHILE: return parse_while(p);
+    case TOK_KW_DO: return parse_do(p);
+    case TOK_KW_RETURN: return parse_return(p);
+    case TOK_KW_FOR: return parse_for(p);
+    case TOK_KW_REPEAT: return parse_repeat(p);
+    case TOK_KW_BREAK: return parse_break(p);
+    case TOK_KW_GOTO: return parse_goto(p);
+    case TOK_DBLCOLON: return parse_label(p);
+    case TOK_LPAREN:
+        /* `(prefixexp)(args)` or `(prefixexp):method(args)` are valid
+         * statements — `parse_ident_stmt` already walks a prefix chain
+         * via `parse_prefix_chain`, which handles a paren-grouped primary. */
+        return parse_ident_stmt(p);
+    case TOK_IDENT: {
+        /* `global` is a contextual keyword: it introduces a declaration
+         * only when followed by a name, `function`, an attribute `<`, or
+         * the wildcard `*`. In any other position (`global = 5`,
+         * `global.x = 1`, `global()`, `global:m()`) it is an ordinary
+         * identifier, so fall through to the assignment/call parser. The
+         * lexer keeps it as a plain TOK_IDENT; we disambiguate here. */
+        const Token *t = peek(p);
+        if (t->len == 6 && memcmp(t->start, "global", 6) == 0) {
+            TokKind nxt = peek_at(p, 1)->kind;
+            if (nxt == TOK_IDENT || nxt == TOK_KW_FUNCTION ||
+                nxt == TOK_LT || nxt == TOK_STAR) {
+                return parse_global(p);
             }
-            return parse_ident_stmt(p);
         }
-        default:
-            set_error(p, "expected a statement");
-            return NULL;
+        return parse_ident_stmt(p);
+    }
+    default:
+        set_error(p, "expected a statement");
+        return NULL;
     }
 }
 
@@ -1298,7 +1485,10 @@ static void parse_block(Parser *p, Block *out, const TokKind *stops, int n_stops
         Stmt *st = parse_stmt(p);
         if (!p->ok) break;
         if (!st) continue;
-        if (count == cap) { cap = cap ? cap * 2 : 8; vec = xrealloc(vec, cap * sizeof(Stmt *)); }
+        if (count == cap) {
+            cap = cap ? cap * 2 : 8;
+            vec = xrealloc(vec, cap * sizeof(Stmt *));
+        }
         vec[count++] = st;
     }
     out->count = count;
@@ -1317,11 +1507,14 @@ static void parse_block(Parser *p, Block *out, const TokKind *stops, int n_stops
 static LuaFunc *parse_function_body_ex(Parser *p, int line, int with_self);
 
 static LuaFunc *parse_function_body(Parser *p, int line) {
-    return parse_function_body_ex(p, line, /*with_self*/0);
+    return parse_function_body_ex(p, line, /*with_self*/ 0);
 }
 
 static LuaFunc *parse_function_body_ex(Parser *p, int line, int with_self) {
-    if (p->n_funcs >= MAX_FUNCS) { set_error(p, "too many functions"); return NULL; }
+    if (p->n_funcs >= MAX_FUNCS) {
+        set_error(p, "too many functions");
+        return NULL;
+    }
     int func_idx = p->n_funcs;
     LuaFunc *fn = func_new(p->pool, func_idx, line);
     fn->parent_idx = p->cur_fn;
@@ -1355,10 +1548,14 @@ static LuaFunc *parse_function_body_ex(Parser *p, int line, int with_self) {
                 if (peek(p)->kind == TOK_IDENT) advance(p);
                 break;
             }
-            if (peek(p)->kind != TOK_IDENT) { set_error(p, "expected parameter name"); break; }
+            if (peek(p)->kind != TOK_IDENT) {
+                set_error(p, "expected parameter name");
+                break;
+            }
             const Token *pn = advance(p);
             if (frame_declare(cur_frame(p), pn->start, pn->len) < 0) {
-                set_error(p, "too many params"); break;
+                set_error(p, "too many params");
+                break;
             }
             n_params++;
         } while (match(p, TOK_COMMA));
@@ -1393,22 +1590,22 @@ static LuaFunc *parse_function_body_ex(Parser *p, int line, int with_self) {
 }
 
 ParseResult parse(const TokenList *tokens, NodePool *pool) {
-    Parser p = { .toks = tokens, .pool = pool, .ok = 1, .frame_depth = 0, .cur_fn = -1 };
+    Parser p = {.toks = tokens, .pool = pool, .ok = 1, .frame_depth = 0, .cur_fn = -1};
     frame_init(&p.frames[0]);
     /* Pre-declare stdlib library tables and well-known globals so user code can name them. */
-    globals_declare(&p, "math",      4);
-    globals_declare(&p, "string",    6);
-    globals_declare(&p, "io",        2);
-    globals_declare(&p, "table",     5);
-    globals_declare(&p, "utf8",      4);
-    globals_declare(&p, "debug",     5);
-    globals_declare(&p, "package",   7);
+    globals_declare(&p, "math", 4);
+    globals_declare(&p, "string", 6);
+    globals_declare(&p, "io", 2);
+    globals_declare(&p, "table", 5);
+    globals_declare(&p, "utf8", 4);
+    globals_declare(&p, "debug", 5);
+    globals_declare(&p, "package", 7);
     /* Stub libraries — empty tables, but their names exist so `require`
      * succeeds and `os == os` identity checks pass. */
-    globals_declare(&p, "os",        2);
+    globals_declare(&p, "os", 2);
     globals_declare(&p, "coroutine", 9);
-    globals_declare(&p, "_VERSION",  8);
-    globals_declare(&p, "_G",        2);
+    globals_declare(&p, "_VERSION", 8);
+    globals_declare(&p, "_G", 2);
 
     Block main = {0};
     parse_block1(&p, &main, TOK_EOF);

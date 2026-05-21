@@ -15,20 +15,39 @@
 
 static char *read_file(const char *path) {
     FILE *f = fopen(path, "rb");
-    if (!f) { perror(path); return NULL; }
+    if (!f) {
+        perror(path);
+        return NULL;
+    }
     /* Reject anything that isn't a regular file up front — fopen("rb") on a
      * directory "succeeds" on many platforms, then fseek/fread misbehave. */
     struct stat st;
-    if (fstat(fileno(f), &st) != 0) { perror(path); fclose(f); return NULL; }
+    if (fstat(fileno(f), &st) != 0) {
+        perror(path);
+        fclose(f);
+        return NULL;
+    }
     if (!S_ISREG(st.st_mode)) {
         fprintf(stderr, "%s: not a regular file\n", path);
         fclose(f);
         return NULL;
     }
-    if (fseek(f, 0, SEEK_END) != 0) { perror(path); fclose(f); return NULL; }
+    if (fseek(f, 0, SEEK_END) != 0) {
+        perror(path);
+        fclose(f);
+        return NULL;
+    }
     long n = ftell(f);
-    if (n < 0) { perror(path); fclose(f); return NULL; }
-    if (fseek(f, 0, SEEK_SET) != 0) { perror(path); fclose(f); return NULL; }
+    if (n < 0) {
+        perror(path);
+        fclose(f);
+        return NULL;
+    }
+    if (fseek(f, 0, SEEK_SET) != 0) {
+        perror(path);
+        fclose(f);
+        return NULL;
+    }
     char *buf = xmalloc((size_t)n + 1);
     size_t got = fread(buf, 1, (size_t)n, f);
     if (got != (size_t)n) {
@@ -56,9 +75,9 @@ static void strip_shebang(char *s) {
 
 static void usage(const char *prog) {
     fprintf(stderr,
-        "usage: %s <main.lua> [-m <module.lua>]... -o <output.wat>\n"
-        "  -m FILE  load FILE as a require()-able module, keyed by basename\n",
-        prog);
+            "usage: %s <main.lua> [-m <module.lua>]... -o <output.wat>\n"
+            "  -m FILE  load FILE as a require()-able module, keyed by basename\n",
+            prog);
 }
 
 /* Extract module name from a path: basename without .lua suffix.
@@ -83,19 +102,27 @@ int main(int argc, char **argv) {
     int n_modules = 0;
     int tree_shake = 0;
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) { out = argv[++i]; }
-        else if (strcmp(argv[i], "--tree-shake") == 0) { tree_shake = 1; }
-        else if (strcmp(argv[i], "-m") == 0 && i + 1 < argc) {
+        if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) {
+            out = argv[++i];
+        } else if (strcmp(argv[i], "--tree-shake") == 0) {
+            tree_shake = 1;
+        } else if (strcmp(argv[i], "-m") == 0 && i + 1 < argc) {
             if (n_modules >= MAX_MODULES) {
                 fprintf(stderr, "too many -m modules (max %d)\n", MAX_MODULES);
                 return 2;
             }
             modules[n_modules++] = argv[++i];
+        } else if (!in) {
+            in = argv[i];
+        } else {
+            usage(argv[0]);
+            return 2;
         }
-        else if (!in) { in = argv[i]; }
-        else { usage(argv[0]); return 2; }
     }
-    if (!in || !out) { usage(argv[0]); return 2; }
+    if (!in || !out) {
+        usage(argv[0]);
+        return 2;
+    }
 
     char *entry_src = read_file(in);
     if (!entry_src) return 1;
@@ -121,7 +148,10 @@ int main(int argc, char **argv) {
         char mod_names[MAX_MODULES][128];
         for (int i = 0; i < n_modules; i++) {
             char *ms = read_file(modules[i]);
-            if (!ms) { wat_free(&cb); return 1; }
+            if (!ms) {
+                wat_free(&cb);
+                return 1;
+            }
             strip_shebang(ms);
             if (module_name_of(modules[i], mod_names[i],
                                sizeof(mod_names[i])) != 0) {
@@ -184,7 +214,10 @@ int main(int argc, char **argv) {
     }
 
     FILE *of = fopen(out, "wb");
-    if (!of) { perror(out); return 1; }
+    if (!of) {
+        perror(out);
+        return 1;
+    }
     fputs(wat_cstr(&w), of);
     fclose(of);
 
