@@ -319,7 +319,11 @@ static BinOp binop_of(TokKind k) {
         case TOK_GE:      return BIN_GE;
         case TOK_KW_AND:  return BIN_AND;
         case TOK_KW_OR:   return BIN_OR;
-        default:          return BIN_ADD;
+        default:
+            /* Unreachable: parse_prec only calls binop_of after prec_of(k)
+             * confirmed k is a binary operator. Don't mask a bug by silently
+             * folding an unexpected kind to BIN_ADD. */
+            __builtin_unreachable();
     }
 }
 
@@ -604,10 +608,19 @@ static Expr *parse_expr(Parser *p) { return parse_prec(p, PREC_OR); }
 
 /* ============================================================ */
 
-static void parse_block(Parser *p, Block *out, TokKind stop1, TokKind stop2, TokKind stop3);
+/* Parse statements until one of `stops` (or EOF, always implicit) is the next
+ * token. Most callers stop on a single keyword; if/elseif arms stop on any of
+ * {else, elseif, end}. */
+static void parse_block(Parser *p, Block *out, const TokKind *stops, int n_stops);
+/* Convenience wrapper for the common single-stop case. */
+static void parse_block1(Parser *p, Block *out, TokKind stop) {
+    parse_block(p, out, &stop, 1);
+}
 
-static int is_block_end(TokKind k, TokKind s1, TokKind s2, TokKind s3) {
-    return k == TOK_EOF || k == s1 || k == s2 || k == s3;
+static int is_block_end(TokKind k, const TokKind *stops, int n_stops) {
+    if (k == TOK_EOF) return 1;
+    for (int i = 0; i < n_stops; i++) if (k == stops[i]) return 1;
+    return 0;
 }
 
 static Stmt *parse_local(Parser *p) {
@@ -732,6 +745,8 @@ static Stmt *parse_local(Parser *p) {
 }
 
 static Stmt *parse_if(Parser *p) {
+    /* An if/elseif arm body ends at the next else/elseif/end. */
+    static const TokKind ARM_STOPS[] = { TOK_KW_ELSE, TOK_KW_ELSEIF, TOK_KW_END };
     int line = peek(p)->line;
     advance(p);
     IfArm arms_buf[MAX_LIST];
@@ -741,7 +756,7 @@ static Stmt *parse_if(Parser *p) {
     expect(p, TOK_KW_THEN, "then");
     Block body = {0};
     int mark = frame_mark(cur_frame(p));
-    parse_block(p, &body, TOK_KW_ELSE, TOK_KW_ELSEIF, TOK_KW_END);
+    parse_block(p, &body, ARM_STOPS, 3);
     frame_rewind(cur_frame(p), mark);
     if (!p->ok) return NULL;
     arms_buf[narms++] = (IfArm){ .cond = cond, .body = body };
@@ -753,7 +768,7 @@ static Stmt *parse_if(Parser *p) {
         expect(p, TOK_KW_THEN, "then");
         Block b = {0};
         int m = frame_mark(cur_frame(p));
-        parse_block(p, &b, TOK_KW_ELSE, TOK_KW_ELSEIF, TOK_KW_END);
+        parse_block(p, &b, ARM_STOPS, 3);
         frame_rewind(cur_frame(p), m);
         if (!p->ok) return NULL;
         if (narms >= MAX_LIST) { set_error(p, "too many elseif arms"); return NULL; }
@@ -765,7 +780,7 @@ static Stmt *parse_if(Parser *p) {
     if (match(p, TOK_KW_ELSE)) {
         has_else = 1;
         int m = frame_mark(cur_frame(p));
-        parse_block(p, &else_body, TOK_KW_END, TOK_KW_END, TOK_KW_END);
+        parse_block1(p, &else_body, TOK_KW_END);
         frame_rewind(cur_frame(p), m);
         if (!p->ok) return NULL;
     }
@@ -788,7 +803,7 @@ static Stmt *parse_while(Parser *p) {
     expect(p, TOK_KW_DO, "do");
     Block body = {0};
     int mark = frame_mark(cur_frame(p));
-    parse_block(p, &body, TOK_KW_END, TOK_KW_END, TOK_KW_END);
+    parse_block1(p, &body, TOK_KW_END);
     frame_rewind(cur_frame(p), mark);
     expect(p, TOK_KW_END, "end (of while)");
     if (!p->ok) return NULL;
@@ -803,7 +818,7 @@ static Stmt *parse_do(Parser *p) {
     advance(p);
     Block body = {0};
     int mark = frame_mark(cur_frame(p));
-    parse_block(p, &body, TOK_KW_END, TOK_KW_END, TOK_KW_END);
+    parse_block1(p, &body, TOK_KW_END);
     frame_rewind(cur_frame(p), mark);
     expect(p, TOK_KW_END, "end (of do)");
     if (!p->ok) return NULL;
@@ -939,7 +954,7 @@ static Stmt *parse_for(Parser *p) {
         if (slot < 0) { set_error(p, "too many locals"); return NULL; }
         frame_mark_last_const(cur_frame(p));  /* numeric control var is const */
         Block body = {0};
-        parse_block(p, &body, TOK_KW_END, TOK_KW_END, TOK_KW_END);
+        parse_block1(p, &body, TOK_KW_END);
         frame_rewind(cur_frame(p), mark);
         expect(p, TOK_KW_END, "end (of for)");
         if (!p->ok) return NULL;
@@ -986,7 +1001,7 @@ static Stmt *parse_for(Parser *p) {
         lens_arr[i] = names[i]->len;
     }
     Block body = {0};
-    parse_block(p, &body, TOK_KW_END, TOK_KW_END, TOK_KW_END);
+    parse_block1(p, &body, TOK_KW_END);
     frame_rewind(cur_frame(p), mark);
     expect(p, TOK_KW_END, "end (of for)");
     if (!p->ok) return NULL;
@@ -1007,7 +1022,7 @@ static Stmt *parse_repeat(Parser *p) {
     advance(p); /* repeat */
     Block body = {0};
     int mark = frame_mark(cur_frame(p));
-    parse_block(p, &body, TOK_KW_UNTIL, TOK_KW_UNTIL, TOK_KW_UNTIL);
+    parse_block1(p, &body, TOK_KW_UNTIL);
     /* `until cond` is evaluated in scope where the loop's locals are still visible */
     expect(p, TOK_KW_UNTIL, "until");
     Expr *cond = parse_expr(p);
@@ -1266,10 +1281,10 @@ static Stmt *parse_stmt(Parser *p) {
     }
 }
 
-static void parse_block(Parser *p, Block *out, TokKind s1, TokKind s2, TokKind s3) {
+static void parse_block(Parser *p, Block *out, const TokKind *stops, int n_stops) {
     Stmt **vec = NULL;
     size_t count = 0, cap = 0;
-    while (p->ok && !is_block_end(peek(p)->kind, s1, s2, s3)) {
+    while (p->ok && !is_block_end(peek(p)->kind, stops, n_stops)) {
         Stmt *st = parse_stmt(p);
         if (!p->ok) break;
         if (!st) continue;
@@ -1341,7 +1356,7 @@ static LuaFunc *parse_function_body_ex(Parser *p, int line, int with_self) {
     expect(p, TOK_RPAREN, ")");
 
     Block body = {0};
-    parse_block(p, &body, TOK_KW_END, TOK_KW_END, TOK_KW_END);
+    parse_block1(p, &body, TOK_KW_END);
     expect(p, TOK_KW_END, "end (of function)");
 
     fn->n_params = n_params;
@@ -1386,7 +1401,7 @@ ParseResult parse(const TokenList *tokens, NodePool *pool) {
     globals_declare(&p, "_G",        2);
 
     Block main = {0};
-    parse_block(&p, &main, TOK_EOF, TOK_EOF, TOK_EOF);
+    parse_block1(&p, &main, TOK_EOF);
 
     ParseResult r = {0};
     r.ok = p.ok;
