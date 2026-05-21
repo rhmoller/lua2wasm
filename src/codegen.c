@@ -521,6 +521,13 @@ static void emit_target_open(CG *c, const AssignTarget *t, int depth) {
                 break;
             }
         }
+    } else if (c->opt_int && expr_is_int(c, t->as.index.key)) {
+        /* Int-typed key: $lua_tabset_ik takes the raw i64 (no make_int /
+         * $as_arr_key) and still dispatches __newindex. The value is emitted
+         * by the caller between open and close. */
+        emit_indent(c, depth); wat_append(c->w, "(call $lua_tabset_ik\n");
+        emit_expr(c, t->as.index.table, depth + 1);
+        emit_int_expr(c, t->as.index.key, depth + 1);
     } else {
         /* User-code assignment goes through \$lua_tabset so __newindex
          * has a chance to fire. Table constructors emit \$tab_set
@@ -1005,7 +1012,18 @@ static void emit_index_expr(CG *c, const Expr *e, int depth) {
     /* `t[k]`. Use the runtime $lua_index helper instead of an inline
      * (ref.cast (ref $LuaTable) …) so that strings transparently route
      * through the string library and other-typed receivers throw a
-     * Lua-shaped error with a source line. */
+     * Lua-shaped error with a source line. For an int-typed key, the
+     * $lua_index_ik fast path takes the raw i64 (no make_int / $as_arr_key)
+     * and hits the array part directly. */
+    if (c->opt_int && expr_is_int(c, e->as.index.key)) {
+        emit_indent(c, depth); wat_append(c->w, "(call $lua_index_ik\n");
+        emit_expr(c, e->as.index.table, depth + 1);
+        emit_int_expr(c, e->as.index.key, depth + 1);
+        emit_indent(c, depth + 1);
+        wat_appendf(c->w, "(i32.const %d)\n", e->line);
+        emit_indent(c, depth); wat_append(c->w, ")\n");
+        return;
+    }
     emit_indent(c, depth); wat_append(c->w, "(call $lua_index\n");
     emit_expr(c, e->as.index.table, depth + 1);
     emit_expr(c, e->as.index.key, depth + 1);
