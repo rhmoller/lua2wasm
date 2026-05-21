@@ -3786,9 +3786,11 @@ int codegen_module(const ParseResult *pr, const char *src_name,
     for (size_t i = 0; i < pr->funcs.count; i++) {
         emit_user_function(&c, pr->funcs.items[i], 0, 0);
         /* Direct-call fast entries (non-vararg only): _da returns the result
-         * array (multi-value call contexts), _da1 returns a single anyref
-         * (single-value contexts — no result-array allocation). */
-        if (c.opt_int && !pr->funcs.items[i]->is_vararg) {
+         * array (multi-value call contexts), _da1 returns a single value
+         * (single-value contexts — no result-array allocation). Emitted only
+         * when some direct-call site actually targets this function (has_site),
+         * otherwise they would be dead code. */
+        if (c.opt_int && !pr->funcs.items[i]->is_vararg && c.sigs[i].has_site) {
             emit_user_function(&c, pr->funcs.items[i], 1, 0);
             emit_user_function(&c, pr->funcs.items[i], 1, 1);
         }
