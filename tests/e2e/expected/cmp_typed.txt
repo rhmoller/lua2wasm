@@ -1,0 +1,11 @@
+true	true	false	false	false	true
+false	false	true	false
+-1	0	1
+10
+3
+true	true	false	true
+20
+false	true	false	false
+true	true	false
+true	boolean
+true	true

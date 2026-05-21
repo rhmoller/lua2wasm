@@ -561,6 +561,53 @@ static const char *binop_helper(BinOp op) {
     }
 }
 
+/* A relational/equality binop with both operands the *same* unboxed numeric
+ * type: 1 = both int (i64 compare), 2 = both float (f64 compare), 0 = neither.
+ * Mixed int/float is left to the generic helper — Lua compares int vs float
+ * exactly, which an f64 conversion would not preserve for large integers. */
+static int cmp_numeric_kind(CG *c, const Expr *e) {
+    if (!c->opt_int || e->kind != EXPR_BINOP) return 0;
+    switch (e->as.binop.op) {
+    case BIN_LT: case BIN_LE: case BIN_GT: case BIN_GE:
+    case BIN_EQ: case BIN_NEQ: break;
+    default: return 0;
+    }
+    const Expr *l = e->as.binop.lhs, *r = e->as.binop.rhs;
+    if (expr_is_int(c, l) && expr_is_int(c, r)) return 1;
+    if (expr_is_float(c, l) && expr_is_float(c, r)) return 2;
+    return 0;
+}
+
+/* Emit a same-type numeric comparison (cmp_numeric_kind != 0) as a raw i32. */
+static void emit_cmp_i32(CG *c, const Expr *e, int depth, int kind) {
+    static const char *iops[] = { "i64.lt_s","i64.le_s","i64.gt_s","i64.ge_s","i64.eq","i64.ne" };
+    static const char *fops[] = { "f64.lt","f64.le","f64.gt","f64.ge","f64.eq","f64.ne" };
+    int j;
+    switch (e->as.binop.op) {
+    case BIN_LT: j = 0; break; case BIN_LE: j = 1; break;
+    case BIN_GT: j = 2; break; case BIN_GE: j = 3; break;
+    case BIN_EQ: j = 4; break; default: j = 5; break;   /* BIN_NEQ */
+    }
+    emit_indent(c, depth); wat_appendf(c->w, "(%s\n", kind == 1 ? iops[j] : fops[j]);
+    if (kind == 1) {
+        emit_int_expr(c, e->as.binop.lhs, depth + 1);
+        emit_int_expr(c, e->as.binop.rhs, depth + 1);
+    } else {
+        emit_num_as_f64(c, e->as.binop.lhs, depth + 1);
+        emit_num_as_f64(c, e->as.binop.rhs, depth + 1);
+    }
+    emit_indent(c, depth); wat_append(c->w, ")\n");
+}
+
+/* Emit `e` as an i32 truthiness (0/1). A numeric comparison becomes a direct
+ * iXX/fXX compare, skipping the boxed boolean and $lua_truthy. */
+static void emit_truthy(CG *c, const Expr *e, int depth) {
+    int k = cmp_numeric_kind(c, e);
+    if (k) { emit_cmp_i32(c, e, depth, k); return; }
+    emit_expr(c, e, depth);
+    emit_indent(c, depth); wat_append(c->w, "(call $lua_truthy)\n");
+}
+
 static void emit_binop(CG *c, const Expr *e, int depth) {
     BinOp op = e->as.binop.op;
     if (op == BIN_AND || op == BIN_OR) {
@@ -583,6 +630,16 @@ static void emit_binop(CG *c, const Expr *e, int depth) {
             emit_indent(c, depth + 1); wat_append(c->w, "))\n");
             emit_expr(c, e->as.binop.rhs, depth + 1);
         }
+        emit_indent(c, depth); wat_append(c->w, ")\n");
+        return;
+    }
+    int ck = cmp_numeric_kind(c, e);
+    if (ck) {
+        /* Value context: materialize the i32 compare as a Lua boolean. */
+        emit_indent(c, depth); wat_append(c->w, "(select (result anyref)\n");
+        emit_indent(c, depth + 1); wat_append(c->w, "(global.get $g_true)\n");
+        emit_indent(c, depth + 1); wat_append(c->w, "(global.get $g_false)\n");
+        emit_cmp_i32(c, e, depth + 1, ck);
         emit_indent(c, depth); wat_append(c->w, ")\n");
         return;
     }
@@ -2132,8 +2189,7 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
             if (!push_break_label(c, label)) break;
             emit_indent(c, depth); wat_appendf(c->w, "(block $brk_%d\n", label);
             emit_indent(c, depth + 1); wat_appendf(c->w, "(loop $cont_%d\n", label);
-            emit_expr(c, s->as.while_stmt.cond, depth + 2);
-            emit_indent(c, depth + 2); wat_append(c->w, "(call $lua_truthy)\n");
+            emit_truthy(c, s->as.while_stmt.cond, depth + 2);
             emit_indent(c, depth + 2); wat_append(c->w, "i32.eqz\n");
             emit_indent(c, depth + 2); wat_appendf(c->w, "br_if $brk_%d\n", label);
             emit_block(c, &s->as.while_stmt.body, depth + 2);
@@ -2150,8 +2206,7 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
             emit_indent(c, depth); wat_appendf(c->w, "(block $brk_%d\n", label);
             emit_indent(c, depth + 1); wat_appendf(c->w, "(loop $cont_%d\n", label);
             emit_block(c, &s->as.repeat.body, depth + 2);
-            emit_expr(c, s->as.repeat.cond, depth + 2);
-            emit_indent(c, depth + 2); wat_append(c->w, "(call $lua_truthy)\n");
+            emit_truthy(c, s->as.repeat.cond, depth + 2);
             emit_indent(c, depth + 2); wat_append(c->w, "i32.eqz\n");
             emit_indent(c, depth + 2); wat_appendf(c->w, "br_if $cont_%d\n", label);
             emit_indent(c, depth + 1); wat_append(c->w, ")\n");
@@ -2491,8 +2546,7 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
             wat_appendf(c->w, "(block $if_end_%d\n", label);
             for (size_t i = 0; i < s->as.if_stmt.narms; i++) {
                 IfArm *a = &s->as.if_stmt.arms[i];
-                emit_expr(c, a->cond, depth + 1);
-                emit_indent(c, depth + 1); wat_append(c->w, "(call $lua_truthy)\n");
+                emit_truthy(c, a->cond, depth + 1);
                 emit_indent(c, depth + 1); wat_append(c->w, "(if (then\n");
                 emit_block(c, &a->body, depth + 2);
                 emit_indent(c, depth + 2); wat_appendf(c->w, "br $if_end_%d\n", label);
