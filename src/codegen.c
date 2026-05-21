@@ -2434,6 +2434,7 @@ int codegen_module(const ParseResult *pr, const char *src_name,
         { "$g_mkey_close",      "__close"     },
         { "$g_mkey_tostring",   "__tostring"  },
         { "$g_mkey_metatable",  "__metatable" },
+        { "$g_mkey_name",       "__name"      },
     };
     for (size_t k = 0; k < sizeof(MKEYS)/sizeof(MKEYS[0]); k++)
         emit_global_set_str(&c, MKEYS[k].name, MKEYS[k].key, strlen(MKEYS[k].key));

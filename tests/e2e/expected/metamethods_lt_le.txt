@@ -11,5 +11,5 @@ true
 true
 true
 true
-false	attempt to compare two values
-false	attempt to compare two values
+false	metamethods_lt_le:32: attempt to compare two table values
+false	metamethods_lt_le:33: attempt to compare number with table

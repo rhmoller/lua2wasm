@@ -13,10 +13,10 @@ true
 false
 false
 false
-false	attempt to compare two values
-false	attempt to compare two values
-false	attempt to compare two values
-false	attempt to compare two values
-false	attempt to compare two values
-false	attempt to compare two values
-false	attempt to compare two values
+false	compare_typecheck:30: attempt to compare number with string
+false	compare_typecheck:31: attempt to compare string with number
+false	compare_typecheck:32: attempt to compare number with nil
+false	compare_typecheck:33: attempt to compare nil with number
+false	compare_typecheck:34: attempt to compare two table values
+false	compare_typecheck:37: attempt to compare string with number
+false	compare_typecheck:38: attempt to compare number with string

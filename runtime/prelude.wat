@@ -802,10 +802,36 @@
     (if (ref.is_null (local.get $mm))
       (then (local.set $mm (call $get_metamethod (local.get $b) (local.get $key)))))
     (if (ref.is_null (local.get $mm))
-      (then (throw $LuaError (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 479) (i32.const 29))))))
+      (then (call $throw_compare_error (local.get $a) (local.get $b)) (unreachable)))
     (call $lua_truthy (call $args_first (call $lua_call
       (ref.cast (ref $LuaClosure) (local.get $mm))
       (array.new_fixed $ArgArr 2 (local.get $a) (local.get $b))))))
+
+  ;; Reference luaG_ordererror: "attempt to compare two <T> values" when both
+  ;; operands share a type name, else "attempt to compare <T1> with <T2>".
+  ;; Type names honour __name (via $objtypename). The file:line prefix is added
+  ;; by $throw_at_top. Carved from the "attempt to compare two values" literal
+  ;; (offset 479): "attempt to compare " (19), "attempt to compare two " (23),
+  ;; " values" (7 from offset 501); " with " is built inline.
+  (func $throw_compare_error (param $a anyref) (param $b anyref)
+    (local $ta (ref $LuaArr)) (local $tb (ref $LuaArr))
+    (local.set $ta (call $objtypename (local.get $a)))
+    (local.set $tb (call $objtypename (local.get $b)))
+    (if (call $str_eq (struct.new $LuaString (local.get $ta))
+                      (struct.new $LuaString (local.get $tb)))
+      (then (call $throw_at_top (ref.cast (ref $LuaString) (call $lua_concat
+        (call $lua_concat
+          (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 479) (i32.const 23)))
+          (struct.new $LuaString (local.get $ta)))
+        (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 501) (i32.const 7))))))))
+    (call $throw_at_top (ref.cast (ref $LuaString) (call $lua_concat
+      (call $lua_concat
+        (call $lua_concat
+          (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 479) (i32.const 19)))
+          (struct.new $LuaString (local.get $ta)))
+        (struct.new $LuaString (array.new_fixed $LuaArr 6
+          (i32.const 32) (i32.const 119) (i32.const 105) (i32.const 116) (i32.const 104) (i32.const 32))))  ;; " with "
+      (struct.new $LuaString (local.get $tb))))))
 
   (func $lua_lt_raw (param $a anyref) (param $b anyref) (result i32)
     (if (i32.and
@@ -911,14 +937,40 @@
       (br $wl)))
     (local.get $out))
 
+  ;; Basic type-name bytes for a value: nil/boolean/number/string/table/
+  ;; function. Shared by $builtin_type, $objtypename, and error formatting.
+  (func $basic_type_bytes (param $v anyref) (result (ref $LuaArr))
+    (if (ref.is_null (local.get $v))
+      (then (return (call $bytes_of_lit (i32.const 19)))))            ;; nil
+    (if (ref.test (ref $LuaBool) (local.get $v))
+      (then (return (call $bytes_of_lit (i32.const 7)))))             ;; boolean
+    (if (i32.or (call $is_int (local.get $v)) (call $is_float (local.get $v)))
+      (then (return (call $bytes_of_lit (i32.const 0)))))             ;; number
+    (if (ref.test (ref $LuaString) (local.get $v))
+      (then (return (call $bytes_of_lit (i32.const 1)))))             ;; string
+    (if (ref.test (ref $LuaTable) (local.get $v))
+      (then (return (call $bytes_of_lit (i32.const 2)))))             ;; table
+    (call $bytes_of_lit (i32.const 3)))                               ;; function
+
+  ;; Like $basic_type_bytes, but a table whose metatable carries a string
+  ;; __name field uses that name instead — matching reference Lua's
+  ;; luaT_objtypename (used by tostring and type-aware error messages).
+  (func $objtypename (param $v anyref) (result (ref $LuaArr))
+    (local $nm anyref)
+    (local.set $nm (call $get_metamethod (local.get $v)
+      (ref.as_non_null (global.get $g_mkey_name))))
+    (if (ref.test (ref $LuaString) (local.get $nm))
+      (then (return (struct.get $LuaString $bytes
+        (ref.cast (ref $LuaString) (local.get $nm))))))
+    (call $basic_type_bytes (local.get $v)))
+
   ;; Build "<prefix>: 0x<hex id>" — the address-style string Lua uses for
-  ;; tables/functions/etc. ($off,$len) point at the prefix word in $str_data.
-  (func $obj_addr_string (param $off i32) (param $len i32) (param $id i32)
+  ;; tables/functions/etc. $prefix is the type/name bytes.
+  (func $obj_addr_string (param $prefix (ref $LuaArr)) (param $id i32)
                          (result (ref $LuaString))
     (ref.cast (ref $LuaString) (call $lua_concat
       (call $lua_concat
-        (struct.new $LuaString
-          (array.new_data $LuaArr $str_data (local.get $off) (local.get $len)))
+        (struct.new $LuaString (local.get $prefix))
         (struct.new $LuaString (array.new_fixed $LuaArr 4
           (i32.const 58) (i32.const 32) (i32.const 48) (i32.const 120))))  ;; ": 0x"
       (struct.new $LuaString (call $int_to_hex_bytes (local.get $id))))))
@@ -962,10 +1014,11 @@
     ;; constant address (the "function:" prefix is what callers check; their
     ;; mutual distinctness is a documented minor gap).
     (if (ref.test (ref $LuaTable) (local.get $v))
-      (then (return (call $obj_addr_string (i32.const 31) (i32.const 5)
-        (struct.get $LuaTable $id (ref.cast (ref $LuaTable) (local.get $v)))))))   ;; "table"
+      (then (return (call $obj_addr_string (call $objtypename (local.get $v))
+        (struct.get $LuaTable $id (ref.cast (ref $LuaTable) (local.get $v)))))))   ;; "table" or __name
     (if (ref.test (ref $LuaClosure) (local.get $v))
-      (then (return (call $obj_addr_string (i32.const 36) (i32.const 8)
+      (then (return (call $obj_addr_string
+        (array.new_data $LuaArr $str_data (i32.const 36) (i32.const 8))
         (i32.const 0)))))   ;; "function"
     ;; Unknown type: nil placeholder so we never trap.
     (struct.new $LuaString
@@ -1262,6 +1315,7 @@
   (global $g_mkey_call      (mut (ref null $LuaString)) (ref.null $LuaString))
   (global $g_mkey_tostring  (mut (ref null $LuaString)) (ref.null $LuaString))
   (global $g_mkey_metatable (mut (ref null $LuaString)) (ref.null $LuaString))
+  (global $g_mkey_name      (mut (ref null $LuaString)) (ref.null $LuaString))
 
   ;; --- _G: the global-environment table ---
   ;; Every Lua global (user-declared, library, builtin) is an entry in
@@ -2579,7 +2633,6 @@
 
   (func $builtin_type (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
-    (local $v anyref) (local $bytes (ref null $LuaArr)) (local $b (ref null $LuaString))
     ;; type() with no args is a `bad argument #1` error per the spec, not
     ;; an implicit nil. assert(not pcall(type)) in the upstream suite
     ;; relies on this.
@@ -2594,22 +2647,11 @@
         (struct.new $LuaString
           (array.new_data $LuaArr $str_data
             (i32.const 93) (i32.const 36)))))))
-    (local.set $v (call $args_at (local.get $args) (i32.const 0)))
-    ;; pick canonical type-name bytes via existing $str_data offsets if any;
-    ;; otherwise materialize on the fly. We just store the names inline.
-    (if (ref.is_null (local.get $v))
-      (then (local.set $bytes (call $bytes_of_lit (i32.const 19))))
-      (else (if (ref.test (ref $LuaBool) (local.get $v))
-        (then (local.set $bytes (call $bytes_of_lit (i32.const 7))))
-        (else (if (i32.or (call $is_int (local.get $v)) (call $is_float (local.get $v)))
-          (then (local.set $bytes (call $bytes_of_lit (i32.const 0))))
-          (else (if (ref.test (ref $LuaString) (local.get $v))
-            (then (local.set $bytes (call $bytes_of_lit (i32.const 1))))
-            (else (if (ref.test (ref $LuaTable) (local.get $v))
-              (then (local.set $bytes (call $bytes_of_lit (i32.const 2))))
-              (else (local.set $bytes (call $bytes_of_lit (i32.const 3)))))))))))))
-    (local.set $b (struct.new $LuaString (ref.as_non_null (local.get $bytes))))
-    (array.new_fixed $ArgArr 1 (ref.as_non_null (local.get $b))))
+    ;; type() ignores __name (it reports the basic type); $objtypename, used
+    ;; by tostring and error messages, is the __name-aware variant.
+    (array.new_fixed $ArgArr 1
+      (struct.new $LuaString
+        (call $basic_type_bytes (call $args_at (local.get $args) (i32.const 0))))))
 
   (func $builtin_tostring (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
