@@ -161,9 +161,18 @@ export function makeHelpers({ getInstance, formatFloat, cFormatG }) {
     const exp = () => getInstance().exports;
 
     function readLuaString(v) {
-        const n = exp().lua_str_len(v);
+        const e = exp();
+        const n = e.lua_str_len(v);
         const out = new Uint8Array(n);
-        for (let i = 0; i < n; i++) out[i] = exp().lua_str_byte(v, i);
+        // Pull four bytes per crossing (packed little-endian); out-of-range
+        // typed-array writes are silently ignored, so the tail needs no guard.
+        for (let i = 0; i < n; i += 4) {
+            const w = e.lua_str_word(v, i);
+            out[i] = w;
+            out[i + 1] = w >>> 8;
+            out[i + 2] = w >>> 16;
+            out[i + 3] = w >>> 24;
+        }
         return UTF8_DECODER.decode(out);
     }
 

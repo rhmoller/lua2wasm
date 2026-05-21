@@ -7500,6 +7500,31 @@
     (array.get_u $LuaArr
       (struct.get $LuaString $bytes (ref.cast (ref $LuaString) (local.get $v)))
       (local.get $i)))
+  ;; Read up to four bytes starting at $i, packed little-endian into an i32
+  ;; (bytes past the end read as 0). Lets the host pull a Lua string out in
+  ;; word-sized steps, cutting the JS<->wasm crossings per string ~4x versus
+  ;; one $lua_str_byte call per byte. (No linear memory, so a true bulk copy
+  ;; of the (array i8) into a JS view isn't available; a packed scalar is.)
+  (func (export "lua_str_word") (param $v anyref) (param $i i32) (result i32)
+    (local $a (ref $LuaArr)) (local $n i32) (local $w i32)
+    (local.set $a
+      (struct.get $LuaString $bytes (ref.cast (ref $LuaString) (local.get $v))))
+    (local.set $n (array.len (local.get $a)))
+    (if (i32.lt_u (local.get $i) (local.get $n))
+      (then (local.set $w (array.get_u $LuaArr (local.get $a) (local.get $i)))))
+    (if (i32.lt_u (i32.add (local.get $i) (i32.const 1)) (local.get $n))
+      (then (local.set $w (i32.or (local.get $w) (i32.shl
+        (array.get_u $LuaArr (local.get $a) (i32.add (local.get $i) (i32.const 1)))
+        (i32.const 8))))))
+    (if (i32.lt_u (i32.add (local.get $i) (i32.const 2)) (local.get $n))
+      (then (local.set $w (i32.or (local.get $w) (i32.shl
+        (array.get_u $LuaArr (local.get $a) (i32.add (local.get $i) (i32.const 2)))
+        (i32.const 16))))))
+    (if (i32.lt_u (i32.add (local.get $i) (i32.const 3)) (local.get $n))
+      (then (local.set $w (i32.or (local.get $w) (i32.shl
+        (array.get_u $LuaArr (local.get $a) (i32.add (local.get $i) (i32.const 3)))
+        (i32.const 24))))))
+    (local.get $w))
   ;; Host-callable constructors so JS can build int/float values from
   ;; parsed strings (used by tonumber).
   (func (export "lua_make_int") (param $v i64) (result anyref)

@@ -1,0 +1,4 @@
+[]=0 [x]=1 [xx]=2 [xxx]=3 [xxxx]=4 [xxxxx]=5 [xxxxxx]=6 [xxxxxxx]=7 [xxxxxxxx]=8 [xxxxxxxxx]=9 
+héllo·wörld #=14
+"tab\9q\"uote"
+abcdefghij
