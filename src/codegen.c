@@ -124,6 +124,7 @@ typedef struct {
      * inline i64 ops, boxed to a Lua value only at use-site boundaries. */
     int opt_int;
     const unsigned char *cur_is_int;
+    const unsigned char *cur_is_float;   /* slots proven float-only -> unboxed f64 */
     int cur_n_params;
     /* goto/label state */
     int next_label_id;      /* fresh per function body */
@@ -284,6 +285,8 @@ static void emit_block(CG *c, const Block *b, int depth);
 static void emit_stmt(CG *c, const Stmt *s, int depth);
 static int  expr_is_int(CG *c, const Expr *e);
 static void emit_int_expr(CG *c, const Expr *e, int depth);
+static int  expr_is_float(CG *c, const Expr *e);
+static void emit_float_expr(CG *c, const Expr *e, int depth);
 
 /* ----- literal emission ----- */
 static void emit_int_literal(CG *c, int64_t v, int depth) {
@@ -929,6 +932,87 @@ static void emit_int_expr(CG *c, const Expr *e, int depth) {
     }
 }
 
+/* Is this slot a local proven to hold only floats (declared as f64)? */
+static int slot_is_float(const CG *c, int slot) {
+    if (!c->opt_int || !c->cur_is_float) return 0;
+    if (slot < 0 || slot >= c->cur_n_locals) return 0;
+    return c->cur_is_float[slot];
+}
+
+/* True iff `e` provably evaluates to a Lua float and can be emitted as a raw
+ * f64 via emit_float_expr. `/` is always float; `+ - *` are float when at
+ * least one operand is float and the other is numeric (int promotes). `// % ^`
+ * are left to the generic path for now. */
+static int expr_is_float(CG *c, const Expr *e) {
+    if (!c->opt_int) return 0;
+    switch (e->kind) {
+    case EXPR_FLOAT: return 1;
+    case EXPR_VAR:
+        return e->as.var.kind == VAR_LOCAL && slot_is_float(c, e->as.var.idx);
+    case EXPR_BINOP: {
+        const Expr *l = e->as.binop.lhs, *r = e->as.binop.rhs;
+        int ln = expr_is_int(c, l) || expr_is_float(c, l);
+        int rn = expr_is_int(c, r) || expr_is_float(c, r);
+        switch (e->as.binop.op) {
+        case BIN_DIV: return ln && rn;                               /* always float */
+        case BIN_ADD: case BIN_SUB: case BIN_MUL:
+            return ln && rn && (expr_is_float(c, l) || expr_is_float(c, r));
+        default: return 0;
+        }
+    }
+    case EXPR_UNOP:
+        return e->as.unop.op == UN_NEG && expr_is_float(c, e->as.unop.operand);
+    default: return 0;
+    }
+}
+
+/* Emit a numeric (int- or float-typed) expression as a raw f64, converting an
+ * integer operand with f64.convert_i64_s. */
+static void emit_num_as_f64(CG *c, const Expr *e, int depth) {
+    if (expr_is_float(c, e)) { emit_float_expr(c, e, depth); return; }
+    /* must be integer-typed (the only other case expr_is_float admits) */
+    emit_indent(c, depth); wat_append(c->w, "(f64.convert_i64_s\n");
+    emit_int_expr(c, e, depth + 1);
+    emit_indent(c, depth); wat_append(c->w, ")\n");
+}
+
+/* Emit `e` (which must satisfy expr_is_float) as a raw f64 on the wasm stack. */
+static void emit_float_expr(CG *c, const Expr *e, int depth) {
+    if (!c->ok) return;
+    switch (e->kind) {
+    case EXPR_FLOAT:
+        emit_indent(c, depth);
+        wat_appendf(c->w, "(f64.const %.17g)\n", e->as.f_val);
+        return;
+    case EXPR_VAR:
+        emit_indent(c, depth);
+        wat_appendf(c->w, "(local.get $L%d)\n", e->as.var.idx);
+        return;
+    case EXPR_UNOP: /* UN_NEG */
+        emit_indent(c, depth); wat_append(c->w, "(f64.neg\n");
+        emit_num_as_f64(c, e->as.unop.operand, depth + 1);
+        emit_indent(c, depth); wat_append(c->w, ")\n");
+        return;
+    case EXPR_BINOP: {
+        const char *op = "f64.add";
+        switch (e->as.binop.op) {
+        case BIN_ADD: op = "f64.add"; break;
+        case BIN_SUB: op = "f64.sub"; break;
+        case BIN_MUL: op = "f64.mul"; break;
+        case BIN_DIV: op = "f64.div"; break;
+        default: break;
+        }
+        emit_indent(c, depth); wat_appendf(c->w, "(%s\n", op);
+        emit_num_as_f64(c, e->as.binop.lhs, depth + 1);
+        emit_num_as_f64(c, e->as.binop.rhs, depth + 1);
+        emit_indent(c, depth); wat_append(c->w, ")\n");
+        return;
+    }
+    default:
+        cg_error(c, "emit_float_expr on non-float expression");
+    }
+}
+
 /* Walk one block, clearing out[] entries whose slot has any assignment that
  * isn't a clean single integer expression. Conservative and sound: a slot
  * stays set only if *every* assignment to it is provably integer. */
@@ -1006,6 +1090,76 @@ static void compute_int_slots(CG *c, const Block *body, int n_locals, int n_para
     c->cur_n_locals = saved_n;
 }
 
+/* Float analog of int_kill_*. A slot stays float only if every assignment is a
+ * float-typed expression. Numeric-for control vars are never float-specialized
+ * (no f64 for-loop yet), so they are killed. Requires the final int bitmap. */
+static void float_kill_block(CG *c, const Block *b, unsigned char *out, int *changed);
+
+static void float_kill_stmt(CG *c, const Stmt *s, unsigned char *out, int *changed) {
+    #define KILLF(slot) do { int _s=(slot); if (_s>=0 && _s<c->cur_n_locals && out[_s]) { out[_s]=0; *changed=1; } } while (0)
+    switch (s->kind) {
+    case STMT_LOCAL: {
+        int nn = s->as.local.n_names, nv = s->as.local.n_values;
+        for (int j = 0; j < nn; j++) {
+            if (nv == nn && expr_is_float(c, s->as.local.values[j])) continue;
+            KILLF(s->as.local.local_idxs[j]);
+        }
+        break;
+    }
+    case STMT_ASSIGN: {
+        int nt = s->as.assign.n_targets, nv = s->as.assign.n_values;
+        for (int j = 0; j < nt; j++) {
+            AssignTarget *t = &s->as.assign.targets[j];
+            if (t->kind != TGT_VAR || t->as.var.kind != VAR_LOCAL) continue;
+            if (nt == 1 && nv == 1 && expr_is_float(c, s->as.assign.values[0])) continue;
+            KILLF(t->as.var.idx);
+        }
+        break;
+    }
+    case STMT_FOR_NUM:
+        KILLF(s->as.for_num.local_idx);
+        float_kill_block(c, &s->as.for_num.body, out, changed);
+        break;
+    case STMT_FOR_GEN:
+        for (int j = 0; j < s->as.for_gen.n_names; j++) KILLF(s->as.for_gen.local_idxs[j]);
+        float_kill_block(c, &s->as.for_gen.body, out, changed);
+        break;
+    case STMT_LOCAL_FUNC: KILLF(s->as.local_func.local_idx); break;
+    case STMT_IF:
+        for (size_t a = 0; a < s->as.if_stmt.narms; a++)
+            float_kill_block(c, &s->as.if_stmt.arms[a].body, out, changed);
+        if (s->as.if_stmt.has_else) float_kill_block(c, &s->as.if_stmt.else_body, out, changed);
+        break;
+    case STMT_WHILE:  float_kill_block(c, &s->as.while_stmt.body, out, changed); break;
+    case STMT_DO:     float_kill_block(c, &s->as.do_stmt.body,    out, changed); break;
+    case STMT_REPEAT: float_kill_block(c, &s->as.repeat.body,     out, changed); break;
+    default: break;
+    }
+    #undef KILLF
+}
+
+static void float_kill_block(CG *c, const Block *b, unsigned char *out, int *changed) {
+    for (size_t i = 0; i < b->count; i++) float_kill_stmt(c, b->items[i], out, changed);
+}
+
+/* Fill out[] with float-only slots. Run AFTER compute_int_slots (with the
+ * final int bitmap live on c->cur_is_int, since expr_is_float consults
+ * expr_is_int for mixed int/float operands). */
+static void compute_float_slots(CG *c, const Block *body, int n_locals, int n_params,
+                                const unsigned char *captured, unsigned char *out) {
+    for (int i = 0; i < n_locals; i++)
+        out[i] = (i >= n_params) && !(captured && captured[i])
+                 && !(c->cur_is_int && c->cur_is_int[i]);
+    const unsigned char *saved = c->cur_is_float;
+    int saved_n = c->cur_n_locals;
+    c->cur_is_float = out;
+    c->cur_n_locals = n_locals;
+    int changed = 1;
+    while (changed) { changed = 0; float_kill_block(c, body, out, &changed); }
+    c->cur_is_float = saved;
+    c->cur_n_locals = saved_n;
+}
+
 /* ----- main expression dispatch ----- */
 static void emit_expr(CG *c, const Expr *e, int depth) {
     if (!c->ok) return;
@@ -1014,6 +1168,12 @@ static void emit_expr(CG *c, const Expr *e, int depth) {
     if (c->opt_int && e->kind != EXPR_INT && expr_is_int(c, e)) {
         emit_indent(c, depth); wat_append(c->w, "(call $make_int\n");
         emit_int_expr(c, e, depth + 1);
+        emit_indent(c, depth); wat_append(c->w, ")\n");
+        return;
+    }
+    if (c->opt_int && e->kind != EXPR_FLOAT && expr_is_float(c, e)) {
+        emit_indent(c, depth); wat_append(c->w, "(call $make_float\n");
+        emit_float_expr(c, e, depth + 1);
         emit_indent(c, depth); wat_append(c->w, ")\n");
         return;
     }
@@ -1111,6 +1271,13 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
                     emit_indent(c, depth); wat_append(c->w, ")\n");
                     continue;
                 }
+                if (slot_is_float(c, slot)) {
+                    emit_indent(c, depth);
+                    wat_appendf(c->w, "(local.set $L%d\n", slot);
+                    emit_float_expr(c, s->as.local.values[i], depth + 1);
+                    emit_indent(c, depth); wat_append(c->w, ")\n");
+                    continue;
+                }
                 int boxed = slot_is_boxed(c, slot);
                 emit_indent(c, depth);
                 if (boxed) {
@@ -1142,6 +1309,14 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
                     emit_indent(c, depth);
                     wat_appendf(c->w, "(local.set $L%d\n", t->as.var.idx);
                     emit_int_expr(c, s->as.assign.values[0], depth + 1);
+                    emit_indent(c, depth); wat_append(c->w, ")\n");
+                    break;
+                }
+                if (t->kind == TGT_VAR && t->as.var.kind == VAR_LOCAL
+                    && slot_is_float(c, t->as.var.idx)) {
+                    emit_indent(c, depth);
+                    wat_appendf(c->w, "(local.set $L%d\n", t->as.var.idx);
+                    emit_float_expr(c, s->as.assign.values[0], depth + 1);
                     emit_indent(c, depth); wat_append(c->w, ")\n");
                     break;
                 }
@@ -2033,16 +2208,21 @@ static void emit_user_function(CG *c, const LuaFunc *fn) {
     const unsigned char *prev_captured = c->cur_captured;
     int prev_n_locals = c->cur_n_locals;
     const unsigned char *prev_is_int = c->cur_is_int;
+    const unsigned char *prev_is_float = c->cur_is_float;
     int prev_n_params = c->cur_n_params;
     c->cur_captured = fn->captured;
     c->cur_n_locals = fn->n_locals;
     c->cur_n_params = fn->n_params;
-    unsigned char *isint = NULL;
+    unsigned char *isint = NULL, *isfloat = NULL;
     if (c->opt_int) {
         isint = calloc(fn->n_locals ? fn->n_locals : 1, 1);
         compute_int_slots(c, &fn->body, fn->n_locals, fn->n_params, fn->captured, isint);
+        c->cur_is_int = isint;
+        isfloat = calloc(fn->n_locals ? fn->n_locals : 1, 1);
+        compute_float_slots(c, &fn->body, fn->n_locals, fn->n_params, fn->captured, isfloat);
     }
     c->cur_is_int = isint;
+    c->cur_is_float = isfloat;
 
     /* Run the label pre-pass NOW so block_dispatch_id is populated on
      * every label and goto before we emit the $next_BID i32 locals. */
@@ -2053,6 +2233,8 @@ static void emit_user_function(CG *c, const LuaFunc *fn) {
     for (int i = 0; i < fn->n_locals; i++) {
         if (isint && isint[i]) {
             wat_appendf(w, "    (local $L%d i64)\n", i);
+        } else if (isfloat && isfloat[i]) {
+            wat_appendf(w, "    (local $L%d f64)\n", i);
         } else if (fn->captured && fn->captured[i]) {
             wat_appendf(w, "    (local $L%d (ref $Box))\n", i);
         } else {
@@ -2135,8 +2317,10 @@ static void emit_user_function(CG *c, const LuaFunc *fn) {
     c->cur_captured = prev_captured;
     c->cur_n_locals = prev_n_locals;
     c->cur_is_int = prev_is_int;
+    c->cur_is_float = prev_is_float;
     c->cur_n_params = prev_n_params;
     free(isint);
+    free(isfloat);
 }
 
 /* ---------- tree-shaking (milestone 0 / size opt) ---------- */
@@ -2562,12 +2746,16 @@ static void emit_main_chunk(CG *c) {
     c->cur_captured = pr->main_captured;
     c->cur_n_locals = pr->main_n_locals;
     c->cur_n_params = 0;
-    unsigned char *isint = NULL;
+    unsigned char *isint = NULL, *isfloat = NULL;
     if (c->opt_int) {
         isint = calloc(pr->main_n_locals ? pr->main_n_locals : 1, 1);
         compute_int_slots(c, &pr->main_body, pr->main_n_locals, 0, pr->main_captured, isint);
+        c->cur_is_int = isint;
+        isfloat = calloc(pr->main_n_locals ? pr->main_n_locals : 1, 1);
+        compute_float_slots(c, &pr->main_body, pr->main_n_locals, 0, pr->main_captured, isfloat);
     }
     c->cur_is_int = isint;
+    c->cur_is_float = isfloat;
     /* Pre-pass before locals: dispatch ids must be assigned so the
      * $next_BID i32 locals can be declared up-front. */
     c->next_label_id = 0;
@@ -2576,6 +2764,8 @@ static void emit_main_chunk(CG *c) {
     for (int i = 0; i < pr->main_n_locals; i++) {
         if (isint && isint[i]) {
             wat_appendf(out, "    (local $L%d i64)\n", i);
+        } else if (isfloat && isfloat[i]) {
+            wat_appendf(out, "    (local $L%d f64)\n", i);
         } else if (pr->main_captured && pr->main_captured[i]) {
             wat_appendf(out, "    (local $L%d (ref $Box))\n", i);
         } else {
@@ -2617,7 +2807,9 @@ static void emit_main_chunk(CG *c) {
 
     wat_append(out, "  )\n");
     c->cur_is_int = NULL;
+    c->cur_is_float = NULL;
     free(isint);
+    free(isfloat);
 }
 
 /* Emit the `$str_data` passive data segment: every interned byte of the
