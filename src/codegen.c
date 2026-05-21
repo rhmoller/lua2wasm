@@ -99,6 +99,20 @@ typedef struct LabelScope {
     struct LabelScope *parent;
 } LabelScope;
 
+/* ----- whole-program numeric signatures (LUA2WASM_OPT_INT) -----
+ * Parameter + return unboxing. In Lua 5.5 integer and float are distinct types
+ * (3*3 == 9 but 3.0*3.0 == 9.0), so they are *incomparable*: a value seen as
+ * both must stay boxed (NT_ANY) — unboxing it to one machine type would change
+ * the result. The lattice is therefore NT_UNSET (top, "no evidence yet") above
+ * the two incomparable concretes NT_INT / NT_FLOAT, above NT_ANY (bottom). */
+typedef enum { NT_ANY = 0, NT_INT, NT_FLOAT, NT_UNSET } NumTy;
+typedef struct {
+    NumTy *param_ty;   /* [n_params]; NULL when n_params == 0 */
+    int    n_params;
+    NumTy  ret_ty;     /* single-value return type, NT_ANY if not monomorphic */
+    int    has_site;   /* a direct-call site somewhere targets this function */
+} FuncSig;
+
 /* ----- codegen context ----- */
 typedef struct {
     WatBuilder *w;
@@ -130,7 +144,11 @@ typedef struct {
      * function), so a call f(args) of matching arity can skip the $ArgArr and
      * invoke the function's direct-args entry $user_N_da. */
     const LuaFunc **cur_func_slot;
-    int ret_single;          /* emitting a $user_N_da1 body: return one anyref */
+    int ret_single;          /* emitting a $user_N_da1 body: return one value */
+    NumTy cur_ret_ty;        /* result type of the $user_N_da1 body being emitted */
+    /* Whole-program inferred signatures, indexed by func_idx (opt_int only). */
+    FuncSig *sigs;
+    int n_sigs;
     int cur_n_params;
     /* goto/label state */
     int next_label_id;      /* fresh per function body */
@@ -293,6 +311,7 @@ static int  expr_is_int(CG *c, const Expr *e);
 static void emit_int_expr(CG *c, const Expr *e, int depth);
 static int  expr_is_float(CG *c, const Expr *e);
 static void emit_float_expr(CG *c, const Expr *e, int depth);
+static void emit_num_as_f64(CG *c, const Expr *e, int depth);
 
 /* ----- literal emission ----- */
 static void emit_int_literal(CG *c, int64_t v, int depth) {
@@ -610,6 +629,61 @@ static const LuaFunc *direct_call_target(CG *c, const Expr *e) {
     return K;
 }
 
+/* The inferred signature of a direct-call target, or NULL when unavailable. */
+static const FuncSig *target_sig(CG *c, const LuaFunc *K) {
+    if (!K || !c->sigs || K->func_idx < 0 || K->func_idx >= c->n_sigs) return NULL;
+    return &c->sigs[K->func_idx];
+}
+
+/* The numeric type of `e` in the current context (NT_INT/NT_FLOAT/NT_ANY). */
+static NumTy expr_num_ty(CG *c, const Expr *e) {
+    if (expr_is_int(c, e)) return NT_INT;
+    if (expr_is_float(c, e)) return NT_FLOAT;
+    return NT_ANY;
+}
+
+/* Can a direct call to K reach its typed _da/_da1 entry from here? Each argument
+ * must be emittable at its parameter's declared numeric type (an f64 param also
+ * accepts an int arg, which is converted at the call). When K's params are all
+ * NT_ANY this is always true, matching the original (untyped) direct-args path. */
+static int direct_args_typed_ok(CG *c, const Expr *e, const LuaFunc *K) {
+    const FuncSig *sg = target_sig(c, K);
+    if (!sg) return 0;
+    for (size_t i = 0; i < e->as.call.nargs; i++) {
+        NumTy pt = sg->param_ty ? sg->param_ty[i] : NT_ANY;
+        const Expr *a = e->as.call.args[i];
+        if (pt == NT_INT && !expr_is_int(c, a)) return 0;
+        if (pt == NT_FLOAT && !expr_is_int(c, a) && !expr_is_float(c, a)) return 0;
+    }
+    return 1;
+}
+
+/* Emit each argument of a direct call at its parameter's declared numeric type:
+ * a raw i64 for NT_INT, a raw f64 for NT_FLOAT, else a boxed anyref. */
+static void emit_typed_args(CG *c, const Expr *e, const FuncSig *sg, int depth) {
+    for (size_t i = 0; i < e->as.call.nargs; i++) {
+        NumTy pt = (sg && sg->param_ty) ? sg->param_ty[i] : NT_ANY;
+        const Expr *a = e->as.call.args[i];
+        if (pt == NT_INT)        emit_int_expr(c, a, depth);
+        else if (pt == NT_FLOAT) emit_num_as_f64(c, a, depth);
+        else                     emit_expr(c, a, depth);
+    }
+}
+
+/* Emit a direct call to K's single-value entry $user_K_da1 (closure + typed
+ * args). The result lands as the entry's declared type: raw i64/f64 when K has a
+ * numeric ret_ty, otherwise a single anyref. Callers ensure args are typed-ok. */
+static void emit_typed_direct_call1(CG *c, const Expr *e, const LuaFunc *K, int depth) {
+    const FuncSig *sg = target_sig(c, K);
+    emit_indent(c, depth);
+    wat_appendf(c->w, "(call $user_%d_da1\n", K->func_idx);
+    emit_indent(c, depth + 1); wat_append(c->w, "(ref.cast (ref $LuaClosure)\n");
+    emit_expr(c, e->as.call.callee, depth + 2);
+    emit_indent(c, depth + 1); wat_append(c->w, ")\n");
+    emit_typed_args(c, e, sg, depth + 1);
+    emit_indent(c, depth); wat_append(c->w, ")\n");
+}
+
 /* Build a (ref $ArgArr) from a sequence of argument expressions, splicing
  * the trailing expression's full multi-value result if it is a call or `...`. */
 static void emit_args_array(CG *c, Expr **args, size_t nargs, int depth) {
@@ -682,8 +756,8 @@ static void emit_call_array(CG *c, const Expr *e, int depth) {
         return;
     }
     const LuaFunc *dt = direct_call_target(c, e);
-    if (dt) {
-        /* Direct-args call: pass the closure + unpacked args to $user_N_da,
+    if (dt && direct_args_typed_ok(c, e, dt)) {
+        /* Direct-args call: pass the closure + (typed) args to $user_N_da,
          * no $ArgArr allocation. Returns the result array like $lua_call_any.
          * (Frame push/pop is skipped — a known function needs no __call walk;
          * error positions inside it fall back to the caller's frame, matching
@@ -693,8 +767,7 @@ static void emit_call_array(CG *c, const Expr *e, int depth) {
         emit_indent(c, depth + 1); wat_append(c->w, "(ref.cast (ref $LuaClosure)\n");
         emit_expr(c, e->as.call.callee, depth + 2);
         emit_indent(c, depth + 1); wat_append(c->w, ")\n");
-        for (size_t i = 0; i < e->as.call.nargs; i++)
-            emit_expr(c, e->as.call.args[i], depth + 1);
+        emit_typed_args(c, e, target_sig(c, dt), depth + 1);
         emit_indent(c, depth); wat_append(c->w, ")\n");
         return;
     }
@@ -709,17 +782,12 @@ static void emit_call_array(CG *c, const Expr *e, int depth) {
 /* In expression context we want a single anyref; wrap with $args_first. */
 static void emit_call(CG *c, const Expr *e, int depth) {
     const LuaFunc *dt = direct_call_target(c, e);
-    if (dt) {
+    if (dt && direct_args_typed_ok(c, e, dt)) {
         /* Single-value direct call: invoke the $user_N_da1 entry, which returns
-         * one anyref directly — no $ArgArr and no $args_first. */
-        emit_indent(c, depth);
-        wat_appendf(c->w, "(call $user_%d_da1\n", dt->func_idx);
-        emit_indent(c, depth + 1); wat_append(c->w, "(ref.cast (ref $LuaClosure)\n");
-        emit_expr(c, e->as.call.callee, depth + 2);
-        emit_indent(c, depth + 1); wat_append(c->w, ")\n");
-        for (size_t i = 0; i < e->as.call.nargs; i++)
-            emit_expr(c, e->as.call.args[i], depth + 1);
-        emit_indent(c, depth); wat_append(c->w, ")\n");
+         * one value directly — no $ArgArr and no $args_first. A numeric-returning
+         * call is routed through emit_int/float_expr upstream (expr_is_int/float),
+         * so when we get here ret_ty is ANY and $user_N_da1 yields one anyref. */
+        emit_typed_direct_call1(c, e, dt, depth);
         return;
     }
     emit_indent(c, depth); wat_append(c->w, "(call $args_first\n");
@@ -933,6 +1001,13 @@ static int expr_is_int(CG *c, const Expr *e) {
     case EXPR_UNOP:
         return (e->as.unop.op == UN_NEG || e->as.unop.op == UN_BNOT)
             && expr_is_int(c, e->as.unop.operand);
+    case EXPR_CALL: {
+        /* A direct call to an int-returning function, callable with typed args
+         * from here, yields a raw i64 (its $user_N_da1 returns i64). */
+        const LuaFunc *K = direct_call_target(c, e);
+        const FuncSig *sg = target_sig(c, K);
+        return sg && sg->ret_ty == NT_INT && direct_args_typed_ok(c, e, K);
+    }
     default: return 0;
     }
 }
@@ -981,6 +1056,10 @@ static void emit_int_expr(CG *c, const Expr *e, int depth) {
         emit_indent(c, depth); wat_append(c->w, ")\n");
         return;
     }
+    case EXPR_CALL:
+        /* Guarded by expr_is_int: a direct call to an int-returning function. */
+        emit_typed_direct_call1(c, e, direct_call_target(c, e), depth);
+        return;
     default:
         cg_error(c, "emit_int_expr on non-integer expression");
     }
@@ -1016,6 +1095,13 @@ static int expr_is_float(CG *c, const Expr *e) {
     }
     case EXPR_UNOP:
         return e->as.unop.op == UN_NEG && expr_is_float(c, e->as.unop.operand);
+    case EXPR_CALL: {
+        /* A direct call to a float-returning function (its $user_N_da1 returns
+         * f64), callable with typed args from here. */
+        const LuaFunc *K = direct_call_target(c, e);
+        const FuncSig *sg = target_sig(c, K);
+        return sg && sg->ret_ty == NT_FLOAT && direct_args_typed_ok(c, e, K);
+    }
     default: return 0;
     }
 }
@@ -1062,6 +1148,10 @@ static void emit_float_expr(CG *c, const Expr *e, int depth) {
         emit_indent(c, depth); wat_append(c->w, ")\n");
         return;
     }
+    case EXPR_CALL:
+        /* Guarded by expr_is_float: a direct call to a float-returning function. */
+        emit_typed_direct_call1(c, e, direct_call_target(c, e), depth);
+        return;
     default:
         cg_error(c, "emit_float_expr on non-float expression");
     }
@@ -1129,11 +1219,16 @@ static void int_kill_block(CG *c, const Block *b, unsigned char *out, int *chang
 
 /* Fill out[0..n_locals) with the integer-only slots of one function body.
  * Optimistic start (every non-param, non-captured slot is a candidate), then
- * fixpoint-remove any contradicted by an assignment. */
+ * fixpoint-remove any contradicted by an assignment. A non-NULL param_seed
+ * (the typed direct entries $user_N_da/_da1) additionally seeds parameter slots
+ * marked NT_INT, so an i64 parameter is unboxed in the body. */
 static void compute_int_slots(CG *c, const Block *body, int n_locals, int n_params,
-                              const unsigned char *captured, unsigned char *out) {
-    for (int i = 0; i < n_locals; i++)
-        out[i] = (i >= n_params) && !(captured && captured[i]);
+                              const unsigned char *captured, unsigned char *out,
+                              const NumTy *param_seed) {
+    for (int i = 0; i < n_locals; i++) {
+        if (captured && captured[i]) { out[i] = 0; continue; }
+        out[i] = (i >= n_params) || (param_seed && param_seed[i] == NT_INT);
+    }
     const unsigned char *saved = c->cur_is_int;
     int saved_n = c->cur_n_locals;
     c->cur_is_int = out;
@@ -1200,10 +1295,12 @@ static void float_kill_block(CG *c, const Block *b, unsigned char *out, int *cha
  * final int bitmap live on c->cur_is_int, since expr_is_float consults
  * expr_is_int for mixed int/float operands). */
 static void compute_float_slots(CG *c, const Block *body, int n_locals, int n_params,
-                                const unsigned char *captured, unsigned char *out) {
-    for (int i = 0; i < n_locals; i++)
-        out[i] = (i >= n_params) && !(captured && captured[i])
-                 && !(c->cur_is_int && c->cur_is_int[i]);
+                                const unsigned char *captured, unsigned char *out,
+                                const NumTy *param_seed) {
+    for (int i = 0; i < n_locals; i++) {
+        if ((captured && captured[i]) || (c->cur_is_int && c->cur_is_int[i])) { out[i] = 0; continue; }
+        out[i] = (i >= n_params) || (param_seed && param_seed[i] == NT_FLOAT);
+    }
     const unsigned char *saved = c->cur_is_float;
     int saved_n = c->cur_n_locals;
     c->cur_is_float = out;
@@ -1268,6 +1365,275 @@ static void compute_func_slots(const Block *body, int n_locals,
     for (int i = 0; i < n_locals; i++)
         if (reassigned[i] || (captured && captured[i])) out[i] = NULL;
     free(reassigned);
+}
+
+/* ----- whole-program signature inference (param + return unboxing) -----
+ *
+ * A monotone fixpoint over all functions (and the main chunk). Each function's
+ * parameters start optimistically at NT_INT and are narrowed (a meet over every
+ * direct-call site's argument type) toward NT_FLOAT/NT_ANY; its single-value
+ * return type is recomputed from its body each round. Both lattices only move
+ * downward (INT > FLOAT > ANY), so iteration terminates. Reading optimistic
+ * mid-fixpoint values is sound for the same reason the per-function int-slot
+ * fixpoint above is: contradictions propagate and re-narrow on the next round.
+ *
+ * The inferred signature only types the dedicated $user_N_da/_da1 entries; a
+ * call site uses them only when its arguments are typed-ok (direct_args_typed_ok),
+ * otherwise it falls back to the fully generic path — so over-typing is never
+ * unsound, just occasionally a missed fast path. */
+
+static NumTy num_meet(NumTy a, NumTy b) {
+    if (a == NT_UNSET) return b;
+    if (b == NT_UNSET) return a;
+    return a == b ? a : NT_ANY;   /* INT vs FLOAT (or any disagreement) -> ANY */
+}
+
+/* Does every path through the block end in a `return`? Conservative: only the
+ * trailing statement is examined (an if/else both of whose arms always return,
+ * a do-block, or a literal return). */
+static int block_always_returns(const Block *b);
+static int stmt_always_returns(const Stmt *s) {
+    switch (s->kind) {
+    case STMT_RETURN: return 1;
+    case STMT_DO:     return block_always_returns(&s->as.do_stmt.body);
+    case STMT_IF:
+        if (!s->as.if_stmt.has_else) return 0;
+        for (size_t a = 0; a < s->as.if_stmt.narms; a++)
+            if (!block_always_returns(&s->as.if_stmt.arms[a].body)) return 0;
+        return block_always_returns(&s->as.if_stmt.else_body);
+    default: return 0;
+    }
+}
+static int block_always_returns(const Block *b) {
+    return b->count > 0 && stmt_always_returns(b->items[b->count - 1]);
+}
+
+/* Meet every return's value type into *acc (NT_UNSET is the identity). A return
+ * that isn't a single numeric value, or that disagrees with another (int vs
+ * float), folds *acc to NT_ANY. Skips nested functions. */
+static void ret_scan_block(CG *c, const Block *b, NumTy *acc);
+static void ret_scan_stmt(CG *c, const Stmt *s, NumTy *acc) {
+    switch (s->kind) {
+    case STMT_RETURN:
+        *acc = num_meet(*acc, s->as.return_stmt.n_values == 1
+                              ? expr_num_ty(c, s->as.return_stmt.values[0])
+                              : NT_ANY);
+        return;
+    case STMT_IF:
+        for (size_t a = 0; a < s->as.if_stmt.narms; a++)
+            ret_scan_block(c, &s->as.if_stmt.arms[a].body, acc);
+        if (s->as.if_stmt.has_else) ret_scan_block(c, &s->as.if_stmt.else_body, acc);
+        return;
+    case STMT_WHILE:   ret_scan_block(c, &s->as.while_stmt.body, acc); return;
+    case STMT_DO:      ret_scan_block(c, &s->as.do_stmt.body,    acc); return;
+    case STMT_REPEAT:  ret_scan_block(c, &s->as.repeat.body,     acc); return;
+    case STMT_FOR_NUM: ret_scan_block(c, &s->as.for_num.body,    acc); return;
+    case STMT_FOR_GEN: ret_scan_block(c, &s->as.for_gen.body,    acc); return;
+    default: return;
+    }
+}
+static void ret_scan_block(CG *c, const Block *b, NumTy *acc) {
+    for (size_t i = 0; i < b->count; i++) ret_scan_stmt(c, b->items[i], acc);
+}
+
+/* Single-value return type of fn in the current context, or NT_ANY when the
+ * function may fall through (return nil) or its returns aren't one shared
+ * numeric type. */
+static NumTy compute_ret_ty(CG *c, const LuaFunc *fn) {
+    if (!block_always_returns(&fn->body)) return NT_ANY;
+    NumTy acc = NT_UNSET;
+    ret_scan_block(c, &fn->body, &acc);
+    return acc == NT_UNSET ? NT_ANY : acc;   /* UNSET only if no returns at all */
+}
+
+/* Walk a body in the current context and, at each direct-call site, narrow the
+ * callee's parameter types by meeting them with the argument types here. */
+static void infer_sites_block(CG *c, const Block *b, int *changed);
+static void infer_sites_expr(CG *c, const Expr *e, int *changed) {
+    if (!e) return;
+    switch (e->kind) {
+    case EXPR_CALL: {
+        infer_sites_expr(c, e->as.call.callee, changed);
+        for (size_t i = 0; i < e->as.call.nargs; i++)
+            infer_sites_expr(c, e->as.call.args[i], changed);
+        const LuaFunc *K = direct_call_target(c, e);
+        if (K && K->func_idx >= 0 && K->func_idx < c->n_sigs) {
+            FuncSig *sg = &c->sigs[K->func_idx];
+            sg->has_site = 1;
+            for (size_t i = 0; i < e->as.call.nargs && (int)i < sg->n_params; i++) {
+                if (sg->param_ty[i] == NT_ANY) continue;
+                NumTy nw = num_meet(sg->param_ty[i], expr_num_ty(c, e->as.call.args[i]));
+                if (nw != sg->param_ty[i]) { sg->param_ty[i] = nw; *changed = 1; }
+            }
+        }
+        return;
+    }
+    case EXPR_METHOD_CALL:
+        infer_sites_expr(c, e->as.method_call.recv, changed);
+        for (size_t i = 0; i < e->as.method_call.nargs; i++)
+            infer_sites_expr(c, e->as.method_call.args[i], changed);
+        return;
+    case EXPR_BINOP:
+        infer_sites_expr(c, e->as.binop.lhs, changed);
+        infer_sites_expr(c, e->as.binop.rhs, changed);
+        return;
+    case EXPR_UNOP: infer_sites_expr(c, e->as.unop.operand, changed); return;
+    case EXPR_INDEX:
+        infer_sites_expr(c, e->as.index.table, changed);
+        infer_sites_expr(c, e->as.index.key, changed);
+        return;
+    case EXPR_TABLE:
+        for (int i = 0; i < e->as.table_ctor.n_entries; i++) {
+            infer_sites_expr(c, e->as.table_ctor.entries[i].key, changed);
+            infer_sites_expr(c, e->as.table_ctor.entries[i].value, changed);
+        }
+        return;
+    default: return; /* EXPR_FUNCTION bodies are walked on their own row */
+    }
+}
+static void infer_sites_stmt(CG *c, const Stmt *s, int *changed) {
+    switch (s->kind) {
+    case STMT_LOCAL:
+        for (int i = 0; i < s->as.local.n_values; i++) infer_sites_expr(c, s->as.local.values[i], changed);
+        break;
+    case STMT_ASSIGN:
+        for (int i = 0; i < s->as.assign.n_targets; i++) {
+            AssignTarget *t = &s->as.assign.targets[i];
+            if (t->kind == TGT_INDEX) {
+                infer_sites_expr(c, t->as.index.table, changed);
+                infer_sites_expr(c, t->as.index.key, changed);
+            }
+        }
+        for (int i = 0; i < s->as.assign.n_values; i++) infer_sites_expr(c, s->as.assign.values[i], changed);
+        break;
+    case STMT_EXPR:   infer_sites_expr(c, s->as.expr_stmt.expr, changed); break;
+    case STMT_RETURN:
+        for (int i = 0; i < s->as.return_stmt.n_values; i++) infer_sites_expr(c, s->as.return_stmt.values[i], changed);
+        break;
+    case STMT_IF:
+        for (size_t a = 0; a < s->as.if_stmt.narms; a++) {
+            infer_sites_expr(c, s->as.if_stmt.arms[a].cond, changed);
+            infer_sites_block(c, &s->as.if_stmt.arms[a].body, changed);
+        }
+        if (s->as.if_stmt.has_else) infer_sites_block(c, &s->as.if_stmt.else_body, changed);
+        break;
+    case STMT_WHILE:
+        infer_sites_expr(c, s->as.while_stmt.cond, changed);
+        infer_sites_block(c, &s->as.while_stmt.body, changed);
+        break;
+    case STMT_DO: infer_sites_block(c, &s->as.do_stmt.body, changed); break;
+    case STMT_REPEAT:
+        infer_sites_block(c, &s->as.repeat.body, changed);
+        infer_sites_expr(c, s->as.repeat.cond, changed);
+        break;
+    case STMT_FOR_NUM:
+        infer_sites_expr(c, s->as.for_num.start, changed);
+        infer_sites_expr(c, s->as.for_num.stop, changed);
+        if (s->as.for_num.step) infer_sites_expr(c, s->as.for_num.step, changed);
+        infer_sites_block(c, &s->as.for_num.body, changed);
+        break;
+    case STMT_FOR_GEN:
+        for (int i = 0; i < s->as.for_gen.n_exprs; i++) infer_sites_expr(c, s->as.for_gen.exprs[i], changed);
+        infer_sites_block(c, &s->as.for_gen.body, changed);
+        break;
+    default: break; /* STMT_LOCAL_FUNC body walked on its own row */
+    }
+}
+static void infer_sites_block(CG *c, const Block *b, int *changed) {
+    for (size_t i = 0; i < b->count; i++) infer_sites_stmt(c, b->items[i], changed);
+}
+
+/* One fixpoint step for a single function/main body: rebuild its analysis
+ * context from current signatures, then narrow callees' params and (for a real
+ * function) recompute its own return type. */
+static void infer_step_body(CG *c, const Block *body, int n_locals, int n_params,
+                            const unsigned char *captured, const NumTy *param_seed,
+                            const LuaFunc *fn, int *changed) {
+    const unsigned char *p_int = c->cur_is_int, *p_float = c->cur_is_float;
+    const LuaFunc **p_fs = c->cur_func_slot;
+    int p_nl = c->cur_n_locals, p_np = c->cur_n_params;
+
+    const LuaFunc **fslot = calloc(n_locals ? n_locals : 1, sizeof *fslot);
+    unsigned char *isint = calloc(n_locals ? n_locals : 1, 1);
+    unsigned char *isfloat = calloc(n_locals ? n_locals : 1, 1);
+    compute_func_slots(body, n_locals, captured, fslot);
+    c->cur_func_slot = fslot;
+    compute_int_slots(c, body, n_locals, n_params, captured, isint, param_seed);
+    c->cur_is_int = isint;
+    compute_float_slots(c, body, n_locals, n_params, captured, isfloat, param_seed);
+    c->cur_is_float = isfloat;
+    c->cur_n_locals = n_locals;
+    c->cur_n_params = n_params;
+
+    infer_sites_block(c, body, changed);
+    if (fn) {
+        NumTy r = compute_ret_ty(c, fn);
+        if (r != c->sigs[fn->func_idx].ret_ty) { c->sigs[fn->func_idx].ret_ty = r; *changed = 1; }
+    }
+
+    c->cur_is_int = p_int; c->cur_is_float = p_float; c->cur_func_slot = p_fs;
+    c->cur_n_locals = p_nl; c->cur_n_params = p_np;
+    free(fslot); free(isint); free(isfloat);
+}
+
+/* Allocate and infer c->sigs for every user function. */
+static void infer_signatures(CG *c, const ParseResult *pr) {
+    int n = (int)pr->funcs.count;
+    c->n_sigs = n;
+    c->sigs = calloc(n ? n : 1, sizeof *c->sigs);
+    for (int i = 0; i < n; i++) {
+        const LuaFunc *fn = pr->funcs.items[i];
+        FuncSig *sg = &c->sigs[i];
+        sg->n_params = fn->n_params;
+        sg->ret_ty = NT_INT;            /* optimistic; narrows downward */
+        sg->has_site = 0;
+        sg->param_ty = fn->n_params ? calloc(fn->n_params, sizeof(NumTy)) : NULL;
+        /* A parameter is eligible for unboxing only if it is never reassigned
+         * and never captured; others are pinned to NT_ANY. */
+        int nl = fn->n_locals;
+        unsigned char *reassigned = calloc(nl ? nl : 1, 1);
+        const LuaFunc **scratch = calloc(nl ? nl : 1, sizeof *scratch);
+        func_slot_walk(&fn->body, scratch, reassigned, nl);
+        for (int p = 0; p < fn->n_params; p++) {
+            int pinned = reassigned[p] || (fn->captured && fn->captured[p]);
+            sg->param_ty[p] = pinned ? NT_ANY : NT_UNSET;  /* narrowed by sites */
+        }
+        free(reassigned); free(scratch);
+    }
+
+    int changed = 1;
+    while (changed) {
+        changed = 0;
+        for (int i = 0; i < n; i++) {
+            const LuaFunc *fn = pr->funcs.items[i];
+            infer_step_body(c, &fn->body, fn->n_locals, fn->n_params, fn->captured,
+                            c->sigs[i].param_ty, fn, &changed);
+        }
+        infer_step_body(c, &pr->main_body, pr->main_n_locals, 0, pr->main_captured,
+                        NULL, NULL, &changed);
+    }
+
+    /* Finalize: a parameter with no narrowing evidence (NT_UNSET) becomes ANY,
+     * and a function nothing direct-calls keeps its (dead) entries fully boxed —
+     * matching the pre-unboxing output and avoiding stray unreachable entries. */
+    for (int i = 0; i < n; i++) {
+        FuncSig *sg = &c->sigs[i];
+        if (!sg->has_site) {
+            for (int p = 0; p < sg->n_params; p++) sg->param_ty[p] = NT_ANY;
+            sg->ret_ty = NT_ANY;
+        } else {
+            for (int p = 0; p < sg->n_params; p++)
+                if (sg->param_ty[p] == NT_UNSET) sg->param_ty[p] = NT_ANY;
+        }
+    }
+}
+
+static void free_signatures(CG *c) {
+    if (!c->sigs) return;
+    for (int i = 0; i < c->n_sigs; i++) free(c->sigs[i].param_ty);
+    free(c->sigs);
+    c->sigs = NULL;
+    c->n_sigs = 0;
 }
 
 /* ----- main expression dispatch ----- */
@@ -1543,9 +1909,20 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
             }
             if (c->ret_single) {
                 /* Single-value-return entry ($user_N_da1): produce exactly one
-                 * anyref. A non-vararg body never uses `...`, so a lone
-                 * multi-value tail here is a call, adjusted to one by emit_expr.
-                 * Extra return values still evaluate (side effects), in order. */
+                 * value of the entry's result type. A numeric ret_ty was inferred
+                 * only when every return is a single numeric value, so emit it
+                 * raw (i64/f64). */
+                if ((c->cur_ret_ty == NT_INT || c->cur_ret_ty == NT_FLOAT) && n_values == 1) {
+                    emit_indent(c, depth); wat_append(c->w, "(return\n");
+                    if (c->cur_ret_ty == NT_INT) emit_int_expr(c, s->as.return_stmt.values[0], depth + 1);
+                    else                         emit_num_as_f64(c, s->as.return_stmt.values[0], depth + 1);
+                    emit_indent(c, depth); wat_append(c->w, ")\n");
+                    break;
+                }
+                /* ret_ty == ANY: produce a single anyref. A non-vararg body never
+                 * uses `...`, so a lone multi-value tail here is a call, adjusted
+                 * to one by emit_expr. Extra return values still evaluate (side
+                 * effects), in order. */
                 if (n_values == 0) {
                     emit_indent(c, depth); wat_append(c->w, "(return (ref.null any))\n");
                 } else if (n_values == 1) {
@@ -2328,18 +2705,32 @@ static const char *verify_literal_slab(void) {
     return expect_off == LITERAL_PREFIX_LEN ? NULL : "(slab total length)";
 }
 
+/* WAT type keyword for an inferred numeric type. */
+static const char *num_wat_ty(NumTy t) {
+    return t == NT_INT ? "i64" : t == NT_FLOAT ? "f64" : "anyref";
+}
+
 /* Emit the body of one user function. */
 static void emit_user_function(CG *c, const LuaFunc *fn, int direct, int ret_single) {
     WatBuilder *w = c->w;
+    const FuncSig *sg = (c->opt_int && fn->func_idx >= 0 && fn->func_idx < c->n_sigs)
+                            ? &c->sigs[fn->func_idx] : NULL;
+    /* Typed direct entries seed their parameter slots from the signature; the
+     * generic entry and the main chunk leave parameters boxed. */
+    const NumTy *param_seed = (direct && sg) ? sg->param_ty : NULL;
+    NumTy ret_ty = (direct && ret_single && sg) ? sg->ret_ty : NT_ANY;
     if (direct) {
-        /* Direct-args entry: closure + one anyref param per declared parameter,
-         * no $args/$ArgArr. ret_single ($user_N_da1) returns a single anyref
-         * (no result array); otherwise ($user_N_da) the array-based return.
-         * Same body as $user_N either way. */
+        /* Direct-args entry: closure + one (typed) param per declared parameter,
+         * no $args/$ArgArr. ret_single ($user_N_da1) returns a single value of
+         * the inferred result type; otherwise ($user_N_da) the array-based
+         * return. Same body as $user_N either way. */
         wat_appendf(w, "  (func $user_%d_%s (param $closure (ref $LuaClosure))",
                     fn->func_idx, ret_single ? "da1" : "da");
-        for (int i = 0; i < fn->n_params; i++) wat_appendf(w, " (param $p%d anyref)", i);
-        wat_append(w, ret_single ? " (result anyref)\n" : " (result (ref $ArgArr))\n");
+        for (int i = 0; i < fn->n_params; i++)
+            wat_appendf(w, " (param $p%d %s)", i,
+                        num_wat_ty(param_seed ? param_seed[i] : NT_ANY));
+        if (ret_single) wat_appendf(w, " (result %s)\n", num_wat_ty(ret_ty));
+        else            wat_append(w, " (result (ref $ArgArr))\n");
     } else {
         wat_appendf(w,
             "  (func $user_%d (type $LuaFn) "
@@ -2361,13 +2752,17 @@ static void emit_user_function(CG *c, const LuaFunc *fn, int direct, int ret_sin
     unsigned char *isint = NULL, *isfloat = NULL;
     const LuaFunc **fslot = NULL;
     if (c->opt_int) {
-        isint = calloc(fn->n_locals ? fn->n_locals : 1, 1);
-        compute_int_slots(c, &fn->body, fn->n_locals, fn->n_params, fn->captured, isint);
-        c->cur_is_int = isint;
-        isfloat = calloc(fn->n_locals ? fn->n_locals : 1, 1);
-        compute_float_slots(c, &fn->body, fn->n_locals, fn->n_params, fn->captured, isfloat);
+        /* func slots first: the int/float slot analysis recognizes direct calls
+         * (expr_is_int on EXPR_CALL needs cur_func_slot), so a slot assigned the
+         * result of an int-returning call is itself typed int. */
         fslot = calloc(fn->n_locals ? fn->n_locals : 1, sizeof *fslot);
         compute_func_slots(&fn->body, fn->n_locals, fn->captured, fslot);
+        c->cur_func_slot = fslot;
+        isint = calloc(fn->n_locals ? fn->n_locals : 1, 1);
+        compute_int_slots(c, &fn->body, fn->n_locals, fn->n_params, fn->captured, isint, param_seed);
+        c->cur_is_int = isint;
+        isfloat = calloc(fn->n_locals ? fn->n_locals : 1, 1);
+        compute_float_slots(c, &fn->body, fn->n_locals, fn->n_params, fn->captured, isfloat, param_seed);
     }
     c->cur_is_int = isint;
     c->cur_is_float = isfloat;
@@ -2450,17 +2845,25 @@ static void emit_user_function(CG *c, const LuaFunc *fn, int direct, int ret_sin
 
     int was_in_main = c->in_main;
     int prev_ret_single = c->ret_single;
+    NumTy prev_ret_ty = c->cur_ret_ty;
     c->in_main = 0;
     c->ret_single = ret_single;
+    c->cur_ret_ty = ret_ty;
     if (c->ok) emit_block(c, &fn->body, 2);
     c->next_label_id = saved_next_id_pre;
     c->in_main = was_in_main;
     c->ret_single = prev_ret_single;
+    c->cur_ret_ty = prev_ret_ty;
 
-    /* Default trailing return — nil for the single-value entry, else the
-     * empty results array. */
-    wat_append(w, ret_single ? "    (ref.null any)\n"
-                             : "    (global.get $g_empty_args)\n");
+    /* Default trailing fall-through value. A numeric ret_ty implies the body
+     * always returns (block_always_returns), so this default is dead but must
+     * still type-check; otherwise it is nil / the empty results array. */
+    if (ret_single)
+        wat_appendf(w, "    %s\n", ret_ty == NT_INT ? "(i64.const 0)"
+                                 : ret_ty == NT_FLOAT ? "(f64.const 0)"
+                                 : "(ref.null any)");
+    else
+        wat_append(w, "    (global.get $g_empty_args)\n");
     wat_append(w, "  )\n");
 
     /* Declare so the funcref is usable in const init / closures. The direct
@@ -2905,13 +3308,14 @@ static void emit_main_chunk(CG *c) {
     unsigned char *isint = NULL, *isfloat = NULL;
     const LuaFunc **fslot = NULL;
     if (c->opt_int) {
-        isint = calloc(pr->main_n_locals ? pr->main_n_locals : 1, 1);
-        compute_int_slots(c, &pr->main_body, pr->main_n_locals, 0, pr->main_captured, isint);
-        c->cur_is_int = isint;
-        isfloat = calloc(pr->main_n_locals ? pr->main_n_locals : 1, 1);
-        compute_float_slots(c, &pr->main_body, pr->main_n_locals, 0, pr->main_captured, isfloat);
         fslot = calloc(pr->main_n_locals ? pr->main_n_locals : 1, sizeof *fslot);
         compute_func_slots(&pr->main_body, pr->main_n_locals, pr->main_captured, fslot);
+        c->cur_func_slot = fslot;
+        isint = calloc(pr->main_n_locals ? pr->main_n_locals : 1, 1);
+        compute_int_slots(c, &pr->main_body, pr->main_n_locals, 0, pr->main_captured, isint, NULL);
+        c->cur_is_int = isint;
+        isfloat = calloc(pr->main_n_locals ? pr->main_n_locals : 1, 1);
+        compute_float_slots(c, &pr->main_body, pr->main_n_locals, 0, pr->main_captured, isfloat, NULL);
     }
     c->cur_is_int = isint;
     c->cur_is_float = isfloat;
@@ -3008,6 +3412,9 @@ int codegen_module(const ParseResult *pr, const char *src_name,
     /* Integer-specialization PoC: opt-in via env so the default pipeline and
      * golden output are byte-for-byte unchanged. */
     c.opt_int = getenv("LUA2WASM_OPT_INT") != NULL;
+    /* Whole-program pre-pass: infer per-function param/return numeric types used
+     * to unbox the typed direct-call entries. */
+    if (c.opt_int) infer_signatures(&c, pr);
     strpool_add(&c.strs, LITERAL_PREFIX, LITERAL_PREFIX_LEN);
 
     wat_append(out, "(module\n");
@@ -3175,9 +3582,11 @@ int codegen_module(const ParseResult *pr, const char *src_name,
         snprintf(err, errlen, "%s", c.err);
         free(c.strs.bytes);
         free(live); free(gref);
+        free_signatures(&c);
         return 0;
     }
     free(c.strs.bytes);
     free(live); free(gref);
+    free_signatures(&c);
     return 1;
 }
