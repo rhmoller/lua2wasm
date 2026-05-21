@@ -25,6 +25,7 @@ iterator	tests/fixtures/iterator.lua
 leading_zero_int	tests/fixtures/leading_zero_int.lua
 local_prefix_attr	tests/fixtures/local_prefix_attr.lua
 long_brackets	tests/fixtures/long_brackets.lua
+long_number_literal	tests/fixtures/long_number_literal.lua
 math_atan_log	tests/fixtures/math_atan_log.lua
 math_deg_rad	tests/fixtures/math_deg_rad.lua
 math_fillers	tests/fixtures/math_fillers.lua

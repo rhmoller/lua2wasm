@@ -23,37 +23,44 @@ static unsigned hex_val(int c) {
     return (unsigned)(isdigit(c) ? c - '0' : (c | 32) - 'a' + 10);
 }
 
-typedef struct { const char *kw; TokKind kind; } Keyword;
+typedef struct { const char *kw; size_t len; TokKind kind; } Keyword;
+/* Lengths are precomputed so keyword_or_ident never re-runs strlen, and the
+ * table is kept sorted by length then first char so we can prefilter cheaply. */
 static const Keyword KEYWORDS[] = {
-    { "and",      TOK_KW_AND },
-    { "break",    TOK_KW_BREAK },
-    { "do",       TOK_KW_DO },
-    { "else",     TOK_KW_ELSE },
-    { "elseif",   TOK_KW_ELSEIF },
-    { "end",      TOK_KW_END },
-    { "false",    TOK_KW_FALSE },
-    { "for",      TOK_KW_FOR },
-    { "function", TOK_KW_FUNCTION },
-    { "goto",     TOK_KW_GOTO },
-    { "if",       TOK_KW_IF },
-    { "in",       TOK_KW_IN },
-    { "local",    TOK_KW_LOCAL },
-    { "nil",      TOK_KW_NIL },
-    { "not",      TOK_KW_NOT },
-    { "or",       TOK_KW_OR },
-    { "repeat",   TOK_KW_REPEAT },
-    { "return",   TOK_KW_RETURN },
-    { "then",     TOK_KW_THEN },
-    { "true",     TOK_KW_TRUE },
-    { "until",    TOK_KW_UNTIL },
-    { "while",    TOK_KW_WHILE },
+    { "do",       2, TOK_KW_DO },
+    { "if",       2, TOK_KW_IF },
+    { "in",       2, TOK_KW_IN },
+    { "or",       2, TOK_KW_OR },
+    { "and",      3, TOK_KW_AND },
+    { "end",      3, TOK_KW_END },
+    { "for",      3, TOK_KW_FOR },
+    { "nil",      3, TOK_KW_NIL },
+    { "not",      3, TOK_KW_NOT },
+    { "else",     4, TOK_KW_ELSE },
+    { "goto",     4, TOK_KW_GOTO },
+    { "then",     4, TOK_KW_THEN },
+    { "true",     4, TOK_KW_TRUE },
+    { "break",    5, TOK_KW_BREAK },
+    { "false",    5, TOK_KW_FALSE },
+    { "local",    5, TOK_KW_LOCAL },
+    { "until",    5, TOK_KW_UNTIL },
+    { "while",    5, TOK_KW_WHILE },
+    { "elseif",   6, TOK_KW_ELSEIF },
+    { "repeat",   6, TOK_KW_REPEAT },
+    { "return",   6, TOK_KW_RETURN },
+    { "function", 8, TOK_KW_FUNCTION },
 };
 
 static TokKind keyword_or_ident(const char *start, size_t len) {
+    /* Keywords are 2..8 bytes; skip the scan entirely for anything outside
+     * that range. Within range, prefilter on the precomputed length and the
+     * first byte before falling back to a full memcmp. */
+    if (len < 2 || len > 8) return TOK_IDENT;
+    char first = start[0];
     for (size_t i = 0; i < sizeof(KEYWORDS) / sizeof(KEYWORDS[0]); i++) {
-        if (strlen(KEYWORDS[i].kw) == len && memcmp(KEYWORDS[i].kw, start, len) == 0) {
-            return KEYWORDS[i].kind;
-        }
+        if (KEYWORDS[i].len != len) continue;
+        if (KEYWORDS[i].kw[0] != first) continue;
+        if (memcmp(KEYWORDS[i].kw, start, len) == 0) return KEYWORDS[i].kind;
     }
     return TOK_IDENT;
 }
@@ -236,7 +243,11 @@ static int read_string(Lex *L, char q, char **out_buf, size_t *out_len) {
  * — that is, `[` followed by N>=0 `=`s followed by another `[`. Returns
  * the level N on success (advancing L->p past the opener and the
  * optional leading newline). Returns -1 if not a long bracket and
- * leaves L->p unchanged. */
+ * leaves L->p unchanged.
+ *
+ * Contract: `source` passed to lex() is a NUL-terminated C string, so the
+ * unbounded `L->p[1 + level]` walk is safe — a run of '=' can never reach
+ * past the terminating '\0', which is neither '=' nor '[' and stops the loop. */
 static int try_open_long_bracket(Lex *L) {
     if (L->p[0] != '[') return -1;
     int level = 0;
@@ -249,7 +260,9 @@ static int try_open_long_bracket(Lex *L) {
 
 /* Read the body of a long bracket until the matching close "]=...=]".
  * Sets *out_buf / *out_len to the body bytes (caller frees). Returns 1
- * on success, 0 if EOF was hit before the close. */
+ * on success, 0 if EOF was hit before the close. Relies on the same
+ * NUL-termination contract as try_open_long_bracket: the outer `while (*L->p)`
+ * bounds the scan, and the inner `L->p[1 + n]` run of '=' can't pass '\0'. */
 static int read_long_body(Lex *L, int level, char **out_buf, size_t *out_len) {
     const char *start = L->p;
     while (*L->p) {
@@ -344,28 +357,40 @@ TokenList lex(const char *source) {
                 }
             }
             t.len = (size_t)(L.p - s);
-            char tmp[64];
-            size_t n = t.len < 63 ? t.len : 63;
-            memcpy(tmp, s, n); tmp[n] = '\0';
-            if (is_float) {
-                t.kind = TOK_FLOAT;
-                /* strtod handles both decimal and C99 hex floats (0x1.8p3). */
-                t.f_val = strtod(tmp, NULL);
-            } else if (is_hex) {
+            if (is_hex && !is_float) {
                 /* Hex int literals wrap mod 2^64 per Lua 5.5: a 26-digit
                  * literal denotes its low 64 bits. strtoll saturates at
-                 * LLONG_MAX, so accumulate ourselves in a u64. */
+                 * LLONG_MAX, so accumulate ourselves in a u64 directly over
+                 * the source span — no copy, no truncation. */
                 t.kind = TOK_INT;
                 unsigned long long acc = 0;
-                for (size_t k = 2; k < n; k++) {  /* skip "0x" prefix */
-                    acc = (acc << 4) | hex_val((unsigned char)tmp[k]);
+                for (size_t k = 2; k < t.len; k++) {  /* skip "0x" prefix */
+                    acc = (acc << 4) | hex_val((unsigned char)s[k]);
                 }
                 t.i_val = (long long)acc;
+            } else if (is_float) {
+                /* strtod/strtoll need NUL-terminated input. Use a stack buffer
+                 * for the common short literal and only allocate for an
+                 * over-long span, so a long literal is parsed in full rather
+                 * than silently truncated to 63 chars. */
+                t.kind = TOK_FLOAT;
+                char stackbuf[64];
+                char *num = stackbuf;
+                if (t.len >= sizeof(stackbuf)) num = xmalloc(t.len + 1);
+                memcpy(num, s, t.len); num[t.len] = '\0';
+                /* strtod handles both decimal and C99 hex floats (0x1.8p3). */
+                t.f_val = strtod(num, NULL);
+                if (num != stackbuf) free(num);
             } else {
                 t.kind = TOK_INT;
+                char stackbuf[64];
+                char *num = stackbuf;
+                if (t.len >= sizeof(stackbuf)) num = xmalloc(t.len + 1);
+                memcpy(num, s, t.len); num[t.len] = '\0';
                 /* Lua has no octal integer syntax — a leading zero is just
                  * a decimal digit. */
-                t.i_val = strtoll(tmp, NULL, 10);
+                t.i_val = strtoll(num, NULL, 10);
+                if (num != stackbuf) free(num);
             }
             push_tok(&v, t);
             continue;
@@ -453,12 +478,15 @@ TokenList lex(const char *source) {
                         if (*L.p == '+' || *L.p == '-') L.p++;
                         while (isdigit((unsigned char)*L.p)) L.p++;
                     }
-                    char tmp[64]; size_t n = (size_t)(L.p - s);
-                    if (n >= 63) n = 63;
-                    memcpy(tmp, s, n); tmp[n] = '\0';
+                    size_t n = (size_t)(L.p - s);
+                    char stackbuf[64];
+                    char *num = stackbuf;
+                    if (n >= sizeof(stackbuf)) num = xmalloc(n + 1);
+                    memcpy(num, s, n); num[n] = '\0';
                     t.kind = TOK_FLOAT;
-                    t.f_val = strtod(tmp, NULL);
-                    t.len = (size_t)(L.p - s);
+                    t.f_val = strtod(num, NULL);
+                    if (num != stackbuf) free(num);
+                    t.len = n;
                 } else ONE(TOK_DOT);
                 break;
             default:
@@ -490,69 +518,75 @@ void tokenlist_free(TokenList *t) {
     t->count = 0;
 }
 
+/* Display names indexed by TokKind. Designated initializers keep this in sync
+ * with the enum regardless of declaration order; the keyword spellings match
+ * KEYWORDS[] above so recognition and reporting never drift apart. */
+static const char *const TOK_NAMES[] = {
+    [TOK_EOF] = "EOF",
+    [TOK_ERROR] = "ERROR",
+    [TOK_IDENT] = "IDENT",
+    [TOK_INT] = "INT",
+    [TOK_FLOAT] = "FLOAT",
+    [TOK_STRING] = "STRING",
+    [TOK_LPAREN] = "(",
+    [TOK_RPAREN] = ")",
+    [TOK_LBRACE] = "{",
+    [TOK_RBRACE] = "}",
+    [TOK_LBRACKET] = "[",
+    [TOK_RBRACKET] = "]",
+    [TOK_COMMA] = ",",
+    [TOK_SEMI] = ";",
+    [TOK_COLON] = ":",
+    [TOK_DBLCOLON] = "::",
+    [TOK_DOT] = ".",
+    [TOK_CONCAT] = "..",
+    [TOK_ELLIPSIS] = "...",
+    [TOK_ASSIGN] = "=",
+    [TOK_PLUS] = "+",
+    [TOK_MINUS] = "-",
+    [TOK_STAR] = "*",
+    [TOK_SLASH] = "/",
+    [TOK_DSLASH] = "//",
+    [TOK_PERCENT] = "%",
+    [TOK_CARET] = "^",
+    [TOK_HASH] = "#",
+    [TOK_EQ] = "==",
+    [TOK_NEQ] = "~=",
+    [TOK_LT] = "<",
+    [TOK_LE] = "<=",
+    [TOK_GT] = ">",
+    [TOK_GE] = ">=",
+    [TOK_AMP] = "&",
+    [TOK_PIPE] = "|",
+    [TOK_TILDE] = "~",
+    [TOK_SHL] = "<<",
+    [TOK_SHR] = ">>",
+    [TOK_KW_AND] = "and",
+    [TOK_KW_BREAK] = "break",
+    [TOK_KW_DO] = "do",
+    [TOK_KW_ELSE] = "else",
+    [TOK_KW_ELSEIF] = "elseif",
+    [TOK_KW_END] = "end",
+    [TOK_KW_FALSE] = "false",
+    [TOK_KW_FOR] = "for",
+    [TOK_KW_FUNCTION] = "function",
+    [TOK_KW_GOTO] = "goto",
+    [TOK_KW_IF] = "if",
+    [TOK_KW_IN] = "in",
+    [TOK_KW_LOCAL] = "local",
+    [TOK_KW_NIL] = "nil",
+    [TOK_KW_NOT] = "not",
+    [TOK_KW_OR] = "or",
+    [TOK_KW_REPEAT] = "repeat",
+    [TOK_KW_RETURN] = "return",
+    [TOK_KW_THEN] = "then",
+    [TOK_KW_TRUE] = "true",
+    [TOK_KW_UNTIL] = "until",
+    [TOK_KW_WHILE] = "while",
+};
+
 const char *tok_kind_name(TokKind k) {
-    switch (k) {
-        case TOK_EOF: return "EOF";
-        case TOK_ERROR: return "ERROR";
-        case TOK_IDENT: return "IDENT";
-        case TOK_INT: return "INT";
-        case TOK_FLOAT: return "FLOAT";
-        case TOK_STRING: return "STRING";
-        case TOK_LPAREN: return "(";
-        case TOK_RPAREN: return ")";
-        case TOK_LBRACE: return "{";
-        case TOK_RBRACE: return "}";
-        case TOK_LBRACKET: return "[";
-        case TOK_RBRACKET: return "]";
-        case TOK_COMMA: return ",";
-        case TOK_SEMI: return ";";
-        case TOK_COLON: return ":";
-        case TOK_DBLCOLON: return "::";
-        case TOK_DOT: return ".";
-        case TOK_CONCAT: return "..";
-        case TOK_ELLIPSIS: return "...";
-        case TOK_ASSIGN: return "=";
-        case TOK_PLUS: return "+";
-        case TOK_MINUS: return "-";
-        case TOK_STAR: return "*";
-        case TOK_SLASH: return "/";
-        case TOK_DSLASH: return "//";
-        case TOK_PERCENT: return "%";
-        case TOK_CARET: return "^";
-        case TOK_HASH: return "#";
-        case TOK_EQ: return "==";
-        case TOK_NEQ: return "~=";
-        case TOK_LT: return "<";
-        case TOK_LE: return "<=";
-        case TOK_GT: return ">";
-        case TOK_GE: return ">=";
-        case TOK_AMP: return "&";
-        case TOK_PIPE: return "|";
-        case TOK_TILDE: return "~";
-        case TOK_SHL: return "<<";
-        case TOK_SHR: return ">>";
-        case TOK_KW_AND: return "and";
-        case TOK_KW_BREAK: return "break";
-        case TOK_KW_DO: return "do";
-        case TOK_KW_ELSE: return "else";
-        case TOK_KW_ELSEIF: return "elseif";
-        case TOK_KW_END: return "end";
-        case TOK_KW_FALSE: return "false";
-        case TOK_KW_FOR: return "for";
-        case TOK_KW_FUNCTION: return "function";
-        case TOK_KW_GOTO: return "goto";
-        case TOK_KW_IF: return "if";
-        case TOK_KW_IN: return "in";
-        case TOK_KW_LOCAL: return "local";
-        case TOK_KW_NIL: return "nil";
-        case TOK_KW_NOT: return "not";
-        case TOK_KW_OR: return "or";
-        case TOK_KW_REPEAT: return "repeat";
-        case TOK_KW_RETURN: return "return";
-        case TOK_KW_THEN: return "then";
-        case TOK_KW_TRUE: return "true";
-        case TOK_KW_UNTIL: return "until";
-        case TOK_KW_WHILE: return "while";
-    }
-    return "?";
+    if ((size_t)k >= sizeof(TOK_NAMES) / sizeof(TOK_NAMES[0]) || !TOK_NAMES[k])
+        return "?";
+    return TOK_NAMES[k];
 }

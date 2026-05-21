@@ -7,7 +7,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { formatFloat, formatScalar, cFormatG } from "./format.mjs";
 import { MATH_FNS, MATH2_FNS, makeHelpers,
-         BufferedFile, parseFileMode, FMT_BUF_CAP } from "./host-bindings.mjs";
+         BufferedFile, parseFileMode,
+         UTF8_ENCODER, writeBytesToFmtBuf } from "./host-bindings.mjs";
 
 const wasmPath = process.argv[2];
 if (!wasmPath) {
@@ -28,64 +29,29 @@ const cpuStart = process.cpuUsage();
 
 const bytes = await readFile(wasmPath);
 
-// io.read backing: pulls all of stdin synchronously at first call and
-// keeps a byte cursor.
-let stdinBuf = null;
-let stdinPos = 0;
+// io.read backing: stdin is just another BufferedFile, pulled in
+// synchronously on first access and read through the same cursor/slice
+// logic as on-disk files (no duplicated mode/regex handling).
+let stdinFile = null;
 function ensureStdin() {
-    if (stdinBuf !== null) return;
-    try {
-        stdinBuf = new TextEncoder().encode(readFileSync(0, "utf8"));
-    } catch { stdinBuf = new Uint8Array(0); }
+    if (stdinFile !== null) return stdinFile;
+    let bytes;
+    try { bytes = UTF8_ENCODER.encode(readFileSync(0, "utf8")); }
+    catch { bytes = new Uint8Array(0); }
+    stdinFile = new BufferedFile(bytes);
+    return stdinFile;
 }
-function writeBytesToFmtBuf(slice) {
-    const n = Math.min(slice.length, FMT_BUF_CAP);
-    for (let i = 0; i < n; i++)
-        instance.exports.fmt_buf_set(i, slice[i]);
-    return n;
-}
-// mode 0 = "l", 1 = "L", 2 = "a", 3 = N-byte count
+// mode 0 = "l", 1 = "L", 2 = "a", 3 = N-byte count. Mirrors fsRead's
+// wrapping: write the slice into $fmt_buf and return its length, or -1 at
+// EOF for line/N modes (mode 2 yields an empty slice -> 0, never -1).
 function hostRead(mode, count) {
-    ensureStdin();
-    if (mode === 2) {
-        // Chunked: hand back at most a buffer's worth and advance the
-        // cursor; 0 at EOF lets the WAT "a" loop terminate.
-        if (stdinPos >= stdinBuf.length) return 0;
-        const end = Math.min(stdinPos + FMT_BUF_CAP, stdinBuf.length);
-        const slice = stdinBuf.subarray(stdinPos, end);
-        stdinPos = end;
-        return writeBytesToFmtBuf(slice);
-    }
-    if (mode === 3) {
-        if (count === 0) return stdinPos >= stdinBuf.length ? -1 : 0;
-        if (stdinPos >= stdinBuf.length) return -1;
-        const end = Math.min(stdinPos + count, stdinBuf.length);
-        const slice = stdinBuf.subarray(stdinPos, end);
-        stdinPos = end;
-        return writeBytesToFmtBuf(slice);
-    }
-    if (stdinPos >= stdinBuf.length) return -1;
-    let end = stdinPos;
-    while (end < stdinBuf.length && stdinBuf[end] !== 0x0A) end++;
-    const includeNewline = mode === 1 && end < stdinBuf.length;
-    const slice = stdinBuf.subarray(stdinPos, end + (includeNewline ? 1 : 0));
-    stdinPos = end + (end < stdinBuf.length ? 1 : 0);
-    return writeBytesToFmtBuf(slice);
+    const slice = ensureStdin().read(mode, count);
+    if (slice === null) return -1;
+    return writeBytesToFmtBuf(instance.exports, slice);
 }
 function hostReadNum() {
-    ensureStdin();
-    while (stdinPos < stdinBuf.length) {
-        const b = stdinBuf[stdinPos];
-        if (b === 0x20 || b === 0x09 || b === 0x0A || b === 0x0D
-         || b === 0x0B || b === 0x0C) stdinPos++;
-        else break;
-    }
-    if (stdinPos >= stdinBuf.length) return null;
-    const tail = new TextDecoder().decode(stdinBuf.subarray(stdinPos));
-    const m = /^[+-]?(0[xX][0-9a-fA-F]+(\.[0-9a-fA-F]*)?([pP][+-]?[0-9]+)?|[0-9]+\.?[0-9]*([eE][+-]?[0-9]+)?|\.[0-9]+([eE][+-]?[0-9]+)?)/.exec(tail);
-    if (!m) return null;
-    stdinPos += new TextEncoder().encode(m[0]).length;
-    return helpers.parseNumberFromString(m[0]);
+    const s = ensureStdin().readNumStr();
+    return s === null ? null : helpers.parseNumberFromString(s);
 }
 
 // --- filesystem: an fd registry over node:fs, with BufferedFile doing
@@ -95,12 +61,10 @@ function hostReadNum() {
 const openFiles = new Map();   // fd -> { file: BufferedFile, path, writable }
 let nextFd = 3;                // 0/1/2 are the conceptual std streams
 function fmtBufBytes(bytes) {
-    const n = Math.min(bytes.length, FMT_BUF_CAP);
-    for (let i = 0; i < n; i++) instance.exports.fmt_buf_set(i, bytes[i]);
-    return n;
+    return writeBytesToFmtBuf(instance.exports, bytes);
 }
 function fmtBufErr(msg) {
-    return -(fmtBufBytes(new TextEncoder().encode(msg)) + 1);
+    return -(fmtBufBytes(UTF8_ENCODER.encode(msg)) + 1);
 }
 function errnoText(e) {
     switch (e && e.code) {
@@ -148,7 +112,7 @@ function fsReadNum(fd) {
 function fsWrite(fd, valRef) {
     const e = openFiles.get(fd);
     if (!e) return -1;
-    e.file.write(new TextEncoder().encode(luaToString(valRef)));
+    e.file.write(UTF8_ENCODER.encode(luaToString(valRef)));
     return 0;
 }
 function fsSeek(fd, whence, offset) {
@@ -184,7 +148,7 @@ function osRename(oldRef, newRef) {
 function osTmpname() {
     const name = join(tmpdir(),
         "lua_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2));
-    return fmtBufBytes(new TextEncoder().encode(name));
+    return fmtBufBytes(UTF8_ENCODER.encode(name));
 }
 
 ({ instance } = await WebAssembly.instantiate(bytes, {
@@ -195,9 +159,12 @@ function osTmpname() {
         write_err: (v) => { process.stderr.write(luaToString(v)); },
         warn:      (v) => { process.stderr.write("Lua warning: " + luaToString(v) + "\n"); },
         fmt:       (kind, i, f, prec) => {
-            const s = formatScalar(kind, i, f, prec);
-            for (let j = 0; j < s.length; j++) instance.exports.fmt_buf_set(j, s.charCodeAt(j));
-            return s.length;
+            // Encode to bytes (not per-UTF-16-unit charCodeAt, which would
+            // truncate non-ASCII) and return the byte length the WAT side
+            // reads back. Only numbers flow through today, so this is ASCII
+            // in practice, but the byte path keeps it correct regardless.
+            return writeBytesToFmtBuf(instance.exports,
+                UTF8_ENCODER.encode(formatScalar(kind, i, f, prec)));
         },
         math:      (kind, x)      => MATH_FNS[kind](x),
         math2:     (kind, x, y)   => MATH2_FNS[kind](x, y),

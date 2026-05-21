@@ -29,13 +29,38 @@ export const MATH2_FNS = [Math.atan2, cPow];
 
 export const FMT_BUF_CAP = 16384;
 
+// Shared, reusable codec singletons. Constructing a TextEncoder/TextDecoder
+// per I/O call is wasteful (they're stateless for our usage); hoist them so
+// every path here and in host.mjs reuses the same instances.
+export const UTF8_ENCODER = new TextEncoder();
+export const UTF8_DECODER = new TextDecoder();
+
+// Anchored match for one Lua numeric token (decimal/hex int or float, with
+// optional sign and exponent). Shared by every "read a number from a byte
+// stream" path (BufferedFile.readNumStr here, stdin's read_num in host.mjs)
+// so the grammar stays in one place.
+export const LUA_NUM_RE =
+    /^[+-]?(0[xX][0-9a-fA-F]+(\.[0-9a-fA-F]*)?([pP][+-]?[0-9]+)?|[0-9]+\.?[0-9]*([eE][+-]?[0-9]+)?|\.[0-9]+([eE][+-]?[0-9]+)?)/;
+
+// The one place bytes go into the shared $fmt_buf. Every host I/O path that
+// hands data back to the WAT side (file/stdin reads, formatted output, error
+// messages, os.date) funnels through here. Truncating at FMT_BUF_CAP is safer
+// than walking off the end of the GC array — the WAT side chunks larger reads.
+export function writeBytesToFmtBuf(exports, bytes) {
+    const n = Math.min(bytes.length, FMT_BUF_CAP);
+    for (let i = 0; i < n; i++) exports.fmt_buf_set(i, bytes[i]);
+    return n;
+}
+
 // Parse an io.open mode string into capability flags. A trailing "b"
 // (binary) is accepted and ignored; we always operate on raw bytes.
 // Returns null for an unrecognised mode.
 //   needExisting: load current file contents at open time (r/r+/a/a+)
 //   mustExist:    fail if the file is absent (r/r+)
 export function parseFileMode(mode) {
-    let s = (mode || "r").replace("b", "");
+    // Strip a single trailing "b" (binary) marker only — replacing the first
+    // "b" anywhere would corrupt a mode that legitimately contained one.
+    let s = (mode || "r").replace(/b$/, "");
     const plus = s.includes("+");
     const base = s[0];
     switch (base) {
@@ -97,10 +122,10 @@ export class BufferedFile {
             else break;
         }
         if (this.pos >= this.buf.length) return null;
-        const tail = new TextDecoder().decode(this.buf.subarray(this.pos));
-        const m = /^[+-]?(0[xX][0-9a-fA-F]+(\.[0-9a-fA-F]*)?([pP][+-]?[0-9]+)?|[0-9]+\.?[0-9]*([eE][+-]?[0-9]+)?|\.[0-9]+([eE][+-]?[0-9]+)?)/.exec(tail);
+        const tail = UTF8_DECODER.decode(this.buf.subarray(this.pos));
+        const m = LUA_NUM_RE.exec(tail);
         if (!m) return null;
-        this.pos += new TextEncoder().encode(m[0]).length;
+        this.pos += UTF8_ENCODER.encode(m[0]).length;
         return m[0];
     }
 
@@ -139,7 +164,7 @@ export function makeHelpers({ getInstance, formatFloat, cFormatG }) {
         const n = exp().lua_str_len(v);
         const out = new Uint8Array(n);
         for (let i = 0; i < n; i++) out[i] = exp().lua_str_byte(v, i);
-        return new TextDecoder().decode(out);
+        return UTF8_DECODER.decode(out);
     }
 
     // Stable, distinct per-object identity for the "type: 0xADDR" forms of
@@ -147,12 +172,18 @@ export function makeHelpers({ getInstance, formatFloat, cFormatG }) {
     // exposed to JS keep their identity across calls, so a WeakMap assigns each
     // a lazily-allocated id (only paid when an address is actually rendered).
     // Tables already carry their own struct $id and don't use this.
+    // Ids feed an i32 WASM import ($host_obj_id) that renders them as an
+    // unsigned hex address, so they live in the unsigned 32-bit range. Start
+    // at 1 (0 is the "not an object" sentinel) and advance with `>>> 0` so the
+    // counter stays unsigned: the old `(n+1)|0` produced a *signed* int that
+    // turned negative past 2^31 and wrapped to 0 at 2^32, aliasing distinct
+    // objects (and colliding with the sentinel) in %p / tostring.
     const objIds = new WeakMap();
     let nextObjId = 0;
     function objId(v) {
         if (v === null || typeof v !== "object") return 0;
         let id = objIds.get(v);
-        if (id === undefined) { id = (nextObjId = (nextObjId + 1) | 0); objIds.set(v, id); }
+        if (id === undefined) { id = (nextObjId = (nextObjId + 1) >>> 0); objIds.set(v, id); }
         return id;
     }
 
@@ -171,14 +202,9 @@ export function makeHelpers({ getInstance, formatFloat, cFormatG }) {
         }
     }
 
-    // Uses the module-level FMT_BUF_CAP (kept in sync with the $fmt_buf
-    // size in stdlib_init); truncating beyond it is safer than walking off
-    // the end of the GC array.
+    // Encode a string and stream it into $fmt_buf via the shared byte writer.
     function writeFmtBuf(s) {
-        const bytes = new TextEncoder().encode(s);
-        const n = Math.min(bytes.length, FMT_BUF_CAP);
-        for (let i = 0; i < n; i++) exp().fmt_buf_set(i, bytes[i]);
-        return n;
+        return writeBytesToFmtBuf(exp(), UTF8_ENCODER.encode(s));
     }
 
     function applyPad(body, flags, width) {
