@@ -2073,6 +2073,445 @@ static void emit_distributed_value(CG *c, int i, int n_values, Expr **values,
     }
 }
 
+/* ----- statement arms (split out of emit_stmt) ----- */
+
+static void emit_assign(CG *c, const Stmt *s, int depth) {
+    int n_targets = s->as.assign.n_targets;
+    int n_values = s->as.assign.n_values;
+    int last_call = (n_values > 0 &&
+                     is_multival_tail(s->as.assign.values[n_values - 1]));
+    if (n_targets == 1) {
+        AssignTarget *t = &s->as.assign.targets[0];
+        if (t->kind == TGT_VAR && t->as.var.kind == VAR_LOCAL
+            && slot_is_int(c, t->as.var.idx)) {
+            emit_indent(c, depth);
+            wat_appendf(c->w, "(local.set $L%d\n", t->as.var.idx);
+            emit_int_expr(c, s->as.assign.values[0], depth + 1);
+            emit_indent(c, depth); wat_append(c->w, ")\n");
+            return;
+        }
+        if (t->kind == TGT_VAR && t->as.var.kind == VAR_LOCAL
+            && slot_is_float(c, t->as.var.idx)) {
+            emit_indent(c, depth);
+            wat_appendf(c->w, "(local.set $L%d\n", t->as.var.idx);
+            emit_float_expr(c, s->as.assign.values[0], depth + 1);
+            emit_indent(c, depth); wat_append(c->w, ")\n");
+            return;
+        }
+        emit_target_open(c, t, depth);
+        if (last_call) {
+            emit_indent(c, depth + 1); wat_append(c->w, "(call $args_first\n");
+            emit_multival_array(c, s->as.assign.values[0], depth + 2);
+            emit_indent(c, depth + 1); wat_append(c->w, ")\n");
+        } else {
+            emit_expr(c, s->as.assign.values[0], depth + 1);
+        }
+        emit_target_close(c, depth);
+        return;
+    }
+    /* Multi-target. Lua evaluates every LHS table/key sub-expression
+     * and every RHS value *before* any store, then stores right-to-
+     * left (so a repeated target keeps its leftmost value, matching
+     * reference). Concretely: `i, t[i] = i+1, 99` must capture t[i]'s
+     * index before i is reassigned, and `g.a, g.b, g.a = 1, 2, 3`
+     * must leave g.a == 1.
+     *
+     * Pre-evaluate index targets' table+key into parallel arrays
+     * (left-to-right); plain var targets have a static address and
+     * need no pre-eval, so we skip the arrays entirely when every
+     * target is a variable. (last_call is only relevant to the
+     * single-target branch above; the multi-target path always
+     * builds the full $tmp_args array via emit_args_array.) */
+    int has_index = 0;
+    for (int i = 0; i < n_targets; i++)
+        if (s->as.assign.targets[i].kind != TGT_VAR) { has_index = 1; break; }
+    if (has_index) {
+        emit_indent(c, depth);
+        wat_appendf(c->w,
+            "(local.set $tmp_lhs_t (array.new $ArgArr (ref.null any) "
+            "(i32.const %d)))\n", n_targets);
+        emit_indent(c, depth);
+        wat_appendf(c->w,
+            "(local.set $tmp_lhs_k (array.new $ArgArr (ref.null any) "
+            "(i32.const %d)))\n", n_targets);
+        for (int i = 0; i < n_targets; i++) {
+            AssignTarget *t = &s->as.assign.targets[i];
+            if (t->kind == TGT_VAR) continue;
+            emit_indent(c, depth);
+            wat_appendf(c->w,
+                "(array.set $ArgArr (ref.as_non_null (local.get $tmp_lhs_t)) "
+                "(i32.const %d)\n", i);
+            emit_expr(c, t->as.index.table, depth + 1);
+            emit_indent(c, depth); wat_append(c->w, ")\n");
+            emit_indent(c, depth);
+            wat_appendf(c->w,
+                "(array.set $ArgArr (ref.as_non_null (local.get $tmp_lhs_k)) "
+                "(i32.const %d)\n", i);
+            emit_expr(c, t->as.index.key, depth + 1);
+            emit_indent(c, depth); wat_append(c->w, ")\n");
+        }
+    }
+    emit_indent(c, depth); wat_append(c->w, "(local.set $tmp_args\n");
+    emit_args_array(c, s->as.assign.values, n_values, depth + 1);
+    emit_indent(c, depth); wat_append(c->w, ")\n");
+    for (int i = n_targets - 1; i >= 0; i--) {
+        AssignTarget *t = &s->as.assign.targets[i];
+        if (t->kind == TGT_VAR) {
+            emit_target_open(c, t, depth);
+            emit_args_at(c, i, depth + 1);
+            emit_target_close(c, depth);
+        } else {
+            /* index target: store via pre-evaluated table+key so
+             * __newindex still fires (matches emit_target_open). */
+            emit_indent(c, depth); wat_append(c->w, "(call $lua_tabset\n");
+            emit_indent(c, depth + 1);
+            wat_appendf(c->w,
+                "(array.get $ArgArr (ref.as_non_null (local.get $tmp_lhs_t)) "
+                "(i32.const %d))\n", i);
+            emit_indent(c, depth + 1);
+            wat_appendf(c->w,
+                "(array.get $ArgArr (ref.as_non_null (local.get $tmp_lhs_k)) "
+                "(i32.const %d))\n", i);
+            emit_args_at(c, i, depth + 1);
+            emit_indent(c, depth); wat_append(c->w, ")\n");
+        }
+    }
+}
+
+static void emit_return(CG *c, const Stmt *s, int depth) {
+    int n_values = s->as.return_stmt.n_values;
+    if (c->in_main) {
+        /* $main is exported with no result, so the chunk's return
+         * value can't be surfaced to the host — but we still have
+         * to evaluate the expressions so their side effects fire
+         * (e.g. `return print("hi")`). Drop each result after
+         * evaluation, then exit. */
+        for (int i = 0; i < n_values; i++) {
+            emit_expr(c, s->as.return_stmt.values[i], depth);
+            emit_indent(c, depth); wat_append(c->w, "drop\n");
+        }
+        emit_indent(c, depth); wat_append(c->w, "return\n");
+        return;
+    }
+    if (c->ret_single) {
+        /* Single-value-return entry ($user_N_da1): produce exactly one
+         * value of the entry's result type. A numeric ret_ty was inferred
+         * only when every return is a single numeric value, so emit it
+         * raw (i64/f64). */
+        if ((c->cur_ret_ty == NT_INT || c->cur_ret_ty == NT_FLOAT) && n_values == 1) {
+            emit_indent(c, depth); wat_append(c->w, "(return\n");
+            if (c->cur_ret_ty == NT_INT) emit_int_expr(c, s->as.return_stmt.values[0], depth + 1);
+            else                         emit_num_as_f64(c, s->as.return_stmt.values[0], depth + 1);
+            emit_indent(c, depth); wat_append(c->w, ")\n");
+            return;
+        }
+        /* ret_ty == ANY: produce a single anyref. A non-vararg body never
+         * uses `...`, so a lone multi-value tail here is a call, adjusted
+         * to one by emit_expr. Extra return values still evaluate (side
+         * effects), in order. */
+        if (n_values == 0) {
+            emit_indent(c, depth); wat_append(c->w, "(return (ref.null any))\n");
+        } else if (n_values == 1) {
+            emit_indent(c, depth); wat_append(c->w, "(return\n");
+            emit_expr(c, s->as.return_stmt.values[0], depth + 1);
+            emit_indent(c, depth); wat_append(c->w, ")\n");
+        } else {
+            emit_indent(c, depth); wat_append(c->w, "(local.set $tmp_any\n");
+            emit_expr(c, s->as.return_stmt.values[0], depth + 1);
+            emit_indent(c, depth); wat_append(c->w, ")\n");
+            for (int i = 1; i < n_values; i++) {
+                emit_expr(c, s->as.return_stmt.values[i], depth);
+                emit_indent(c, depth); wat_append(c->w, "drop\n");
+            }
+            emit_indent(c, depth); wat_append(c->w, "(return (local.get $tmp_any))\n");
+        }
+        return;
+    }
+    /* Tail-call optimization: exactly `return f(args)` or
+     * `return obj:m(args)` (not parenthesized, which forces adjust-to-
+     * one and so isn't a tail call). */
+    if (n_values == 1 && !s->as.return_stmt.values[0]->paren
+        && (s->as.return_stmt.values[0]->kind == EXPR_CALL
+            || s->as.return_stmt.values[0]->kind == EXPR_METHOD_CALL)) {
+        emit_tail_call(c, s->as.return_stmt.values[0], depth);
+        return;
+    }
+    /* `return f(), x, ...` and similar: build the result array. A lone
+     * multi-value tail (a single call/vararg) returns its array as-is. */
+    if (n_values == 1 && is_multival_tail(s->as.return_stmt.values[0])) {
+        emit_multival_array(c, s->as.return_stmt.values[0], depth);
+    } else {
+        emit_args_array(c, s->as.return_stmt.values, n_values, depth);
+    }
+    emit_indent(c, depth); wat_append(c->w, "return\n");
+}
+
+static void emit_for_num(CG *c, const Stmt *s, int depth) {
+    int label = c->next_label++;
+    if (!push_break_label(c, label)) return;
+    int slot = s->as.for_num.local_idx;
+    /* Integer-specialized loop: control var + bounds are i64, the
+     * counter is an unboxed i64 slot, no per-iteration boxing or
+     * generic-helper calls. The analysis only marks the slot int when
+     * start/stop/step are all integer and the var isn't captured. */
+    if (slot_is_int(c, slot)) {
+        int fd = c->for_depth;
+        const Expr *st = s->as.for_num.step;
+        char step_s[40];
+        int sign;   /* +1/-1 known at compile time; 0 = runtime */
+        if (!st) { snprintf(step_s, sizeof step_s, "(i64.const 1)"); sign = 1; }
+        else if (st->kind == EXPR_INT && st->as.i_val != 0) {
+            snprintf(step_s, sizeof step_s, "(i64.const %lld)", (long long)st->as.i_val);
+            sign = st->as.i_val > 0 ? 1 : -1;
+        } else { snprintf(step_s, sizeof step_s, "(local.get $ifor_step_%d)", fd); sign = 0; }
+        emit_indent(c, depth); wat_appendf(c->w, "(local.set $L%d\n", slot);
+        emit_int_expr(c, s->as.for_num.start, depth + 1);
+        emit_indent(c, depth); wat_append(c->w, ")\n");
+        emit_indent(c, depth); wat_appendf(c->w, "(local.set $ifor_stop_%d\n", fd);
+        emit_int_expr(c, s->as.for_num.stop, depth + 1);
+        emit_indent(c, depth); wat_append(c->w, ")\n");
+        if (sign == 0) {
+            emit_indent(c, depth); wat_appendf(c->w, "(local.set $ifor_step_%d\n", fd);
+            emit_int_expr(c, st, depth + 1);
+            emit_indent(c, depth); wat_append(c->w, ")\n");
+            emit_indent(c, depth);
+            wat_appendf(c->w, "(if (i64.eqz %s) (then (call $throw_lit (i32.const 75) (i32.const 18))))\n", step_s);
+        }
+        emit_indent(c, depth); wat_appendf(c->w, "(block $brk_%d\n", label);
+        emit_indent(c, depth + 1); wat_appendf(c->w, "(loop $cont_%d\n", label);
+        emit_indent(c, depth + 2);
+        if (sign == 1)
+            wat_appendf(c->w, "(br_if $brk_%d (i64.gt_s (local.get $L%d) (local.get $ifor_stop_%d)))\n", label, slot, fd);
+        else if (sign == -1)
+            wat_appendf(c->w, "(br_if $brk_%d (i64.lt_s (local.get $L%d) (local.get $ifor_stop_%d)))\n", label, slot, fd);
+        else
+            wat_appendf(c->w,
+                "(if (i64.gt_s %s (i64.const 0)) (then (br_if $brk_%d (i64.gt_s (local.get $L%d) (local.get $ifor_stop_%d)))) (else (br_if $brk_%d (i64.lt_s (local.get $L%d) (local.get $ifor_stop_%d)))))\n",
+                step_s, label, slot, fd, label, slot, fd);
+        c->for_depth++;
+        emit_block(c, &s->as.for_num.body, depth + 2);
+        c->for_depth--;
+        emit_indent(c, depth + 2);
+        wat_appendf(c->w, "(local.set $ifor_next_%d (i64.add (local.get $L%d) %s))\n", fd, slot, step_s);
+        emit_indent(c, depth + 2);
+        if (sign == 1)
+            wat_appendf(c->w, "(br_if $brk_%d (i64.lt_s (local.get $ifor_next_%d) (local.get $L%d)))\n", label, fd, slot);
+        else if (sign == -1)
+            wat_appendf(c->w, "(br_if $brk_%d (i64.gt_s (local.get $ifor_next_%d) (local.get $L%d)))\n", label, fd, slot);
+        else
+            wat_appendf(c->w,
+                "(if (i64.gt_s %s (i64.const 0)) (then (br_if $brk_%d (i64.lt_s (local.get $ifor_next_%d) (local.get $L%d)))) (else (br_if $brk_%d (i64.gt_s (local.get $ifor_next_%d) (local.get $L%d)))))\n",
+                step_s, label, fd, slot, label, fd, slot);
+        emit_indent(c, depth + 2);
+        wat_appendf(c->w, "(local.set $L%d (local.get $ifor_next_%d))\n", slot, fd);
+        emit_indent(c, depth + 2); wat_appendf(c->w, "br $cont_%d\n", label);
+        emit_indent(c, depth + 1); wat_append(c->w, ")\n");
+        emit_indent(c, depth);     wat_append(c->w, ")\n");
+        c->break_depth--;
+        return;
+    }
+    int boxed = slot_is_boxed(c, slot);
+    /* Per-nesting-level scratch so an inner for-loop can't clobber
+     * this loop's stop/step. */
+    int fd = c->for_depth;
+    char f_stop[24], f_step[24], f_next[24], f_cur[24];
+    snprintf(f_stop, sizeof f_stop, "$for_stop_%d", fd);
+    snprintf(f_step, sizeof f_step, "$for_step_%d", fd);
+    snprintf(f_next, sizeof f_next, "$for_next_%d", fd);
+    snprintf(f_cur,  sizeof f_cur,  "$for_cur_%d",  fd);
+    /* The running counter lives in a scratch local; stash stop/step
+     * alongside. When the control variable is captured (boxed), the
+     * counter must stay separate from the user-visible $Box so that
+     * each iteration can bind a FRESH box (Lua 5.4+: the loop
+     * variable is a new local per iteration, so closures capture
+     * distinct values). When it isn't captured the slot holds the
+     * value directly and doubles as the counter. */
+    emit_indent(c, depth);
+    if (boxed) {
+        wat_appendf(c->w, "(local.set %s\n", f_cur);
+    } else {
+        wat_appendf(c->w, "(local.set $L%d\n", slot);
+    }
+    emit_expr(c, s->as.for_num.start, depth + 1);
+    emit_indent(c, depth); wat_append(c->w, ")\n");
+    emit_indent(c, depth); wat_appendf(c->w, "(local.set %s\n", f_stop);
+    emit_expr(c, s->as.for_num.stop, depth + 1);
+    emit_indent(c, depth); wat_append(c->w, ")\n");
+    emit_indent(c, depth); wat_appendf(c->w, "(local.set %s\n", f_step);
+    if (s->as.for_num.step) {
+        emit_expr(c, s->as.for_num.step, depth + 1);
+    } else {
+        emit_indent(c, depth + 1); wat_append(c->w, "(ref.i31 (i32.const 1))\n");
+    }
+    emit_indent(c, depth); wat_append(c->w, ")\n");
+    emit_indent(c, depth);
+    wat_appendf(c->w, "(call $for_check_step (local.get %s))\n", f_step);
+    /* Settle the control variable's type up front: if init or step is
+     * a float the whole loop is float (Lua 5.4+). counter_loc is the
+     * local that holds the running value. */
+    char counter_loc[24];
+    if (boxed) snprintf(counter_loc, sizeof counter_loc, "%s", f_cur);
+    else       snprintf(counter_loc, sizeof counter_loc, "$L%d", slot);
+    emit_indent(c, depth);
+    wat_appendf(c->w,
+        "(local.set %s (call $for_coerce (local.get %s) (local.get %s)))\n",
+        counter_loc, counter_loc, f_step);
+    emit_indent(c, depth);
+    wat_appendf(c->w,
+        "(local.set %s (call $for_coerce (local.get %s) (local.get %s)))\n",
+        f_step, f_step, counter_loc);
+
+    emit_indent(c, depth); wat_appendf(c->w, "(block $brk_%d\n", label);
+    emit_indent(c, depth + 1); wat_appendf(c->w, "(loop $cont_%d\n", label);
+    /* terminate? */
+    emit_indent(c, depth + 2);
+    wat_appendf(c->w,
+        "(if (call $for_step_positive (local.get %s))\n", f_step);
+    emit_indent(c, depth + 2); wat_append(c->w, "  (then\n");
+    char load_buf[80];
+    if (boxed) snprintf(load_buf, sizeof(load_buf), "(local.get %s)", f_cur);
+    else       snprintf(load_buf, sizeof(load_buf), "(local.get $L%d)", slot);
+    emit_indent(c, depth + 2);
+    wat_appendf(c->w,
+        "    (br_if $brk_%d (i32.eqz (call $num_le\n"
+        "      %s\n"
+        "      (local.get %s)))))\n", label, load_buf, f_stop);
+    emit_indent(c, depth + 2); wat_append(c->w, "  (else\n");
+    emit_indent(c, depth + 2);
+    wat_appendf(c->w,
+        "    (br_if $brk_%d (i32.eqz (call $num_le\n"
+        "      (local.get %s)\n"
+        "      %s)))))\n", label, f_stop, load_buf);
+    /* Fresh per-iteration binding for a captured control variable. */
+    if (boxed) {
+        emit_indent(c, depth + 2);
+        wat_appendf(c->w,
+            "(local.set $L%d (struct.new $Box %s))\n", slot, load_buf);
+    }
+    /* body */
+    c->for_depth++;
+    emit_block(c, &s->as.for_num.body, depth + 2);
+    c->for_depth--;
+    /* i = i + step, but stop if the integer addition wrapped past the
+     * representable range (Lua 5.4 numeric-for overflow semantics) —
+     * otherwise `for i = maxinteger-2, maxinteger` would loop forever. */
+    emit_indent(c, depth + 2);
+    wat_appendf(c->w, "(local.set %s (call $lua_add %s (local.get %s)))\n",
+                f_next, load_buf, f_step);
+    emit_indent(c, depth + 2);
+    wat_appendf(c->w,
+        "(br_if $brk_%d (call $for_overflowed %s (local.get %s) "
+        "(local.get %s)))\n", label, load_buf, f_step, f_next);
+    emit_indent(c, depth + 2);
+    if (boxed) {
+        wat_appendf(c->w,
+            "(local.set %s (local.get %s))\n", f_cur, f_next);
+    } else {
+        wat_appendf(c->w,
+            "(local.set $L%d (local.get %s))\n", slot, f_next);
+    }
+    emit_indent(c, depth + 2); wat_appendf(c->w, "br $cont_%d\n", label);
+    emit_indent(c, depth + 1); wat_append(c->w, ")\n");
+    emit_indent(c, depth);     wat_append(c->w, ")\n");
+    c->break_depth--;
+}
+
+static void emit_for_gen(CG *c, const Stmt *s, int depth) {
+    /* Generic for: `for v1[, v2, ...] in iter [, state [, init]] do body end`.
+     * Evaluate the expr_list into ($for_iter_any, $for_state, $for_k),
+     * then loop: call iter(state, k); if first result is nil, break;
+     * otherwise bind v1..vN to results, set k = result[0]. */
+    int label = c->next_label++;
+    if (!push_break_label(c, label)) return;
+    /* Per-nesting-level iterator state so an inner for-loop can't
+     * clobber this loop's iterator/state/control key. ($tmp_args is
+     * recomputed each iteration, so it stays function-shared.) */
+    int fd = c->for_depth;
+    char f_iter[24], f_state[24], f_k[24];
+    snprintf(f_iter, sizeof f_iter, "$for_iter_%d", fd);
+    snprintf(f_state, sizeof f_state, "$for_state_%d", fd);
+    snprintf(f_k, sizeof f_k, "$for_k_%d", fd);
+    int n_exprs = s->as.for_gen.n_exprs;
+    emit_indent(c, depth); wat_append(c->w, "(local.set $tmp_args\n");
+    emit_args_array(c, s->as.for_gen.exprs, n_exprs, depth + 1);
+    emit_indent(c, depth); wat_append(c->w, ")\n");
+    /* iter = args[0]; state = args[1]; k = args[2]. */
+    emit_indent(c, depth); wat_appendf(c->w,
+        "(local.set %s "
+        "(call $args_at (ref.as_non_null (local.get $tmp_args)) (i32.const 0)))\n", f_iter);
+    emit_indent(c, depth); wat_appendf(c->w,
+        "(local.set %s "
+        "(call $args_at (ref.as_non_null (local.get $tmp_args)) (i32.const 1)))\n", f_state);
+    emit_indent(c, depth); wat_appendf(c->w,
+        "(local.set %s "
+        "(call $args_at (ref.as_non_null (local.get $tmp_args)) (i32.const 2)))\n", f_k);
+
+    /* Pre-allocate boxes (or just nil-init the local) per loop var. */
+    for (int i = 0; i < s->as.for_gen.n_names; i++) {
+        int li = s->as.for_gen.local_idxs[i];
+        emit_indent(c, depth);
+        if (slot_is_boxed(c, li)) {
+            wat_appendf(c->w,
+                "(local.set $L%d (struct.new $Box (ref.null any)))\n", li);
+        } else {
+            wat_appendf(c->w, "(local.set $L%d (ref.null any))\n", li);
+        }
+    }
+
+    emit_indent(c, depth); wat_appendf(c->w, "(block $brk_%d\n", label);
+    emit_indent(c, depth + 1); wat_appendf(c->w, "(loop $cont_%d\n", label);
+    /* Call iter(state, k). The iterator can be any callable (a
+     * closure, or a table with __call) — go through $lua_call_any
+     * so a wrong type produces a typed error instead of a trap. */
+    emit_indent(c, depth + 2); wat_append(c->w, "(local.set $tmp_args\n");
+    emit_indent(c, depth + 3); wat_append(c->w, "(call $lua_call_any\n");
+    emit_indent(c, depth + 4); wat_appendf(c->w, "(local.get %s)\n", f_iter);
+    emit_indent(c, depth + 4);
+    wat_appendf(c->w,
+        "(array.new_fixed $ArgArr 2 (local.get %s) (local.get %s))\n", f_state, f_k);
+    emit_indent(c, depth + 4);
+    wat_appendf(c->w, "(i32.const %d)\n", s->line);
+    emit_indent(c, depth + 3); wat_append(c->w, ")\n");
+    emit_indent(c, depth + 2); wat_append(c->w, ")\n");
+    /* terminate if results[0] is nil */
+    emit_indent(c, depth + 2);
+    wat_appendf(c->w,
+        "(br_if $brk_%d (ref.is_null "
+        "(call $args_at (ref.as_non_null (local.get $tmp_args)) (i32.const 0))))\n",
+        label);
+    /* update k to results[0] */
+    emit_indent(c, depth + 2);
+    wat_appendf(c->w,
+        "(local.set %s "
+        "(call $args_at (ref.as_non_null (local.get $tmp_args)) (i32.const 0)))\n", f_k);
+    /* Bind loop vars from results. A captured var gets a FRESH $Box
+     * each iteration so closures over it see distinct values
+     * (Lua 5.4+ semantics), rather than sharing one mutated cell. */
+    for (int i = 0; i < s->as.for_gen.n_names; i++) {
+        int li = s->as.for_gen.local_idxs[i];
+        emit_indent(c, depth + 2);
+        if (slot_is_boxed(c, li)) {
+            wat_appendf(c->w,
+                "(local.set $L%d (struct.new $Box "
+                "(call $args_at (ref.as_non_null (local.get $tmp_args)) "
+                "(i32.const %d))))\n", li, i);
+        } else {
+            wat_appendf(c->w,
+                "(local.set $L%d "
+                "(call $args_at (ref.as_non_null (local.get $tmp_args)) "
+                "(i32.const %d)))\n", li, i);
+        }
+    }
+    /* body */
+    c->for_depth++;
+    emit_block(c, &s->as.for_gen.body, depth + 2);
+    c->for_depth--;
+    emit_indent(c, depth + 2); wat_appendf(c->w, "br $cont_%d\n", label);
+    emit_indent(c, depth + 1); wat_append(c->w, ")\n");
+    emit_indent(c, depth);     wat_append(c->w, ")\n");
+    c->break_depth--;
+}
+
 /* ----- statements ----- */
 static void emit_stmt(CG *c, const Stmt *s, int depth) {
     if (!c->ok) return;
@@ -2123,109 +2562,9 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
             break;
         }
 
-        case STMT_ASSIGN: {
-            int n_targets = s->as.assign.n_targets;
-            int n_values = s->as.assign.n_values;
-            int last_call = (n_values > 0 &&
-                             is_multival_tail(s->as.assign.values[n_values - 1]));
-            if (n_targets == 1) {
-                AssignTarget *t = &s->as.assign.targets[0];
-                if (t->kind == TGT_VAR && t->as.var.kind == VAR_LOCAL
-                    && slot_is_int(c, t->as.var.idx)) {
-                    emit_indent(c, depth);
-                    wat_appendf(c->w, "(local.set $L%d\n", t->as.var.idx);
-                    emit_int_expr(c, s->as.assign.values[0], depth + 1);
-                    emit_indent(c, depth); wat_append(c->w, ")\n");
-                    break;
-                }
-                if (t->kind == TGT_VAR && t->as.var.kind == VAR_LOCAL
-                    && slot_is_float(c, t->as.var.idx)) {
-                    emit_indent(c, depth);
-                    wat_appendf(c->w, "(local.set $L%d\n", t->as.var.idx);
-                    emit_float_expr(c, s->as.assign.values[0], depth + 1);
-                    emit_indent(c, depth); wat_append(c->w, ")\n");
-                    break;
-                }
-                emit_target_open(c, t, depth);
-                if (last_call) {
-                    emit_indent(c, depth + 1); wat_append(c->w, "(call $args_first\n");
-                    emit_multival_array(c, s->as.assign.values[0], depth + 2);
-                    emit_indent(c, depth + 1); wat_append(c->w, ")\n");
-                } else {
-                    emit_expr(c, s->as.assign.values[0], depth + 1);
-                }
-                emit_target_close(c, depth);
-                break;
-            }
-            /* Multi-target. Lua evaluates every LHS table/key sub-expression
-             * and every RHS value *before* any store, then stores right-to-
-             * left (so a repeated target keeps its leftmost value, matching
-             * reference). Concretely: `i, t[i] = i+1, 99` must capture t[i]'s
-             * index before i is reassigned, and `g.a, g.b, g.a = 1, 2, 3`
-             * must leave g.a == 1.
-             *
-             * Pre-evaluate index targets' table+key into parallel arrays
-             * (left-to-right); plain var targets have a static address and
-             * need no pre-eval, so we skip the arrays entirely when every
-             * target is a variable. (last_call is only relevant to the
-             * single-target branch above; the multi-target path always
-             * builds the full $tmp_args array via emit_args_array.) */
-            int has_index = 0;
-            for (int i = 0; i < n_targets; i++)
-                if (s->as.assign.targets[i].kind != TGT_VAR) { has_index = 1; break; }
-            if (has_index) {
-                emit_indent(c, depth);
-                wat_appendf(c->w,
-                    "(local.set $tmp_lhs_t (array.new $ArgArr (ref.null any) "
-                    "(i32.const %d)))\n", n_targets);
-                emit_indent(c, depth);
-                wat_appendf(c->w,
-                    "(local.set $tmp_lhs_k (array.new $ArgArr (ref.null any) "
-                    "(i32.const %d)))\n", n_targets);
-                for (int i = 0; i < n_targets; i++) {
-                    AssignTarget *t = &s->as.assign.targets[i];
-                    if (t->kind == TGT_VAR) continue;
-                    emit_indent(c, depth);
-                    wat_appendf(c->w,
-                        "(array.set $ArgArr (ref.as_non_null (local.get $tmp_lhs_t)) "
-                        "(i32.const %d)\n", i);
-                    emit_expr(c, t->as.index.table, depth + 1);
-                    emit_indent(c, depth); wat_append(c->w, ")\n");
-                    emit_indent(c, depth);
-                    wat_appendf(c->w,
-                        "(array.set $ArgArr (ref.as_non_null (local.get $tmp_lhs_k)) "
-                        "(i32.const %d)\n", i);
-                    emit_expr(c, t->as.index.key, depth + 1);
-                    emit_indent(c, depth); wat_append(c->w, ")\n");
-                }
-            }
-            emit_indent(c, depth); wat_append(c->w, "(local.set $tmp_args\n");
-            emit_args_array(c, s->as.assign.values, n_values, depth + 1);
-            emit_indent(c, depth); wat_append(c->w, ")\n");
-            for (int i = n_targets - 1; i >= 0; i--) {
-                AssignTarget *t = &s->as.assign.targets[i];
-                if (t->kind == TGT_VAR) {
-                    emit_target_open(c, t, depth);
-                    emit_args_at(c, i, depth + 1);
-                    emit_target_close(c, depth);
-                } else {
-                    /* index target: store via pre-evaluated table+key so
-                     * __newindex still fires (matches emit_target_open). */
-                    emit_indent(c, depth); wat_append(c->w, "(call $lua_tabset\n");
-                    emit_indent(c, depth + 1);
-                    wat_appendf(c->w,
-                        "(array.get $ArgArr (ref.as_non_null (local.get $tmp_lhs_t)) "
-                        "(i32.const %d))\n", i);
-                    emit_indent(c, depth + 1);
-                    wat_appendf(c->w,
-                        "(array.get $ArgArr (ref.as_non_null (local.get $tmp_lhs_k)) "
-                        "(i32.const %d))\n", i);
-                    emit_args_at(c, i, depth + 1);
-                    emit_indent(c, depth); wat_append(c->w, ")\n");
-                }
-            }
+        case STMT_ASSIGN:
+            emit_assign(c, s, depth);
             break;
-        }
 
         case STMT_EXPR:
             /* Call as statement: get array, drop it. */
@@ -2237,74 +2576,9 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
             emit_block(c, &s->as.do_stmt.body, depth);
             break;
 
-        case STMT_RETURN: {
-            int n_values = s->as.return_stmt.n_values;
-            if (c->in_main) {
-                /* $main is exported with no result, so the chunk's return
-                 * value can't be surfaced to the host — but we still have
-                 * to evaluate the expressions so their side effects fire
-                 * (e.g. `return print("hi")`). Drop each result after
-                 * evaluation, then exit. */
-                for (int i = 0; i < n_values; i++) {
-                    emit_expr(c, s->as.return_stmt.values[i], depth);
-                    emit_indent(c, depth); wat_append(c->w, "drop\n");
-                }
-                emit_indent(c, depth); wat_append(c->w, "return\n");
-                break;
-            }
-            if (c->ret_single) {
-                /* Single-value-return entry ($user_N_da1): produce exactly one
-                 * value of the entry's result type. A numeric ret_ty was inferred
-                 * only when every return is a single numeric value, so emit it
-                 * raw (i64/f64). */
-                if ((c->cur_ret_ty == NT_INT || c->cur_ret_ty == NT_FLOAT) && n_values == 1) {
-                    emit_indent(c, depth); wat_append(c->w, "(return\n");
-                    if (c->cur_ret_ty == NT_INT) emit_int_expr(c, s->as.return_stmt.values[0], depth + 1);
-                    else                         emit_num_as_f64(c, s->as.return_stmt.values[0], depth + 1);
-                    emit_indent(c, depth); wat_append(c->w, ")\n");
-                    break;
-                }
-                /* ret_ty == ANY: produce a single anyref. A non-vararg body never
-                 * uses `...`, so a lone multi-value tail here is a call, adjusted
-                 * to one by emit_expr. Extra return values still evaluate (side
-                 * effects), in order. */
-                if (n_values == 0) {
-                    emit_indent(c, depth); wat_append(c->w, "(return (ref.null any))\n");
-                } else if (n_values == 1) {
-                    emit_indent(c, depth); wat_append(c->w, "(return\n");
-                    emit_expr(c, s->as.return_stmt.values[0], depth + 1);
-                    emit_indent(c, depth); wat_append(c->w, ")\n");
-                } else {
-                    emit_indent(c, depth); wat_append(c->w, "(local.set $tmp_any\n");
-                    emit_expr(c, s->as.return_stmt.values[0], depth + 1);
-                    emit_indent(c, depth); wat_append(c->w, ")\n");
-                    for (int i = 1; i < n_values; i++) {
-                        emit_expr(c, s->as.return_stmt.values[i], depth);
-                        emit_indent(c, depth); wat_append(c->w, "drop\n");
-                    }
-                    emit_indent(c, depth); wat_append(c->w, "(return (local.get $tmp_any))\n");
-                }
-                break;
-            }
-            /* Tail-call optimization: exactly `return f(args)` or
-             * `return obj:m(args)` (not parenthesized, which forces adjust-to-
-             * one and so isn't a tail call). */
-            if (n_values == 1 && !s->as.return_stmt.values[0]->paren
-                && (s->as.return_stmt.values[0]->kind == EXPR_CALL
-                    || s->as.return_stmt.values[0]->kind == EXPR_METHOD_CALL)) {
-                emit_tail_call(c, s->as.return_stmt.values[0], depth);
-                break;
-            }
-            /* `return f(), x, ...` and similar: build the result array. A lone
-             * multi-value tail (a single call/vararg) returns its array as-is. */
-            if (n_values == 1 && is_multival_tail(s->as.return_stmt.values[0])) {
-                emit_multival_array(c, s->as.return_stmt.values[0], depth);
-            } else {
-                emit_args_array(c, s->as.return_stmt.values, n_values, depth);
-            }
-            emit_indent(c, depth); wat_append(c->w, "return\n");
+        case STMT_RETURN:
+            emit_return(c, s, depth);
             break;
-        }
 
         case STMT_WHILE: {
             int label = c->next_label++;
@@ -2364,273 +2638,13 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
              * itself produces no code at its position. */
             break;
 
-        case STMT_FOR_NUM: {
-            int label = c->next_label++;
-            if (!push_break_label(c, label)) break;
-            int slot = s->as.for_num.local_idx;
-            /* Integer-specialized loop: control var + bounds are i64, the
-             * counter is an unboxed i64 slot, no per-iteration boxing or
-             * generic-helper calls. The analysis only marks the slot int when
-             * start/stop/step are all integer and the var isn't captured. */
-            if (slot_is_int(c, slot)) {
-                int fd = c->for_depth;
-                const Expr *st = s->as.for_num.step;
-                char step_s[40];
-                int sign;   /* +1/-1 known at compile time; 0 = runtime */
-                if (!st) { snprintf(step_s, sizeof step_s, "(i64.const 1)"); sign = 1; }
-                else if (st->kind == EXPR_INT && st->as.i_val != 0) {
-                    snprintf(step_s, sizeof step_s, "(i64.const %lld)", (long long)st->as.i_val);
-                    sign = st->as.i_val > 0 ? 1 : -1;
-                } else { snprintf(step_s, sizeof step_s, "(local.get $ifor_step_%d)", fd); sign = 0; }
-                emit_indent(c, depth); wat_appendf(c->w, "(local.set $L%d\n", slot);
-                emit_int_expr(c, s->as.for_num.start, depth + 1);
-                emit_indent(c, depth); wat_append(c->w, ")\n");
-                emit_indent(c, depth); wat_appendf(c->w, "(local.set $ifor_stop_%d\n", fd);
-                emit_int_expr(c, s->as.for_num.stop, depth + 1);
-                emit_indent(c, depth); wat_append(c->w, ")\n");
-                if (sign == 0) {
-                    emit_indent(c, depth); wat_appendf(c->w, "(local.set $ifor_step_%d\n", fd);
-                    emit_int_expr(c, st, depth + 1);
-                    emit_indent(c, depth); wat_append(c->w, ")\n");
-                    emit_indent(c, depth);
-                    wat_appendf(c->w, "(if (i64.eqz %s) (then (call $throw_lit (i32.const 75) (i32.const 18))))\n", step_s);
-                }
-                emit_indent(c, depth); wat_appendf(c->w, "(block $brk_%d\n", label);
-                emit_indent(c, depth + 1); wat_appendf(c->w, "(loop $cont_%d\n", label);
-                emit_indent(c, depth + 2);
-                if (sign == 1)
-                    wat_appendf(c->w, "(br_if $brk_%d (i64.gt_s (local.get $L%d) (local.get $ifor_stop_%d)))\n", label, slot, fd);
-                else if (sign == -1)
-                    wat_appendf(c->w, "(br_if $brk_%d (i64.lt_s (local.get $L%d) (local.get $ifor_stop_%d)))\n", label, slot, fd);
-                else
-                    wat_appendf(c->w,
-                        "(if (i64.gt_s %s (i64.const 0)) (then (br_if $brk_%d (i64.gt_s (local.get $L%d) (local.get $ifor_stop_%d)))) (else (br_if $brk_%d (i64.lt_s (local.get $L%d) (local.get $ifor_stop_%d)))))\n",
-                        step_s, label, slot, fd, label, slot, fd);
-                c->for_depth++;
-                emit_block(c, &s->as.for_num.body, depth + 2);
-                c->for_depth--;
-                emit_indent(c, depth + 2);
-                wat_appendf(c->w, "(local.set $ifor_next_%d (i64.add (local.get $L%d) %s))\n", fd, slot, step_s);
-                emit_indent(c, depth + 2);
-                if (sign == 1)
-                    wat_appendf(c->w, "(br_if $brk_%d (i64.lt_s (local.get $ifor_next_%d) (local.get $L%d)))\n", label, fd, slot);
-                else if (sign == -1)
-                    wat_appendf(c->w, "(br_if $brk_%d (i64.gt_s (local.get $ifor_next_%d) (local.get $L%d)))\n", label, fd, slot);
-                else
-                    wat_appendf(c->w,
-                        "(if (i64.gt_s %s (i64.const 0)) (then (br_if $brk_%d (i64.lt_s (local.get $ifor_next_%d) (local.get $L%d)))) (else (br_if $brk_%d (i64.gt_s (local.get $ifor_next_%d) (local.get $L%d)))))\n",
-                        step_s, label, fd, slot, label, fd, slot);
-                emit_indent(c, depth + 2);
-                wat_appendf(c->w, "(local.set $L%d (local.get $ifor_next_%d))\n", slot, fd);
-                emit_indent(c, depth + 2); wat_appendf(c->w, "br $cont_%d\n", label);
-                emit_indent(c, depth + 1); wat_append(c->w, ")\n");
-                emit_indent(c, depth);     wat_append(c->w, ")\n");
-                c->break_depth--;
-                break;
-            }
-            int boxed = slot_is_boxed(c, slot);
-            /* Per-nesting-level scratch so an inner for-loop can't clobber
-             * this loop's stop/step. */
-            int fd = c->for_depth;
-            char f_stop[24], f_step[24], f_next[24], f_cur[24];
-            snprintf(f_stop, sizeof f_stop, "$for_stop_%d", fd);
-            snprintf(f_step, sizeof f_step, "$for_step_%d", fd);
-            snprintf(f_next, sizeof f_next, "$for_next_%d", fd);
-            snprintf(f_cur,  sizeof f_cur,  "$for_cur_%d",  fd);
-            /* The running counter lives in a scratch local; stash stop/step
-             * alongside. When the control variable is captured (boxed), the
-             * counter must stay separate from the user-visible $Box so that
-             * each iteration can bind a FRESH box (Lua 5.4+: the loop
-             * variable is a new local per iteration, so closures capture
-             * distinct values). When it isn't captured the slot holds the
-             * value directly and doubles as the counter. */
-            emit_indent(c, depth);
-            if (boxed) {
-                wat_appendf(c->w, "(local.set %s\n", f_cur);
-            } else {
-                wat_appendf(c->w, "(local.set $L%d\n", slot);
-            }
-            emit_expr(c, s->as.for_num.start, depth + 1);
-            emit_indent(c, depth); wat_append(c->w, ")\n");
-            emit_indent(c, depth); wat_appendf(c->w, "(local.set %s\n", f_stop);
-            emit_expr(c, s->as.for_num.stop, depth + 1);
-            emit_indent(c, depth); wat_append(c->w, ")\n");
-            emit_indent(c, depth); wat_appendf(c->w, "(local.set %s\n", f_step);
-            if (s->as.for_num.step) {
-                emit_expr(c, s->as.for_num.step, depth + 1);
-            } else {
-                emit_indent(c, depth + 1); wat_append(c->w, "(ref.i31 (i32.const 1))\n");
-            }
-            emit_indent(c, depth); wat_append(c->w, ")\n");
-            emit_indent(c, depth);
-            wat_appendf(c->w, "(call $for_check_step (local.get %s))\n", f_step);
-            /* Settle the control variable's type up front: if init or step is
-             * a float the whole loop is float (Lua 5.4+). counter_loc is the
-             * local that holds the running value. */
-            char counter_loc[24];
-            if (boxed) snprintf(counter_loc, sizeof counter_loc, "%s", f_cur);
-            else       snprintf(counter_loc, sizeof counter_loc, "$L%d", slot);
-            emit_indent(c, depth);
-            wat_appendf(c->w,
-                "(local.set %s (call $for_coerce (local.get %s) (local.get %s)))\n",
-                counter_loc, counter_loc, f_step);
-            emit_indent(c, depth);
-            wat_appendf(c->w,
-                "(local.set %s (call $for_coerce (local.get %s) (local.get %s)))\n",
-                f_step, f_step, counter_loc);
-
-            emit_indent(c, depth); wat_appendf(c->w, "(block $brk_%d\n", label);
-            emit_indent(c, depth + 1); wat_appendf(c->w, "(loop $cont_%d\n", label);
-            /* terminate? */
-            emit_indent(c, depth + 2);
-            wat_appendf(c->w,
-                "(if (call $for_step_positive (local.get %s))\n", f_step);
-            emit_indent(c, depth + 2); wat_append(c->w, "  (then\n");
-            char load_buf[80];
-            if (boxed) snprintf(load_buf, sizeof(load_buf), "(local.get %s)", f_cur);
-            else       snprintf(load_buf, sizeof(load_buf), "(local.get $L%d)", slot);
-            emit_indent(c, depth + 2);
-            wat_appendf(c->w,
-                "    (br_if $brk_%d (i32.eqz (call $num_le\n"
-                "      %s\n"
-                "      (local.get %s)))))\n", label, load_buf, f_stop);
-            emit_indent(c, depth + 2); wat_append(c->w, "  (else\n");
-            emit_indent(c, depth + 2);
-            wat_appendf(c->w,
-                "    (br_if $brk_%d (i32.eqz (call $num_le\n"
-                "      (local.get %s)\n"
-                "      %s)))))\n", label, f_stop, load_buf);
-            /* Fresh per-iteration binding for a captured control variable. */
-            if (boxed) {
-                emit_indent(c, depth + 2);
-                wat_appendf(c->w,
-                    "(local.set $L%d (struct.new $Box %s))\n", slot, load_buf);
-            }
-            /* body */
-            c->for_depth++;
-            emit_block(c, &s->as.for_num.body, depth + 2);
-            c->for_depth--;
-            /* i = i + step, but stop if the integer addition wrapped past the
-             * representable range (Lua 5.4 numeric-for overflow semantics) —
-             * otherwise `for i = maxinteger-2, maxinteger` would loop forever. */
-            emit_indent(c, depth + 2);
-            wat_appendf(c->w, "(local.set %s (call $lua_add %s (local.get %s)))\n",
-                        f_next, load_buf, f_step);
-            emit_indent(c, depth + 2);
-            wat_appendf(c->w,
-                "(br_if $brk_%d (call $for_overflowed %s (local.get %s) "
-                "(local.get %s)))\n", label, load_buf, f_step, f_next);
-            emit_indent(c, depth + 2);
-            if (boxed) {
-                wat_appendf(c->w,
-                    "(local.set %s (local.get %s))\n", f_cur, f_next);
-            } else {
-                wat_appendf(c->w,
-                    "(local.set $L%d (local.get %s))\n", slot, f_next);
-            }
-            emit_indent(c, depth + 2); wat_appendf(c->w, "br $cont_%d\n", label);
-            emit_indent(c, depth + 1); wat_append(c->w, ")\n");
-            emit_indent(c, depth);     wat_append(c->w, ")\n");
-            c->break_depth--;
+        case STMT_FOR_NUM:
+            emit_for_num(c, s, depth);
             break;
-        }
 
-        case STMT_FOR_GEN: {
-            /* Generic for: `for v1[, v2, ...] in iter [, state [, init]] do body end`.
-             * Evaluate the expr_list into ($for_iter_any, $for_state, $for_k),
-             * then loop: call iter(state, k); if first result is nil, break;
-             * otherwise bind v1..vN to results, set k = result[0]. */
-            int label = c->next_label++;
-            if (!push_break_label(c, label)) break;
-            /* Per-nesting-level iterator state so an inner for-loop can't
-             * clobber this loop's iterator/state/control key. ($tmp_args is
-             * recomputed each iteration, so it stays function-shared.) */
-            int fd = c->for_depth;
-            char f_iter[24], f_state[24], f_k[24];
-            snprintf(f_iter, sizeof f_iter, "$for_iter_%d", fd);
-            snprintf(f_state, sizeof f_state, "$for_state_%d", fd);
-            snprintf(f_k, sizeof f_k, "$for_k_%d", fd);
-            int n_exprs = s->as.for_gen.n_exprs;
-            emit_indent(c, depth); wat_append(c->w, "(local.set $tmp_args\n");
-            emit_args_array(c, s->as.for_gen.exprs, n_exprs, depth + 1);
-            emit_indent(c, depth); wat_append(c->w, ")\n");
-            /* iter = args[0]; state = args[1]; k = args[2]. */
-            emit_indent(c, depth); wat_appendf(c->w,
-                "(local.set %s "
-                "(call $args_at (ref.as_non_null (local.get $tmp_args)) (i32.const 0)))\n", f_iter);
-            emit_indent(c, depth); wat_appendf(c->w,
-                "(local.set %s "
-                "(call $args_at (ref.as_non_null (local.get $tmp_args)) (i32.const 1)))\n", f_state);
-            emit_indent(c, depth); wat_appendf(c->w,
-                "(local.set %s "
-                "(call $args_at (ref.as_non_null (local.get $tmp_args)) (i32.const 2)))\n", f_k);
-
-            /* Pre-allocate boxes (or just nil-init the local) per loop var. */
-            for (int i = 0; i < s->as.for_gen.n_names; i++) {
-                int li = s->as.for_gen.local_idxs[i];
-                emit_indent(c, depth);
-                if (slot_is_boxed(c, li)) {
-                    wat_appendf(c->w,
-                        "(local.set $L%d (struct.new $Box (ref.null any)))\n", li);
-                } else {
-                    wat_appendf(c->w, "(local.set $L%d (ref.null any))\n", li);
-                }
-            }
-
-            emit_indent(c, depth); wat_appendf(c->w, "(block $brk_%d\n", label);
-            emit_indent(c, depth + 1); wat_appendf(c->w, "(loop $cont_%d\n", label);
-            /* Call iter(state, k). The iterator can be any callable (a
-             * closure, or a table with __call) — go through $lua_call_any
-             * so a wrong type produces a typed error instead of a trap. */
-            emit_indent(c, depth + 2); wat_append(c->w, "(local.set $tmp_args\n");
-            emit_indent(c, depth + 3); wat_append(c->w, "(call $lua_call_any\n");
-            emit_indent(c, depth + 4); wat_appendf(c->w, "(local.get %s)\n", f_iter);
-            emit_indent(c, depth + 4);
-            wat_appendf(c->w,
-                "(array.new_fixed $ArgArr 2 (local.get %s) (local.get %s))\n", f_state, f_k);
-            emit_indent(c, depth + 4);
-            wat_appendf(c->w, "(i32.const %d)\n", s->line);
-            emit_indent(c, depth + 3); wat_append(c->w, ")\n");
-            emit_indent(c, depth + 2); wat_append(c->w, ")\n");
-            /* terminate if results[0] is nil */
-            emit_indent(c, depth + 2);
-            wat_appendf(c->w,
-                "(br_if $brk_%d (ref.is_null "
-                "(call $args_at (ref.as_non_null (local.get $tmp_args)) (i32.const 0))))\n",
-                label);
-            /* update k to results[0] */
-            emit_indent(c, depth + 2);
-            wat_appendf(c->w,
-                "(local.set %s "
-                "(call $args_at (ref.as_non_null (local.get $tmp_args)) (i32.const 0)))\n", f_k);
-            /* Bind loop vars from results. A captured var gets a FRESH $Box
-             * each iteration so closures over it see distinct values
-             * (Lua 5.4+ semantics), rather than sharing one mutated cell. */
-            for (int i = 0; i < s->as.for_gen.n_names; i++) {
-                int li = s->as.for_gen.local_idxs[i];
-                emit_indent(c, depth + 2);
-                if (slot_is_boxed(c, li)) {
-                    wat_appendf(c->w,
-                        "(local.set $L%d (struct.new $Box "
-                        "(call $args_at (ref.as_non_null (local.get $tmp_args)) "
-                        "(i32.const %d))))\n", li, i);
-                } else {
-                    wat_appendf(c->w,
-                        "(local.set $L%d "
-                        "(call $args_at (ref.as_non_null (local.get $tmp_args)) "
-                        "(i32.const %d)))\n", li, i);
-                }
-            }
-            /* body */
-            c->for_depth++;
-            emit_block(c, &s->as.for_gen.body, depth + 2);
-            c->for_depth--;
-            emit_indent(c, depth + 2); wat_appendf(c->w, "br $cont_%d\n", label);
-            emit_indent(c, depth + 1); wat_append(c->w, ")\n");
-            emit_indent(c, depth);     wat_append(c->w, ")\n");
-            c->break_depth--;
+        case STMT_FOR_GEN:
+            emit_for_gen(c, s, depth);
             break;
-        }
 
         case STMT_GLOBAL: {
             int n_names = s->as.global_decl.n_names;
