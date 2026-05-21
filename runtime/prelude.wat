@@ -678,6 +678,14 @@
 
   (func $lua_eq_raw (param $a anyref) (param $b anyref) (result i32)
     (local $mm anyref)
+    ;; Fast path for the dominant case (small-int keys / comparisons): two i31
+    ;; refs are equal iff their sign-extended payloads match. An i31 holds only
+    ;; a small integer here (never NaN, never bool/nil), so a direct value
+    ;; compare is exact -- identical to the $num_eq result below -- and it skips
+    ;; the null/bool/numlike cascade plus the $num_eq dispatch.
+    (if (i32.and (ref.test (ref i31) (local.get $a)) (ref.test (ref i31) (local.get $b)))
+      (then (return (i32.eq (i31.get_s (ref.cast (ref i31) (local.get $a)))
+                            (i31.get_s (ref.cast (ref i31) (local.get $b)))))))
     (if (i32.and (ref.is_null (local.get $a)) (ref.is_null (local.get $b)))
       (then (return (i32.const 1))))
     (if (i32.or  (ref.is_null (local.get $a)) (ref.is_null (local.get $b)))
@@ -1673,16 +1681,25 @@
             (else (i32.mul (local.get $cap) (i32.const 2)))))))
     ;; Keep the index under 50% occupancy (live + tombstones = $used).
     ;; Initial size 8; doubled each time, which also clears tombstones.
+    ;; $idx/$mask are loaded once here and only reloaded when a rebuild
+    ;; actually replaces them; the no-rebuild path leaves them current, so the
+    ;; probe-insert below can reuse them without re-reading the struct.
     (local.set $idx (struct.get $LuaTable $idx (local.get $t)))
     (if (ref.is_null (local.get $idx))
-      (then (call $tab_index_rebuild (local.get $t) (i32.const 7)))
+      (then
+        (call $tab_index_rebuild (local.get $t) (i32.const 7))
+        (local.set $idx  (struct.get $LuaTable $idx  (local.get $t)))
+        (local.set $mask (struct.get $LuaTable $mask (local.get $t))))
       (else
         (local.set $mask (struct.get $LuaTable $mask (local.get $t)))
         (if (i32.ge_u (i32.shl (i32.add (struct.get $LuaTable $used (local.get $t))
                                         (i32.const 1)) (i32.const 1))
                       (i32.add (local.get $mask) (i32.const 1)))
-          (then (call $tab_index_rebuild (local.get $t)
-            (i32.or (i32.shl (local.get $mask) (i32.const 1)) (i32.const 1)))))))
+          (then
+            (call $tab_index_rebuild (local.get $t)
+              (i32.or (i32.shl (local.get $mask) (i32.const 1)) (i32.const 1)))
+            (local.set $idx  (struct.get $LuaTable $idx  (local.get $t)))
+            (local.set $mask (struct.get $LuaTable $mask (local.get $t)))))))
     ;; Append to keys/vals and probe-insert into idx, reusing the first
     ;; tombstone in the probe chain if any (so churn doesn't grow $used).
     (local.set $keys (struct.get $LuaTable $keys (local.get $t)))
@@ -1690,8 +1707,6 @@
     (array.set $TArr (ref.as_non_null (local.get $keys)) (local.get $n) (local.get $k))
     (array.set $TArr (ref.as_non_null (local.get $vals)) (local.get $n) (local.get $v))
     (struct.set $LuaTable $n (local.get $t) (i32.add (local.get $n) (i32.const 1)))
-    (local.set $idx (struct.get $LuaTable $idx (local.get $t)))
-    (local.set $mask (struct.get $LuaTable $mask (local.get $t)))
     (local.set $h (i32.and (local.get $mask) (call $lua_hash (local.get $k))))
     (local.set $ftomb (i32.const -1))
     (loop $probe
@@ -1979,13 +1994,18 @@
     (local.get $out))
 
   ;; tab_append_args(t, pos, args): t[pos+i] = args[i] for i in 0..#args-1.
+  ;; Uses the unboxed-int-key setter ($tab_set_ik) so the integer key never
+  ;; gets boxed as an i31 first; it still routes through the same array/hash
+  ;; placement logic as $tab_set, so nil holes and hash spill behave
+  ;; identically. (A bulk array.copy is not safe here: the spread args may
+  ;; contain nils, which would punch holes in the dense array part.)
   (func $tab_append_args (param $t (ref $LuaTable)) (param $pos i32) (param $args (ref $ArgArr))
     (local $i i32) (local $n i32)
     (local.set $n (array.len (local.get $args)))
     (block $done (loop $lp
       (br_if $done (i32.ge_s (local.get $i) (local.get $n)))
-      (call $tab_set (local.get $t)
-        (ref.i31 (i32.add (local.get $pos) (local.get $i)))
+      (call $tab_set_ik (local.get $t)
+        (i64.extend_i32_s (i32.add (local.get $pos) (local.get $i)))
         (array.get $ArgArr (local.get $args) (local.get $i)))
       (local.set $i (i32.add (local.get $i) (i32.const 1)))
       (br $lp))))
@@ -2011,6 +2031,7 @@
   (func $builtin_print (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
     (local $n i32) (local $i i32) (local $acc anyref)
+    (local $bld (ref $Builder)) (local $sbytes (ref $LuaArr))
     (local.set $n (array.len (local.get $args)))
     (if (i32.eqz (local.get $n))
       (then
@@ -2029,18 +2050,24 @@
         (return (global.get $g_empty_args))))
     ;; Multi-arg: stringify each value (so nil/bool/table render fine
     ;; without tripping the concat type check), then join with TAB.
-    (local.set $acc (call $lua_tostring (call $args_at (local.get $args) (i32.const 0))))
+    ;; Accumulate once in a $Builder (O(total) bytes) instead of chaining
+    ;; $lua_concat, which reallocates the whole prefix per arg -> O(n^2).
+    (local.set $bld (call $builder_new))
+    (local.set $sbytes (struct.get $LuaString $bytes
+      (call $lua_tostring (call $args_at (local.get $args) (i32.const 0)))))
+    (call $builder_append (local.get $bld) (local.get $sbytes)
+      (i32.const 0) (array.len (local.get $sbytes)))
     (local.set $i (i32.const 1))
     (block $done (loop $lp
       (br_if $done (i32.ge_s (local.get $i) (local.get $n)))
-      (local.set $acc
-        (call $lua_concat
-          (call $lua_concat (local.get $acc)
-                            (ref.as_non_null (global.get $g_tab_str)))
-          (call $lua_tostring (call $args_at (local.get $args) (local.get $i)))))
+      (call $builder_append_byte (local.get $bld) (i32.const 9))   ;; TAB
+      (local.set $sbytes (struct.get $LuaString $bytes
+        (call $lua_tostring (call $args_at (local.get $args) (local.get $i)))))
+      (call $builder_append (local.get $bld) (local.get $sbytes)
+        (i32.const 0) (array.len (local.get $sbytes)))
       (local.set $i (i32.add (local.get $i) (i32.const 1)))
       (br $lp)))
-    (call $host_print (local.get $acc))
+    (call $host_print (call $builder_finish (local.get $bld)))
     (global.get $g_empty_args))
 
   ;; Build "<src>:<line>: <msg>" as a new $LuaString.
@@ -2150,22 +2177,15 @@
   (func $builtin_pcall (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
     (local $callee anyref) (local $f_args (ref $ArgArr))
-    (local $n_total i32) (local $n_fargs i32) (local $i i32) (local $line i32)
+    (local $n_total i32) (local $line i32)
     (local $err anyref) (local $results (ref $ArgArr)) (local $r2 (ref $ArgArr))
     (local $saved_depth i32)
     (local.set $n_total (array.len (local.get $args)))
     (if (i32.eqz (local.get $n_total))
       (then (throw $LuaError (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 620) (i32.const 14))))))
     (local.set $callee (array.get $ArgArr (local.get $args) (i32.const 0)))
-    (local.set $n_fargs (i32.sub (local.get $n_total) (i32.const 1)))
-    (local.set $f_args (array.new $ArgArr (ref.null any) (local.get $n_fargs)))
-    (block $copied (loop $cp
-      (br_if $copied (i32.ge_s (local.get $i) (local.get $n_fargs)))
-      (array.set $ArgArr (local.get $f_args) (local.get $i)
-        (array.get $ArgArr (local.get $args)
-          (i32.add (local.get $i) (i32.const 1))))
-      (local.set $i (i32.add (local.get $i) (i32.const 1)))
-      (br $cp)))
+    ;; f_args = args[1..]. $args_slice does the bulk copy with array.copy.
+    (local.set $f_args (call $args_slice (local.get $args) (i32.const 1)))
     (local.set $saved_depth (global.get $call_depth))
     ;; Pass the pcall call-site's line through to lua_call_any so error()
     ;; inside the callee reports the pcall(...) source position — matches
@@ -2195,7 +2215,7 @@
   (func $builtin_xpcall (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
     (local $callee anyref) (local $msgh anyref) (local $f_args (ref $ArgArr))
-    (local $n_total i32) (local $n_fargs i32) (local $i i32) (local $line i32)
+    (local $n_total i32) (local $line i32)
     (local $err anyref) (local $results (ref $ArgArr)) (local $r2 (ref $ArgArr))
     (local $handled anyref) (local $saved_depth i32)
     (local.set $n_total (array.len (local.get $args)))
@@ -2203,15 +2223,8 @@
       (then (throw $LuaError (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 620) (i32.const 14))))))
     (local.set $callee (array.get $ArgArr (local.get $args) (i32.const 0)))
     (local.set $msgh   (array.get $ArgArr (local.get $args) (i32.const 1)))
-    (local.set $n_fargs (i32.sub (local.get $n_total) (i32.const 2)))
-    (local.set $f_args (array.new $ArgArr (ref.null any) (local.get $n_fargs)))
-    (block $copied (loop $cp
-      (br_if $copied (i32.ge_s (local.get $i) (local.get $n_fargs)))
-      (array.set $ArgArr (local.get $f_args) (local.get $i)
-        (array.get $ArgArr (local.get $args)
-          (i32.add (local.get $i) (i32.const 2))))
-      (local.set $i (i32.add (local.get $i) (i32.const 1)))
-      (br $cp)))
+    ;; f_args = args[2..]. $args_slice does the bulk copy with array.copy.
+    (local.set $f_args (call $args_slice (local.get $args) (i32.const 2)))
     (local.set $saved_depth (global.get $call_depth))
     (if (i32.gt_s (global.get $call_depth) (i32.const 0))
       (then (local.set $line (array.get $LineArr
@@ -2245,8 +2258,9 @@
   ;; silently ignores) the "@on"/"@off" control messages.
   (func $builtin_warn (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
-    (local $n i32) (local $i i32) (local $acc anyref) (local $first anyref)
+    (local $n i32) (local $i i32) (local $first anyref)
     (local $bytes (ref $LuaArr))
+    (local $bld (ref $Builder)) (local $wbytes (ref $LuaArr))
     (local.set $n (array.len (local.get $args)))
     (if (i32.eqz (local.get $n)) (then (return (global.get $g_empty_args))))
     ;; Drop control messages "@on" and "@off" silently when they appear
@@ -2264,21 +2278,24 @@
                              (i32.const 64)))   ;; '@'
           (then (return (global.get $g_empty_args))))))
     ;; Concatenate all args (each tostring'd) and hand to host_warn.
-    (local.set $acc (call $lua_tostring (call $args_at (local.get $args) (i32.const 0))))
-    (local.set $i (i32.const 1))
+    ;; Single-pass $Builder accumulation (O(total) instead of O(n^2)).
+    (local.set $bld (call $builder_new))
+    (local.set $i (i32.const 0))
     (block $done (loop $lp
       (br_if $done (i32.ge_s (local.get $i) (local.get $n)))
-      (local.set $acc (call $lua_concat (local.get $acc)
+      (local.set $wbytes (struct.get $LuaString $bytes
         (call $lua_tostring (call $args_at (local.get $args) (local.get $i)))))
+      (call $builder_append (local.get $bld) (local.get $wbytes)
+        (i32.const 0) (array.len (local.get $wbytes)))
       (local.set $i (i32.add (local.get $i) (i32.const 1)))
       (br $lp)))
-    (call $host_warn (local.get $acc))
+    (call $host_warn (call $builder_finish (local.get $bld)))
     (global.get $g_empty_args))
 
   ;; --- additional top-level builtins ---
   (func $builtin_assert (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
-    (local $msg anyref) (local $idx i32) (local $bytes (ref $LuaArr))
+    (local $msg anyref) (local $idx i32)
     (if (call $lua_truthy (call $args_at (local.get $args) (i32.const 0)))
       (then (return (local.get $args))))
     ;; failed: prefix string messages with "<src>:<assert-call-line>: "
@@ -2289,25 +2306,15 @@
     ;; Default message when none given (per Lua spec): "assertion failed!"
     (if (ref.is_null (local.get $msg))
       (then
-        (local.set $bytes (array.new $LuaArr (i32.const 0) (i32.const 17)))
-        (array.set $LuaArr (local.get $bytes) (i32.const  0) (i32.const 97))   ;; a
-        (array.set $LuaArr (local.get $bytes) (i32.const  1) (i32.const 115))  ;; s
-        (array.set $LuaArr (local.get $bytes) (i32.const  2) (i32.const 115))  ;; s
-        (array.set $LuaArr (local.get $bytes) (i32.const  3) (i32.const 101))  ;; e
-        (array.set $LuaArr (local.get $bytes) (i32.const  4) (i32.const 114))  ;; r
-        (array.set $LuaArr (local.get $bytes) (i32.const  5) (i32.const 116))  ;; t
-        (array.set $LuaArr (local.get $bytes) (i32.const  6) (i32.const 105))  ;; i
-        (array.set $LuaArr (local.get $bytes) (i32.const  7) (i32.const 111))  ;; o
-        (array.set $LuaArr (local.get $bytes) (i32.const  8) (i32.const 110))  ;; n
-        (array.set $LuaArr (local.get $bytes) (i32.const  9) (i32.const 32))   ;; space
-        (array.set $LuaArr (local.get $bytes) (i32.const 10) (i32.const 102))  ;; f
-        (array.set $LuaArr (local.get $bytes) (i32.const 11) (i32.const 97))   ;; a
-        (array.set $LuaArr (local.get $bytes) (i32.const 12) (i32.const 105))  ;; i
-        (array.set $LuaArr (local.get $bytes) (i32.const 13) (i32.const 108))  ;; l
-        (array.set $LuaArr (local.get $bytes) (i32.const 14) (i32.const 101))  ;; e
-        (array.set $LuaArr (local.get $bytes) (i32.const 15) (i32.const 100))  ;; d
-        (array.set $LuaArr (local.get $bytes) (i32.const 16) (i32.const 33))   ;; !
-        (local.set $msg (struct.new $LuaString (local.get $bytes)))))
+        ;; "assertion failed!" — built in one shot rather than 17 array.set.
+        ;; (Not in codegen's $str_data slab, which it owns; we keep our own
+        ;; byte literal here.)
+        (local.set $msg (struct.new $LuaString (array.new_fixed $LuaArr 17
+          (i32.const 97)  (i32.const 115) (i32.const 115) (i32.const 101)   ;; asse
+          (i32.const 114) (i32.const 116) (i32.const 105) (i32.const 111)   ;; rtio
+          (i32.const 110) (i32.const 32)  (i32.const 102) (i32.const 97)    ;; n(sp)fa
+          (i32.const 105) (i32.const 108) (i32.const 101) (i32.const 100)   ;; iled
+          (i32.const 33))))))                                               ;; !
     (if (ref.test (ref $LuaString) (local.get $msg))
       (then
         (local.set $idx (i32.sub (global.get $call_depth) (i32.const 1)))
@@ -4143,7 +4150,7 @@
   (func $builtin_table_insert (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
     (local $t (ref $LuaTable)) (local $n i32) (local $pos i32) (local $v anyref)
-    (local $i i32)
+    (local $i i32) (local $alen i32) (local $arr (ref null $TArr))
     (local.set $t (ref.cast (ref $LuaTable) (call $args_at (local.get $args) (i32.const 0))))
     (local.set $n (call $tab_len (local.get $t)))
     (if (i32.eq (array.len (local.get $args)) (i32.const 2))
@@ -4161,6 +4168,27 @@
                 (i32.gt_s (local.get $pos) (i32.add (local.get $n) (i32.const 1))))
       (then (call $throw_lit (i32.const 837) (i32.const 22))))   ;; "position out of bounds"
     (local.set $v (call $args_at (local.get $args) (i32.const 2)))
+    ;; Fast path: when the sequence is exactly the dense array part (no
+    ;; metatable, n == $alen, and the value is non-nil so the prefix stays
+    ;; dense) the whole shift is one memmove on $arr. array.copy handles the
+    ;; overlapping forward shift like memmove. Behaviour is identical to the
+    ;; loop below, which here would be pure raw array reads/writes anyway.
+    (local.set $alen (struct.get $LuaTable $alen (local.get $t)))
+    (if (i32.and (i32.and
+            (ref.is_null (struct.get $LuaTable $meta (local.get $t)))
+            (i32.eq (local.get $n) (local.get $alen)))
+            (i32.eqz (ref.is_null (local.get $v))))
+      (then
+        (call $arr_ensure (local.get $t) (i32.add (local.get $alen) (i32.const 1)))
+        (local.set $arr (struct.get $LuaTable $arr (local.get $t)))
+        (array.copy $TArr $TArr
+          (ref.as_non_null (local.get $arr)) (local.get $pos)
+          (ref.as_non_null (local.get $arr)) (i32.sub (local.get $pos) (i32.const 1))
+          (i32.add (i32.sub (local.get $n) (local.get $pos)) (i32.const 1)))
+        (array.set $TArr (ref.as_non_null (local.get $arr))
+          (i32.sub (local.get $pos) (i32.const 1)) (local.get $v))
+        (struct.set $LuaTable $alen (local.get $t) (i32.add (local.get $alen) (i32.const 1)))
+        (return (global.get $g_empty_args))))
     ;; shift elements pos..n up by 1
     (local.set $i (local.get $n))
     (block $done (loop $lp
@@ -4177,7 +4205,7 @@
   (func $builtin_table_remove (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
     (local $t (ref $LuaTable)) (local $n i32) (local $pos i32)
-    (local $removed anyref) (local $i i32)
+    (local $removed anyref) (local $i i32) (local $alen i32) (local $arr (ref null $TArr))
     (local.set $t (ref.cast (ref $LuaTable) (call $args_at (local.get $args) (i32.const 0))))
     (local.set $n (call $tab_len (local.get $t)))
     (if (i32.gt_u (array.len (local.get $args)) (i32.const 1))
@@ -4190,6 +4218,28 @@
       (then (if (i32.or (i32.lt_s (local.get $pos) (i32.const 1))
                         (i32.gt_s (local.get $pos) (i32.add (local.get $n) (i32.const 1))))
         (then (call $throw_lit (i32.const 837) (i32.const 22))))))   ;; "position out of bounds"
+    ;; Fast path: a plain dense sequence (no metatable, n == $alen) with the
+    ;; removal point inside the array part. The shift-down is one memmove on
+    ;; $arr, then we shrink the prefix. Identical to the loop below, which here
+    ;; would be pure raw array reads/writes.
+    (local.set $alen (struct.get $LuaTable $alen (local.get $t)))
+    (if (i32.and (i32.and
+            (ref.is_null (struct.get $LuaTable $meta (local.get $t)))
+            (i32.eq (local.get $n) (local.get $alen)))
+            (i32.and (i32.ge_s (local.get $pos) (i32.const 1))
+                     (i32.le_s (local.get $pos) (local.get $n))))
+      (then
+        (local.set $arr (struct.get $LuaTable $arr (local.get $t)))
+        (local.set $removed (array.get $TArr (ref.as_non_null (local.get $arr))
+          (i32.sub (local.get $pos) (i32.const 1))))
+        (array.copy $TArr $TArr
+          (ref.as_non_null (local.get $arr)) (i32.sub (local.get $pos) (i32.const 1))
+          (ref.as_non_null (local.get $arr)) (local.get $pos)
+          (i32.sub (local.get $n) (local.get $pos)))
+        (array.set $TArr (ref.as_non_null (local.get $arr))
+          (i32.sub (local.get $n) (i32.const 1)) (ref.null any))
+        (struct.set $LuaTable $alen (local.get $t) (i32.sub (local.get $alen) (i32.const 1)))
+        (return (array.new_fixed $ArgArr 1 (local.get $removed)))))
     (local.set $removed (call $tab_get (local.get $t) (ref.i31 (local.get $pos))))
     ;; shift elements pos+1..n down by 1, then clear the vacated slot
     (local.set $i (local.get $pos))
@@ -4210,6 +4260,7 @@
     (local $t (ref $LuaTable)) (local $sep anyref) (local $acc anyref)
     (local $i i32) (local $j i32) (local $k i32) (local $nargs i32)
     (local $elem anyref)
+    (local $bld (ref $Builder)) (local $sepb (ref $LuaArr)) (local $eb (ref $LuaArr))
     (local.set $t (ref.cast (ref $LuaTable) (call $args_at (local.get $args) (i32.const 0))))
     (local.set $nargs (array.len (local.get $args)))
     (if (i32.gt_u (local.get $nargs) (i32.const 1))
@@ -4227,22 +4278,39 @@
       (then (return (array.new_fixed $ArgArr 1 (ref.as_non_null (global.get $g_empty_str))))))
     ;; Reference table.concat accepts only strings and numbers per element
     ;; (it does NOT tostring tables/booleans); anything else is a catchable
-    ;; "invalid value ... for 'concat'" error.
+    ;; "invalid value ... for 'concat'" error. Reads still go through $tab_get
+    ;; (so __index is honoured, like reference Lua), but the pieces are
+    ;; accumulated in a single $Builder (O(total) bytes) instead of chaining
+    ;; $lua_concat, which reallocates the whole prefix per element -> O(n^2).
+    (local.set $sepb (struct.get $LuaString $bytes (call $lua_tostring (local.get $sep))))
+    (local.set $bld (call $builder_new))
     (local.set $acc (call $tab_get (local.get $t) (ref.i31 (local.get $i))))
     (if (i32.eqz (call $is_concatable (local.get $acc)))
       (then (call $throw_lit (i32.const 785) (i32.const 35))))
+    (local.set $eb (struct.get $LuaString $bytes (call $lua_tostring (local.get $acc))))
+    (call $builder_append (local.get $bld) (local.get $eb)
+      (i32.const 0) (array.len (local.get $eb)))
     (local.set $k (i32.add (local.get $i) (i32.const 1)))
     (block $done (loop $lp
       (br_if $done (i32.gt_s (local.get $k) (local.get $j)))
       (local.set $elem (call $tab_get (local.get $t) (ref.i31 (local.get $k))))
       (if (i32.eqz (call $is_concatable (local.get $elem)))
         (then (call $throw_lit (i32.const 785) (i32.const 35))))
-      (local.set $acc (call $lua_concat
-        (call $lua_concat (local.get $acc) (local.get $sep))
-        (local.get $elem)))
+      ;; Guard an i32 byte-length overflow before the builder's array.new can
+      ;; trap, matching $lua_concat's catchable "too large".
+      (local.set $eb (struct.get $LuaString $bytes (call $lua_tostring (local.get $elem))))
+      (if (i32.lt_s
+            (i32.add (struct.get $Builder $len (local.get $bld))
+              (i32.add (array.len (local.get $sepb)) (array.len (local.get $eb))))
+            (i32.const 0))
+        (then (call $throw_lit (i32.const 297) (i32.const 9))))    ;; "too large"
+      (call $builder_append (local.get $bld) (local.get $sepb)
+        (i32.const 0) (array.len (local.get $sepb)))
+      (call $builder_append (local.get $bld) (local.get $eb)
+        (i32.const 0) (array.len (local.get $eb)))
       (local.set $k (i32.add (local.get $k) (i32.const 1)))
       (br $lp)))
-    (array.new_fixed $ArgArr 1 (call $lua_tostring (local.get $acc))))
+    (array.new_fixed $ArgArr 1 (call $builder_finish (local.get $bld))))
 
   ;; table.unpack(t [, i [, j]]) -> t[i], t[i+1], ..., t[j].
   ;; Defaults: i = 1, j = #t. Returns no values when j < i.
@@ -4342,6 +4410,7 @@
     (local $a1 (ref $LuaTable)) (local $a2 (ref $LuaTable))
     (local $f i32) (local $e i32) (local $t i32)
     (local $n i32) (local $i i32) (local $v anyref)
+    (local $alen1 i32) (local $alen2 i32)
     (local.set $a1 (ref.cast (ref $LuaTable) (call $args_at (local.get $args) (i32.const 0))))
     (local.set $f  (i32.wrap_i64 (call $as_int (call $args_at (local.get $args) (i32.const 1)))))
     (local.set $e  (i32.wrap_i64 (call $as_int (call $args_at (local.get $args) (i32.const 2)))))
@@ -4355,6 +4424,29 @@
     (if (i32.le_s (local.get $f) (local.get $e))
       (then
         (local.set $n (i32.add (i32.sub (local.get $e) (local.get $f)) (i32.const 1)))
+        ;; Fast path: source range [f,e] sits entirely in a1's dense array part
+        ;; and the destination range [t, t+n-1] sits entirely in a2's dense
+        ;; array part (an in-place overwrite, no growth). One array.copy then
+        ;; handles the bulk move; array.copy is memmove-correct for the
+        ;; same-array overlapping case, so no direction analysis is needed.
+        (local.set $alen1 (struct.get $LuaTable $alen (local.get $a1)))
+        (local.set $alen2 (struct.get $LuaTable $alen (local.get $a2)))
+        (if (i32.and (i32.and
+                (i32.and (i32.ge_s (local.get $f) (i32.const 1))
+                         (i32.le_s (local.get $e) (local.get $alen1)))
+                (i32.and (i32.ge_s (local.get $t) (i32.const 1))
+                         (i32.le_s (i32.add (local.get $t) (i32.sub (local.get $n) (i32.const 1)))
+                                   (local.get $alen2))))
+                (i32.eqz (i32.and (ref.eq (local.get $a1) (local.get $a2))
+                                  (i32.eq (local.get $t) (local.get $f)))))
+          (then
+            (array.copy $TArr $TArr
+              (ref.as_non_null (struct.get $LuaTable $arr (local.get $a2)))
+              (i32.sub (local.get $t) (i32.const 1))
+              (ref.as_non_null (struct.get $LuaTable $arr (local.get $a1)))
+              (i32.sub (local.get $f) (i32.const 1))
+              (local.get $n))
+            (return (array.new_fixed $ArgArr 1 (local.get $a2)))))
         ;; If dst overlaps src and t > f, iterate backward to avoid clobbering.
         ;; Backward iteration: i = n-1 ..= 0, dst[t+i] = src[f+i].
         ;; Forward iteration:  i = 0 ..< n.
@@ -5197,7 +5289,6 @@
     (local $item_end_pos i32) (local $quant i32) (local $next_ppos i32)
     (local $k i32) (local $min_k i32) (local $r i32) (local $r_n i32)
     (local $idx i32) (local $cap_start i32) (local $cap_len i32)
-    (local $saved i32)
     (local.set $n_pat (array.len (local.get $pat)))
     (local.set $n_sub (array.len (local.get $sub)))
     ;; Base: end of pattern → success.
@@ -5253,8 +5344,10 @@
             (then (br $found)))
           (local.set $idx (i32.sub (local.get $idx) (i32.const 1)))
           (br $scan)))
-        ;; idx is the open capture to close.
-        (local.set $saved (i32.const -1))
+        ;; $idx is the open capture to close. Its length cell is the open
+        ;; sentinel (-1) by construction: the scan above selected this capture
+        ;; precisely because that cell held -1. So on a failed close we rewind
+        ;; straight back to -1 — no saved value to track.
         (array.set $CapArr (local.get $caps)
           (i32.add (i32.mul (local.get $idx) (i32.const 2)) (i32.const 1))
           (i32.sub (local.get $spos)
@@ -5267,10 +5360,10 @@
         (local.set $r)
         (if (i32.ge_s (local.get $r) (i32.const 0))
           (then (return (local.get $r) (local.get $r_n))))
-        ;; rewind the close
+        ;; rewind the close back to the open sentinel
         (array.set $CapArr (local.get $caps)
           (i32.add (i32.mul (local.get $idx) (i32.const 2)) (i32.const 1))
-          (local.get $saved))
+          (i32.const -1))
         (return (i32.const -1) (local.get $ncaps))))
     ;; '%n' back-reference (n=1..9), '%bxy' balanced match, '%f[set]'
     ;; frontier.
@@ -7377,7 +7470,12 @@
         (then (br $r (array.new_data $LuaArr $str_data (i32.const 36) (i32.const 8)))))
       (if (i32.eq (local.get $idx) (i32.const 7))
         (then (br $r (array.new_data $LuaArr $str_data (i32.const 44) (i32.const 7)))))
-      (array.new_data $LuaArr $str_data (i32.const 0) (i32.const 3))))
+      (if (i32.eq (local.get $idx) (i32.const 19))
+        (then (br $r (array.new_data $LuaArr $str_data (i32.const 0) (i32.const 3)))))   ;; nil
+      ;; Every caller passes one of the constants above (0/1/2/3/7/19, the
+      ;; type-name literals). Trap on a stray index rather than silently
+      ;; handing back the wrong slab bytes, so a future bad caller is caught.
+      (unreachable)))
 
 
   ;; --- exported decoders for the JS host ---
