@@ -64,10 +64,14 @@ jobs:
           # sit alongside index.html in the flat dist.
           cp runtime/host-bindings.mjs dist/host-bindings.mjs
           cp runtime/format.mjs        dist/format.mjs
-          # Rewrite relative import so dist is flat:
-          #   "../build-em/lua2wasm.js" → "./lua2wasm.js"
-          sed 's|\.\./build-em/lua2wasm\.js|./lua2wasm.js|' \
-            runtime/playground.html > dist/index.html
+          # Rewrite relative import so dist is flat
+          #   ("../build-em/lua2wasm.js" → "./lua2wasm.js"), and stamp the
+          # footer's build-hash placeholder with the deployed commit so the
+          # live site shows exactly which revision is running.
+          SHA='${{ github.sha }}'; SHORT="${SHA:0:7}"; REPO='${{ github.repository }}'
+          sed -e 's#\.\./build-em/lua2wasm\.js#./lua2wasm.js#' \
+              -e "s#<a id=\"build-hash\"[^>]*><code>dev</code></a>#<a id=\"build-hash\" href=\"https://github.com/${REPO}/commit/${SHA}\" target=\"_blank\" rel=\"noopener\"><code>${SHORT}</code></a>#" \
+              runtime/playground.html > dist/index.html
           # Disable Jekyll processing on a static site.
           touch dist/.nojekyll
 
