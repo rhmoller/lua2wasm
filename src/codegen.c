@@ -118,6 +118,13 @@ typedef struct {
      * before emitting either a user function body or the main chunk. */
     const unsigned char *cur_captured;
     int cur_n_locals;
+    /* Integer-specialization PoC (opt-in via LUA2WASM_OPT_INT). When on,
+     * cur_is_int[s] != 0 marks a local slot proven to hold only integers; it
+     * is declared as an unboxed i64 and integer arithmetic on it is emitted as
+     * inline i64 ops, boxed to a Lua value only at use-site boundaries. */
+    int opt_int;
+    const unsigned char *cur_is_int;
+    int cur_n_params;
     /* goto/label state */
     int next_label_id;      /* fresh per function body */
     LabelScope *label_scope; /* innermost first */
@@ -275,6 +282,8 @@ static int i31_fits(int64_t v) {
 static void emit_expr(CG *c, const Expr *e, int depth);
 static void emit_block(CG *c, const Block *b, int depth);
 static void emit_stmt(CG *c, const Stmt *s, int depth);
+static int  expr_is_int(CG *c, const Expr *e);
+static void emit_int_expr(CG *c, const Expr *e, int depth);
 
 /* ----- literal emission ----- */
 static void emit_int_literal(CG *c, int64_t v, int depth) {
@@ -837,9 +846,177 @@ static void emit_table_ctor(CG *c, const Expr *e, int depth) {
     emit_indent(c, depth); wat_append(c->w, ")\n");
 }
 
+/* ----- integer-specialization PoC (LUA2WASM_OPT_INT) ----- */
+
+/* Is this slot a local proven to hold only integers (declared as i64)? */
+static int slot_is_int(const CG *c, int slot) {
+    if (!c->opt_int || !c->cur_is_int) return 0;
+    if (slot < 0 || slot >= c->cur_n_locals) return 0;
+    return c->cur_is_int[slot];
+}
+
+/* True iff `e` provably evaluates to a Lua integer and can be emitted as a
+ * raw i64 via emit_int_expr. Conservative: only integer literals, i64 locals,
+ * and integer-closed arithmetic over those. `/` and `^` are always float; `<<`
+ * `>>` have non-trivial Lua semantics so are left to the generic path. */
+static int expr_is_int(CG *c, const Expr *e) {
+    if (!c->opt_int) return 0;
+    switch (e->kind) {
+    case EXPR_INT: return 1;
+    case EXPR_VAR:
+        return e->as.var.kind == VAR_LOCAL && slot_is_int(c, e->as.var.idx);
+    case EXPR_BINOP:
+        switch (e->as.binop.op) {
+        case BIN_ADD: case BIN_SUB: case BIN_MUL:
+        case BIN_FDIV: case BIN_MOD:
+        case BIN_BAND: case BIN_BOR: case BIN_BXOR:
+            return expr_is_int(c, e->as.binop.lhs) && expr_is_int(c, e->as.binop.rhs);
+        default: return 0;
+        }
+    case EXPR_UNOP:
+        return (e->as.unop.op == UN_NEG || e->as.unop.op == UN_BNOT)
+            && expr_is_int(c, e->as.unop.operand);
+    default: return 0;
+    }
+}
+
+/* Emit `e` (which must satisfy expr_is_int) as a raw i64 on the wasm stack. */
+static void emit_int_expr(CG *c, const Expr *e, int depth) {
+    if (!c->ok) return;
+    switch (e->kind) {
+    case EXPR_INT:
+        emit_indent(c, depth);
+        wat_appendf(c->w, "(i64.const %lld)\n", (long long)e->as.i_val);
+        return;
+    case EXPR_VAR:
+        emit_indent(c, depth);
+        wat_appendf(c->w, "(local.get $L%d)\n", e->as.var.idx);
+        return;
+    case EXPR_UNOP:
+        if (e->as.unop.op == UN_NEG) {
+            emit_indent(c, depth); wat_append(c->w, "(i64.sub (i64.const 0)\n");
+            emit_int_expr(c, e->as.unop.operand, depth + 1);
+            emit_indent(c, depth); wat_append(c->w, ")\n");
+        } else { /* UN_BNOT */
+            emit_indent(c, depth); wat_append(c->w, "(i64.xor (i64.const -1)\n");
+            emit_int_expr(c, e->as.unop.operand, depth + 1);
+            emit_indent(c, depth); wat_append(c->w, ")\n");
+        }
+        return;
+    case EXPR_BINOP: {
+        const char *op = NULL, *fn = NULL;
+        switch (e->as.binop.op) {
+        case BIN_ADD: op = "i64.add"; break;
+        case BIN_SUB: op = "i64.sub"; break;
+        case BIN_MUL: op = "i64.mul"; break;
+        case BIN_BAND: op = "i64.and"; break;
+        case BIN_BOR:  op = "i64.or";  break;
+        case BIN_BXOR: op = "i64.xor"; break;
+        case BIN_FDIV: fn = "$idiv_floor"; break;
+        case BIN_MOD:  fn = "$imod_floor"; break;
+        default: break;
+        }
+        emit_indent(c, depth);
+        if (fn) wat_appendf(c->w, "(call %s\n", fn);
+        else    wat_appendf(c->w, "(%s\n", op);
+        emit_int_expr(c, e->as.binop.lhs, depth + 1);
+        emit_int_expr(c, e->as.binop.rhs, depth + 1);
+        emit_indent(c, depth); wat_append(c->w, ")\n");
+        return;
+    }
+    default:
+        cg_error(c, "emit_int_expr on non-integer expression");
+    }
+}
+
+/* Walk one block, clearing out[] entries whose slot has any assignment that
+ * isn't a clean single integer expression. Conservative and sound: a slot
+ * stays set only if *every* assignment to it is provably integer. */
+static void int_kill_block(CG *c, const Block *b, unsigned char *out, int *changed);
+
+static void int_kill_stmt(CG *c, const Stmt *s, unsigned char *out, int *changed) {
+    #define KILL(slot) do { int _s=(slot); if (_s>=0 && _s<c->cur_n_locals && out[_s]) { out[_s]=0; *changed=1; } } while (0)
+    switch (s->kind) {
+    case STMT_LOCAL: {
+        int nn = s->as.local.n_names, nv = s->as.local.n_values;
+        for (int j = 0; j < nn; j++) {
+            int slot = s->as.local.local_idxs[j];
+            if (nv == nn && expr_is_int(c, s->as.local.values[j])) continue;
+            KILL(slot);
+        }
+        break;
+    }
+    case STMT_ASSIGN: {
+        int nt = s->as.assign.n_targets, nv = s->as.assign.n_values;
+        for (int j = 0; j < nt; j++) {
+            AssignTarget *t = &s->as.assign.targets[j];
+            if (t->kind != TGT_VAR || t->as.var.kind != VAR_LOCAL) continue;
+            /* Only a single-target single-value int store is specialized; the
+             * multi-target path stores anyref, which an i64 slot can't hold. */
+            if (nt == 1 && nv == 1 && expr_is_int(c, s->as.assign.values[0])) continue;
+            KILL(t->as.var.idx);
+        }
+        break;
+    }
+    case STMT_FOR_NUM: {
+        const Expr *st = s->as.for_num.step;
+        if (!(expr_is_int(c, s->as.for_num.start)
+              && expr_is_int(c, s->as.for_num.stop)
+              && (st == NULL || expr_is_int(c, st))))
+            KILL(s->as.for_num.local_idx);
+        int_kill_block(c, &s->as.for_num.body, out, changed);
+        break;
+    }
+    case STMT_FOR_GEN:
+        for (int j = 0; j < s->as.for_gen.n_names; j++) KILL(s->as.for_gen.local_idxs[j]);
+        int_kill_block(c, &s->as.for_gen.body, out, changed);
+        break;
+    case STMT_LOCAL_FUNC: KILL(s->as.local_func.local_idx); break;
+    case STMT_IF:
+        for (size_t a = 0; a < s->as.if_stmt.narms; a++)
+            int_kill_block(c, &s->as.if_stmt.arms[a].body, out, changed);
+        if (s->as.if_stmt.has_else) int_kill_block(c, &s->as.if_stmt.else_body, out, changed);
+        break;
+    case STMT_WHILE:  int_kill_block(c, &s->as.while_stmt.body, out, changed); break;
+    case STMT_DO:     int_kill_block(c, &s->as.do_stmt.body,    out, changed); break;
+    case STMT_REPEAT: int_kill_block(c, &s->as.repeat.body,     out, changed); break;
+    default: break;
+    }
+    #undef KILL
+}
+
+static void int_kill_block(CG *c, const Block *b, unsigned char *out, int *changed) {
+    for (size_t i = 0; i < b->count; i++) int_kill_stmt(c, b->items[i], out, changed);
+}
+
+/* Fill out[0..n_locals) with the integer-only slots of one function body.
+ * Optimistic start (every non-param, non-captured slot is a candidate), then
+ * fixpoint-remove any contradicted by an assignment. */
+static void compute_int_slots(CG *c, const Block *body, int n_locals, int n_params,
+                              const unsigned char *captured, unsigned char *out) {
+    for (int i = 0; i < n_locals; i++)
+        out[i] = (i >= n_params) && !(captured && captured[i]);
+    const unsigned char *saved = c->cur_is_int;
+    int saved_n = c->cur_n_locals;
+    c->cur_is_int = out;
+    c->cur_n_locals = n_locals;
+    int changed = 1;
+    while (changed) { changed = 0; int_kill_block(c, body, out, &changed); }
+    c->cur_is_int = saved;
+    c->cur_n_locals = saved_n;
+}
+
 /* ----- main expression dispatch ----- */
 static void emit_expr(CG *c, const Expr *e, int depth) {
     if (!c->ok) return;
+    /* Integer-specialized value used in a Lua-value (anyref) context: emit the
+     * unboxed i64 and box it. EXPR_INT keeps its existing path. */
+    if (c->opt_int && e->kind != EXPR_INT && expr_is_int(c, e)) {
+        emit_indent(c, depth); wat_append(c->w, "(call $make_int\n");
+        emit_int_expr(c, e, depth + 1);
+        emit_indent(c, depth); wat_append(c->w, ")\n");
+        return;
+    }
     switch (e->kind) {
         case EXPR_NIL:
             emit_indent(c, depth); wat_append(c->w, "(ref.null any)\n"); break;
@@ -926,6 +1103,14 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
             }
             for (int i = 0; i < n_names; i++) {
                 int slot = s->as.local.local_idxs[i];
+                if (slot_is_int(c, slot)) {
+                    /* i64 slot: analysis guarantees a matching single int value. */
+                    emit_indent(c, depth);
+                    wat_appendf(c->w, "(local.set $L%d\n", slot);
+                    emit_int_expr(c, s->as.local.values[i], depth + 1);
+                    emit_indent(c, depth); wat_append(c->w, ")\n");
+                    continue;
+                }
                 int boxed = slot_is_boxed(c, slot);
                 emit_indent(c, depth);
                 if (boxed) {
@@ -952,6 +1137,14 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
                              is_multival_tail(s->as.assign.values[n_values - 1]));
             if (n_targets == 1) {
                 AssignTarget *t = &s->as.assign.targets[0];
+                if (t->kind == TGT_VAR && t->as.var.kind == VAR_LOCAL
+                    && slot_is_int(c, t->as.var.idx)) {
+                    emit_indent(c, depth);
+                    wat_appendf(c->w, "(local.set $L%d\n", t->as.var.idx);
+                    emit_int_expr(c, s->as.assign.values[0], depth + 1);
+                    emit_indent(c, depth); wat_append(c->w, ")\n");
+                    break;
+                }
                 emit_target_open(c, t, depth);
                 if (last_call) {
                     emit_indent(c, depth + 1); wat_append(c->w, "(call $args_first\n");
@@ -1147,6 +1340,66 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
             int label = c->next_label++;
             if (!push_break_label(c, label)) break;
             int slot = s->as.for_num.local_idx;
+            /* Integer-specialized loop: control var + bounds are i64, the
+             * counter is an unboxed i64 slot, no per-iteration boxing or
+             * generic-helper calls. The analysis only marks the slot int when
+             * start/stop/step are all integer and the var isn't captured. */
+            if (slot_is_int(c, slot)) {
+                int fd = c->for_depth;
+                const Expr *st = s->as.for_num.step;
+                char step_s[40];
+                int sign;   /* +1/-1 known at compile time; 0 = runtime */
+                if (!st) { snprintf(step_s, sizeof step_s, "(i64.const 1)"); sign = 1; }
+                else if (st->kind == EXPR_INT && st->as.i_val != 0) {
+                    snprintf(step_s, sizeof step_s, "(i64.const %lld)", (long long)st->as.i_val);
+                    sign = st->as.i_val > 0 ? 1 : -1;
+                } else { snprintf(step_s, sizeof step_s, "(local.get $ifor_step_%d)", fd); sign = 0; }
+                emit_indent(c, depth); wat_appendf(c->w, "(local.set $L%d\n", slot);
+                emit_int_expr(c, s->as.for_num.start, depth + 1);
+                emit_indent(c, depth); wat_append(c->w, ")\n");
+                emit_indent(c, depth); wat_appendf(c->w, "(local.set $ifor_stop_%d\n", fd);
+                emit_int_expr(c, s->as.for_num.stop, depth + 1);
+                emit_indent(c, depth); wat_append(c->w, ")\n");
+                if (sign == 0) {
+                    emit_indent(c, depth); wat_appendf(c->w, "(local.set $ifor_step_%d\n", fd);
+                    emit_int_expr(c, st, depth + 1);
+                    emit_indent(c, depth); wat_append(c->w, ")\n");
+                    emit_indent(c, depth);
+                    wat_appendf(c->w, "(if (i64.eqz %s) (then (call $throw_lit (i32.const 75) (i32.const 18))))\n", step_s);
+                }
+                emit_indent(c, depth); wat_appendf(c->w, "(block $brk_%d\n", label);
+                emit_indent(c, depth + 1); wat_appendf(c->w, "(loop $cont_%d\n", label);
+                emit_indent(c, depth + 2);
+                if (sign == 1)
+                    wat_appendf(c->w, "(br_if $brk_%d (i64.gt_s (local.get $L%d) (local.get $ifor_stop_%d)))\n", label, slot, fd);
+                else if (sign == -1)
+                    wat_appendf(c->w, "(br_if $brk_%d (i64.lt_s (local.get $L%d) (local.get $ifor_stop_%d)))\n", label, slot, fd);
+                else
+                    wat_appendf(c->w,
+                        "(if (i64.gt_s %s (i64.const 0)) (then (br_if $brk_%d (i64.gt_s (local.get $L%d) (local.get $ifor_stop_%d)))) (else (br_if $brk_%d (i64.lt_s (local.get $L%d) (local.get $ifor_stop_%d)))))\n",
+                        step_s, label, slot, fd, label, slot, fd);
+                c->for_depth++;
+                emit_block(c, &s->as.for_num.body, depth + 2);
+                c->for_depth--;
+                emit_indent(c, depth + 2);
+                wat_appendf(c->w, "(local.set $ifor_next_%d (i64.add (local.get $L%d) %s))\n", fd, slot, step_s);
+                emit_indent(c, depth + 2);
+                if (sign == 1)
+                    wat_appendf(c->w, "(br_if $brk_%d (i64.lt_s (local.get $ifor_next_%d) (local.get $L%d)))\n", label, fd, slot);
+                else if (sign == -1)
+                    wat_appendf(c->w, "(br_if $brk_%d (i64.gt_s (local.get $ifor_next_%d) (local.get $L%d)))\n", label, fd, slot);
+                else
+                    wat_appendf(c->w,
+                        "(if (i64.gt_s %s (i64.const 0)) (then (br_if $brk_%d (i64.lt_s (local.get $ifor_next_%d) (local.get $L%d)))) (else (br_if $brk_%d (i64.gt_s (local.get $ifor_next_%d) (local.get $L%d)))))\n",
+                        step_s, label, fd, slot, label, fd, slot);
+                emit_indent(c, depth + 2);
+                wat_appendf(c->w, "(local.set $L%d (local.get $ifor_next_%d))\n", slot, fd);
+                emit_indent(c, depth + 2); wat_appendf(c->w, "br $cont_%d\n", label);
+                emit_indent(c, depth + 1); wat_append(c->w, ")\n");
+                emit_indent(c, depth);     wat_append(c->w, ")\n");
+                c->break_depth--;
+                break;
+            }
             int boxed = slot_is_boxed(c, slot);
             /* Per-nesting-level scratch so an inner for-loop can't clobber
              * this loop's stop/step. */
@@ -1779,8 +2032,17 @@ static void emit_user_function(CG *c, const LuaFunc *fn) {
     /* Wire escape-analysis state for this body. */
     const unsigned char *prev_captured = c->cur_captured;
     int prev_n_locals = c->cur_n_locals;
+    const unsigned char *prev_is_int = c->cur_is_int;
+    int prev_n_params = c->cur_n_params;
     c->cur_captured = fn->captured;
     c->cur_n_locals = fn->n_locals;
+    c->cur_n_params = fn->n_params;
+    unsigned char *isint = NULL;
+    if (c->opt_int) {
+        isint = calloc(fn->n_locals ? fn->n_locals : 1, 1);
+        compute_int_slots(c, &fn->body, fn->n_locals, fn->n_params, fn->captured, isint);
+    }
+    c->cur_is_int = isint;
 
     /* Run the label pre-pass NOW so block_dispatch_id is populated on
      * every label and goto before we emit the $next_BID i32 locals. */
@@ -1789,7 +2051,9 @@ static void emit_user_function(CG *c, const LuaFunc *fn) {
     la_block(c, &fn->body, NULL);
 
     for (int i = 0; i < fn->n_locals; i++) {
-        if (fn->captured && fn->captured[i]) {
+        if (isint && isint[i]) {
+            wat_appendf(w, "    (local $L%d i64)\n", i);
+        } else if (fn->captured && fn->captured[i]) {
             wat_appendf(w, "    (local $L%d (ref $Box))\n", i);
         } else {
             wat_appendf(w, "    (local $L%d anyref)\n", i);
@@ -1803,6 +2067,12 @@ static void emit_user_function(CG *c, const LuaFunc *fn) {
     wat_append(w, "    (local $tmp_lhs_t (ref null $ArgArr))\n");
     wat_append(w, "    (local $tmp_lhs_k (ref null $ArgArr))\n");
     emit_for_scratch_locals(w, &fn->body);
+    if (c->opt_int) {
+        int lv = max_for_nesting(&fn->body);
+        for (int d = 0; d < lv; d++)
+            wat_appendf(w, "    (local $ifor_stop_%d i64) (local $ifor_step_%d i64)"
+                           " (local $ifor_next_%d i64)\n", d, d, d);
+    }
     if (fn->is_vararg) {
         /* Non-null: prologue always writes $varargs before first use. */
         wat_append(w, "    (local $varargs (ref $ArgArr))\n");
@@ -1864,6 +2134,9 @@ static void emit_user_function(CG *c, const LuaFunc *fn) {
 
     c->cur_captured = prev_captured;
     c->cur_n_locals = prev_n_locals;
+    c->cur_is_int = prev_is_int;
+    c->cur_n_params = prev_n_params;
+    free(isint);
 }
 
 /* ---------- tree-shaking (milestone 0 / size opt) ---------- */
@@ -2288,13 +2561,22 @@ static void emit_main_chunk(CG *c) {
     wat_append(out, "  (func $main (export \"main\")\n");
     c->cur_captured = pr->main_captured;
     c->cur_n_locals = pr->main_n_locals;
+    c->cur_n_params = 0;
+    unsigned char *isint = NULL;
+    if (c->opt_int) {
+        isint = calloc(pr->main_n_locals ? pr->main_n_locals : 1, 1);
+        compute_int_slots(c, &pr->main_body, pr->main_n_locals, 0, pr->main_captured, isint);
+    }
+    c->cur_is_int = isint;
     /* Pre-pass before locals: dispatch ids must be assigned so the
      * $next_BID i32 locals can be declared up-front. */
     c->next_label_id = 0;
     la_block(c, &pr->main_body, NULL);
 
     for (int i = 0; i < pr->main_n_locals; i++) {
-        if (pr->main_captured && pr->main_captured[i]) {
+        if (isint && isint[i]) {
+            wat_appendf(out, "    (local $L%d i64)\n", i);
+        } else if (pr->main_captured && pr->main_captured[i]) {
             wat_appendf(out, "    (local $L%d (ref $Box))\n", i);
         } else {
             wat_appendf(out, "    (local $L%d anyref)\n", i);
@@ -2308,6 +2590,12 @@ static void emit_main_chunk(CG *c) {
     wat_append(out, "    (local $tmp_lhs_t (ref null $ArgArr))\n");
     wat_append(out, "    (local $tmp_lhs_k (ref null $ArgArr))\n");
     emit_for_scratch_locals(out, &pr->main_body);
+    if (c->opt_int) {
+        int lv = max_for_nesting(&pr->main_body);
+        for (int d = 0; d < lv; d++)
+            wat_appendf(out, "    (local $ifor_stop_%d i64) (local $ifor_step_%d i64)"
+                            " (local $ifor_next_%d i64)\n", d, d, d);
+    }
     {
         int bids[128]; int n = 0;
         collect_dispatch_ids(&pr->main_body, bids, &n, 128);
@@ -2328,6 +2616,8 @@ static void emit_main_chunk(CG *c) {
     if (c->ok) emit_block(c, &pr->main_body, 2);
 
     wat_append(out, "  )\n");
+    c->cur_is_int = NULL;
+    free(isint);
 }
 
 /* Emit the `$str_data` passive data segment: every interned byte of the
@@ -2361,6 +2651,9 @@ int codegen_module(const ParseResult *pr, const char *src_name,
     }
 
     CG c = { .w = out, .pr = pr, .ok = 1, .in_main = 1 };
+    /* Integer-specialization PoC: opt-in via env so the default pipeline and
+     * golden output are byte-for-byte unchanged. */
+    c.opt_int = getenv("LUA2WASM_OPT_INT") != NULL;
     strpool_add(&c.strs, LITERAL_PREFIX, LITERAL_PREFIX_LEN);
 
     wat_append(out, "(module\n");

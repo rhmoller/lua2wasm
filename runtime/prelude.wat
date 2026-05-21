@@ -3431,6 +3431,39 @@
       (then (call $throw_number_expected (local.get $v)) (unreachable)))
     (call $as_float (local.get $c)))
 
+  ;; i64 floor-division and floor-modulo for the integer-specialization path
+  ;; (LUA2WASM_OPT_INT). Same semantics as $lua_fdiv/$lua_mod on two integers
+  ;; — floor toward -inf, divide-by-zero raises the catchable Lua error — but
+  ;; operating on raw i64 with no boxing. The b==-1 guards avoid the wasm
+  ;; INT64_MIN/-1 overflow trap (Lua wraps: x//-1 == -x, x%-1 == 0).
+  (func $idiv_floor (param $a i64) (param $b i64) (result i64)
+    (local $q i64)
+    (if (i64.eqz (local.get $b))
+      (then (call $throw_lit (i32.const 430) (i32.const 25)) (unreachable)))  ;; divide by zero
+    (if (i64.eq (local.get $b) (i64.const -1))
+      (then (return (i64.sub (i64.const 0) (local.get $a)))))
+    (local.set $q (i64.div_s (local.get $a) (local.get $b)))
+    (if (i32.and
+          (i64.ne (i64.rem_s (local.get $a) (local.get $b)) (i64.const 0))
+          (i32.ne (i64.lt_s (local.get $a) (i64.const 0))
+                  (i64.lt_s (local.get $b) (i64.const 0))))
+      (then (local.set $q (i64.sub (local.get $q) (i64.const 1)))))
+    (local.get $q))
+
+  (func $imod_floor (param $a i64) (param $b i64) (result i64)
+    (local $r i64)
+    (if (i64.eqz (local.get $b))
+      (then (call $throw_lit (i32.const 455) (i32.const 24)) (unreachable)))  ;; 'n%0'
+    (if (i64.eq (local.get $b) (i64.const -1))
+      (then (return (i64.const 0))))
+    (local.set $r (i64.rem_s (local.get $a) (local.get $b)))
+    (if (i32.and
+          (i64.ne (local.get $r) (i64.const 0))
+          (i32.ne (i64.lt_s (local.get $r) (i64.const 0))
+                  (i64.lt_s (local.get $b) (i64.const 0))))
+      (then (local.set $r (i64.add (local.get $r) (local.get $b)))))
+    (local.get $r))
+
   ;; Integer analog of $as_float_co: a number or numeric string denoting an
   ;; exact integer passes through; a fractional / out-of-range value raises a
   ;; catchable "number has no integer representation"; a non-number raises
