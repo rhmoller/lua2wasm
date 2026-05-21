@@ -333,6 +333,19 @@ static LuaFunc *parse_function_body(Parser *p, int line);
 static LuaFunc *parse_function_body_ex(Parser *p, int line, int with_self);
 static Stmt *parse_function_stmt(Parser *p);
 
+/* Build `base[name]` — an EXPR_INDEX with a string-literal key — for the
+ * `.field`/`:method` dotted-path sugar shared by the prefix-chain parser and
+ * the `function a.b.c:d()` definition parser. */
+static Expr *make_index(NodePool *pool, Expr *base, const Token *name) {
+    Expr *key = expr_new(pool, EXPR_STRING, name->line);
+    key->as.s.bytes = name->start;
+    key->as.s.len = name->len;
+    Expr *idx = expr_new(pool, EXPR_INDEX, name->line);
+    idx->as.index.table = base;
+    idx->as.index.key = key;
+    return idx;
+}
+
 static Expr *parse_primary(Parser *p) {
     const Token *t = peek(p);
     int line = t->line;
@@ -483,14 +496,7 @@ static Expr *parse_prefix_chain(Parser *p) {
         } else if (k == TOK_DOT) {
             advance(p);
             if (peek(p)->kind != TOK_IDENT) { set_error(p, "expected field name after '.'"); return NULL; }
-            const Token *nm = advance(p);
-            Expr *key = expr_new(p->pool, EXPR_STRING, nm->line);
-            key->as.s.bytes = nm->start;
-            key->as.s.len = nm->len;
-            Expr *idx = expr_new(p->pool, EXPR_INDEX, nm->line);
-            idx->as.index.table = e;
-            idx->as.index.key = key;
-            e = idx;
+            e = make_index(p->pool, e, advance(p));
         } else if (k == TOK_LBRACKET) {
             int line = peek(p)->line;
             advance(p);
@@ -623,6 +629,27 @@ static int is_block_end(TokKind k, const TokKind *stops, int n_stops) {
     return 0;
 }
 
+/* Parse a `<attr>` after seeing the leading TOK_LT. Consumes `< name >`,
+ * validates `name` against the recognised set {const, close}, and returns the
+ * attribute code (1 = const, 2 = close). On any malformed/unknown attribute it
+ * sets the parser error and returns -1. Used by both `local` (which acts on the
+ * code) and `global` (which validates but does not yet enforce). */
+static int parse_attribute(Parser *p) {
+    advance(p); /* < */
+    if (peek(p)->kind != TOK_IDENT) {
+        set_error(p, "expected attribute name after '<'"); return -1;
+    }
+    const Token *a = advance(p);
+    int attrib;
+    if (a->len == 5 && memcmp(a->start, "const", 5) == 0)
+        attrib = 1;
+    else if (a->len == 5 && memcmp(a->start, "close", 5) == 0)
+        attrib = 2;
+    else { set_error(p, "unknown attribute"); return -1; }
+    if (!match(p, TOK_GT)) { set_error(p, "expected '>' after attribute"); return -1; }
+    return attrib;
+}
+
 static Stmt *parse_local(Parser *p) {
     int line = peek(p)->line;
     advance(p); /* local */
@@ -653,17 +680,8 @@ static Stmt *parse_local(Parser *p) {
      * same attribute to every name (per-name attribute still wins). */
     int default_attrib = 0;
     if (peek(p)->kind == TOK_LT) {
-        advance(p); /* < */
-        if (peek(p)->kind != TOK_IDENT) {
-            set_error(p, "expected attribute name after '<'"); return NULL;
-        }
-        const Token *a = advance(p);
-        if (a->len == 5 && memcmp(a->start, "const", 5) == 0)
-            default_attrib = 1;
-        else if (a->len == 5 && memcmp(a->start, "close", 5) == 0)
-            default_attrib = 2;
-        else { set_error(p, "unknown local attribute"); return NULL; }
-        if (!match(p, TOK_GT)) { set_error(p, "expected '>' after attribute"); return NULL; }
+        default_attrib = parse_attribute(p);
+        if (default_attrib < 0) return NULL;
     }
     if (peek(p)->kind != TOK_IDENT) { set_error(p, "expected identifier after `local`"); return NULL; }
     const Token *names_buf[MAX_LIST];
@@ -671,19 +689,11 @@ static Stmt *parse_local(Parser *p) {
     int n_names = 0;
     names_buf[n_names++] = advance(p);
     attribs_buf[n_names - 1] = default_attrib;
-    /* Optional <attrib> immediately after the name. */
+    /* Optional <attrib> immediately after the name (per-name overrides prefix). */
     if (peek(p)->kind == TOK_LT) {
-        advance(p);
-        if (peek(p)->kind != TOK_IDENT) {
-            set_error(p, "expected attribute name after '<'"); return NULL;
-        }
-        const Token *a = advance(p);
-        if (a->len == 5 && memcmp(a->start, "const", 5) == 0)
-            attribs_buf[n_names - 1] = 1;
-        else if (a->len == 5 && memcmp(a->start, "close", 5) == 0)
-            attribs_buf[n_names - 1] = 2;
-        else { set_error(p, "unknown local attribute"); return NULL; }
-        if (!match(p, TOK_GT)) { set_error(p, "expected '>' after attribute"); return NULL; }
+        int a = parse_attribute(p);
+        if (a < 0) return NULL;
+        attribs_buf[n_names - 1] = a;
     }
     while (match(p, TOK_COMMA)) {
         if (peek(p)->kind != TOK_IDENT) { set_error(p, "expected identifier"); return NULL; }
@@ -691,17 +701,9 @@ static Stmt *parse_local(Parser *p) {
         names_buf[n_names++] = advance(p);
         attribs_buf[n_names - 1] = default_attrib;
         if (peek(p)->kind == TOK_LT) {
-            advance(p);
-            if (peek(p)->kind != TOK_IDENT) {
-                set_error(p, "expected attribute name after '<'"); return NULL;
-            }
-            const Token *a = advance(p);
-            if (a->len == 5 && memcmp(a->start, "const", 5) == 0)
-                attribs_buf[n_names - 1] = 1;
-            else if (a->len == 5 && memcmp(a->start, "close", 5) == 0)
-                attribs_buf[n_names - 1] = 2;
-            else { set_error(p, "unknown local attribute"); return NULL; }
-            if (!match(p, TOK_GT)) { set_error(p, "expected '>' after attribute"); return NULL; }
+            int a = parse_attribute(p);
+            if (a < 0) return NULL;
+            attribs_buf[n_names - 1] = a;
         }
     }
     /* Parse RHS values BEFORE declaring locals — Lua scoping rule. */
@@ -1074,21 +1076,6 @@ static Stmt *parse_label(Parser *p) {
     return s;
 }
 
-/* Consume an `<attribute>` (after seeing TOK_LT). Returns 1 on success.
- * The attribute name is parsed but not interpreted — `const`-ness on
- * globals is not yet enforced. */
-static int consume_attribute(Parser *p) {
-    advance(p); /* < */
-    if (peek(p)->kind != TOK_IDENT) {
-        set_error(p, "expected attribute name after '<'"); return 0;
-    }
-    advance(p); /* attribute name */
-    if (!match(p, TOK_GT)) {
-        set_error(p, "expected '>' after attribute"); return 0;
-    }
-    return 1;
-}
-
 static Stmt *parse_global(Parser *p) {
     int line = peek(p)->line;
     advance(p); /* global */
@@ -1105,7 +1092,7 @@ static Stmt *parse_global(Parser *p) {
     /* Optional prefix `<attr>` — `global <const> ...`. Parser-accepted,
      * not enforced yet. */
     if (peek(p)->kind == TOK_LT) {
-        if (!consume_attribute(p)) return NULL;
+        if (parse_attribute(p) < 0) return NULL;
     }
 
     /* Wildcard form: `global <const> *` (or even `global *`) — declare
@@ -1120,14 +1107,14 @@ static Stmt *parse_global(Parser *p) {
     names_buf[n_names++] = advance(p);
     /* Per-name attribute after the first name. */
     if (peek(p)->kind == TOK_LT) {
-        if (!consume_attribute(p)) return NULL;
+        if (parse_attribute(p) < 0) return NULL;
     }
     while (match(p, TOK_COMMA)) {
         if (peek(p)->kind != TOK_IDENT) { set_error(p, "expected identifier"); return NULL; }
         if (n_names >= MAX_LIST) { set_error(p, "too many names in global"); return NULL; }
         names_buf[n_names++] = advance(p);
         if (peek(p)->kind == TOK_LT) {
-            if (!consume_attribute(p)) return NULL;
+            if (parse_attribute(p) < 0) return NULL;
         }
     }
     /* Register globals BEFORE parsing values so they can self-reference. */
@@ -1188,41 +1175,18 @@ static Stmt *parse_function_stmt(Parser *p) {
     while (peek(p)->kind == TOK_DOT) {
         advance(p);
         if (peek(p)->kind != TOK_IDENT) { set_error(p, "expected name after '.'"); return NULL; }
-        const Token *nm = advance(p);
-        Expr *key = expr_new(p->pool, EXPR_STRING, nm->line);
-        key->as.s.bytes = nm->start;
-        key->as.s.len = nm->len;
-        Expr *idxe = expr_new(p->pool, EXPR_INDEX, nm->line);
-        idxe->as.index.table = base;
-        idxe->as.index.key = key;
-        base = idxe;
+        base = make_index(p->pool, base, advance(p));
     }
     /* Optional :METHOD suffix. */
     int with_self = 0;
     if (peek(p)->kind == TOK_COLON) {
         advance(p);
         if (peek(p)->kind != TOK_IDENT) { set_error(p, "expected name after ':'"); return NULL; }
-        const Token *nm = advance(p);
-        Expr *key = expr_new(p->pool, EXPR_STRING, nm->line);
-        key->as.s.bytes = nm->start;
-        key->as.s.len = nm->len;
-        Expr *idxe = expr_new(p->pool, EXPR_INDEX, nm->line);
-        idxe->as.index.table = base;
-        idxe->as.index.key = key;
-        base = idxe;
+        base = make_index(p->pool, base, advance(p));
         with_self = 1;
     }
     /* base is now the assignment target. */
-    AssignTarget target;
-    if (base->kind == EXPR_VAR) {
-        target.kind = TGT_VAR;
-        target.as.var.kind = base->as.var.kind;
-        target.as.var.idx = base->as.var.idx;
-    } else {
-        target.kind = TGT_INDEX;
-        target.as.index.table = base->as.index.table;
-        target.as.index.key = base->as.index.key;
-    }
+    AssignTarget target = expr_to_target(base);
 
     LuaFunc *fn = parse_function_body_ex(p, line, with_self);
     if (!p->ok) return NULL;
