@@ -106,3 +106,4 @@ tailcall_mvarg	tests/fixtures/tailcall_mvarg.lua
 direct_call_typed	tests/fixtures/direct_call_typed.lua
 recursion_typed	tests/fixtures/recursion_typed.lua
 cmp_typed	tests/fixtures/cmp_typed.lua
+table_array_part	tests/fixtures/table_array_part.lua

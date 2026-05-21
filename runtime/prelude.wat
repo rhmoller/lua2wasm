@@ -51,7 +51,12 @@
       (field $mask (mut i32))
       (field $used (mut i32))   ;; occupied index slots: live entries + tombstones
       (field $meta (mut (ref null $LuaTable)))
-      (field $id   i32)))))   ;; unique identity for hashing table keys
+      (field $id   i32)         ;; unique identity for hashing table keys
+      ;; Array part: a dense prefix holding integer keys 1..$alen in $arr[0..alen-1]
+      ;; (always non-nil — a hole demotes the whole prefix into the hash part).
+      ;; Gives O(1) sequential integer access; everything else lives in the hash.
+      (field $arr  (mut (ref null $TArr)))
+      (field $alen (mut i32))))))
 
   (import "host" "print" (func $host_print (param anyref)))
   (import "host" "write_raw" (func $host_write_raw (param anyref)))
@@ -184,6 +189,10 @@
   ;; ($tab_new) and $lua_hash mixes it — without this, every table key hashes
   ;; to 0 and a table-keyed map degrades to O(n^2).
   (global $g_next_table_id (mut i32) (i32.const 1))
+  ;; Max length of a table's array part (16M entries). Beyond this, integer
+  ;; keys fall into the hash part, so a pathological sequence can't grow a single
+  ;; array past the engine's array-size limit (an uncatchable trap).
+  (global $arr_max i32 (i32.const 16777216))
   ;; Lua-style source name ("main" for main.lua). Set in $stdlib_init.
   (global $g_src_name (mut (ref null $LuaString)) (ref.null $LuaString))
 
@@ -1070,7 +1079,8 @@
       (i32.const 0) (i32.const 0)
       (ref.null $IArr) (i32.const 0) (i32.const 0)
       (ref.null $LuaTable)
-      (local.get $id)))
+      (local.get $id)
+      (ref.null $TArr) (i32.const 0)))   ;; $arr, $alen
 
   ;; Grow keys/vals arrays to at least new_cap; copies old contents.
   (func $tab_grow (param $t (ref $LuaTable)) (param $new_cap i32)
@@ -1218,12 +1228,86 @@
       (then (return (i32.const -1))))
     (call $tab_index_lookup (local.get $t) (local.get $k)))
 
-  (func $tab_get_raw (param $t (ref $LuaTable)) (param $k anyref) (result anyref)
+  ;; Hash-part raw lookup: position in keys[] (>=0) or nil. The array part is
+  ;; handled by the $tab_get_raw dispatcher below.
+  (func $tab_get_hash (param $t (ref $LuaTable)) (param $k anyref) (result anyref)
     (local $i i32) (local $vals (ref null $TArr))
     (local.set $i (call $tab_find (local.get $t) (local.get $k)))
     (if (i32.lt_s (local.get $i) (i32.const 0)) (then (return (ref.null any))))
     (local.set $vals (struct.get $LuaTable $vals (local.get $t)))
     (array.get $TArr (ref.as_non_null (local.get $vals)) (local.get $i)))
+
+  ;; If $k is an integer or integral float in i64 range, returns (value, 1);
+  ;; otherwise (0, 0). Mirrors the integer-valued-float normalization in
+  ;; $lua_hash, so t[2] and t[2.0] address the same array slot.
+  (func $as_arr_key (param $k anyref) (result i64 i32)
+    (local $f f64)
+    (if (call $is_int (local.get $k))
+      (then (return (call $as_int (local.get $k)) (i32.const 1))))
+    (if (call $is_float (local.get $k))
+      (then
+        (local.set $f (call $as_float (local.get $k)))
+        (if (i32.and (f64.eq (local.get $f) (f64.trunc (local.get $f)))
+                     (i32.and (f64.ge (local.get $f) (f64.const -9.2233720368547758e+18))
+                              (f64.lt (local.get $f) (f64.const  9.2233720368547758e+18))))
+          (then (return (i64.trunc_f64_s (local.get $f)) (i32.const 1))))))
+    (return (i64.const 0) (i32.const 0)))
+
+  ;; Ensure the array part can hold $need slots (initial 4, doubling).
+  (func $arr_ensure (param $t (ref $LuaTable)) (param $need i32)
+    (local $a (ref null $TArr)) (local $cap i32) (local $na (ref $TArr))
+    (local.set $a (struct.get $LuaTable $arr (local.get $t)))
+    (if (ref.is_null (local.get $a))
+      (then
+        (local.set $cap (i32.const 4))
+        (if (i32.gt_s (local.get $need) (local.get $cap)) (then (local.set $cap (local.get $need))))
+        (struct.set $LuaTable $arr (local.get $t)
+          (array.new $TArr (ref.null any) (local.get $cap)))
+        (return)))
+    (local.set $cap (array.len (ref.as_non_null (local.get $a))))
+    (if (i32.gt_s (local.get $need) (local.get $cap))
+      (then
+        (local.set $cap (i32.mul (local.get $cap) (i32.const 2)))
+        (if (i32.gt_s (local.get $need) (local.get $cap)) (then (local.set $cap (local.get $need))))
+        (local.set $na (array.new $TArr (ref.null any) (local.get $cap)))
+        (array.copy $TArr $TArr (local.get $na) (i32.const 0)
+          (ref.as_non_null (local.get $a)) (i32.const 0)
+          (array.len (ref.as_non_null (local.get $a))))
+        (struct.set $LuaTable $arr (local.get $t) (local.get $na)))))
+
+  ;; Spill the whole array prefix back into the hash part and clear it. Called
+  ;; when an operation would punch a hole in the dense prefix.
+  (func $tab_demote (param $t (ref $LuaTable))
+    (local $i i32) (local $alen i32) (local $a (ref $TArr))
+    (local.set $alen (struct.get $LuaTable $alen (local.get $t)))
+    (if (i32.eqz (local.get $alen)) (then (return)))
+    (local.set $a (ref.as_non_null (struct.get $LuaTable $arr (local.get $t))))
+    (struct.set $LuaTable $alen (local.get $t) (i32.const 0))
+    (struct.set $LuaTable $arr  (local.get $t) (ref.null $TArr))
+    (local.set $i (i32.const 0))
+    (loop $lp
+      (if (i32.lt_s (local.get $i) (local.get $alen))
+        (then
+          (call $tab_set_hash (local.get $t)
+            (call $make_int (i64.extend_i32_s (i32.add (local.get $i) (i32.const 1))))
+            (array.get $TArr (local.get $a) (local.get $i)))
+          (local.set $i (i32.add (local.get $i) (i32.const 1)))
+          (br $lp)))))
+
+  ;; Raw lookup `t[k]` (no metamethods): array part fast path, else hash part.
+  (func $tab_get_raw (param $t (ref $LuaTable)) (param $k anyref) (result anyref)
+    (local $val i64) (local $ok i32) (local $alen i32)
+    (local.set $alen (struct.get $LuaTable $alen (local.get $t)))
+    (call $as_arr_key (local.get $k))
+    (local.set $ok)
+    (local.set $val)
+    (if (i32.and (local.get $ok)
+                 (i32.and (i64.ge_s (local.get $val) (i64.const 1))
+                          (i64.le_s (local.get $val) (i64.extend_i32_s (local.get $alen)))))
+      (then (return (array.get $TArr
+        (ref.as_non_null (struct.get $LuaTable $arr (local.get $t)))
+        (i32.wrap_i64 (i64.sub (local.get $val) (i64.const 1)))))))
+    (call $tab_get_hash (local.get $t) (local.get $k)))
 
   ;; Lookup that walks the __index metamethod chain (with cycle limit).
   (func $tab_get (param $t (ref $LuaTable)) (param $k anyref) (result anyref)
@@ -1335,7 +1419,75 @@
   ;; $get_string_mt the first time getmetatable() sees a string.
   (global $g_string_mt  (mut (ref null $LuaTable)) (ref.null $LuaTable))
 
+  ;; `t[k] = v` raw set into the array part (fast path) or hash part. No
+  ;; metamethods (that is $lua_tabset). The array prefix stays dense: an
+  ;; in-range update or an append-at-alen+1 stays in the array (an append
+  ;; absorbs any now-contiguous integer keys sitting in the hash); deleting the
+  ;; last element shrinks it; anything that would leave a hole demotes first.
   (func $tab_set (param $t (ref $LuaTable)) (param $k anyref) (param $v anyref)
+    (local $val i64) (local $ok i32) (local $alen i32)
+    (local $arr (ref null $TArr)) (local $hv anyref)
+    (local.set $alen (struct.get $LuaTable $alen (local.get $t)))
+    (call $as_arr_key (local.get $k))
+    (local.set $ok)
+    (local.set $val)
+    (if (local.get $ok) (then (block $to_hash
+      ;; in-range: update or delete within [1, alen]
+      (if (i32.and (i64.ge_s (local.get $val) (i64.const 1))
+                   (i64.le_s (local.get $val) (i64.extend_i32_s (local.get $alen))))
+        (then
+          (local.set $arr (struct.get $LuaTable $arr (local.get $t)))
+          (if (i32.eqz (ref.is_null (local.get $v)))
+            (then  ;; overwrite, prefix stays dense
+              (array.set $TArr (ref.as_non_null (local.get $arr))
+                (i32.wrap_i64 (i64.sub (local.get $val) (i64.const 1))) (local.get $v))
+              (return)))
+          ;; delete: shrink if it's the last element, else demote (would hole)
+          (if (i64.eq (local.get $val) (i64.extend_i32_s (local.get $alen)))
+            (then
+              (array.set $TArr (ref.as_non_null (local.get $arr))
+                (i32.sub (local.get $alen) (i32.const 1)) (ref.null any))
+              (struct.set $LuaTable $alen (local.get $t) (i32.sub (local.get $alen) (i32.const 1)))
+              (return)))
+          (call $tab_demote (local.get $t))
+          (br $to_hash)))
+      ;; append at alen+1 (non-nil), then absorb contiguous hash keys. Capped at
+      ;; $arr_max so a runaway sequence (e.g. `a[i]=i` to math.huge) overflows
+      ;; into the hash part rather than tripping the engine's array-size limit
+      ;; with an uncatchable trap — the hash then fails the same (catchable) way
+      ;; the table did before the array part existed.
+      (if (i32.and (i32.and (i64.eq (local.get $val)
+                                    (i64.add (i64.extend_i32_s (local.get $alen)) (i64.const 1)))
+                            (i32.lt_s (local.get $alen) (global.get $arr_max)))
+                   (i32.eqz (ref.is_null (local.get $v))))
+        (then
+          (call $arr_ensure (local.get $t) (i32.add (local.get $alen) (i32.const 1)))
+          (array.set $TArr (ref.as_non_null (struct.get $LuaTable $arr (local.get $t)))
+            (local.get $alen) (local.get $v))
+          (local.set $alen (i32.add (local.get $alen) (i32.const 1)))
+          (struct.set $LuaTable $alen (local.get $t) (local.get $alen))
+          (loop $mig
+            (local.set $hv (if (result anyref) (i32.lt_s (local.get $alen) (global.get $arr_max))
+              (then (call $tab_get_hash (local.get $t)
+                (call $make_int (i64.add (i64.extend_i32_s (local.get $alen)) (i64.const 1)))))
+              (else (ref.null any))))
+            (if (i32.eqz (ref.is_null (local.get $hv)))
+              (then
+                (call $arr_ensure (local.get $t) (i32.add (local.get $alen) (i32.const 1)))
+                (array.set $TArr (ref.as_non_null (struct.get $LuaTable $arr (local.get $t)))
+                  (local.get $alen) (local.get $hv))
+                (call $tab_set_hash (local.get $t)
+                  (call $make_int (i64.add (i64.extend_i32_s (local.get $alen)) (i64.const 1)))
+                  (ref.null any))
+                (local.set $alen (i32.add (local.get $alen) (i32.const 1)))
+                (struct.set $LuaTable $alen (local.get $t) (local.get $alen))
+                (br $mig))))
+          (return)))
+      ;; otherwise fall through to the hash part
+    )))
+    (call $tab_set_hash (local.get $t) (local.get $k) (local.get $v)))
+
+  (func $tab_set_hash (param $t (ref $LuaTable)) (param $k anyref) (param $v anyref)
     (local $i i32) (local $n i32) (local $cap i32) (local $mask i32)
     (local $keys (ref null $TArr)) (local $vals (ref null $TArr))
     (local $idx (ref null $IArr)) (local $h i32) (local $hm i32)
@@ -2742,14 +2894,39 @@
   (func $builtin_next (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
     (local $t (ref $LuaTable)) (local $k anyref)
-    (local $idx i32) (local $n i32)
+    (local $idx i32) (local $n i32) (local $alen i32)
+    (local $val i64) (local $ok i32)
     (local.set $t (ref.cast (ref $LuaTable) (call $args_at (local.get $args) (i32.const 0))))
     (local.set $k (call $args_at (local.get $args) (i32.const 1)))
-    (if (ref.is_null (local.get $k))
-      (then (local.set $idx (i32.const 0)))
-      (else
-        (local.set $idx (i32.add (call $tab_find (local.get $t) (local.get $k))
-                                  (i32.const 1)))))
+    (local.set $alen (struct.get $LuaTable $alen (local.get $t)))
+    ;; Iterate the array part (dense keys 1..alen) first, then the hash part.
+    ;; Each "go to hash" path sets $idx to the hash start position and falls out.
+    (block $hash_phase
+      (if (ref.is_null (local.get $k))
+        (then
+          (if (i32.gt_s (local.get $alen) (i32.const 0))
+            (then (return (array.new_fixed $ArgArr 2
+              (call $make_int (i64.const 1))
+              (array.get $TArr (ref.as_non_null (struct.get $LuaTable $arr (local.get $t)))
+                               (i32.const 0))))))
+          (local.set $idx (i32.const 0))
+          (br $hash_phase)))
+      (call $as_arr_key (local.get $k))
+      (local.set $ok)
+      (local.set $val)
+      (if (i32.and (local.get $ok)
+                   (i32.and (i64.ge_s (local.get $val) (i64.const 1))
+                            (i64.le_s (local.get $val) (i64.extend_i32_s (local.get $alen)))))
+        (then
+          (if (i64.lt_s (local.get $val) (i64.extend_i32_s (local.get $alen)))
+            (then (return (array.new_fixed $ArgArr 2
+              (call $make_int (i64.add (local.get $val) (i64.const 1)))
+              (array.get $TArr (ref.as_non_null (struct.get $LuaTable $arr (local.get $t)))
+                               (i32.wrap_i64 (local.get $val)))))))
+          (local.set $idx (i32.const 0))
+          (br $hash_phase)))
+      ;; $k is a hash-part key
+      (local.set $idx (i32.add (call $tab_find (local.get $t) (local.get $k)) (i32.const 1))))
     (local.set $n (struct.get $LuaTable $n (local.get $t)))
     ;; Exhausted: return an explicit nil (so `next({})` yields nil, not no
     ;; value). The generic-for loop stops on a nil first result either way.
