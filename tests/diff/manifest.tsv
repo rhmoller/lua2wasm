@@ -93,7 +93,7 @@ pass	table_insert_remove_bounds	insert/remove raise on out-of-range pos / wrong 
 # "runtime sharp edges". Note: error-message *wording* and chunk-name
 # formatting are intentionally not tracked; only semantic behavior.
 #
-# -- tractable: fixes in progress (flip to `pass` as each lands) --
+# -- fixed in this sweep (now regression anchors) --
 pass	math_arg_coerce	math.* coerce numeric strings; non-number raises catchable "number expected"
 pass	obj_addr_distinct	function tostring/%p carries a stable, distinct per-object address
 pass	compare_type_msg	order-compare error names operand types (two table values / table with number)
@@ -102,6 +102,12 @@ pass	deep_recursion	deep non-tail recursion raises a catchable "stack overflow"
 pass	os_difftime	os.difftime(t2,t1) returns the second difference as a float
 pass	os_setlocale	os.setlocale query/"C" returns "C"
 pass	io_default_files	io.input()/io.output() return default handles; io.write routes through them
+#
+# -- deferred: large milestone (open a discussion before tackling) --
+# Full <close> on early exits needs close calls injected before every
+# return/break/goto crossing a close scope PLUS try_table error-path unwinding
+# — invasive changes to control-flow and exception lowering. Niche feature;
+# natural-block-exit close already works. Kept captured.
 xfail	close_early_exit	<close> runs __close on return/break/goto/error exits, reverse order
 #
 # -- blocked by hard constraints / missing metadata (kept captured) --
