@@ -1,0 +1,21 @@
+# C formatting for lua2wasm. Matches the de-facto 4-space style.
+# Run: cmake --build build --target format   (or: clang-format -i src/*.c src/*.h)
+BasedOnStyle: LLVM
+Language: Cpp            # clang-format treats C as Cpp
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ColumnLimit: 0          # never reflow; preserves hand-laid multi-line WAT templates
+PointerAlignment: Right
+DerivePointerAlignment: false
+AlignConsecutiveMacros: AcrossComments   # keep aligned #define columns
+AlignTrailingComments:
+  Kind: Always
+AllowShortCaseLabelsOnASingleLine: true  # keep `case X: advance(p); return ...;`
+AllowShortBlocksOnASingleLine: Always
+AllowShortIfStatementsOnASingleLine: AllIfsAndElse
+AllowShortLoopsOnASingleLine: true
+AllowShortFunctionsOnASingleLine: All
+SpaceAfterCStyleCast: false
+SortIncludes: false      # keep local-before-system include grouping as-is
+KeepEmptyLinesAtTheStartOfBlocks: false

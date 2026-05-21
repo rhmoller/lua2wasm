@@ -56,8 +56,9 @@ Bug fixes follow the same shape: failing test first, fix second, same commit.
 
 ## Conventions
 
-- C23, two-space indents, match the surrounding file. Keep `-Wall -Wextra
-  -Wpedantic` clean.
+- C23, four-space indents, enforced by clang-format (`.clang-format`). Run
+  `cmake --build build --target format` (or enable `.githooks/pre-commit` via
+  `git config core.hooksPath .githooks`). Keep `-Wall -Wextra -Wpedantic` clean.
 - The runtime prelude is `runtime/prelude.wat`, embedded via C23 `#embed` — edit
   it as WAT, not as a C string. Editing it re-links `codegen.c`.
 - Reuse codegen helpers (`emit_args_array`, etc.) over re-open-coding multi-value

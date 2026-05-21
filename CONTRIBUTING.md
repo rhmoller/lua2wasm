@@ -46,7 +46,10 @@ in the same commit.
 ## Style
 
 - C23. Build with `-Wall -Wextra -Wpedantic` and keep them clean.
-- Two-space indents. Match the surrounding file.
+- Four-space indents, enforced by clang-format (`.clang-format`). Run
+  `cmake --build build --target format` before committing, or enable the
+  bundled hook once with `git config core.hooksPath .githooks`. Hand-aligned
+  data tables are fenced with `/* clang-format off */` — leave those fences in.
 - The runtime prelude lives in `runtime/prelude.wat` and is embedded
   via C23 `#embed`. Edit it as WAT, not as a C string.
 - Codegen helpers like `emit_args_array` exist to be reused — prefer

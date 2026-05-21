@@ -1,6 +1,8 @@
 #include "builtins.h"
 #include <string.h>
 
+/* Keep the hand-aligned builtin table — clang-format can't reproduce it. */
+/* clang-format off */
 static const struct {
     const char *name;       /* lookup key (top-level) or table key (libs) */
     size_t      len;
@@ -143,6 +145,7 @@ static const struct {
     { "difftime",  8, "$builtin_os_difftime",  BLT_LIB_OS },
     { "setlocale", 9, "$builtin_os_setlocale", BLT_LIB_OS },
 };
+/* clang-format on */
 
 #define N (sizeof(BUILTINS)/sizeof(BUILTINS[0]))
 

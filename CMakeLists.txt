@@ -178,3 +178,22 @@ add_test(
             ${CMAKE_SOURCE_DIR}
             ${CMAKE_BINARY_DIR}
 )
+
+# --- formatting ---------------------------------------------------------
+# `format` rewrites src/ in place; `format-check` fails if anything is unformatted.
+# Both are no-ops on machines without clang-format. The .clang-format config and
+# the optional .githooks/pre-commit hook (git config core.hooksPath .githooks)
+# are the source of truth for C style.
+find_program(CLANG_FORMAT NAMES clang-format)
+if(CLANG_FORMAT)
+    file(GLOB FORMAT_SOURCES CONFIGURE_DEPENDS
+        ${CMAKE_SOURCE_DIR}/src/*.c ${CMAKE_SOURCE_DIR}/src/*.h)
+    add_custom_target(format
+        COMMAND ${CLANG_FORMAT} -i ${FORMAT_SOURCES}
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        COMMENT "clang-format -i src/*.{c,h}")
+    add_custom_target(format-check
+        COMMAND ${CLANG_FORMAT} --dry-run -Werror ${FORMAT_SOURCES}
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        COMMENT "clang-format --dry-run -Werror (fails if unformatted)")
+endif()

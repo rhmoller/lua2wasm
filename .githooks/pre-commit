@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Block commits whose staged C changes aren't clang-formatted.
+# Enable once per clone:  git config core.hooksPath .githooks
+# Fix offending files with: cmake --build build --target format
+set -euo pipefail
+
+command -v clang-format >/dev/null || exit 0
+
+mapfile -t files < <(git diff --cached --name-only --diff-filter=ACM -- 'src/*.c' 'src/*.h')
+((${#files[@]})) || exit 0
+
+bad=()
+for f in "${files[@]}"; do
+    # Compare the staged blob against its formatted form (working tree ignored).
+    diff -q <(git show ":$f") <(git show ":$f" | clang-format --assume-filename="$f") \
+        >/dev/null 2>&1 || bad+=("$f")
+done
+
+if ((${#bad[@]})); then
+    printf 'clang-format needed for:\n'
+    printf '  %s\n' "${bad[@]}"
+    printf 'Fix with: cmake --build build --target format\n'
+    exit 1
+fi

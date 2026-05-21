@@ -23,6 +23,8 @@ static unsigned hex_val(int c) {
     return (unsigned)(isdigit(c) ? c - '0' : (c | 32) - 'a' + 10);
 }
 
+/* Keep the hand-aligned keyword grid — clang-format can't reproduce it. */
+/* clang-format off */
 typedef struct { const char *kw; size_t len; TokKind kind; } Keyword;
 /* Lengths are precomputed so keyword_or_ident never re-runs strlen, and the
  * table is kept sorted by length then first char so we can prefilter cheaply. */
@@ -50,6 +52,7 @@ static const Keyword KEYWORDS[] = {
     { "return",   6, TOK_KW_RETURN },
     { "function", 8, TOK_KW_FUNCTION },
 };
+/* clang-format on */
 
 static TokKind keyword_or_ident(const char *start, size_t len) {
     /* Keywords are 2..8 bytes; skip the scan entirely for anything outside
