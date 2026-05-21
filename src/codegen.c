@@ -149,6 +149,17 @@ typedef struct {
     /* Whole-program inferred signatures, indexed by func_idx (opt_int only). */
     FuncSig *sigs;
     int n_sigs;
+    /* Global direct-call binding maps (opt_int): which LuaFunc a local slot /
+     * upvalue of each function statically (and stably) resolves to. Unlike the
+     * per-body func-slot scan these include captured-but-never-reassigned
+     * functions, so self-recursive `local function`s become direct-call targets.
+     * bind_slot/bind_upval are indexed by func_idx; main's locals live in
+     * main_slot_func (main has no upvalues). */
+    const LuaFunc ***bind_slot;
+    const LuaFunc ***bind_upval;
+    const LuaFunc **main_slot_func;
+    int cur_func_idx;               /* func_idx of the body being emitted; -1 = main */
+    const LuaFunc **cur_upval_func; /* upvalue->LuaFunc map for that body */
     int cur_n_params;
     /* goto/label state */
     int next_label_id;      /* fresh per function body */
@@ -612,17 +623,32 @@ static void emit_multival_array(CG *c, const Expr *e, int depth) {
     emit_call_array(c, e, depth);
 }
 
-/* If `e` is a call whose callee is a statically-bound local function (lever 3)
- * invoked with exactly its parameter count and no multi-value-splat argument,
- * return that LuaFunc — the call can go to the direct-args entry $user_N_da and
- * skip building an $ArgArr. Otherwise NULL. */
+/* If `e` is a call whose callee statically (and stably) resolves to a known
+ * LuaFunc, invoked with exactly its parameter count and no multi-value-splat
+ * argument, return that LuaFunc: the call can go to the direct entry
+ * $user_N_da/_da1 and skip building an $ArgArr. Otherwise NULL.
+ *
+ *   - VAR_LOCAL: a never-reassigned local function, *including a captured one*
+ *     (so a self-recursive `local function fib` is reachable from its defining
+ *     scope, which bootstraps the typed recursion below).
+ *   - VAR_UPVAL: only *self-recursion* (the upvalue resolves to the function
+ *     being emitted). This makes recursive `local function`s like fib direct
+ *     without making cross-function upvalue calls direct — the latter would
+ *     skip the callee's frame and degrade error()/traceback positions. */
 static const LuaFunc *direct_call_target(CG *c, const Expr *e) {
-    if (!c->opt_int || !c->cur_func_slot || e->kind != EXPR_CALL) return NULL;
+    if (!c->opt_int || e->kind != EXPR_CALL) return NULL;
     const Expr *callee = e->as.call.callee;
-    if (callee->kind != EXPR_VAR || callee->as.var.kind != VAR_LOCAL) return NULL;
-    int slot = callee->as.var.idx;
-    if (slot < 0 || slot >= c->cur_n_locals) return NULL;
-    const LuaFunc *K = c->cur_func_slot[slot];
+    if (callee->kind != EXPR_VAR) return NULL;
+    const LuaFunc *K = NULL;
+    int idx = callee->as.var.idx;
+    if (callee->as.var.kind == VAR_LOCAL) {
+        if (c->cur_func_slot && idx >= 0 && idx < c->cur_n_locals) K = c->cur_func_slot[idx];
+    } else if (callee->as.var.kind == VAR_UPVAL) {
+        if (c->cur_upval_func && idx >= 0) {
+            K = c->cur_upval_func[idx];
+            if (K && K->func_idx != c->cur_func_idx) K = NULL;  /* self-recursion only */
+        }
+    }
     if (!K || K->is_vararg || (int)e->as.call.nargs != K->n_params) return NULL;
     for (size_t i = 0; i < e->as.call.nargs; i++)
         if (is_multival_tail(e->as.call.args[i])) return NULL;
@@ -1221,13 +1247,18 @@ static void int_kill_block(CG *c, const Block *b, unsigned char *out, int *chang
  * Optimistic start (every non-param, non-captured slot is a candidate), then
  * fixpoint-remove any contradicted by an assignment. A non-NULL param_seed
  * (the typed direct entries $user_N_da/_da1) additionally seeds parameter slots
- * marked NT_INT, so an i64 parameter is unboxed in the body. */
+ * marked NT_INT, so an i64 parameter is unboxed in the body. During inference a
+ * still-undetermined parameter (NT_UNSET) is *optimistically* seeded int so a
+ * self-recursive call's argument (e.g. `n-1`) types as int instead of poisoning
+ * the parameter to ANY before the external call sites are seen; emission only
+ * ever passes finalized seeds (no NT_UNSET). */
 static void compute_int_slots(CG *c, const Block *body, int n_locals, int n_params,
                               const unsigned char *captured, unsigned char *out,
                               const NumTy *param_seed) {
     for (int i = 0; i < n_locals; i++) {
         if (captured && captured[i]) { out[i] = 0; continue; }
-        out[i] = (i >= n_params) || (param_seed && param_seed[i] == NT_INT);
+        out[i] = (i >= n_params) ||
+                 (param_seed && (param_seed[i] == NT_INT || param_seed[i] == NT_UNSET));
     }
     const unsigned char *saved = c->cur_is_int;
     int saved_n = c->cur_n_locals;
@@ -1356,26 +1387,158 @@ static void func_slot_walk(const Block *b, const LuaFunc **out,
     for (size_t i = 0; i < b->count; i++) func_slot_walk_stmt(b->items[i], out, reassigned, n);
 }
 
-static void compute_func_slots(const Block *body, int n_locals,
-                               const unsigned char *captured, const LuaFunc **out) {
-    unsigned char *reassigned = calloc(n_locals ? n_locals : 1, 1);
-    for (int i = 0; i < n_locals; i++) out[i] = NULL;
-    func_slot_walk(body, out, reassigned, n_locals);
-    /* A reassigned or captured slot can't be guaranteed to still hold K. */
-    for (int i = 0; i < n_locals; i++)
-        if (reassigned[i] || (captured && captured[i])) out[i] = NULL;
-    free(reassigned);
+/* ----- global function-binding maps (direct-call resolution) -----
+ *
+ * For every function (and main) record which LuaFunc each local slot and each
+ * upvalue stably resolves to. A binding is stable iff the slot is never
+ * reassigned — neither directly (an assignment to the local) nor through an
+ * upvalue in any descendant closure. Captured slots are *kept* (unlike the old
+ * per-body scan), so a self-recursive `local function f` — which captures itself
+ * as an upvalue — is a direct-call target both inside its body (the upvalue) and
+ * from its defining scope (the captured local). Reassignment via upvalue is what
+ * the captured-exclusion used to guard against; we now check it precisely. */
+
+typedef struct {
+    const LuaFunc **slot_func;   /* [n_locals]  slot -> bound LuaFunc (or NULL) */
+    unsigned char  *reass_local; /* [n_locals]  slot assigned somewhere in body */
+    unsigned char  *reass_upval; /* [n_upvalues] upvalue assigned in body (or NULL) */
+    int n_locals, n_upvalues;
+} BindAccum;
+
+static void bind_walk_block(const Block *b, BindAccum *a);
+static void bind_walk_stmt(const Stmt *s, BindAccum *a) {
+    switch (s->kind) {
+    case STMT_LOCAL_FUNC: {
+        int sl = s->as.local_func.local_idx;
+        if (sl >= 0 && sl < a->n_locals) a->slot_func[sl] = s->as.local_func.func;
+        break;
+    }
+    case STMT_LOCAL:
+        if (s->as.local.n_values == s->as.local.n_names)
+            for (int j = 0; j < s->as.local.n_names; j++)
+                if (s->as.local.values[j]->kind == EXPR_FUNCTION) {
+                    int sl = s->as.local.local_idxs[j];
+                    if (sl >= 0 && sl < a->n_locals)
+                        a->slot_func[sl] = s->as.local.values[j]->as.func_expr.func;
+                }
+        break;
+    case STMT_ASSIGN:
+        for (int j = 0; j < s->as.assign.n_targets; j++) {
+            AssignTarget *t = &s->as.assign.targets[j];
+            if (t->kind != TGT_VAR) continue;
+            if (t->as.var.kind == VAR_LOCAL && t->as.var.idx >= 0 && t->as.var.idx < a->n_locals)
+                a->reass_local[t->as.var.idx] = 1;
+            else if (t->as.var.kind == VAR_UPVAL && a->reass_upval
+                     && t->as.var.idx >= 0 && t->as.var.idx < a->n_upvalues)
+                a->reass_upval[t->as.var.idx] = 1;
+        }
+        break;
+    case STMT_IF:
+        for (size_t k = 0; k < s->as.if_stmt.narms; k++) bind_walk_block(&s->as.if_stmt.arms[k].body, a);
+        if (s->as.if_stmt.has_else) bind_walk_block(&s->as.if_stmt.else_body, a);
+        break;
+    case STMT_WHILE:   bind_walk_block(&s->as.while_stmt.body, a); break;
+    case STMT_DO:      bind_walk_block(&s->as.do_stmt.body,    a); break;
+    case STMT_REPEAT:  bind_walk_block(&s->as.repeat.body,     a); break;
+    case STMT_FOR_NUM: bind_walk_block(&s->as.for_num.body,    a); break;
+    case STMT_FOR_GEN: bind_walk_block(&s->as.for_gen.body,    a); break;
+    default: break; /* nested function literals are walked on their own row */
+    }
+}
+static void bind_walk_block(const Block *b, BindAccum *a) {
+    for (size_t i = 0; i < b->count; i++) bind_walk_stmt(b->items[i], a);
+}
+
+/* The slot_func map (and its length) for a given enclosing scope; func_idx == -1
+ * is the main chunk. */
+static const LuaFunc **bind_slot_map(CG *c, int func_idx, int *n_out) {
+    if (func_idx == -1) { *n_out = c->pr->main_n_locals; return c->main_slot_func; }
+    if (func_idx < 0 || func_idx >= c->n_sigs) { *n_out = 0; return NULL; }
+    *n_out = c->pr->funcs.items[func_idx]->n_locals;
+    return c->bind_slot[func_idx];
+}
+
+/* Trace upvalue u of function func_idx back to the (scope, local-slot) where it
+ * originates. *of == -1 means the main chunk; *of == -2 means unresolvable. */
+static void resolve_upval_origin(CG *c, int func_idx, int u, int *of, int *os) {
+    const LuaFunc *F = c->pr->funcs.items[func_idx];
+    if (!F->upvalues || u < 0 || u >= F->n_upvalues) { *of = -2; *os = -1; return; }
+    UpvalueRef ref = F->upvalues[u];
+    if (ref.src == UPVAL_FROM_LOCAL) { *of = F->parent_idx; *os = ref.idx; }
+    else if (F->parent_idx >= 0)     resolve_upval_origin(c, F->parent_idx, ref.idx, of, os);
+    else                             { *of = -2; *os = -1; }   /* main has no upvalues */
+}
+
+/* Build c->bind_slot / c->bind_upval / c->main_slot_func. */
+static void compute_func_bindings(CG *c, const ParseResult *pr) {
+    int n = (int)pr->funcs.count;
+    c->bind_slot  = calloc(n ? n : 1, sizeof *c->bind_slot);
+    c->bind_upval = calloc(n ? n : 1, sizeof *c->bind_upval);
+    c->main_slot_func = calloc(pr->main_n_locals ? pr->main_n_locals : 1, sizeof(const LuaFunc *));
+    unsigned char **reass_upval = calloc(n ? n : 1, sizeof *reass_upval);
+
+    /* Pass 1: per-scope bindings; drop directly-reassigned local bindings. */
+    {
+        unsigned char *rl = calloc(pr->main_n_locals ? pr->main_n_locals : 1, 1);
+        BindAccum a = { c->main_slot_func, rl, NULL, pr->main_n_locals, 0 };
+        bind_walk_block(&pr->main_body, &a);
+        for (int s = 0; s < pr->main_n_locals; s++) if (rl[s]) c->main_slot_func[s] = NULL;
+        free(rl);
+    }
+    for (int f = 0; f < n; f++) {
+        const LuaFunc *F = pr->funcs.items[f];
+        c->bind_slot[f]  = calloc(F->n_locals ? F->n_locals : 1, sizeof(const LuaFunc *));
+        c->bind_upval[f] = calloc(F->n_upvalues ? F->n_upvalues : 1, sizeof(const LuaFunc *));
+        reass_upval[f]   = calloc(F->n_upvalues ? F->n_upvalues : 1, 1);
+        unsigned char *rl = calloc(F->n_locals ? F->n_locals : 1, 1);
+        BindAccum a = { c->bind_slot[f], rl, reass_upval[f], F->n_locals, F->n_upvalues };
+        bind_walk_block(&F->body, &a);
+        for (int s = 0; s < F->n_locals; s++) if (rl[s]) c->bind_slot[f][s] = NULL;
+        free(rl);
+    }
+
+    /* Pass 2: a slot reassigned through an upvalue in any descendant is unstable
+     * at its origin too. */
+    for (int f = 0; f < n; f++) {
+        const LuaFunc *F = pr->funcs.items[f];
+        for (int u = 0; u < F->n_upvalues; u++) {
+            if (!reass_upval[f][u]) continue;
+            int of, os; resolve_upval_origin(c, f, u, &of, &os);
+            int nn; const LuaFunc **m = bind_slot_map(c, of, &nn);
+            if (m && os >= 0 && os < nn) m[os] = NULL;
+        }
+    }
+
+    /* Pass 3: resolve each upvalue to its (now-finalized) bound function. */
+    for (int f = 0; f < n; f++) {
+        const LuaFunc *F = pr->funcs.items[f];
+        for (int u = 0; u < F->n_upvalues; u++) {
+            int of, os; resolve_upval_origin(c, f, u, &of, &os);
+            int nn; const LuaFunc **m = bind_slot_map(c, of, &nn);
+            c->bind_upval[f][u] = (m && os >= 0 && os < nn) ? m[os] : NULL;
+        }
+        free(reass_upval[f]);
+    }
+    free(reass_upval);
+}
+
+static void free_func_bindings(CG *c) {
+    if (c->bind_slot)  for (int i = 0; i < c->n_sigs; i++) free((void *)c->bind_slot[i]);
+    if (c->bind_upval) for (int i = 0; i < c->n_sigs; i++) free((void *)c->bind_upval[i]);
+    free(c->bind_slot);  c->bind_slot = NULL;
+    free(c->bind_upval); c->bind_upval = NULL;
+    free(c->main_slot_func); c->main_slot_func = NULL;
 }
 
 /* ----- whole-program signature inference (param + return unboxing) -----
  *
- * A monotone fixpoint over all functions (and the main chunk). Each function's
- * parameters start optimistically at NT_INT and are narrowed (a meet over every
- * direct-call site's argument type) toward NT_FLOAT/NT_ANY; its single-value
- * return type is recomputed from its body each round. Both lattices only move
- * downward (INT > FLOAT > ANY), so iteration terminates. Reading optimistic
- * mid-fixpoint values is sound for the same reason the per-function int-slot
- * fixpoint above is: contradictions propagate and re-narrow on the next round.
+ * A monotone fixpoint over all functions (and the main chunk). Each parameter
+ * starts at NT_UNSET and is narrowed by meeting it with the argument type at
+ * every direct-call site; each function's single-value return type is recomputed
+ * from its body each round. The lattice only moves downward, so iteration
+ * terminates. Reading not-yet-final values mid-fixpoint is sound for the same
+ * reason the per-function int-slot fixpoint above is: contradictions propagate
+ * and re-narrow on the next round.
  *
  * The inferred signature only types the dedicated $user_N_da/_da1 entries; a
  * call site uses them only when its arguments are typed-ok (direct_args_typed_ok),
@@ -1544,26 +1707,28 @@ static void infer_sites_block(CG *c, const Block *b, int *changed) {
 }
 
 /* One fixpoint step for a single function/main body: rebuild its analysis
- * context from current signatures, then narrow callees' params and (for a real
- * function) recompute its own return type. */
+ * context from current signatures + the global binding maps, then narrow
+ * callees' params and (for a real function) recompute its own return type.
+ * func_idx == -1 is the main chunk. */
 static void infer_step_body(CG *c, const Block *body, int n_locals, int n_params,
                             const unsigned char *captured, const NumTy *param_seed,
-                            const LuaFunc *fn, int *changed) {
+                            const LuaFunc *fn, int func_idx, int *changed) {
     const unsigned char *p_int = c->cur_is_int, *p_float = c->cur_is_float;
-    const LuaFunc **p_fs = c->cur_func_slot;
-    int p_nl = c->cur_n_locals, p_np = c->cur_n_params;
+    const LuaFunc **p_fs = c->cur_func_slot, **p_uv = c->cur_upval_func;
+    int p_nl = c->cur_n_locals, p_np = c->cur_n_params, p_fi = c->cur_func_idx;
 
-    const LuaFunc **fslot = calloc(n_locals ? n_locals : 1, sizeof *fslot);
     unsigned char *isint = calloc(n_locals ? n_locals : 1, 1);
     unsigned char *isfloat = calloc(n_locals ? n_locals : 1, 1);
-    compute_func_slots(body, n_locals, captured, fslot);
-    c->cur_func_slot = fslot;
+    int nn;
+    c->cur_func_slot = bind_slot_map(c, func_idx, &nn);
+    c->cur_upval_func = func_idx >= 0 ? c->bind_upval[func_idx] : NULL;
+    c->cur_func_idx = func_idx;
+    c->cur_n_locals = n_locals;
+    c->cur_n_params = n_params;
     compute_int_slots(c, body, n_locals, n_params, captured, isint, param_seed);
     c->cur_is_int = isint;
     compute_float_slots(c, body, n_locals, n_params, captured, isfloat, param_seed);
     c->cur_is_float = isfloat;
-    c->cur_n_locals = n_locals;
-    c->cur_n_params = n_params;
 
     infer_sites_block(c, body, changed);
     if (fn) {
@@ -1572,8 +1737,9 @@ static void infer_step_body(CG *c, const Block *body, int n_locals, int n_params
     }
 
     c->cur_is_int = p_int; c->cur_is_float = p_float; c->cur_func_slot = p_fs;
-    c->cur_n_locals = p_nl; c->cur_n_params = p_np;
-    free(fslot); free(isint); free(isfloat);
+    c->cur_upval_func = p_uv; c->cur_n_locals = p_nl; c->cur_n_params = p_np;
+    c->cur_func_idx = p_fi;
+    free(isint); free(isfloat);
 }
 
 /* Allocate and infer c->sigs for every user function. */
@@ -1607,10 +1773,10 @@ static void infer_signatures(CG *c, const ParseResult *pr) {
         for (int i = 0; i < n; i++) {
             const LuaFunc *fn = pr->funcs.items[i];
             infer_step_body(c, &fn->body, fn->n_locals, fn->n_params, fn->captured,
-                            c->sigs[i].param_ty, fn, &changed);
+                            c->sigs[i].param_ty, fn, i, &changed);
         }
         infer_step_body(c, &pr->main_body, pr->main_n_locals, 0, pr->main_captured,
-                        NULL, NULL, &changed);
+                        NULL, NULL, -1, &changed);
     }
 
     /* Finalize: a parameter with no narrowing evidence (NT_UNSET) becomes ANY,
@@ -2744,20 +2910,20 @@ static void emit_user_function(CG *c, const LuaFunc *fn, int direct, int ret_sin
     int prev_n_locals = c->cur_n_locals;
     const unsigned char *prev_is_int = c->cur_is_int;
     const unsigned char *prev_is_float = c->cur_is_float;
-    const LuaFunc **prev_func_slot = c->cur_func_slot;
-    int prev_n_params = c->cur_n_params;
+    const LuaFunc **prev_func_slot = c->cur_func_slot, **prev_upval = c->cur_upval_func;
+    int prev_n_params = c->cur_n_params, prev_func_idx = c->cur_func_idx;
     c->cur_captured = fn->captured;
     c->cur_n_locals = fn->n_locals;
     c->cur_n_params = fn->n_params;
+    /* Direct-call resolution uses the global binding maps for this function. */
+    c->cur_func_idx = fn->func_idx;
+    c->cur_func_slot = c->bind_slot ? c->bind_slot[fn->func_idx] : NULL;
+    c->cur_upval_func = c->bind_upval ? c->bind_upval[fn->func_idx] : NULL;
     unsigned char *isint = NULL, *isfloat = NULL;
-    const LuaFunc **fslot = NULL;
     if (c->opt_int) {
-        /* func slots first: the int/float slot analysis recognizes direct calls
-         * (expr_is_int on EXPR_CALL needs cur_func_slot), so a slot assigned the
-         * result of an int-returning call is itself typed int. */
-        fslot = calloc(fn->n_locals ? fn->n_locals : 1, sizeof *fslot);
-        compute_func_slots(&fn->body, fn->n_locals, fn->captured, fslot);
-        c->cur_func_slot = fslot;
+        /* The int/float slot analysis recognizes direct calls (expr_is_int on
+         * EXPR_CALL needs cur_func_slot/cur_upval_func, set just above), so a
+         * slot assigned the result of an int-returning call is itself typed int. */
         isint = calloc(fn->n_locals ? fn->n_locals : 1, 1);
         compute_int_slots(c, &fn->body, fn->n_locals, fn->n_params, fn->captured, isint, param_seed);
         c->cur_is_int = isint;
@@ -2766,7 +2932,6 @@ static void emit_user_function(CG *c, const LuaFunc *fn, int direct, int ret_sin
     }
     c->cur_is_int = isint;
     c->cur_is_float = isfloat;
-    c->cur_func_slot = fslot;
 
     /* Run the label pre-pass NOW so block_dispatch_id is populated on
      * every label and goto before we emit the $next_BID i32 locals. */
@@ -2876,10 +3041,11 @@ static void emit_user_function(CG *c, const LuaFunc *fn, int direct, int ret_sin
     c->cur_is_int = prev_is_int;
     c->cur_is_float = prev_is_float;
     c->cur_func_slot = prev_func_slot;
+    c->cur_upval_func = prev_upval;
+    c->cur_func_idx = prev_func_idx;
     c->cur_n_params = prev_n_params;
     free(isint);
     free(isfloat);
-    free(fslot);
 }
 
 /* ---------- tree-shaking (milestone 0 / size opt) ---------- */
@@ -3305,12 +3471,11 @@ static void emit_main_chunk(CG *c) {
     c->cur_captured = pr->main_captured;
     c->cur_n_locals = pr->main_n_locals;
     c->cur_n_params = 0;
+    c->cur_func_idx = -1;
+    c->cur_func_slot = c->main_slot_func;
+    c->cur_upval_func = NULL;
     unsigned char *isint = NULL, *isfloat = NULL;
-    const LuaFunc **fslot = NULL;
     if (c->opt_int) {
-        fslot = calloc(pr->main_n_locals ? pr->main_n_locals : 1, sizeof *fslot);
-        compute_func_slots(&pr->main_body, pr->main_n_locals, pr->main_captured, fslot);
-        c->cur_func_slot = fslot;
         isint = calloc(pr->main_n_locals ? pr->main_n_locals : 1, 1);
         compute_int_slots(c, &pr->main_body, pr->main_n_locals, 0, pr->main_captured, isint, NULL);
         c->cur_is_int = isint;
@@ -3319,7 +3484,6 @@ static void emit_main_chunk(CG *c) {
     }
     c->cur_is_int = isint;
     c->cur_is_float = isfloat;
-    c->cur_func_slot = fslot;
     /* Pre-pass before locals: dispatch ids must be assigned so the
      * $next_BID i32 locals can be declared up-front. */
     c->next_label_id = 0;
@@ -3373,9 +3537,9 @@ static void emit_main_chunk(CG *c) {
     c->cur_is_int = NULL;
     c->cur_is_float = NULL;
     c->cur_func_slot = NULL;
+    c->cur_upval_func = NULL;
     free(isint);
     free(isfloat);
-    free(fslot);
 }
 
 /* Emit the `$str_data` passive data segment: every interned byte of the
@@ -3412,9 +3576,14 @@ int codegen_module(const ParseResult *pr, const char *src_name,
     /* Integer-specialization PoC: opt-in via env so the default pipeline and
      * golden output are byte-for-byte unchanged. */
     c.opt_int = getenv("LUA2WASM_OPT_INT") != NULL;
-    /* Whole-program pre-pass: infer per-function param/return numeric types used
-     * to unbox the typed direct-call entries. */
-    if (c.opt_int) infer_signatures(&c, pr);
+    /* Whole-program pre-passes (opt_int): resolve direct-call targets (incl.
+     * self-recursive/captured local functions), then infer per-function
+     * param/return numeric types used to unbox the typed direct-call entries. */
+    if (c.opt_int) {
+        c.n_sigs = (int)pr->funcs.count;
+        compute_func_bindings(&c, pr);
+        infer_signatures(&c, pr);
+    }
     strpool_add(&c.strs, LITERAL_PREFIX, LITERAL_PREFIX_LEN);
 
     wat_append(out, "(module\n");
@@ -3582,11 +3751,13 @@ int codegen_module(const ParseResult *pr, const char *src_name,
         snprintf(err, errlen, "%s", c.err);
         free(c.strs.bytes);
         free(live); free(gref);
+        free_func_bindings(&c);   /* before free_signatures: it reads c.n_sigs */
         free_signatures(&c);
         return 0;
     }
     free(c.strs.bytes);
     free(live); free(gref);
+    free_func_bindings(&c);       /* before free_signatures: it reads c.n_sigs */
     free_signatures(&c);
     return 1;
 }

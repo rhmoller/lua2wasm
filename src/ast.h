@@ -268,6 +268,9 @@ struct Stmt {
  */
 struct LuaFunc {
     int func_idx;               /* unique id; used to name `$user_N` */
+    int parent_idx;             /* enclosing function's func_idx, or -1 for the
+                                 * main chunk; lets codegen resolve upvalue
+                                 * references back to their defining function. */
     int n_params;
     int n_locals;               /* total locals, including params */
     UpvalueRef *upvalues;

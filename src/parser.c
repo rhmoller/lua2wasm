@@ -64,6 +64,7 @@ typedef struct {
 
     LuaFunc *funcs[MAX_FUNCS];
     int n_funcs;
+    int cur_fn;            /* func_idx being parsed; -1 = main chunk */
 
     GlobalDecl globals[MAX_GLOBALS];
     int n_globals;
@@ -1298,12 +1299,15 @@ static LuaFunc *parse_function_body_ex(Parser *p, int line, int with_self) {
     if (p->n_funcs >= MAX_FUNCS) { set_error(p, "too many functions"); return NULL; }
     int func_idx = p->n_funcs;
     LuaFunc *fn = func_new(p->pool, func_idx, line);
+    fn->parent_idx = p->cur_fn;
     p->funcs[p->n_funcs++] = fn;
 
     if (p->frame_depth + 1 >= MAX_FRAME_DEPTH) {
         set_error(p, "function nesting too deep");
         return NULL;
     }
+    int prev_fn = p->cur_fn;
+    p->cur_fn = func_idx;
     p->frame_depth++;
     frame_init(cur_frame(p));
 
@@ -1359,11 +1363,12 @@ static LuaFunc *parse_function_body_ex(Parser *p, int line, int with_self) {
     }
 
     p->frame_depth--;
+    p->cur_fn = prev_fn;
     return fn;
 }
 
 ParseResult parse(const TokenList *tokens, NodePool *pool) {
-    Parser p = { .toks = tokens, .pool = pool, .ok = 1, .frame_depth = 0 };
+    Parser p = { .toks = tokens, .pool = pool, .ok = 1, .frame_depth = 0, .cur_fn = -1 };
     frame_init(&p.frames[0]);
     /* Pre-declare stdlib library tables and well-known globals so user code can name them. */
     globals_declare(&p, "math",      4);
