@@ -138,6 +138,8 @@ static const struct {
     { "remove",  6, "$builtin_os_remove",  BLT_LIB_OS },
     { "rename",  6, "$builtin_os_rename",  BLT_LIB_OS },
     { "tmpname", 7, "$builtin_os_tmpname", BLT_LIB_OS },
+    { "difftime",  8, "$builtin_os_difftime",  BLT_LIB_OS },
+    { "setlocale", 9, "$builtin_os_setlocale", BLT_LIB_OS },
 };
 
 #define N (sizeof(BUILTINS)/sizeof(BUILTINS[0]))

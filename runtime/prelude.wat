@@ -3155,6 +3155,34 @@
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
     (array.new_fixed $ArgArr 1 (call $make_float (call $host_os_clock))))
 
+  ;; os.difftime(t2, t1) — seconds between two times, as a float.
+  (func $builtin_os_difftime (type $LuaFn)
+    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
+    (array.new_fixed $ArgArr 1
+      (call $make_float
+        (f64.sub
+          (call $as_float (call $args_at (local.get $args) (i32.const 0)))
+          (call $as_float (call $args_at (local.get $args) (i32.const 1)))))))
+
+  ;; os.setlocale([locale [, category]]) — only the portable "C" locale is
+  ;; available. The query form (nil/absent locale) reports it; setting "C"
+  ;; returns "C"; any other locale name is unsupported and returns nil — the
+  ;; same shape reference Lua produces on a host where only "C" is installed.
+  (func $builtin_os_setlocale (type $LuaFn)
+    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
+    (local $a anyref)
+    (if (i32.gt_s (array.len (local.get $args)) (i32.const 0))
+      (then (local.set $a (call $args_at (local.get $args) (i32.const 0)))))
+    (if (ref.is_null (local.get $a))
+      (then (return (array.new_fixed $ArgArr 1
+        (struct.new $LuaString (array.new_fixed $LuaArr 1 (i32.const 67)))))))
+    (if (ref.test (ref $LuaString) (local.get $a))
+      (then (if (call $str_eq (local.get $a)
+                  (struct.new $LuaString (array.new_fixed $LuaArr 1 (i32.const 67))))
+              (then (return (array.new_fixed $ArgArr 1
+                (struct.new $LuaString (array.new_fixed $LuaArr 1 (i32.const 67)))))))))
+    (array.new_fixed $ArgArr 1 (ref.null any)))
+
   (func $builtin_os_getenv (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
     (local $written i32)
