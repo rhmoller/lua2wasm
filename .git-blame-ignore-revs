@@ -1,0 +1,7 @@
+# Revisions that are pure mechanical reformats — skipped by `git blame`.
+# Enable locally with:
+#   git config blame.ignoreRevsFile .git-blame-ignore-revs
+# (GitHub honors this file automatically.)
+
+# style: format C sources with clang-format
+7f14bef5c8531e2f6e319e55e6dc12bfe3553577
