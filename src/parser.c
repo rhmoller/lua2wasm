@@ -79,7 +79,8 @@ typedef struct {
 typedef struct {
     LocalSlot locals[MAX_LOCALS_PER_FN];
     int local_count;       /* current count (block-rewindable) */
-    int next_slot;         /* monotonic: never reused */
+    int next_slot;         /* monotonic: never reused (see note on finding 2 in
+                            * frame_rewind for why slots are not reclaimed) */
     UpvalueRef upvalues[MAX_UPVALS_PER_FN];
     int n_upvalues;
     int is_vararg;         /* `...` is bound in this frame's scope */
@@ -162,6 +163,18 @@ static void frame_init(FuncFrame *f) {
 }
 
 static int frame_mark(FuncFrame *f) { return f->local_count; }
+
+/* Rewind to a block-entry mark: the locals declared since `mark` fall out of
+ * scope (name visibility is reset). Their wasm slot numbers are deliberately
+ * NOT reclaimed for sibling blocks. Reclaiming them (a high-water-mark scheme)
+ * would shrink n_locals and the parallel codegen bitmaps, but it is unsound
+ * under the LUA2WASM_OPT_INT direct-call optimization: codegen's
+ * compute_func_bindings builds a slot -> bound-LuaFunc map that assumes each
+ * slot maps to at most one function across the whole body. Two sibling
+ * `local f = function...` blocks reusing one slot would collide in that map and
+ * silently bind one call to the wrong function. (Captured-upvalue aliasing is
+ * NOT the problem — each `local` decl emits a fresh $Box — but the func-binding
+ * map is, and it lives in codegen, which this front-end change can't fix.) */
 static void frame_rewind(FuncFrame *f, int mark) { f->local_count = mark; }
 
 static int frame_declare(FuncFrame *f, const char *name, size_t name_len) {
@@ -181,7 +194,13 @@ static void frame_mark_last_const(FuncFrame *f) {
 }
 
 /* Look up the most recent local declaration by slot index, returning its
- * attribute (0 = none, 1 = const, 2 = close). Returns -1 if not found. */
+ * attribute (0 = none, 1 = const, 2 = close). Returns -1 if not found.
+ *
+ * (Finding 9: this is a linear scan run once per assignment LHS target. We
+ * keep it rather than threading the attribute through resolve_name onto the
+ * resolved AssignTarget: that would mean plumbing the attrib through the whole
+ * cross-frame resolution path for a check that only ever runs on a statement's
+ * 1-3 assignment targets over a small locals array. Not worth the churn.) */
 static int frame_local_attrib_by_slot(const FuncFrame *f, int slot) {
     for (int i = f->local_count - 1; i >= 0; i--) {
         if (f->locals[i].slot == slot) return f->locals[i].attrib;
