@@ -23,6 +23,7 @@ implicit_globals	tests/fixtures/implicit_globals.lua
 io_file	tests/fixtures/io_file.lua
 iterator	tests/fixtures/iterator.lua
 leading_zero_int	tests/fixtures/leading_zero_int.lua
+list_no_caps	tests/fixtures/list_no_caps.lua
 local_prefix_attr	tests/fixtures/local_prefix_attr.lua
 long_brackets	tests/fixtures/long_brackets.lua
 long_number_literal	tests/fixtures/long_number_literal.lua

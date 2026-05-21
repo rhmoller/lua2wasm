@@ -27,12 +27,47 @@
 #define MAX_FRAME_DEPTH      32
 #define MAX_FUNCS            256
 #define MAX_GLOBALS          256
-/* Per-construct list limit (params, args, names, return values, assignment
- * targets, etc.). 250 matches Lua's documented MAXVARS / MAXPARAMS. */
-#define MAX_LIST             250
-/* Table-constructor entries — looking up data tables in real programs can be
- * large, so allow more headroom than MAX_LIST. */
-#define MAX_TABLE_ENTRIES    1024
+
+/* ------------------------------------------------------------------
+ * Growable scratch buffer for parsing item lists (call args, table entries,
+ * assignment targets, etc.). Replaces the old fixed `T buf[MAX_LIST]` /
+ * `TableEntry buf[MAX_TABLE_ENTRIES]` stack arrays, which both capped list
+ * lengths artificially and (the 24 KB table-entry array especially) risked
+ * blowing the C stack on deeply nested constructors. Elements are appended to
+ * a heap block grown with xrealloc, then copied once into the node pool.
+ * ------------------------------------------------------------------ */
+typedef struct {
+    void *data;
+    size_t count;
+    size_t cap;       /* in elements */
+    size_t elem;      /* element size in bytes */
+} ItemBuf;
+
+static void ib_init(ItemBuf *b, size_t elem) {
+    b->data = NULL; b->count = 0; b->cap = 0; b->elem = elem;
+}
+/* Return a pointer to a fresh, zeroed slot at the end of the buffer. */
+static void *ib_push(ItemBuf *b) {
+    if (b->count == b->cap) {
+        b->cap = b->cap ? b->cap * 2 : 8;
+        b->data = xrealloc(b->data, b->cap * b->elem);
+    }
+    void *slot = (char *)b->data + b->count * b->elem;
+    memset(slot, 0, b->elem);
+    b->count++;
+    return slot;
+}
+/* Copy all elements into a pool-allocated array (at least one element so the
+ * pointer is never NULL) and release the scratch block. */
+static void *ib_finish(ItemBuf *b, NodePool *pool) {
+    size_t n = b->count ? b->count : 1;
+    void *out = node_pool_alloc(pool, n * b->elem);
+    if (b->count) memcpy(out, b->data, b->count * b->elem);
+    free(b->data);
+    b->data = NULL;
+    return out;
+}
+static void ib_free(ItemBuf *b) { free(b->data); b->data = NULL; }
 
 typedef struct {
     const char *name;
@@ -419,19 +454,17 @@ static Expr *parse_primary(Parser *p) {
         }
         case TOK_LBRACE: {
             advance(p); /* { */
-            TableEntry buf[MAX_TABLE_ENTRIES];
-            int n = 0;
+            ItemBuf buf; ib_init(&buf, sizeof(TableEntry));
             while (peek(p)->kind != TOK_RBRACE && peek(p)->kind != TOK_EOF) {
-                if (n >= MAX_TABLE_ENTRIES) { set_error(p, "too many entries in constructor"); return NULL; }
-                TableEntry *ent = &buf[n];
+                TableEntry *ent = ib_push(&buf);
                 if (peek(p)->kind == TOK_LBRACKET) {
                     advance(p);
                     Expr *k = parse_expr(p);
-                    if (!p->ok) return NULL;
+                    if (!p->ok) { ib_free(&buf); return NULL; }
                     expect(p, TOK_RBRACKET, "]");
                     expect(p, TOK_ASSIGN, "=");
                     Expr *v = parse_expr(p);
-                    if (!p->ok) return NULL;
+                    if (!p->ok) { ib_free(&buf); return NULL; }
                     ent->kind = TENT_KEY_EXPR;
                     ent->key = k; ent->value = v;
                 } else if (peek(p)->kind == TOK_IDENT &&
@@ -439,7 +472,7 @@ static Expr *parse_primary(Parser *p) {
                     const Token *nm = advance(p);
                     advance(p); /* = */
                     Expr *v = parse_expr(p);
-                    if (!p->ok) return NULL;
+                    if (!p->ok) { ib_free(&buf); return NULL; }
                     Expr *k = expr_new(p->pool, EXPR_STRING, nm->line);
                     k->as.s.bytes = nm->start;
                     k->as.s.len = nm->len;
@@ -447,18 +480,16 @@ static Expr *parse_primary(Parser *p) {
                     ent->key = k; ent->value = v;
                 } else {
                     Expr *v = parse_expr(p);
-                    if (!p->ok) return NULL;
+                    if (!p->ok) { ib_free(&buf); return NULL; }
                     ent->kind = TENT_POSITIONAL;
                     ent->key = NULL; ent->value = v;
                 }
-                n++;
                 if (!match(p, TOK_COMMA) && !match(p, TOK_SEMI)) break;
             }
             expect(p, TOK_RBRACE, "}");
             Expr *e = expr_new(p->pool, EXPR_TABLE, line);
-            e->as.table_ctor.n_entries = n;
-            e->as.table_ctor.entries = node_pool_alloc(p->pool, sizeof(TableEntry) * (n ? n : 1));
-            for (int i = 0; i < n; i++) e->as.table_ctor.entries[i] = buf[i];
+            e->as.table_ctor.n_entries = (int)buf.count;
+            e->as.table_ctor.entries = ib_finish(&buf, p->pool);
             return e;
         }
         default:
@@ -477,21 +508,19 @@ static Expr *parse_prefix_chain(Parser *p) {
         if (k == TOK_LPAREN) {
             int call_line = peek(p)->line;
             advance(p);
-            Expr *args_buf[MAX_LIST];
-            size_t nargs = 0;
+            ItemBuf args; ib_init(&args, sizeof(Expr *));
             if (peek(p)->kind != TOK_RPAREN) {
                 do {
-                    if (nargs >= MAX_LIST) { set_error(p, "too many args"); return NULL; }
-                    args_buf[nargs++] = parse_expr(p);
-                    if (!p->ok) return NULL;
+                    Expr *a = parse_expr(p);
+                    if (!p->ok) { ib_free(&args); return NULL; }
+                    *(Expr **)ib_push(&args) = a;
                 } while (match(p, TOK_COMMA));
             }
             expect(p, TOK_RPAREN, ")");
             Expr *call = expr_new(p->pool, EXPR_CALL, call_line);
             call->as.call.callee = e;
-            call->as.call.nargs = nargs;
-            call->as.call.args = node_pool_alloc(p->pool, sizeof(Expr *) * (nargs ? nargs : 1));
-            for (size_t i = 0; i < nargs; i++) call->as.call.args[i] = args_buf[i];
+            call->as.call.nargs = args.count;
+            call->as.call.args = ib_finish(&args, p->pool);
             e = call;
         } else if (k == TOK_DOT) {
             advance(p);
@@ -534,26 +563,25 @@ static Expr *parse_prefix_chain(Parser *p) {
             advance(p); /* : */
             if (peek(p)->kind != TOK_IDENT) { set_error(p, "expected method name after ':'"); return NULL; }
             const Token *nm = advance(p);
-            Expr *args_buf[MAX_LIST];
-            size_t nargs = 0;
+            ItemBuf args; ib_init(&args, sizeof(Expr *));
             TokKind ak = peek(p)->kind;
             if (ak == TOK_STRING) {
                 const Token *st = advance(p);
                 Expr *arg = expr_new(p->pool, EXPR_STRING, st->line);
                 arg->as.s.bytes = st->str_buf;
                 arg->as.s.len = st->str_len;
-                args_buf[nargs++] = arg;
+                *(Expr **)ib_push(&args) = arg;
             } else if (ak == TOK_LBRACE) {
                 Expr *arg = parse_primary(p);
-                if (!p->ok) return NULL;
-                args_buf[nargs++] = arg;
+                if (!p->ok) { ib_free(&args); return NULL; }
+                *(Expr **)ib_push(&args) = arg;
             } else {
                 expect(p, TOK_LPAREN, "(");
                 if (peek(p)->kind != TOK_RPAREN) {
                     do {
-                        if (nargs >= MAX_LIST) { set_error(p, "too many args"); return NULL; }
-                        args_buf[nargs++] = parse_expr(p);
-                        if (!p->ok) return NULL;
+                        Expr *a = parse_expr(p);
+                        if (!p->ok) { ib_free(&args); return NULL; }
+                        *(Expr **)ib_push(&args) = a;
                     } while (match(p, TOK_COMMA));
                 }
                 expect(p, TOK_RPAREN, ")");
@@ -562,9 +590,8 @@ static Expr *parse_prefix_chain(Parser *p) {
             mc->as.method_call.recv = e;
             mc->as.method_call.method = nm->start;
             mc->as.method_call.method_len = nm->len;
-            mc->as.method_call.nargs = nargs;
-            mc->as.method_call.args = node_pool_alloc(p->pool, sizeof(Expr *) * (nargs ? nargs : 1));
-            for (size_t i = 0; i < nargs; i++) mc->as.method_call.args[i] = args_buf[i];
+            mc->as.method_call.nargs = args.count;
+            mc->as.method_call.args = ib_finish(&args, p->pool);
             e = mc;
         } else break;
     }
@@ -684,44 +711,46 @@ static Stmt *parse_local(Parser *p) {
         if (default_attrib < 0) return NULL;
     }
     if (peek(p)->kind != TOK_IDENT) { set_error(p, "expected identifier after `local`"); return NULL; }
-    const Token *names_buf[MAX_LIST];
-    int attribs_buf[MAX_LIST] = {0};
-    int n_names = 0;
-    names_buf[n_names++] = advance(p);
-    attribs_buf[n_names - 1] = default_attrib;
+    ItemBuf names; ib_init(&names, sizeof(const Token *));
+    ItemBuf attribs_b; ib_init(&attribs_b, sizeof(int));
+    #define LOCAL_FAIL() do { ib_free(&names); ib_free(&attribs_b); return NULL; } while (0)
+    *(const Token **)ib_push(&names) = advance(p);
+    *(int *)ib_push(&attribs_b) = default_attrib;
     /* Optional <attrib> immediately after the name (per-name overrides prefix). */
     if (peek(p)->kind == TOK_LT) {
         int a = parse_attribute(p);
-        if (a < 0) return NULL;
-        attribs_buf[n_names - 1] = a;
+        if (a < 0) LOCAL_FAIL();
+        ((int *)attribs_b.data)[attribs_b.count - 1] = a;
     }
     while (match(p, TOK_COMMA)) {
-        if (peek(p)->kind != TOK_IDENT) { set_error(p, "expected identifier"); return NULL; }
-        if (n_names >= MAX_LIST) { set_error(p, "too many names in local"); return NULL; }
-        names_buf[n_names++] = advance(p);
-        attribs_buf[n_names - 1] = default_attrib;
+        if (peek(p)->kind != TOK_IDENT) { set_error(p, "expected identifier"); LOCAL_FAIL(); }
+        *(const Token **)ib_push(&names) = advance(p);
+        *(int *)ib_push(&attribs_b) = default_attrib;
         if (peek(p)->kind == TOK_LT) {
             int a = parse_attribute(p);
-            if (a < 0) return NULL;
-            attribs_buf[n_names - 1] = a;
+            if (a < 0) LOCAL_FAIL();
+            ((int *)attribs_b.data)[attribs_b.count - 1] = a;
         }
     }
+    int n_names = (int)names.count;
+    const Token **names_buf = names.data;
+    int *attribs_buf = attribs_b.data;
     /* Parse RHS values BEFORE declaring locals — Lua scoping rule. */
-    Expr *vals_buf[MAX_LIST];
-    int n_values = 0;
+    ItemBuf vals; ib_init(&vals, sizeof(Expr *));
     if (match(p, TOK_ASSIGN)) {
         do {
-            if (n_values >= MAX_LIST) { set_error(p, "too many values in local"); return NULL; }
-            vals_buf[n_values++] = parse_expr(p);
-            if (!p->ok) return NULL;
+            Expr *v = parse_expr(p);
+            if (!p->ok) { ib_free(&vals); LOCAL_FAIL(); }
+            *(Expr **)ib_push(&vals) = v;
         } while (match(p, TOK_COMMA));
     }
+    int n_values = (int)vals.count;
     /* Now declare locals. */
     int *local_idxs = node_pool_alloc(p->pool, sizeof(int) * n_names);
     int any_attrib = 0;
     for (int i = 0; i < n_names; i++) {
         int slot = frame_declare(cur_frame(p), names_buf[i]->start, names_buf[i]->len);
-        if (slot < 0) { set_error(p, "too many locals"); return NULL; }
+        if (slot < 0) { set_error(p, "too many locals"); ib_free(&vals); LOCAL_FAIL(); }
         local_idxs[i] = slot;
         if (attribs_buf[i]) {
             FuncFrame *f = cur_frame(p);
@@ -740,9 +769,14 @@ static Stmt *parse_local(Parser *p) {
     s->as.local.attribs = attribs;
     s->as.local.n_values = n_values;
     if (n_values) {
-        s->as.local.values = node_pool_alloc(p->pool, sizeof(Expr *) * n_values);
-        for (int i = 0; i < n_values; i++) s->as.local.values[i] = vals_buf[i];
+        s->as.local.values = ib_finish(&vals, p->pool);
+    } else {
+        s->as.local.values = NULL;
+        ib_free(&vals);
     }
+    ib_free(&names);
+    ib_free(&attribs_b);
+    #undef LOCAL_FAIL
     return s;
 }
 
@@ -751,30 +785,28 @@ static Stmt *parse_if(Parser *p) {
     static const TokKind ARM_STOPS[] = { TOK_KW_ELSE, TOK_KW_ELSEIF, TOK_KW_END };
     int line = peek(p)->line;
     advance(p);
-    IfArm arms_buf[MAX_LIST];
-    size_t narms = 0;
+    ItemBuf arms; ib_init(&arms, sizeof(IfArm));
     Expr *cond = parse_expr(p);
-    if (!p->ok) return NULL;
+    if (!p->ok) { ib_free(&arms); return NULL; }
     expect(p, TOK_KW_THEN, "then");
     Block body = {0};
     int mark = frame_mark(cur_frame(p));
     parse_block(p, &body, ARM_STOPS, 3);
     frame_rewind(cur_frame(p), mark);
-    if (!p->ok) return NULL;
-    arms_buf[narms++] = (IfArm){ .cond = cond, .body = body };
+    if (!p->ok) { ib_free(&arms); return NULL; }
+    *(IfArm *)ib_push(&arms) = (IfArm){ .cond = cond, .body = body };
 
     while (peek(p)->kind == TOK_KW_ELSEIF) {
         advance(p);
         Expr *c = parse_expr(p);
-        if (!p->ok) return NULL;
+        if (!p->ok) { ib_free(&arms); return NULL; }
         expect(p, TOK_KW_THEN, "then");
         Block b = {0};
         int m = frame_mark(cur_frame(p));
         parse_block(p, &b, ARM_STOPS, 3);
         frame_rewind(cur_frame(p), m);
-        if (!p->ok) return NULL;
-        if (narms >= MAX_LIST) { set_error(p, "too many elseif arms"); return NULL; }
-        arms_buf[narms++] = (IfArm){ .cond = c, .body = b };
+        if (!p->ok) { ib_free(&arms); return NULL; }
+        *(IfArm *)ib_push(&arms) = (IfArm){ .cond = c, .body = b };
     }
 
     int has_else = 0;
@@ -784,14 +816,13 @@ static Stmt *parse_if(Parser *p) {
         int m = frame_mark(cur_frame(p));
         parse_block1(p, &else_body, TOK_KW_END);
         frame_rewind(cur_frame(p), m);
-        if (!p->ok) return NULL;
+        if (!p->ok) { ib_free(&arms); return NULL; }
     }
     expect(p, TOK_KW_END, "end (of if)");
 
     Stmt *s = stmt_new(p->pool, STMT_IF, line);
-    s->as.if_stmt.narms = narms;
-    s->as.if_stmt.arms = node_pool_alloc(p->pool, sizeof(IfArm) * narms);
-    for (size_t i = 0; i < narms; i++) s->as.if_stmt.arms[i] = arms_buf[i];
+    s->as.if_stmt.narms = arms.count;
+    s->as.if_stmt.arms = ib_finish(&arms, p->pool);
     s->as.if_stmt.has_else = has_else;
     s->as.if_stmt.else_body = else_body;
     return s;
@@ -837,21 +868,21 @@ static int looks_like_block_end(TokKind k) {
 static Stmt *parse_return(Parser *p) {
     int line = peek(p)->line;
     advance(p);
-    Expr *vals_buf[MAX_LIST];
-    int n_values = 0;
+    ItemBuf vals; ib_init(&vals, sizeof(Expr *));
     if (!looks_like_block_end(peek(p)->kind)) {
         do {
-            if (n_values >= MAX_LIST) { set_error(p, "too many return values"); return NULL; }
-            vals_buf[n_values++] = parse_expr(p);
-            if (!p->ok) return NULL;
+            Expr *v = parse_expr(p);
+            if (!p->ok) { ib_free(&vals); return NULL; }
+            *(Expr **)ib_push(&vals) = v;
         } while (match(p, TOK_COMMA));
     }
     match(p, TOK_SEMI);
     Stmt *s = stmt_new(p->pool, STMT_RETURN, line);
-    s->as.return_stmt.n_values = n_values;
-    if (n_values) {
-        s->as.return_stmt.values = node_pool_alloc(p->pool, sizeof(Expr *) * n_values);
-        for (int i = 0; i < n_values; i++) s->as.return_stmt.values[i] = vals_buf[i];
+    s->as.return_stmt.n_values = (int)vals.count;
+    if (vals.count) {
+        s->as.return_stmt.values = ib_finish(&vals, p->pool);
+    } else {
+        ib_free(&vals);
     }
     return s;
 }
@@ -888,47 +919,43 @@ static Stmt *parse_ident_stmt(Parser *p) {
      * the assignment writes a new entry in _G. Codegen routes it through
      * \$g_globals just like any other global write. */
 
-    AssignTarget targets[MAX_LIST];
-    int n_targets = 0;
-    targets[n_targets++] = expr_to_target(first);
+    ItemBuf targets; ib_init(&targets, sizeof(AssignTarget));
+    *(AssignTarget *)ib_push(&targets) = expr_to_target(first);
     while (match(p, TOK_COMMA)) {
-        if (n_targets >= MAX_LIST) { set_error(p, "too many assignment targets"); return NULL; }
         Expr *t = parse_prefix_chain(p);
-        if (!p->ok) return NULL;
+        if (!p->ok) { ib_free(&targets); return NULL; }
         if (t->kind != EXPR_VAR && t->kind != EXPR_INDEX) {
-            set_error(p, "invalid assignment target"); return NULL;
+            set_error(p, "invalid assignment target"); ib_free(&targets); return NULL;
         }
-        targets[n_targets++] = expr_to_target(t);
+        *(AssignTarget *)ib_push(&targets) = expr_to_target(t);
     }
     expect(p, TOK_ASSIGN, "= (assignment)");
-    if (!p->ok) return NULL;
+    if (!p->ok) { ib_free(&targets); return NULL; }
     /* <const> enforcement: reject assignment to const locals.
      * Only checks the current frame; reassignment via upvalue is rare
      * and we don't track attribs through the upvalue table yet. */
-    for (int i = 0; i < n_targets; i++) {
-        if (targets[i].kind == TGT_VAR &&
-            targets[i].as.var.kind == VAR_LOCAL) {
+    AssignTarget *tgt = targets.data;
+    for (size_t i = 0; i < targets.count; i++) {
+        if (tgt[i].kind == TGT_VAR &&
+            tgt[i].as.var.kind == VAR_LOCAL) {
             int a = frame_local_attrib_by_slot(cur_frame(p),
-                                               targets[i].as.var.idx);
+                                               tgt[i].as.var.idx);
             if (a == 1) {
-                set_error(p, "attempt to assign to const variable"); return NULL;
+                set_error(p, "attempt to assign to const variable"); ib_free(&targets); return NULL;
             }
         }
     }
-    Expr *vals_buf[MAX_LIST];
-    int n_values = 0;
+    ItemBuf vals; ib_init(&vals, sizeof(Expr *));
     do {
-        if (n_values >= MAX_LIST) { set_error(p, "too many values"); return NULL; }
-        vals_buf[n_values++] = parse_expr(p);
-        if (!p->ok) return NULL;
+        Expr *v = parse_expr(p);
+        if (!p->ok) { ib_free(&targets); ib_free(&vals); return NULL; }
+        *(Expr **)ib_push(&vals) = v;
     } while (match(p, TOK_COMMA));
     Stmt *s = stmt_new(p->pool, STMT_ASSIGN, line);
-    s->as.assign.n_targets = n_targets;
-    s->as.assign.targets = node_pool_alloc(p->pool, sizeof(AssignTarget) * n_targets);
-    for (int i = 0; i < n_targets; i++) s->as.assign.targets[i] = targets[i];
-    s->as.assign.n_values = n_values;
-    s->as.assign.values = node_pool_alloc(p->pool, sizeof(Expr *) * n_values);
-    for (int i = 0; i < n_values; i++) s->as.assign.values[i] = vals_buf[i];
+    s->as.assign.n_targets = (int)targets.count;
+    s->as.assign.targets = ib_finish(&targets, p->pool);
+    s->as.assign.n_values = (int)vals.count;
+    s->as.assign.values = ib_finish(&vals, p->pool);
     return s;
 }
 
@@ -971,50 +998,49 @@ static Stmt *parse_for(Parser *p) {
         return s;
     }
     /* generic: for k [, v, ...] in expr_list do ... end */
-    const Token *names[MAX_LIST];
-    int n_names = 0;
-    names[n_names++] = first;
+    ItemBuf names; ib_init(&names, sizeof(const Token *));
+    *(const Token **)ib_push(&names) = first;
     while (match(p, TOK_COMMA)) {
-        if (peek(p)->kind != TOK_IDENT) { set_error(p, "expected name"); return NULL; }
-        if (n_names >= MAX_LIST) { set_error(p, "too many for-vars"); return NULL; }
-        names[n_names++] = advance(p);
+        if (peek(p)->kind != TOK_IDENT) { set_error(p, "expected name"); ib_free(&names); return NULL; }
+        *(const Token **)ib_push(&names) = advance(p);
     }
     expect(p, TOK_KW_IN, "in");
-    Expr *exprs[MAX_LIST];
-    int n_exprs = 0;
+    ItemBuf exprs; ib_init(&exprs, sizeof(Expr *));
     do {
-        if (n_exprs >= MAX_LIST) { set_error(p, "too many exprs in for"); return NULL; }
-        exprs[n_exprs++] = parse_expr(p);
-        if (!p->ok) return NULL;
+        Expr *e = parse_expr(p);
+        if (!p->ok) { ib_free(&names); ib_free(&exprs); return NULL; }
+        *(Expr **)ib_push(&exprs) = e;
     } while (match(p, TOK_COMMA));
     expect(p, TOK_KW_DO, "do");
+    int n_names = (int)names.count;
+    const Token **names_toks = names.data;
     int mark = frame_mark(cur_frame(p));
     int *local_idxs = node_pool_alloc(p->pool, sizeof(int) * n_names);
     const char **names_arr = node_pool_alloc(p->pool, sizeof(char *) * n_names);
     size_t *lens_arr = node_pool_alloc(p->pool, sizeof(size_t) * n_names);
     for (int i = 0; i < n_names; i++) {
-        int slot = frame_declare(cur_frame(p), names[i]->start, names[i]->len);
-        if (slot < 0) { set_error(p, "too many locals"); return NULL; }
+        int slot = frame_declare(cur_frame(p), names_toks[i]->start, names_toks[i]->len);
+        if (slot < 0) { set_error(p, "too many locals"); ib_free(&names); ib_free(&exprs); return NULL; }
         /* Lua 5.5: only the first (control) variable of a generic for is
          * const; the remaining variables are ordinary assignable locals. */
         if (i == 0) frame_mark_last_const(cur_frame(p));
         local_idxs[i] = slot;
-        names_arr[i] = names[i]->start;
-        lens_arr[i] = names[i]->len;
+        names_arr[i] = names_toks[i]->start;
+        lens_arr[i] = names_toks[i]->len;
     }
+    ib_free(&names);
     Block body = {0};
     parse_block1(p, &body, TOK_KW_END);
     frame_rewind(cur_frame(p), mark);
     expect(p, TOK_KW_END, "end (of for)");
-    if (!p->ok) return NULL;
+    if (!p->ok) { ib_free(&exprs); return NULL; }
     Stmt *s = stmt_new(p->pool, STMT_FOR_GEN, line);
     s->as.for_gen.n_names = n_names;
     s->as.for_gen.names = names_arr;
     s->as.for_gen.name_lens = lens_arr;
     s->as.for_gen.local_idxs = local_idxs;
-    s->as.for_gen.n_exprs = n_exprs;
-    s->as.for_gen.exprs = node_pool_alloc(p->pool, sizeof(Expr *) * n_exprs);
-    for (int i = 0; i < n_exprs; i++) s->as.for_gen.exprs[i] = exprs[i];
+    s->as.for_gen.n_exprs = (int)exprs.count;
+    s->as.for_gen.exprs = ib_finish(&exprs, p->pool);
     s->as.for_gen.body = body;
     return s;
 }
@@ -1102,44 +1128,45 @@ static Stmt *parse_global(Parser *p) {
     }
 
     if (peek(p)->kind != TOK_IDENT) { set_error(p, "expected identifier after `global`"); return NULL; }
-    const Token *names_buf[MAX_LIST];
-    int n_names = 0;
-    names_buf[n_names++] = advance(p);
+    ItemBuf names; ib_init(&names, sizeof(const Token *));
+    *(const Token **)ib_push(&names) = advance(p);
     /* Per-name attribute after the first name. */
     if (peek(p)->kind == TOK_LT) {
-        if (parse_attribute(p) < 0) return NULL;
+        if (parse_attribute(p) < 0) { ib_free(&names); return NULL; }
     }
     while (match(p, TOK_COMMA)) {
-        if (peek(p)->kind != TOK_IDENT) { set_error(p, "expected identifier"); return NULL; }
-        if (n_names >= MAX_LIST) { set_error(p, "too many names in global"); return NULL; }
-        names_buf[n_names++] = advance(p);
+        if (peek(p)->kind != TOK_IDENT) { set_error(p, "expected identifier"); ib_free(&names); return NULL; }
+        *(const Token **)ib_push(&names) = advance(p);
         if (peek(p)->kind == TOK_LT) {
-            if (parse_attribute(p) < 0) return NULL;
+            if (parse_attribute(p) < 0) { ib_free(&names); return NULL; }
         }
     }
+    int n_names = (int)names.count;
+    const Token **names_buf = names.data;
     /* Register globals BEFORE parsing values so they can self-reference. */
     int *global_idxs = node_pool_alloc(p->pool, sizeof(int) * n_names);
     for (int i = 0; i < n_names; i++) {
         int idx = globals_declare(p, names_buf[i]->start, names_buf[i]->len);
-        if (idx < 0) { set_error(p, "too many globals"); return NULL; }
+        if (idx < 0) { set_error(p, "too many globals"); ib_free(&names); return NULL; }
         global_idxs[i] = idx;
     }
-    Expr *vals_buf[MAX_LIST];
-    int n_values = 0;
+    ib_free(&names);
+    ItemBuf vals; ib_init(&vals, sizeof(Expr *));
     if (match(p, TOK_ASSIGN)) {
         do {
-            if (n_values >= MAX_LIST) { set_error(p, "too many values"); return NULL; }
-            vals_buf[n_values++] = parse_expr(p);
-            if (!p->ok) return NULL;
+            Expr *v = parse_expr(p);
+            if (!p->ok) { ib_free(&vals); return NULL; }
+            *(Expr **)ib_push(&vals) = v;
         } while (match(p, TOK_COMMA));
     }
     Stmt *s = stmt_new(p->pool, STMT_GLOBAL, line);
     s->as.global_decl.n_names = n_names;
     s->as.global_decl.global_idxs = global_idxs;
-    s->as.global_decl.n_values = n_values;
-    if (n_values) {
-        s->as.global_decl.values = node_pool_alloc(p->pool, sizeof(Expr *) * n_values);
-        for (int i = 0; i < n_values; i++) s->as.global_decl.values[i] = vals_buf[i];
+    s->as.global_decl.n_values = (int)vals.count;
+    if (vals.count) {
+        s->as.global_decl.values = ib_finish(&vals, p->pool);
+    } else {
+        ib_free(&vals);
     }
     return s;
 }
