@@ -129,3 +129,99 @@ test("explicit return", async () => {
     (e, who) => assert.equal(e.f(), 5, who),
   );
 });
+
+// --- increment 2: control flow, globals, calls -------------------------
+
+test("mutable global get/set", async () => {
+  await check(
+    `(module
+       (global $g (mut i32) (i32.const 1))
+       (func (export "bump") (result i32)
+         (global.set $g (i32.add (global.get $g) (i32.const 10)))
+         (global.get $g)))`,
+    (e, who) => {
+      assert.equal(e.bump(), 11, who);
+      assert.equal(e.bump(), 21, who);
+    },
+  );
+});
+
+test("immutable global", async () => {
+  await check(
+    `(module (global $k i32 (i32.const 7))
+       (func (export "f") (result i32) (global.get $k)))`,
+    (e, who) => assert.equal(e.f(), 7, who),
+  );
+});
+
+test("call another function", async () => {
+  await check(
+    `(module
+       (func $sq (param i32) (result i32) (i32.mul (local.get 0) (local.get 0)))
+       (func (export "f") (param i32) (result i32)
+         (i32.add (call $sq (local.get 0)) (i32.const 1))))`,
+    (e, who) => assert.equal(e.f(5), 26, who),
+  );
+});
+
+test("if/else yielding a value", async () => {
+  await check(
+    `(module (func (export "max") (param i32 i32) (result i32)
+       (if (result i32) (i32.gt_s (local.get 0) (local.get 1))
+         (then (local.get 0))
+         (else (local.get 1)))))`,
+    (e, who) => {
+      assert.equal(e.max(3, 8), 8, who);
+      assert.equal(e.max(9, 2), 9, who);
+    },
+  );
+});
+
+test("br carries a value out of a block", async () => {
+  // unconditional branch with a result value; the trailing const is dead code
+  await check(
+    `(module (func (export "f") (result i32)
+       (block $out (result i32)
+         (br $out (i32.const 100))
+         (i32.const 7))))`,
+    (e, who) => assert.equal(e.f(), 100, who),
+  );
+});
+
+test("loop countdown sum", async () => {
+  // sum 1..n via a loop with br_if back-edge
+  await check(
+    `(module (func (export "sum") (param $n i32) (result i32)
+       (local $acc i32)
+       (block $done
+         (loop $lp
+           (br_if $done (i32.eqz (local.get $n)))
+           (local.set $acc (i32.add (local.get $acc) (local.get $n)))
+           (local.set $n (i32.sub (local.get $n) (i32.const 1)))
+           (br $lp)))
+       (local.get $acc)))`,
+    (e, who) => {
+      assert.equal(e.sum(5), 15, who);
+      assert.equal(e.sum(0), 0, who);
+    },
+  );
+});
+
+test("multi-value block type", async () => {
+  // a block that leaves two i32s on the stack, consumed by i32.add
+  await check(
+    `(module (func (export "f") (result i32)
+       (i32.add (block (result i32 i32) (i32.const 3) (i32.const 4)))))`,
+    (e, who) => assert.equal(e.f(), 7, who),
+  );
+});
+
+test("return_call (tail call)", async () => {
+  await check(
+    `(module
+       (func $inc (param i32) (result i32) (i32.add (local.get 0) (i32.const 1)))
+       (func (export "f") (param i32) (result i32)
+         (return_call $inc (local.get 0))))`,
+    (e, who) => assert.equal(e.f(41), 42, who),
+  );
+});

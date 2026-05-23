@@ -166,6 +166,8 @@ typedef struct SExpr {
 
 /* --- assembler context ------------------------------------------------- */
 
+struct SigTable;
+
 typedef struct {
     jmp_buf jb;
     char *err;
@@ -174,6 +176,13 @@ typedef struct {
     /* lexer cursor */
     const char *src;
     size_t len, pos;
+    /* module-level name -> index tables, populated before body encoding.
+     * Entry i holds the $name for index i (NULL if anonymous). */
+    const char **func_names;
+    size_t n_func_names;
+    const char **global_names;
+    size_t n_global_names;
+    struct SigTable *sigs; /* for interning block signature types */
 } Ctx;
 
 static void fail(Ctx *c, const char *fmt, ...) {
@@ -508,27 +517,41 @@ typedef struct {
     size_t n_results;
 } FuncSig;
 
-typedef struct {
+typedef struct SigTable {
     FuncSig *sigs;
     size_t n, cap;
 } SigTable;
 
-static int sig_eq(const FuncSig *a, const FuncSig *b) {
-    if (a->n_params != b->n_params || a->n_results != b->n_results) return 0;
-    return memcmp(a->params, b->params, a->n_params) == 0 &&
-           memcmp(a->results, b->results, a->n_results) == 0;
-}
-
-/* Intern a signature, returning its type index. */
-static uint32_t sig_intern(SigTable *t, const FuncSig *s) {
+/* Intern a func signature, returning its type index. The table keeps its own
+ * copies of the param/result vectors, so callers retain ownership of theirs
+ * (stack arrays are fine). */
+static uint32_t sig_intern(SigTable *t, const uint8_t *params, size_t np,
+                           const uint8_t *results, size_t nr) {
     for (size_t i = 0; i < t->n; i++)
-        if (sig_eq(&t->sigs[i], s)) return (uint32_t)i;
+        if (t->sigs[i].n_params == np && t->sigs[i].n_results == nr &&
+            memcmp(t->sigs[i].params, params, np) == 0 &&
+            memcmp(t->sigs[i].results, results, nr) == 0)
+            return (uint32_t)i;
     if (t->n == t->cap) {
         t->cap = t->cap ? t->cap * 2 : 8;
         t->sigs = xgrow(t->sigs, t->cap * sizeof *t->sigs);
     }
-    t->sigs[t->n] = *s;
+    FuncSig *s = &t->sigs[t->n];
+    s->n_params = np;
+    s->params = np ? xreserve(np) : NULL;
+    memcpy(s->params, params, np);
+    s->n_results = nr;
+    s->results = nr ? xreserve(nr) : NULL;
+    memcpy(s->results, results, nr);
     return (uint32_t)t->n++;
+}
+
+static void sig_table_free(SigTable *t) {
+    for (size_t i = 0; i < t->n; i++) {
+        free(t->sigs[i].params);
+        free(t->sigs[i].results);
+    }
+    free(t->sigs);
 }
 
 /* --- per-function state ------------------------------------------------ */
@@ -542,7 +565,20 @@ typedef struct {
     Local *locals; /* params then declared locals */
     size_t n_locals, cap_locals;
     size_t n_params;
+    /* control-frame label stack; index 0 outermost, last innermost. */
+    const char **labels;
+    size_t n_labels, cap_labels;
 } FuncCtx;
+
+static void fc_push_label(FuncCtx *f, const char *name) {
+    if (f->n_labels == f->cap_labels) {
+        f->cap_labels = f->cap_labels ? f->cap_labels * 2 : 8;
+        f->labels = xgrow(f->labels, f->cap_labels * sizeof *f->labels);
+    }
+    f->labels[f->n_labels++] = name;
+}
+
+static void fc_pop_label(FuncCtx *f) { f->n_labels--; }
 
 static void fc_add_local(FuncCtx *f, const char *name, uint8_t type) {
     if (f->n_locals == f->cap_locals) {
@@ -561,6 +597,29 @@ static uint32_t resolve_local(Ctx *c, FuncCtx *f, const SExpr *n) {
             if (f->locals[i].name && strcmp(f->locals[i].name, n->atom) == 0)
                 return (uint32_t)i;
         fail(c, "unknown local '%s'", n->atom);
+    }
+    return (uint32_t)parse_uint(c, n->atom);
+}
+
+/* Branch label -> relative depth (0 = innermost enclosing frame). */
+static uint32_t resolve_label(Ctx *c, FuncCtx *f, const SExpr *n) {
+    if (!is_atom(n)) fail(c, "expected branch label");
+    if (n->atom[0] == '$') {
+        for (size_t i = f->n_labels; i-- > 0;)
+            if (f->labels[i] && strcmp(f->labels[i], n->atom) == 0)
+                return (uint32_t)(f->n_labels - 1 - i);
+        fail(c, "unknown label '%s'", n->atom);
+    }
+    return (uint32_t)parse_uint(c, n->atom);
+}
+
+static uint32_t resolve_index(Ctx *c, const char **names, size_t n_names, const SExpr *n,
+                              const char *what) {
+    if (!is_atom(n)) fail(c, "expected %s index", what);
+    if (n->atom[0] == '$') {
+        for (size_t i = 0; i < n_names; i++)
+            if (names[i] && strcmp(names[i], n->atom) == 0) return (uint32_t)i;
+        fail(c, "unknown %s '%s'", what, n->atom);
     }
     return (uint32_t)parse_uint(c, n->atom);
 }
@@ -703,6 +762,61 @@ static const OpEntry *find_op(const char *name) {
     return NULL;
 }
 
+/* --- block types ------------------------------------------------------- */
+
+#define MAX_BLOCKTYPE 64
+
+typedef struct {
+    uint8_t params[MAX_BLOCKTYPE];
+    size_t np;
+    uint8_t results[MAX_BLOCKTYPE];
+    size_t nr;
+} BlockType;
+
+/* Collect the value types in a (param ...) / (result ...) group. */
+static void collect_valtypes(Ctx *c, const SExpr *grp, uint8_t *arr, size_t *n) {
+    const SExpr *k = grp->first->next;
+    if (k && is_atom(k) && k->atom[0] == '$') {
+        if (*n >= MAX_BLOCKTYPE) fail(c, "block type too large");
+        arr[(*n)++] = valtype_byte(c, k->next);
+        return;
+    }
+    for (; k; k = k->next) {
+        if (*n >= MAX_BLOCKTYPE) fail(c, "block type too large");
+        arr[(*n)++] = valtype_byte(c, k);
+    }
+}
+
+/* Parse leading (param)/(result) forms of a block/loop/if into `bt`; return
+ * the first child that is not part of the type signature. */
+static const SExpr *parse_blocktype(Ctx *c, const SExpr *k, BlockType *bt) {
+    bt->np = 0;
+    bt->nr = 0;
+    for (; k; k = k->next) {
+        const char *h = head(k);
+        if (h && strcmp(h, "param") == 0)
+            collect_valtypes(c, k, bt->params, &bt->np);
+        else if (h && strcmp(h, "result") == 0)
+            collect_valtypes(c, k, bt->results, &bt->nr);
+        else if (h && strcmp(h, "type") == 0)
+            fail(c, "(type ...) block types are not supported yet");
+        else
+            break;
+    }
+    return k;
+}
+
+static void emit_blocktype(Ctx *c, const BlockType *bt, Buf *out) {
+    if (bt->np == 0 && bt->nr == 0) {
+        buf_byte(out, 0x40); /* empty */
+    } else if (bt->np == 0 && bt->nr == 1) {
+        buf_byte(out, bt->results[0]); /* single value type */
+    } else {
+        uint32_t idx = sig_intern(c->sigs, bt->params, bt->np, bt->results, bt->nr);
+        buf_sleb(out, (int64_t)idx);
+    }
+}
+
 /* --- instruction encoding ---------------------------------------------- */
 
 static void encode_instr(Ctx *c, FuncCtx *f, const SExpr *n, Buf *out);
@@ -751,6 +865,86 @@ static void encode_instr(Ctx *c, FuncCtx *f, const SExpr *n, Buf *out) {
         buf_byte(out, op[6] == 'g' ? 0x20 : op[6] == 's' ? 0x21
                                                          : 0x22);
         buf_uleb(out, idx);
+        return;
+    }
+
+    /* Global accessors. */
+    if (strcmp(op, "global.get") == 0 || strcmp(op, "global.set") == 0) {
+        uint32_t idx = resolve_index(c, c->global_names, c->n_global_names, arg1, "global");
+        encode_operands(c, f, arg1->next, out);
+        buf_byte(out, op[7] == 'g' ? 0x23 : 0x24);
+        buf_uleb(out, idx);
+        return;
+    }
+
+    /* Calls: function-index immediate, then folded argument operands. */
+    if (strcmp(op, "call") == 0 || strcmp(op, "return_call") == 0) {
+        uint32_t idx = resolve_index(c, c->func_names, c->n_func_names, arg1, "function");
+        encode_operands(c, f, arg1->next, out);
+        buf_byte(out, op[0] == 'c' ? 0x10 : 0x12);
+        buf_uleb(out, idx);
+        return;
+    }
+
+    /* Branches: label immediate, then folded operands (a branch value). */
+    if (strcmp(op, "br") == 0 || strcmp(op, "br_if") == 0) {
+        uint32_t depth = resolve_label(c, f, arg1);
+        encode_operands(c, f, arg1->next, out);
+        buf_byte(out, strcmp(op, "br") == 0 ? 0x0c : 0x0d);
+        buf_uleb(out, depth);
+        return;
+    }
+
+    /* Structured control: block / loop. */
+    if (strcmp(op, "block") == 0 || strcmp(op, "loop") == 0) {
+        const SExpr *k = arg1;
+        const char *label = NULL;
+        if (k && is_atom(k) && k->atom[0] == '$') {
+            label = k->atom;
+            k = k->next;
+        }
+        BlockType bt;
+        k = parse_blocktype(c, k, &bt);
+        buf_byte(out, op[0] == 'b' ? 0x02 : 0x03);
+        emit_blocktype(c, &bt, out);
+        fc_push_label(f, label);
+        for (; k; k = k->next) encode_instr(c, f, k, out);
+        fc_pop_label(f);
+        buf_byte(out, 0x0b);
+        return;
+    }
+
+    /* Folded if: (if label? blocktype? cond... (then ...) (else ...)?).
+     * The condition is encoded first, then the if opcode + block type. */
+    if (strcmp(op, "if") == 0) {
+        const SExpr *k = arg1;
+        const char *label = NULL;
+        if (k && is_atom(k) && k->atom[0] == '$') {
+            label = k->atom;
+            k = k->next;
+        }
+        BlockType bt;
+        k = parse_blocktype(c, k, &bt);
+        const SExpr *cond = k, *thenN = NULL, *elseN = NULL;
+        for (const SExpr *p = k; p; p = p->next) {
+            const char *h = head(p);
+            if (h && strcmp(h, "then") == 0)
+                thenN = p;
+            else if (h && strcmp(h, "else") == 0)
+                elseN = p;
+        }
+        if (!thenN) fail(c, "if without a (then ...) branch");
+        for (const SExpr *p = cond; p && p != thenN; p = p->next) encode_instr(c, f, p, out);
+        buf_byte(out, 0x04);
+        emit_blocktype(c, &bt, out);
+        fc_push_label(f, label);
+        for (const SExpr *p = thenN->first->next; p; p = p->next) encode_instr(c, f, p, out);
+        if (elseN) {
+            buf_byte(out, 0x05);
+            for (const SExpr *p = elseN->first->next; p; p = p->next) encode_instr(c, f, p, out);
+        }
+        fc_pop_label(f);
+        buf_byte(out, 0x0b);
         return;
     }
 
@@ -855,6 +1049,51 @@ static void parse_func(Ctx *c, const SExpr *fn, Func *out) {
     }
 }
 
+/* --- global parsing ---------------------------------------------------- */
+
+typedef struct {
+    const char *name; /* $id or NULL */
+    uint8_t type;     /* value type byte */
+    int is_mut;
+    const SExpr *init; /* init const-expression instruction node */
+} Global;
+
+static void parse_global(Ctx *c, const SExpr *g, Global *out) {
+    memset(out, 0, sizeof *out);
+    const SExpr *k = g->first->next;
+    if (k && is_atom(k) && k->atom[0] == '$') {
+        out->name = k->atom;
+        k = k->next;
+    }
+    if (!k) fail(c, "global needs a type");
+    if (head(k) && strcmp(head(k), "mut") == 0) {
+        out->is_mut = 1;
+        out->type = valtype_byte(c, k->first->next);
+    } else {
+        out->type = valtype_byte(c, k);
+    }
+    k = k->next;
+    if (!k) fail(c, "global needs an init expression");
+    out->init = k;
+}
+
+/* --- block-type prewalk ------------------------------------------------ *
+ * Block/loop/if signatures that need a type index must be interned before
+ * the type section is written, so walk every body once up front. */
+static void prewalk_instr(Ctx *c, const SExpr *n) {
+    if (!n || !n->is_list) return;
+    const char *op = head(n);
+    if (op && (strcmp(op, "block") == 0 || strcmp(op, "loop") == 0 || strcmp(op, "if") == 0)) {
+        const SExpr *k = n->first->next;
+        if (k && is_atom(k) && k->atom[0] == '$') k = k->next;
+        BlockType bt;
+        parse_blocktype(c, k, &bt);
+        if (bt.np > 0 || bt.nr > 1) sig_intern(c->sigs, bt.params, bt.np, bt.results, bt.nr);
+    }
+    for (const SExpr *k = n->first ? n->first->next : NULL; k; k = k->next)
+        if (k->is_list) prewalk_instr(c, k);
+}
+
 /* --- section assembly -------------------------------------------------- */
 
 static void put_section(Buf *module, uint8_t id, const Buf *body) {
@@ -906,10 +1145,13 @@ static int assemble(Ctx *c, const SExpr *module, uint8_t **out_bytes, size_t *ou
     if (!module || !atom_eq(module->first, "module"))
         fail(c, "expected a top-level (module ...)");
 
-    /* Collect functions. */
+    /* Collect functions and globals (in source order within each kind). */
     Func *funcs = NULL;
     size_t n_funcs = 0, cap_funcs = 0;
+    Global *globals = NULL;
+    size_t n_globals = 0, cap_globals = 0;
     SigTable sigs = {0};
+    c->sigs = &sigs;
 
     for (const SExpr *k = module->first->next; k; k = k->next) {
         const char *h = head(k);
@@ -919,14 +1161,37 @@ static int assemble(Ctx *c, const SExpr *module, uint8_t **out_bytes, size_t *ou
                 funcs = xgrow(funcs, cap_funcs * sizeof *funcs);
             }
             parse_func(c, k, &funcs[n_funcs]);
-            funcs[n_funcs].type_index = sig_intern(&sigs, &funcs[n_funcs].sig);
+            funcs[n_funcs].type_index =
+                sig_intern(&sigs, funcs[n_funcs].sig.params, funcs[n_funcs].sig.n_params,
+                           funcs[n_funcs].sig.results, funcs[n_funcs].sig.n_results);
             n_funcs++;
+        } else if (h && strcmp(h, "global") == 0) {
+            if (n_globals == cap_globals) {
+                cap_globals = cap_globals ? cap_globals * 2 : 8;
+                globals = xgrow(globals, cap_globals * sizeof *globals);
+            }
+            parse_global(c, k, &globals[n_globals]);
+            n_globals++;
         } else if (h) {
             fail(c, "unsupported module field '%s'", h);
         } else {
             fail(c, "unsupported module field");
         }
     }
+
+    /* Build name -> index tables for the body encoder. */
+    const char **func_names = xreserve((n_funcs ? n_funcs : 1) * sizeof *func_names);
+    for (size_t i = 0; i < n_funcs; i++) func_names[i] = funcs[i].name;
+    const char **global_names = xreserve((n_globals ? n_globals : 1) * sizeof *global_names);
+    for (size_t i = 0; i < n_globals; i++) global_names[i] = globals[i].name;
+    c->func_names = func_names;
+    c->n_func_names = n_funcs;
+    c->global_names = global_names;
+    c->n_global_names = n_globals;
+
+    /* Intern block-signature types before emitting the type section. */
+    for (size_t i = 0; i < n_funcs; i++)
+        for (const SExpr *k = funcs[i].body_first; k; k = k->next) prewalk_instr(c, k);
 
     /* Type section (id 1). */
     Buf types;
@@ -945,6 +1210,18 @@ static int assemble(Ctx *c, const SExpr *module, uint8_t **out_bytes, size_t *ou
     buf_init(&funcsec);
     buf_uleb(&funcsec, n_funcs);
     for (size_t i = 0; i < n_funcs; i++) buf_uleb(&funcsec, funcs[i].type_index);
+
+    /* Global section (id 6). */
+    Buf globalsec;
+    buf_init(&globalsec);
+    buf_uleb(&globalsec, n_globals);
+    FuncCtx no_locals = {0};
+    for (size_t i = 0; i < n_globals; i++) {
+        buf_byte(&globalsec, globals[i].type);
+        buf_byte(&globalsec, globals[i].is_mut ? 1 : 0);
+        encode_instr(c, &no_locals, globals[i].init, &globalsec);
+        buf_byte(&globalsec, 0x0b); /* end */
+    }
 
     /* Export section (id 7). */
     Buf exports;
@@ -967,13 +1244,14 @@ static int assemble(Ctx *c, const SExpr *module, uint8_t **out_bytes, size_t *ou
     buf_uleb(&code, n_funcs);
     for (size_t i = 0; i < n_funcs; i++) encode_code(c, &funcs[i], &code);
 
-    /* Assemble the module. */
+    /* Assemble the module (sections in canonical id order). */
     Buf module_buf;
     buf_init(&module_buf);
     static const uint8_t header[8] = {0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00};
     buf_bytes(&module_buf, header, sizeof header);
     put_section(&module_buf, 1, &types);
     put_section(&module_buf, 3, &funcsec);
+    put_section(&module_buf, 6, &globalsec);
     put_section(&module_buf, 7, &exports);
     put_section(&module_buf, 10, &code);
 
@@ -982,17 +1260,20 @@ static int assemble(Ctx *c, const SExpr *module, uint8_t **out_bytes, size_t *ou
 
     buf_free(&types);
     buf_free(&funcsec);
+    buf_free(&globalsec);
     buf_free(&exports);
     buf_free(&code);
     for (size_t i = 0; i < n_funcs; i++) {
         free(funcs[i].sig.params);
         free(funcs[i].sig.results);
         free(funcs[i].fc.locals);
+        free(funcs[i].fc.labels);
     }
     free(funcs);
-    /* sigs.sigs entries alias the Func-owned param/result vecs (freed above),
-     * so only the table array itself is released here. */
-    free(sigs.sigs);
+    free(globals);
+    free(func_names);
+    free(global_names);
+    sig_table_free(&sigs);
     return 0;
 }
 
