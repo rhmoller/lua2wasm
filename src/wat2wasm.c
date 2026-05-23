@@ -193,10 +193,14 @@ typedef struct {
     size_t len, pos;
     /* module-level name -> index tables, populated before body encoding.
      * Entry i holds the $name for index i (NULL if anonymous). */
-    const char **func_names;
+    const char **func_names; /* imported funcs first, then defined */
     size_t n_func_names;
     const char **global_names;
     size_t n_global_names;
+    const char **tag_names;
+    size_t n_tag_names;
+    const char **data_names;
+    size_t n_data_names;
     /* declared types (index -> def) for $name / field resolution. Synthesized
      * func types are appended after these, starting at n_decl_types. */
     const DeclType *decls;
@@ -534,6 +538,8 @@ static uint8_t abstract_heaptype(const char *s) {
     if (!strcmp(s, "none")) return 0x71;
     if (!strcmp(s, "nofunc")) return 0x73;
     if (!strcmp(s, "noextern")) return 0x72;
+    if (!strcmp(s, "exn")) return 0x69;
+    if (!strcmp(s, "noexn")) return 0x74;
     return 0;
 }
 
@@ -563,6 +569,8 @@ static uint8_t abstract_reftype(const char *s) {
     if (!strcmp(s, "nullref")) return 0x71;
     if (!strcmp(s, "nullfuncref")) return 0x73;
     if (!strcmp(s, "nullexternref")) return 0x72;
+    if (!strcmp(s, "exnref")) return 0x69;
+    if (!strcmp(s, "nullexnref")) return 0x74;
     return 0;
 }
 
@@ -1063,6 +1071,30 @@ static void encode_instr(Ctx *c, FuncCtx *f, const SExpr *n, Buf *out) {
         return;
     }
 
+    /* Indirect calls through a typed function reference. Operands (args then
+     * the funcref) come first, then the type index. */
+    if (strcmp(op, "call_ref") == 0 || strcmp(op, "return_call_ref") == 0) {
+        uint32_t t = resolve_type(c, arg1);
+        encode_operands(c, f, arg1->next, out);
+        buf_byte(out, op[0] == 'c' ? 0x14 : 0x15);
+        buf_uleb(out, t);
+        return;
+    }
+
+    /* throw $tag : operands then 0x08 tagidx. throw_ref : operand then 0x0A. */
+    if (strcmp(op, "throw") == 0) {
+        uint32_t t = resolve_index(c, c->tag_names, c->n_tag_names, arg1, "tag");
+        encode_operands(c, f, arg1->next, out);
+        buf_byte(out, 0x08);
+        buf_uleb(out, t);
+        return;
+    }
+    if (strcmp(op, "throw_ref") == 0) {
+        encode_operands(c, f, arg1, out);
+        buf_byte(out, 0x0a);
+        return;
+    }
+
     /* Branches: label immediate, then folded operands (a branch value). */
     if (strcmp(op, "br") == 0 || strcmp(op, "br_if") == 0) {
         uint32_t depth = resolve_label(c, f, arg1);
@@ -1120,6 +1152,60 @@ static void encode_instr(Ctx *c, FuncCtx *f, const SExpr *n, Buf *out) {
             buf_byte(out, 0x05);
             for (const SExpr *p = elseN->first->next; p; p = p->next) encode_instr(c, f, p, out);
         }
+        fc_pop_label(f);
+        buf_byte(out, 0x0b);
+        return;
+    }
+
+    /* try_table: 0x1F blocktype vec(catch) body... end. Handler labels resolve
+     * in the *surrounding* context (the try_table's own frame is not counted),
+     * so they are resolved before pushing the body label. */
+    if (strcmp(op, "try_table") == 0) {
+        const SExpr *k = arg1;
+        const char *label = NULL;
+        if (k && is_atom(k) && k->atom[0] == '$') {
+            label = k->atom;
+            k = k->next;
+        }
+        BlockType bt;
+        k = parse_blocktype(c, k, &bt);
+        /* Separate leading catch clauses from the body. */
+        const SExpr *catches = k, *body = k;
+        size_t n_catch = 0;
+        for (; body; body = body->next) {
+            const char *h = head(body);
+            if (h && (strcmp(h, "catch") == 0 || strcmp(h, "catch_ref") == 0 ||
+                      strcmp(h, "catch_all") == 0 || strcmp(h, "catch_all_ref") == 0))
+                n_catch++;
+            else
+                break;
+        }
+        buf_byte(out, 0x1f);
+        emit_blocktype(c, &bt, out);
+        buf_uleb(out, n_catch);
+        for (const SExpr *p = catches; p != body; p = p->next) {
+            const char *h = head(p);
+            const SExpr *a = p->first->next;
+            if (strcmp(h, "catch") == 0) {
+                uint32_t tag = resolve_index(c, c->tag_names, c->n_tag_names, a, "tag");
+                buf_byte(out, 0x00);
+                buf_uleb(out, tag);
+                buf_uleb(out, resolve_label(c, f, a->next));
+            } else if (strcmp(h, "catch_ref") == 0) {
+                uint32_t tag = resolve_index(c, c->tag_names, c->n_tag_names, a, "tag");
+                buf_byte(out, 0x01);
+                buf_uleb(out, tag);
+                buf_uleb(out, resolve_label(c, f, a->next));
+            } else if (strcmp(h, "catch_all") == 0) {
+                buf_byte(out, 0x02);
+                buf_uleb(out, resolve_label(c, f, a));
+            } else { /* catch_all_ref */
+                buf_byte(out, 0x03);
+                buf_uleb(out, resolve_label(c, f, a));
+            }
+        }
+        fc_push_label(f, label);
+        for (const SExpr *p = body; p; p = p->next) encode_instr(c, f, p, out);
         fc_pop_label(f);
         buf_byte(out, 0x0b);
         return;
@@ -1209,6 +1295,16 @@ static void encode_instr(Ctx *c, FuncCtx *f, const SExpr *n, Buf *out) {
         buf_byte(out, 0xfb);
         buf_uleb(out, strcmp(op, "array.new") == 0 ? 0x06 : 0x07);
         buf_uleb(out, t);
+        return;
+    }
+    if (strcmp(op, "array.new_data") == 0) {
+        uint32_t t = resolve_type(c, arg1);
+        uint32_t d = resolve_index(c, c->data_names, c->n_data_names, arg1->next, "data segment");
+        encode_operands(c, f, arg1->next->next, out);
+        buf_byte(out, 0xfb);
+        buf_uleb(out, 0x09);
+        buf_uleb(out, t);
+        buf_uleb(out, d);
         return;
     }
     if (strcmp(op, "array.new_fixed") == 0) {
@@ -1434,6 +1530,130 @@ static void parse_global(Ctx *c, const SExpr *g, Global *out) {
     out->init = k;
 }
 
+/* --- import / tag / data parsing --------------------------------------- */
+
+/* Finalize a FuncSig from two scratch buffers, transferring ownership. */
+static void sig_finalize(FuncSig *sig, Buf *params, size_t np, Buf *results, size_t nr) {
+    sig->n_params = np;
+    sig->params_len = params->len;
+    sig->params = xreserve(params->len ? params->len : 1);
+    memcpy(sig->params, params->data, params->len);
+    sig->n_results = nr;
+    sig->results_len = results->len;
+    sig->results = xreserve(results->len ? results->len : 1);
+    memcpy(sig->results, results->data, results->len);
+    buf_free(params);
+    buf_free(results);
+}
+
+typedef struct {
+    const char *module;
+    size_t module_len;
+    const char *name;
+    size_t name_len;
+    const char *id; /* $name or NULL */
+    int has_type_ref;
+    uint32_t type_ref;
+    FuncSig sig;
+    uint32_t type_index;
+} Import;
+
+/* Parse (import "m" "n" (func $id <signature>)). Only function imports are
+ * supported (the only kind the compiler emits). */
+static void parse_import(Ctx *c, const SExpr *imp, Import *out) {
+    memset(out, 0, sizeof *out);
+    const SExpr *k = imp->first->next;
+    if (!k || !k->is_string) fail(c, "import needs a module string");
+    out->module = k->atom;
+    out->module_len = k->atom_len;
+    k = k->next;
+    if (!k || !k->is_string) fail(c, "import needs a name string");
+    out->name = k->atom;
+    out->name_len = k->atom_len;
+    k = k->next;
+    if (!(head(k) && strcmp(head(k), "func") == 0))
+        fail(c, "only function imports are supported");
+    Buf params, results;
+    buf_init(&params);
+    buf_init(&results);
+    size_t np = 0, nr = 0;
+    for (const SExpr *d = k->first->next; d; d = d->next) {
+        if (is_atom(d) && d->atom[0] == '$') {
+            out->id = d->atom;
+            continue;
+        }
+        const char *h = head(d);
+        if (h && strcmp(h, "type") == 0) {
+            out->has_type_ref = 1;
+            out->type_ref = resolve_type(c, d->first->next);
+        } else if (h && strcmp(h, "param") == 0) {
+            collect_group(c, d, &params, &np, NULL, 0);
+        } else if (h && strcmp(h, "result") == 0) {
+            collect_group(c, d, &results, &nr, NULL, 0);
+        }
+    }
+    sig_finalize(&out->sig, &params, np, &results, nr);
+}
+
+typedef struct {
+    const char *id;
+    const char *export_name;
+    size_t export_len;
+    FuncSig sig; /* params; no results */
+    uint32_t type_index;
+} Tag;
+
+static void parse_tag(Ctx *c, const SExpr *tg, Tag *out) {
+    memset(out, 0, sizeof *out);
+    Buf params, results;
+    buf_init(&params);
+    buf_init(&results);
+    size_t np = 0;
+    for (const SExpr *k = tg->first->next; k; k = k->next) {
+        if (is_atom(k) && k->atom[0] == '$') {
+            out->id = k->atom;
+            continue;
+        }
+        const char *h = head(k);
+        if (h && strcmp(h, "export") == 0) {
+            const SExpr *s = k->first->next;
+            if (!s || !s->is_string) fail(c, "(export ...) needs a name string");
+            out->export_name = s->atom;
+            out->export_len = s->atom_len;
+        } else if (h && strcmp(h, "param") == 0) {
+            collect_group(c, k, &params, &np, NULL, 0);
+        } else {
+            fail(c, "unexpected form in (tag ...)");
+        }
+    }
+    sig_finalize(&out->sig, &params, np, &results, 0);
+}
+
+typedef struct {
+    const char *id;
+    uint8_t *bytes;
+    size_t len;
+} DataSeg;
+
+static void parse_data(Ctx *c, const SExpr *dn, DataSeg *out) {
+    memset(out, 0, sizeof *out);
+    const SExpr *k = dn->first->next;
+    if (k && is_atom(k) && k->atom[0] == '$') {
+        out->id = k->atom;
+        k = k->next;
+    }
+    Buf b;
+    buf_init(&b);
+    for (; k; k = k->next) {
+        if (!k->is_string) fail(c, "(data ...) expects only a passive byte string");
+        buf_bytes(&b, k->atom, k->atom_len);
+    }
+    out->len = b.len;
+    out->bytes = xreserve(b.len ? b.len : 1);
+    memcpy(out->bytes, b.data, b.len);
+    buf_free(&b);
+}
+
 /* --- block-type prewalk ------------------------------------------------ *
  * Block/loop/if signatures that need a type index must be interned before
  * the type section is written, so walk every body once up front. */
@@ -1647,6 +1867,14 @@ static int assemble(Ctx *c, const SExpr *module, uint8_t **out_bytes, size_t *ou
     size_t n_funcs = 0, cap_funcs = 0;
     Global *globals = NULL;
     size_t n_globals = 0, cap_globals = 0;
+    Import *imports = NULL;
+    size_t n_imports = 0, cap_imports = 0;
+    Tag *tags = NULL;
+    size_t n_tags = 0, cap_tags = 0;
+    DataSeg *datas = NULL;
+    size_t n_datas = 0, cap_datas = 0;
+    const SExpr **elems = NULL;
+    size_t n_elems = 0, cap_elems = 0;
     DeclType *decls = NULL;
     size_t n_decls = 0, cap_decls = 0;
     TypeGroup *groups = NULL;
@@ -1662,7 +1890,7 @@ static int assemble(Ctx *c, const SExpr *module, uint8_t **out_bytes, size_t *ou
         }                                                \
     } while (0)
 
-    /* Pass A: declared types (so funcs/globals/bodies can resolve them). */
+    /* Pass A: declared types (so everything else can resolve them). */
     for (const SExpr *k = module->first->next; k; k = k->next) {
         const char *h = head(k);
         if (h && strcmp(h, "type") == 0) {
@@ -1684,10 +1912,21 @@ static int assemble(Ctx *c, const SExpr *module, uint8_t **out_bytes, size_t *ou
     c->decls = decls;
     c->n_decl_types = n_decls;
 
-    /* Pass B: functions and globals. */
+    /* Pass B: imports, then everything else. Imports must be collected before
+     * functions so the two share the function index space (imports first). */
     for (const SExpr *k = module->first->next; k; k = k->next) {
         const char *h = head(k);
-        if (h && strcmp(h, "func") == 0) {
+        if (h && strcmp(h, "import") == 0) {
+            PUSH(imports, n_imports, cap_imports, 8);
+            Import *im = &imports[n_imports++];
+            parse_import(c, k, im);
+            im->type_index =
+                im->has_type_ref
+                    ? im->type_ref
+                    : (uint32_t)(n_decls + sig_intern(&sigs, im->sig.params, im->sig.params_len,
+                                                      im->sig.n_params, im->sig.results,
+                                                      im->sig.results_len, im->sig.n_results));
+        } else if (h && strcmp(h, "func") == 0) {
             PUSH(funcs, n_funcs, cap_funcs, 8);
             Func *fn = &funcs[n_funcs++];
             parse_func(c, k, fn);
@@ -1701,10 +1940,22 @@ static int assemble(Ctx *c, const SExpr *module, uint8_t **out_bytes, size_t *ou
         } else if (h && strcmp(h, "global") == 0) {
             PUSH(globals, n_globals, cap_globals, 8);
             parse_global(c, k, &globals[n_globals++]);
-        } else if (h && strcmp(h, "type") == 0) {
+        } else if (h && strcmp(h, "tag") == 0) {
+            PUSH(tags, n_tags, cap_tags, 8);
+            Tag *tg = &tags[n_tags++];
+            parse_tag(c, k, tg);
+            tg->type_index =
+                (uint32_t)(n_decls + sig_intern(&sigs, tg->sig.params, tg->sig.params_len,
+                                                tg->sig.n_params, tg->sig.results,
+                                                tg->sig.results_len, tg->sig.n_results));
+        } else if (h && strcmp(h, "data") == 0) {
+            PUSH(datas, n_datas, cap_datas, 8);
+            parse_data(c, k, &datas[n_datas++]);
+        } else if (h && strcmp(h, "elem") == 0) {
+            PUSH(elems, n_elems, cap_elems, 8);
+            elems[n_elems++] = k;
+        } else if (h && (strcmp(h, "type") == 0 || strcmp(h, "rec") == 0)) {
             continue; /* handled in pass A */
-        } else if (h && strcmp(h, "rec") == 0) {
-            continue;
         } else if (h) {
             fail(c, "unsupported module field '%s'", h);
         } else {
@@ -1712,15 +1963,25 @@ static int assemble(Ctx *c, const SExpr *module, uint8_t **out_bytes, size_t *ou
         }
     }
 
-    /* Name -> index tables for the body encoder. */
-    const char **func_names = xreserve((n_funcs ? n_funcs : 1) * sizeof *func_names);
-    for (size_t i = 0; i < n_funcs; i++) func_names[i] = funcs[i].name;
+    /* Name -> index tables. The function index space is imports then defined. */
+    size_t n_all_funcs = n_imports + n_funcs;
+    const char **func_names = xreserve((n_all_funcs ? n_all_funcs : 1) * sizeof *func_names);
+    for (size_t i = 0; i < n_imports; i++) func_names[i] = imports[i].id;
+    for (size_t i = 0; i < n_funcs; i++) func_names[n_imports + i] = funcs[i].name;
     const char **global_names = xreserve((n_globals ? n_globals : 1) * sizeof *global_names);
     for (size_t i = 0; i < n_globals; i++) global_names[i] = globals[i].name;
+    const char **tag_names = xreserve((n_tags ? n_tags : 1) * sizeof *tag_names);
+    for (size_t i = 0; i < n_tags; i++) tag_names[i] = tags[i].id;
+    const char **data_names = xreserve((n_datas ? n_datas : 1) * sizeof *data_names);
+    for (size_t i = 0; i < n_datas; i++) data_names[i] = datas[i].id;
     c->func_names = func_names;
-    c->n_func_names = n_funcs;
+    c->n_func_names = n_all_funcs;
     c->global_names = global_names;
     c->n_global_names = n_globals;
+    c->tag_names = tag_names;
+    c->n_tag_names = n_tags;
+    c->data_names = data_names;
+    c->n_data_names = n_datas;
 
     /* Intern block-signature types before emitting the type section. */
     for (size_t i = 0; i < n_funcs; i++)
@@ -1748,11 +2009,33 @@ static int assemble(Ctx *c, const SExpr *module, uint8_t **out_bytes, size_t *ou
         buf_bytes(&types, sigs.sigs[i].results, sigs.sigs[i].results_len);
     }
 
-    /* Function section (id 3). */
+    /* Import section (id 2). */
+    Buf importsec;
+    buf_init(&importsec);
+    buf_uleb(&importsec, n_imports);
+    for (size_t i = 0; i < n_imports; i++) {
+        buf_uleb(&importsec, imports[i].module_len);
+        buf_bytes(&importsec, imports[i].module, imports[i].module_len);
+        buf_uleb(&importsec, imports[i].name_len);
+        buf_bytes(&importsec, imports[i].name, imports[i].name_len);
+        buf_byte(&importsec, 0x00); /* func */
+        buf_uleb(&importsec, imports[i].type_index);
+    }
+
+    /* Function section (id 3) — defined functions only. */
     Buf funcsec;
     buf_init(&funcsec);
     buf_uleb(&funcsec, n_funcs);
     for (size_t i = 0; i < n_funcs; i++) buf_uleb(&funcsec, funcs[i].type_index);
+
+    /* Tag section (id 13). */
+    Buf tagsec;
+    buf_init(&tagsec);
+    buf_uleb(&tagsec, n_tags);
+    for (size_t i = 0; i < n_tags; i++) {
+        buf_byte(&tagsec, 0x00); /* attribute: exception */
+        buf_uleb(&tagsec, tags[i].type_index);
+    }
 
     /* Global section (id 6). */
     Buf globalsec;
@@ -1766,20 +2049,55 @@ static int assemble(Ctx *c, const SExpr *module, uint8_t **out_bytes, size_t *ou
         buf_byte(&globalsec, 0x0b); /* end */
     }
 
-    /* Export section (id 7). */
+    /* Export section (id 7): functions and tags. */
     Buf exports;
     buf_init(&exports);
     size_t n_exports = 0;
     for (size_t i = 0; i < n_funcs; i++)
         if (funcs[i].export_name) n_exports++;
+    for (size_t i = 0; i < n_tags; i++)
+        if (tags[i].export_name) n_exports++;
     buf_uleb(&exports, n_exports);
     for (size_t i = 0; i < n_funcs; i++) {
         if (!funcs[i].export_name) continue;
         buf_uleb(&exports, funcs[i].export_len);
         buf_bytes(&exports, funcs[i].export_name, funcs[i].export_len);
         buf_byte(&exports, 0x00); /* func */
+        buf_uleb(&exports, (uint32_t)(n_imports + i));
+    }
+    for (size_t i = 0; i < n_tags; i++) {
+        if (!tags[i].export_name) continue;
+        buf_uleb(&exports, tags[i].export_len);
+        buf_bytes(&exports, tags[i].export_name, tags[i].export_len);
+        buf_byte(&exports, 0x04); /* tag */
         buf_uleb(&exports, (uint32_t)i);
     }
+
+    /* Element section (id 9): declarative (elem declare func ...) segments. */
+    Buf elemsec;
+    buf_init(&elemsec);
+    buf_uleb(&elemsec, n_elems);
+    for (size_t i = 0; i < n_elems; i++) {
+        const SExpr *e = elems[i];
+        const SExpr *k = e->first->next;
+        if (!atom_eq(k, "declare")) fail(c, "only (elem declare func ...) is supported");
+        k = k->next;
+        if (!atom_eq(k, "func")) fail(c, "only (elem declare func ...) is supported");
+        k = k->next;
+        size_t cnt = 0;
+        for (const SExpr *p = k; p; p = p->next) cnt++;
+        buf_byte(&elemsec, 0x03); /* declarative */
+        buf_byte(&elemsec, 0x00); /* elemkind: funcref */
+        buf_uleb(&elemsec, cnt);
+        for (const SExpr *p = k; p; p = p->next)
+            buf_uleb(&elemsec, resolve_index(c, func_names, n_all_funcs, p, "function"));
+    }
+
+    /* Data count section (id 12) — required before code when array.new_data
+     * (or memory.init / data.drop) references passive segments. */
+    Buf datacount;
+    buf_init(&datacount);
+    if (n_datas) buf_uleb(&datacount, n_datas);
 
     /* Code section (id 10). */
     Buf code;
@@ -1787,25 +2105,47 @@ static int assemble(Ctx *c, const SExpr *module, uint8_t **out_bytes, size_t *ou
     buf_uleb(&code, n_funcs);
     for (size_t i = 0; i < n_funcs; i++) encode_code(c, &funcs[i], &code);
 
-    /* Assemble the module (sections in canonical id order). */
+    /* Data section (id 11): passive segments. */
+    Buf datasec;
+    buf_init(&datasec);
+    buf_uleb(&datasec, n_datas);
+    for (size_t i = 0; i < n_datas; i++) {
+        buf_byte(&datasec, 0x01); /* passive */
+        buf_uleb(&datasec, datas[i].len);
+        buf_bytes(&datasec, datas[i].bytes, datas[i].len);
+    }
+
+    /* Assemble the module. Section order follows the spec, with the tag
+     * section placed between memory and global, and the data-count section
+     * before code. */
     Buf module_buf;
     buf_init(&module_buf);
     static const uint8_t header[8] = {0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00};
     buf_bytes(&module_buf, header, sizeof header);
     put_section(&module_buf, 1, &types);
+    put_section(&module_buf, 2, &importsec);
     put_section(&module_buf, 3, &funcsec);
+    put_section(&module_buf, 13, &tagsec);
     put_section(&module_buf, 6, &globalsec);
     put_section(&module_buf, 7, &exports);
+    put_section(&module_buf, 9, &elemsec);
+    if (n_datas) put_section(&module_buf, 12, &datacount);
     put_section(&module_buf, 10, &code);
+    put_section(&module_buf, 11, &datasec);
 
     *out_bytes = module_buf.data;
     *out_len = module_buf.len;
 
     buf_free(&types);
+    buf_free(&importsec);
     buf_free(&funcsec);
+    buf_free(&tagsec);
     buf_free(&globalsec);
     buf_free(&exports);
+    buf_free(&elemsec);
+    buf_free(&datacount);
     buf_free(&code);
+    buf_free(&datasec);
     for (size_t i = 0; i < n_funcs; i++) {
         free(funcs[i].sig.params);
         free(funcs[i].sig.results);
@@ -1813,14 +2153,29 @@ static int assemble(Ctx *c, const SExpr *module, uint8_t **out_bytes, size_t *ou
         free(funcs[i].fc.locals);
         free(funcs[i].fc.labels);
     }
+    for (size_t i = 0; i < n_imports; i++) {
+        free(imports[i].sig.params);
+        free(imports[i].sig.results);
+    }
+    for (size_t i = 0; i < n_tags; i++) {
+        free(tags[i].sig.params);
+        free(tags[i].sig.results);
+    }
     for (size_t i = 0; i < n_globals; i++) free(globals[i].type);
+    for (size_t i = 0; i < n_datas; i++) free(datas[i].bytes);
     for (size_t i = 0; i < n_decls; i++) free((void *)decls[i].field_names);
     free(funcs);
     free(globals);
+    free(imports);
+    free(tags);
+    free(datas);
+    free(elems);
     free(decls);
     free(groups);
     free(func_names);
     free(global_names);
+    free(tag_names);
+    free(data_names);
     sig_table_free(&sigs);
     return 0;
 #undef PUSH

@@ -376,3 +376,78 @@ test("GC const-expr in a global init", async () => {
     (e, who) => assert.equal(e.f(), 77, who),
   );
 });
+
+// --- increment 4: func refs, exceptions, data, imports -----------------
+
+test("imported function", async () => {
+  await check(
+    `(module
+       (import "env" "add1" (func $add1 (param i32) (result i32)))
+       (func (export "f") (param i32) (result i32) (call $add1 (local.get 0))))`,
+    (e, who) => assert.equal(e.f(41), 42, who),
+    { env: { add1: (x) => x + 1 } },
+  );
+});
+
+test("call_ref / ref.func / elem declare", async () => {
+  await check(
+    `(module
+       (type $unary (func (param i32) (result i32)))
+       (elem declare func $double)
+       (func $double (param i32) (result i32) (i32.mul (local.get 0) (i32.const 2)))
+       (func (export "f") (param i32) (result i32)
+         (call_ref $unary (local.get 0) (ref.func $double))))`,
+    (e, who) => assert.equal(e.f(21), 42, who),
+  );
+});
+
+test("tag + throw + try_table (catch)", async () => {
+  await check(
+    `(module
+       (tag $err (param i32))
+       (func (export "f") (param i32) (result i32)
+         (block $h (result i32)
+           (try_table (result i32) (catch $err $h)
+             (if (local.get 0) (then (throw $err (i32.const 99))))
+             (i32.const 0)))))`,
+    (e, who) => {
+      assert.equal(e.f(1), 99, who);
+      assert.equal(e.f(0), 0, who);
+    },
+  );
+});
+
+test("try_table (catch_all)", async () => {
+  // catch_all carries no values, so its target block must be void; observe
+  // the catch through a local that the throwing path never reaches.
+  await check(
+    `(module
+       (tag $err (param i32))
+       (func (export "f") (param i32) (result i32)
+         (local $r i32)
+         (local.set $r (i32.const 5))
+         (block $h
+           (try_table (catch_all $h)
+             (if (local.get 0) (then (throw $err (i32.const 7))))
+             (local.set $r (i32.const 1))))
+         (local.get $r)))`,
+    (e, who) => {
+      assert.equal(e.f(1), 5, who); // threw -> caught -> $r stays 5
+      assert.equal(e.f(0), 1, who); // no throw -> $r set to 1
+    },
+  );
+});
+
+test("passive data + array.new_data", async () => {
+  await check(
+    `(module
+       (type $bytes (array (mut i8)))
+       (data $d "\\01\\02\\03\\04")
+       (func (export "f") (result i32)
+         (local $a (ref $bytes))
+         (local.set $a (array.new_data $bytes $d (i32.const 0) (i32.const 4)))
+         (i32.add (array.get_u $bytes (local.get $a) (i32.const 0))
+                  (array.get_u $bytes (local.get $a) (i32.const 3)))))`,
+    (e, who) => assert.equal(e.f(), 5, who),
+  );
+});

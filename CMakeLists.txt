@@ -175,9 +175,12 @@ add_test(
 # our wat2wasm, instantiates it under Node, and asserts behavior; when wasm-as
 # is on PATH it cross-checks against that reference assembler.
 find_program(WASM_AS_PROG NAMES wasm-as)
+# --test-isolation=none keeps the run in this process so the
+# --experimental-wasm-exnref V8 flag applies to the WebAssembly compiles
+# (the test runner does not forward it to per-file child processes).
 add_test(
     NAME test_wat2wasm
-    COMMAND node --experimental-wasm-exnref --test
+    COMMAND node --experimental-wasm-exnref --test --test-isolation=none
             ${CMAKE_SOURCE_DIR}/tests/wat2wasm/run.mjs
 )
 if(WASM_AS_PROG)
