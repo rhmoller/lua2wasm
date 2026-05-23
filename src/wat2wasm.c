@@ -157,6 +157,7 @@ typedef struct SExpr {
     const char *atom; /* NUL-terminated; for strings, the decoded bytes */
     size_t atom_len;  /* decoded length (atoms/strings may embed NUL) */
     int is_string;
+    size_t src_pos; /* byte offset of this token/list in the source */
     /* list: children as a singly linked list */
     struct SExpr *first, *last;
     size_t n_kids;
@@ -216,6 +217,14 @@ static void fail(Ctx *c, const char *fmt, ...) {
         va_end(ap);
     }
     longjmp(c->jb, 1);
+}
+
+/* 1-based source line of a byte offset, for diagnostics. */
+static size_t line_of(Ctx *c, size_t pos) {
+    size_t line = 1;
+    for (size_t i = 0; i < pos && i < c->len; i++)
+        if (c->src[i] == '\n') line++;
+    return line;
 }
 
 /* --- lexer + reader ---------------------------------------------------- */
@@ -395,12 +404,14 @@ static void add_kid(SExpr *list, SExpr *kid) {
 static SExpr *read_sexpr(Ctx *c) {
     skip_trivia(c);
     if (c->pos >= c->len) return NULL;
+    size_t tok_pos = c->pos;
     char ch = c->src[c->pos];
     if (ch == ')') fail(c, "unexpected ')'");
     if (ch == '(') {
         c->pos++;
         SExpr *list = new_node(c);
         list->is_list = 1;
+        list->src_pos = tok_pos;
         for (;;) {
             skip_trivia(c);
             if (c->pos >= c->len) fail(c, "unterminated list");
@@ -415,6 +426,7 @@ static SExpr *read_sexpr(Ctx *c) {
     }
     /* atom */
     SExpr *n = new_node(c);
+    n->src_pos = tok_pos;
     if (ch == '"') {
         n->is_string = 1;
         n->atom = read_string(c, &n->atom_len);
@@ -1005,15 +1017,44 @@ static const SExpr *reftype_parts(Ctx *c, const SExpr *n, int *nullable) {
 /* --- instruction encoding ---------------------------------------------- */
 
 static void encode_instr(Ctx *c, FuncCtx *f, const SExpr *n, Buf *out);
+/* Encode an instruction sequence [first .. stop), handling both folded
+ * (parenthesized) and plain (flat) instructions. stop==NULL means to the end.
+ * Returns the last instruction node emitted (NULL if none). */
+static const SExpr *encode_seq(Ctx *c, FuncCtx *f, const SExpr *first, const SExpr *stop, Buf *out);
+/* Encode a block/loop/if/function body, appending an `unreachable` when the
+ * body cannot fall through (so the enclosing `end` validates in dead code). */
+static void encode_block_body(Ctx *c, FuncCtx *f, const SExpr *first, Buf *out);
 
-/* Encode every operand child in [from .. end). */
+/* Whether control cannot fall through this instruction to the next. Handles
+ * direct transfers and loops (a loop is exited only by falling through its
+ * body, so it can't fall through if its last instruction can't). Blocks/ifs
+ * are conservatively treated as able to fall through. */
+static int flow_unreachable(const SExpr *n) {
+    const char *op = n->is_list ? head(n) : (n->is_string ? NULL : n->atom);
+    if (!op) return 0;
+    if (strcmp(op, "unreachable") == 0 || strcmp(op, "br") == 0 || strcmp(op, "br_table") == 0 ||
+        strcmp(op, "return") == 0 || strcmp(op, "return_call") == 0 ||
+        strcmp(op, "return_call_ref") == 0 || strcmp(op, "throw") == 0 ||
+        strcmp(op, "throw_ref") == 0)
+        return 1;
+    if (strcmp(op, "loop") == 0 && n->is_list && n->last) return flow_unreachable(n->last);
+    return 0;
+}
+
+/* Encode every operand child in [from .. end). Folded operands are always
+ * parenthesized sub-instructions. */
 static void encode_operands(Ctx *c, FuncCtx *f, const SExpr *from, Buf *out) {
     for (const SExpr *k = from; k; k = k->next) encode_instr(c, f, k, out);
 }
 
 static void encode_instr(Ctx *c, FuncCtx *f, const SExpr *n, Buf *out) {
     const char *op = head(n);
-    if (!op) fail(c, "expected an instruction");
+    if (!op) {
+        if (is_atom(n))
+            fail(c, "line %zu: expected an instruction, got atom '%s'", line_of(c, n->src_pos),
+                 n->atom);
+        fail(c, "line %zu: expected an instruction", line_of(c, n->src_pos));
+    }
     const SExpr *arg1 = n->first->next;
 
     /* Constants: opcode then a literal immediate (no folded operands). */
@@ -1104,6 +1145,21 @@ static void encode_instr(Ctx *c, FuncCtx *f, const SExpr *n, Buf *out) {
         return;
     }
 
+    /* br_table: leading label atoms (table entries + trailing default), then a
+     * folded index operand. */
+    if (strcmp(op, "br_table") == 0) {
+        size_t n_labels = 0;
+        const SExpr *operand = arg1;
+        for (; operand && is_atom(operand); operand = operand->next) n_labels++;
+        if (n_labels < 1) fail(c, "br_table needs at least a default label");
+        encode_operands(c, f, operand, out);
+        buf_byte(out, 0x0e);
+        buf_uleb(out, n_labels - 1); /* table length; the last label is default */
+        for (const SExpr *l = arg1; l && is_atom(l); l = l->next)
+            buf_uleb(out, resolve_label(c, f, l));
+        return;
+    }
+
     /* Structured control: block / loop. */
     if (strcmp(op, "block") == 0 || strcmp(op, "loop") == 0) {
         const SExpr *k = arg1;
@@ -1117,7 +1173,7 @@ static void encode_instr(Ctx *c, FuncCtx *f, const SExpr *n, Buf *out) {
         buf_byte(out, op[0] == 'b' ? 0x02 : 0x03);
         emit_blocktype(c, &bt, out);
         fc_push_label(f, label);
-        for (; k; k = k->next) encode_instr(c, f, k, out);
+        encode_block_body(c, f, k, out);
         fc_pop_label(f);
         buf_byte(out, 0x0b);
         return;
@@ -1143,14 +1199,14 @@ static void encode_instr(Ctx *c, FuncCtx *f, const SExpr *n, Buf *out) {
                 elseN = p;
         }
         if (!thenN) fail(c, "if without a (then ...) branch");
-        for (const SExpr *p = cond; p && p != thenN; p = p->next) encode_instr(c, f, p, out);
+        encode_seq(c, f, cond, thenN, out);
         buf_byte(out, 0x04);
         emit_blocktype(c, &bt, out);
         fc_push_label(f, label);
-        for (const SExpr *p = thenN->first->next; p; p = p->next) encode_instr(c, f, p, out);
+        encode_block_body(c, f, thenN->first->next, out);
         if (elseN) {
             buf_byte(out, 0x05);
-            for (const SExpr *p = elseN->first->next; p; p = p->next) encode_instr(c, f, p, out);
+            encode_block_body(c, f, elseN->first->next, out);
         }
         fc_pop_label(f);
         buf_byte(out, 0x0b);
@@ -1205,7 +1261,7 @@ static void encode_instr(Ctx *c, FuncCtx *f, const SExpr *n, Buf *out) {
             }
         }
         fc_push_label(f, label);
-        for (const SExpr *p = body; p; p = p->next) encode_instr(c, f, p, out);
+        encode_block_body(c, f, body, out);
         fc_pop_label(f);
         buf_byte(out, 0x0b);
         return;
@@ -1363,7 +1419,86 @@ static void encode_instr(Ctx *c, FuncCtx *f, const SExpr *n, Buf *out) {
         return;
     }
 
-    fail(c, "unsupported instruction '%s'", op);
+    fail(c, "line %zu: unsupported instruction '%s'", line_of(c, n->src_pos), op);
+}
+
+/* Number of immediate atoms a plain (flat) instruction consumes from the
+ * sibling stream, or -1 if the opcode cannot appear in plain form here
+ * (structured control and reftype-immediate ops are always folded). */
+static int plain_imm_count(const char *op) {
+    if (!strcmp(op, "block") || !strcmp(op, "loop") || !strcmp(op, "if") ||
+        !strcmp(op, "else") || !strcmp(op, "end") || !strcmp(op, "try_table") ||
+        !strcmp(op, "ref.test") || !strcmp(op, "ref.cast") || !strcmp(op, "br_table"))
+        return -1;
+    if (!strcmp(op, "struct.get") || !strcmp(op, "struct.get_s") || !strcmp(op, "struct.get_u") ||
+        !strcmp(op, "struct.set") || !strcmp(op, "array.copy") || !strcmp(op, "array.new_fixed") ||
+        !strcmp(op, "array.new_data"))
+        return 2;
+    if (!strcmp(op, "local.get") || !strcmp(op, "local.set") || !strcmp(op, "local.tee") ||
+        !strcmp(op, "global.get") || !strcmp(op, "global.set") || !strcmp(op, "call") ||
+        !strcmp(op, "return_call") || !strcmp(op, "call_ref") || !strcmp(op, "return_call_ref") ||
+        !strcmp(op, "br") || !strcmp(op, "br_if") || !strcmp(op, "throw") ||
+        !strcmp(op, "ref.func") || !strcmp(op, "ref.null") || !strcmp(op, "i32.const") ||
+        !strcmp(op, "i64.const") || !strcmp(op, "f32.const") || !strcmp(op, "f64.const") ||
+        !strcmp(op, "struct.new") || !strcmp(op, "struct.new_default") || !strcmp(op, "array.new") ||
+        !strcmp(op, "array.new_default") || !strcmp(op, "array.get") ||
+        !strcmp(op, "array.get_s") || !strcmp(op, "array.get_u") || !strcmp(op, "array.set") ||
+        !strcmp(op, "array.fill"))
+        return 1;
+    return 0; /* drop, return, nop, numeric ops, ref.eq, array.len, ... */
+}
+
+/* Encode a plain instruction: the opcode atom `op_node` plus its immediate
+ * atoms (taken from following siblings). Builds an equivalent folded node with
+ * no operand children and reuses encode_instr. Returns the next unconsumed
+ * sibling. */
+static const SExpr *encode_plain(Ctx *c, FuncCtx *f, const SExpr *op_node, Buf *out) {
+    int cnt = plain_imm_count(op_node->atom);
+    if (cnt < 0)
+        fail(c, "line %zu: plain (unfolded) '%s' is not supported", line_of(c, op_node->src_pos),
+             op_node->atom);
+    SExpr *synth = new_node(c);
+    synth->is_list = 1;
+    synth->src_pos = op_node->src_pos;
+    SExpr *opc = new_node(c);
+    opc->atom = op_node->atom;
+    opc->atom_len = op_node->atom_len;
+    add_kid(synth, opc);
+    const SExpr *cur = op_node->next;
+    for (int i = 0; i < cnt; i++) {
+        if (!cur || !is_atom(cur))
+            fail(c, "line %zu: plain '%s' is missing an immediate",
+                 line_of(c, op_node->src_pos), op_node->atom);
+        SExpr *im = new_node(c);
+        im->atom = cur->atom;
+        im->atom_len = cur->atom_len;
+        im->is_string = cur->is_string;
+        im->src_pos = cur->src_pos;
+        add_kid(synth, im);
+        cur = cur->next;
+    }
+    encode_instr(c, f, synth, out);
+    return cur;
+}
+
+static const SExpr *encode_seq(Ctx *c, FuncCtx *f, const SExpr *first, const SExpr *stop,
+                               Buf *out) {
+    const SExpr *k = first, *last = NULL;
+    while (k && k != stop) {
+        last = k;
+        if (k->is_list) {
+            encode_instr(c, f, k, out);
+            k = k->next;
+        } else {
+            k = encode_plain(c, f, k, out);
+        }
+    }
+    return last;
+}
+
+static void encode_block_body(Ctx *c, FuncCtx *f, const SExpr *first, Buf *out) {
+    const SExpr *last = encode_seq(c, f, first, NULL, out);
+    if (last && flow_unreachable(last)) buf_byte(out, 0x00); /* unreachable */
 }
 
 /* --- function parsing -------------------------------------------------- */
@@ -1672,6 +1807,18 @@ static void prewalk_instr(Ctx *c, const SExpr *n) {
         if (k->is_list) prewalk_instr(c, k);
 }
 
+/* Mark every function reached by a (ref.func $x) in this subtree as declared,
+ * so it can be the operand of ref.func (the source relies on the assembler
+ * auto-declaring them, like Binaryen does). */
+static void collect_reffunc(Ctx *c, const SExpr *n, uint8_t *declared) {
+    if (!n || !n->is_list) return;
+    const char *op = head(n);
+    if (op && strcmp(op, "ref.func") == 0)
+        declared[resolve_index(c, c->func_names, c->n_func_names, n->first->next, "function")] = 1;
+    for (const SExpr *k = n->first ? n->first->next : NULL; k; k = k->next)
+        if (k->is_list) collect_reffunc(c, k, declared);
+}
+
 /* --- section assembly -------------------------------------------------- */
 
 static void put_section(Buf *module, uint8_t id, const Buf *body) {
@@ -1703,7 +1850,7 @@ static void encode_code(Ctx *c, Func *fn, Buf *code) {
         i = j;
     }
 
-    for (const SExpr *k = fn->body_first; k; k = k->next) encode_instr(c, &fn->fc, k, &body);
+    encode_block_body(c, &fn->fc, fn->body_first, &body);
     buf_byte(&body, 0x0b); /* end */
 
     Buf entry;
@@ -2073,24 +2220,33 @@ static int assemble(Ctx *c, const SExpr *module, uint8_t **out_bytes, size_t *ou
         buf_uleb(&exports, (uint32_t)i);
     }
 
-    /* Element section (id 9): declarative (elem declare func ...) segments. */
-    Buf elemsec;
-    buf_init(&elemsec);
-    buf_uleb(&elemsec, n_elems);
+    /* Element section (id 9): one declarative segment listing every function
+     * used as a ref.func operand (from explicit (elem declare) plus a scan of
+     * all bodies and global inits), so those references validate. */
+    uint8_t *declared = xreserve(n_all_funcs ? n_all_funcs : 1);
+    memset(declared, 0, n_all_funcs ? n_all_funcs : 1);
     for (size_t i = 0; i < n_elems; i++) {
-        const SExpr *e = elems[i];
-        const SExpr *k = e->first->next;
+        const SExpr *k = elems[i]->first->next;
         if (!atom_eq(k, "declare")) fail(c, "only (elem declare func ...) is supported");
         k = k->next;
         if (!atom_eq(k, "func")) fail(c, "only (elem declare func ...) is supported");
-        k = k->next;
-        size_t cnt = 0;
-        for (const SExpr *p = k; p; p = p->next) cnt++;
+        for (const SExpr *p = k->next; p; p = p->next)
+            declared[resolve_index(c, func_names, n_all_funcs, p, "function")] = 1;
+    }
+    for (size_t i = 0; i < n_funcs; i++)
+        for (const SExpr *k = funcs[i].body_first; k; k = k->next) collect_reffunc(c, k, declared);
+    for (size_t i = 0; i < n_globals; i++) collect_reffunc(c, globals[i].init, declared);
+    size_t n_declared = 0;
+    for (size_t i = 0; i < n_all_funcs; i++) n_declared += declared[i];
+    Buf elemsec;
+    buf_init(&elemsec);
+    buf_uleb(&elemsec, n_declared ? 1 : 0);
+    if (n_declared) {
         buf_byte(&elemsec, 0x03); /* declarative */
         buf_byte(&elemsec, 0x00); /* elemkind: funcref */
-        buf_uleb(&elemsec, cnt);
-        for (const SExpr *p = k; p; p = p->next)
-            buf_uleb(&elemsec, resolve_index(c, func_names, n_all_funcs, p, "function"));
+        buf_uleb(&elemsec, n_declared);
+        for (size_t i = 0; i < n_all_funcs; i++)
+            if (declared[i]) buf_uleb(&elemsec, (uint32_t)i);
     }
 
     /* Data count section (id 12) — required before code when array.new_data
@@ -2176,6 +2332,7 @@ static int assemble(Ctx *c, const SExpr *module, uint8_t **out_bytes, size_t *ou
     free(global_names);
     free(tag_names);
     free(data_names);
+    free(declared);
     sig_table_free(&sigs);
     return 0;
 #undef PUSH
