@@ -10,7 +10,7 @@ WAT="$BUILD_DIR/module_shebang.wat"
 WASM="$BUILD_DIR/module_shebang.wasm"
 
 "$BIN" "$DIR/main.lua" -m "$DIR/greet.lua" -o "$WAT"
-wasm-as --all-features --disable-custom-descriptors -o "$WASM" "$WAT"
+"$BUILD_DIR/wat2wasm" -o "$WASM" "$WAT"
 
 EXPECTED=$'hello, world
 hello, lua2wasm'

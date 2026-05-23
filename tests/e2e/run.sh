@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Generic end-to-end runner for one manifest row: compile a fixture, assemble
-# it with wasm-as, run it under Node, and compare stdout against the golden
-# file tests/e2e/expected/<name>.txt.
+# Generic end-to-end runner for one manifest row: compile a fixture straight to
+# a binary module (lua2wasm assembles it internally), run it under Node, and
+# compare stdout against the golden file tests/e2e/expected/<name>.txt.
 #
 #   run.sh <lua2wasm> <src-dir> <build-dir> <name> <fixture-rel-path>
 #
@@ -10,15 +10,11 @@
 set -uo pipefail
 BIN="$1"; SRC_DIR="$2"; BUILD_DIR="$3"; NAME="$4"; FIXTURE="$5"
 
-WAT="$BUILD_DIR/e2e_$NAME.wat"
 WASM="$BUILD_DIR/e2e_$NAME.wasm"
 GOLDEN="$SRC_DIR/tests/e2e/expected/$NAME.txt"
 
-if ! "$BIN" "$SRC_DIR/$FIXTURE" -o "$WAT"; then
+if ! "$BIN" "$SRC_DIR/$FIXTURE" -o "$WASM"; then
     echo "FAIL: $NAME compile failed" >&2; exit 1
-fi
-if ! wasm-as --all-features --disable-custom-descriptors -o "$WASM" "$WAT"; then
-    echo "FAIL: $NAME wasm-as failed" >&2; exit 1
 fi
 
 # $(...) strips trailing newlines on both sides, so a golden file's final

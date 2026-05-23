@@ -4,7 +4,7 @@ BIN="$1"; SRC_DIR="$2"; BUILD_DIR="$3"
 FIXTURE="$SRC_DIR/tests/fixtures/io_read.lua"
 WAT="$BUILD_DIR/io_read.wat"; WASM="$BUILD_DIR/io_read.wasm"
 "$BIN" "$FIXTURE" -o "$WAT"
-wasm-as --all-features --disable-custom-descriptors -o "$WASM" "$WAT"
+"$BUILD_DIR/wat2wasm" -o "$WASM" "$WAT"
 EXPECTED="alice
 bob
 nil"

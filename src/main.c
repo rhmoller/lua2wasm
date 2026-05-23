@@ -5,6 +5,7 @@
 #include "codegen.h"
 #include "lexer.h"
 #include "parser.h"
+#include "wat2wasm.h"
 #include "wat_builder.h"
 #include "xalloc.h"
 
@@ -213,13 +214,40 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    FILE *of = fopen(out, "wb");
-    if (!of) {
-        perror(out);
-        return 1;
+    /* Emit a binary module when the output ends in .wasm, otherwise WAT text. */
+    const char *wat = wat_cstr(&w);
+    size_t out_len = strlen(out);
+    int emit_wasm = out_len >= 5 && strcmp(out + out_len - 5, ".wasm") == 0;
+    if (emit_wasm) {
+        uint8_t *bytes = NULL;
+        size_t n = 0;
+        char asm_err[512] = {0};
+        if (wat_assemble(wat, strlen(wat), &bytes, &n, asm_err, sizeof asm_err) != 0) {
+            fprintf(stderr, "%s\n", asm_err);
+            return 1;
+        }
+        FILE *of = fopen(out, "wb");
+        if (!of) {
+            perror(out);
+            free(bytes);
+            return 1;
+        }
+        size_t wrote = fwrite(bytes, 1, n, of);
+        fclose(of);
+        free(bytes);
+        if (wrote != n) {
+            fprintf(stderr, "%s: short write\n", out);
+            return 1;
+        }
+    } else {
+        FILE *of = fopen(out, "wb");
+        if (!of) {
+            perror(out);
+            return 1;
+        }
+        fputs(wat, of);
+        fclose(of);
     }
-    fputs(wat_cstr(&w), of);
-    fclose(of);
 
     wat_free(&w);
     parse_result_free(&pr);

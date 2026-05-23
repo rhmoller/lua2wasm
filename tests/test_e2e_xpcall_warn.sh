@@ -6,7 +6,7 @@ WAT="$BUILD_DIR/xpcall_warn.wat"
 WASM="$BUILD_DIR/xpcall_warn.wasm"
 
 "$BIN" "$FIXTURE" -o "$WAT"
-wasm-as --all-features --disable-custom-descriptors -o "$WASM" "$WAT"
+"$BUILD_DIR/wat2wasm" -o "$WASM" "$WAT"
 
 EXPECTED=$'false\thandled: xpcall_warn:6: boom
 true\t7

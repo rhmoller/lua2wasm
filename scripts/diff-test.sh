@@ -75,7 +75,7 @@ run_l2w() {
     local lua="$1" base="$2"
     local wat="$BUILD_DIR/diff_$base.wat" wasm="$BUILD_DIR/diff_$base.wasm"
     if ! "$BIN" "$lua" -o "$wat" >/dev/null 2>&1; then echo "<compile-fail>"; return; fi
-    if ! wasm-as --all-features --disable-custom-descriptors -o "$wasm" "$wat" >/dev/null 2>&1; then
+    if ! "$BUILD_DIR/wat2wasm" -o "$wasm" "$wat" >/dev/null 2>&1; then
         echo "<assemble-fail>"; return
     fi
     node --experimental-wasm-exnref "$HOST" "$wasm" 2>&1

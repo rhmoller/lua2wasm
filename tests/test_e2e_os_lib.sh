@@ -8,7 +8,7 @@ WAT="$BUILD_DIR/os_lib.wat"
 WASM="$BUILD_DIR/os_lib.wasm"
 
 "$BIN" "$FIXTURE" -o "$WAT"
-wasm-as --all-features --disable-custom-descriptors -o "$WASM" "$WAT"
+"$BUILD_DIR/wat2wasm" -o "$WASM" "$WAT"
 
 EXPECTED=$'number\tinteger
 number\tfloat
@@ -38,7 +38,7 @@ WAT2="$BUILD_DIR/os_exit_42.wat"
 WASM2="$BUILD_DIR/os_exit_42.wasm"
 
 "$BIN" "$FIXTURE2" -o "$WAT2"
-wasm-as --all-features --disable-custom-descriptors -o "$WASM2" "$WAT2"
+"$BUILD_DIR/wat2wasm" -o "$WASM2" "$WAT2"
 
 set +e
 OUT2="$(node --experimental-wasm-exnref "$SRC_DIR/runtime/host.mjs" "$WASM2")"

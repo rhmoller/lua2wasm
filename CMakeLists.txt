@@ -40,10 +40,10 @@ target_include_directories(wat2wasm_core PUBLIC src)
 add_executable(wat2wasm src/wat2wasm_cli.c)
 target_link_libraries(wat2wasm PRIVATE wat2wasm_core)
 
-# lua2wasm gains direct -o .wasm output once the assembler is feature-complete
-# (see task: integrate). Until then it keeps emitting WAT and is unchanged.
+# lua2wasm emits WAT by default and a binary module directly (via the
+# wat2wasm assembler) when the output path ends in .wasm.
 add_executable(lua2wasm src/main.c)
-target_link_libraries(lua2wasm PRIVATE lua2wasm_core)
+target_link_libraries(lua2wasm PRIVATE lua2wasm_core wat2wasm_core)
 
 # --- µnit tests ---------------------------------------------------------
 enable_testing()

@@ -18,7 +18,7 @@ while IFS=$'\t' read -r name fixture; do
     [[ -z "${name:-}" || "$name" == \#* ]] && continue
     wat="$BUILD_DIR/e2e_$name.wat"; wasm="$BUILD_DIR/e2e_$name.wasm"
     "$BIN" "$SRC_DIR/$fixture" -o "$wat" >/dev/null || { echo "compile fail: $name" >&2; continue; }
-    wasm-as --all-features --disable-custom-descriptors -o "$wasm" "$wat" || { echo "asm fail: $name" >&2; continue; }
+    "$BUILD_DIR/wat2wasm" -o "$wasm" "$wat" || { echo "asm fail: $name" >&2; continue; }
     node --experimental-wasm-exnref "$HOST" "$wasm" > "$SCRIPT_DIR/expected/$name.txt" 2>/dev/null
     n=$((n+1))
 done < "$SCRIPT_DIR/manifest.tsv"
