@@ -7,9 +7,9 @@ guessing.
 ## Building & testing
 
 ```sh
-cmake -B build
-cmake --build build
-ctest --test-dir build --output-on-failure
+CC=clang cmake -S . -B build -G Ninja      # configure (Debug by default)
+cmake --build build                        # build the native compiler
+ctest --test-dir build --output-on-failure # run the full suite (must be green)
 ```
 
 You need:

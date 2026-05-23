@@ -101,7 +101,7 @@ silently broke until someone tried it (symptom:
 requires a callable`).
 
 **Now:** pure-JS helpers live in `runtime/host-bindings.mjs`
-(`makeHelpers({ getInstance, formatFloat })`); both runners import
+(`makeHelpers({ getInstance, formatFloat, cFormatG })`); both runners import
 from it and each contributes only its own print/write/read wiring
 (sync stdin vs JSPI line prompt).
 

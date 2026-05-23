@@ -314,10 +314,6 @@ and the "jumps into local scope" error case.
 
 ## Milestone 19 — `_G`, `xpcall`, `warn`, `error(msg, level)` (M) — ✅ done
 
-> `error(msg, level)` accepts and validates `level` but does not yet prepend
-> `"file:line: "` — that requires the line-info side band scheduled for
-> milestone 22.
-
 **Goal:** finish the small base-lib leftovers.
 
 - **`_G`**: reify globals as a real `$LuaTable` exposed under the global
@@ -330,8 +326,8 @@ and the "jumps into local scope" error case.
 - **`warn(msg1, …)`**: emit on stderr (Node) / `console.warn` (browser);
   honour `"@on"` / `"@off"` toggle.
 - **`error(msg, level)`**: when `msg` is a string, prepend `"file:line: "`
-  based on the `level` argument (1 = caller, 2 = caller's caller, …). Needs
-  a debug-line-info side channel — see Milestone 22.
+  based on the `level` argument (1 = caller, 2 = caller's caller, …).
+  Full position prefix landed in Milestone 22.
 
 **Touches:** codegen (global access), prelude (xpcall, warn), parser (line
 info already tracked).
@@ -431,26 +427,28 @@ other string ops.
 
 ---
 
-## Milestone 24 — `os.*` browser-friendly subset + `io.open` (M→L) — ⏳ pending
+## Milestone 24 — `os.*` browser-friendly subset + `io.open` (M→L) — ✅ done
 
 **Goal:** real I/O against a host capability layer.
 
-Browser-friendly (do first):
+Browser-friendly:
 - `os.clock()`, `os.time([t])`, `os.difftime(t2, t1)`.
 - `os.date([format [, time]])` — formatting is pure; the time itself is a
   host import.
 - `os.getenv(name)` — empty/nil in browser; populated in Node.
 
-File I/O (do second, behind a feature flag in `host.mjs`):
+File I/O:
 - `io.open(filename [, mode])` returning a file handle with the standard
-  methods (`read/write/lines/seek/setvbuf/close/flush`).
-- `io.lines(filename, …)`, `io.input`, `io.output`, `io.close`, `io.type`.
+  methods (`read/write/lines/seek/flush/close`).
+- `io.lines(filename, …)`, `io.input`, `io.output`, `io.type`.
 - `io.stderr`, `io.stdin`, `io.stdout` as preconstructed handles.
 
-Out of scope for now: `os.execute`, `os.remove`, `os.rename`, `os.setlocale`,
-`os.popen`.
+Also shipped beyond the original plan: `os.exit`, `os.execute`, `os.remove`,
+`os.rename`, `os.setlocale`, `os.tmpname`. `os.popen` remains out of scope.
 
-**Fixture:** `milestone24_io_os.lua` (Node-gated).
+**Fixtures:** `tests/fixtures/os_lib.lua`, `tests/fixtures/os_exit_42.lua`,
+`tests/fixtures/io_file.lua`, `tests/fixtures/io_read_full.lua` (custom
+drivers registered in `CMakeLists.txt`).
 
 ---
 
@@ -519,11 +517,13 @@ Quick wins:        9 → 10 → 11 → 12 → 16    ✅ done
 Polish / sharpen:  13 → 14 → 15 → 19        ✅ done
 Big language gaps: 17 → 18 → 23             ✅ done (23 partial: see m23 note)
 Heavy stdlib:      20 → 21                  ✅ done
-Host integration:  22 → 24 → 25 → 26        ✅ 22, 25 done · ⏳ 24, 26 pending
+Host integration:  22 → 24 → 25 → 26        ✅ 22, 24, 25 done · ⏳ 26 pending
 Blocked:           27 (coroutines)          ⛔ awaiting stack switching
 ```
 
-The remaining "Not yet" surface in the README:
-`<const>/<close>` (23), error-location prefix + `debug.*` (22),
-`os.*` / `io.open` (24), `require` (25), `load`/`loadfile`/`dofile` (26),
-coroutines (27).
+The remaining open surface:
+- `<close>` cleanup on early exits (`return`/`break`/`goto`/error) — natural
+  block exit works; unwind path is deferred (Milestone 23 partial, see note).
+- `load`/`loadfile`/`dofile` — `load` is a stub returning `(nil, "no load")`;
+  `loadfile`/`dofile` are not implemented (Milestone 26).
+- Coroutines — blocked on WASM stack-switching (Milestone 27).

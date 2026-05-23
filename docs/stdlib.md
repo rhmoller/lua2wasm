@@ -13,12 +13,17 @@ Reference: `lua-5.5.0/doc/manual.html` §6.
 
 Registered in `src/builtins.c`:
 
-- Globals: `print error pcall type tostring tonumber ipairs pairs next setmetatable getmetatable assert select`
-- `math`: `floor abs sqrt ceil min max sin cos tan asin acos atan exp log` + constants `pi huge`
-- `string`: `len sub format`
-- `io`: `write read`
-- `table`: `insert remove concat unpack`
-- Globals: `_VERSION`
+- Globals: `print error pcall xpcall warn type tostring tonumber ipairs pairs next setmetatable getmetatable assert select rawequal rawget rawset rawlen require collectgarbage load`
+- `math`: `floor abs sqrt ceil min max sin cos tan asin acos atan exp log deg rad fmod modf tointeger type ult random randomseed` + constants `pi huge maxinteger mininteger`
+- `string`: `len sub format upper lower reverse rep byte char find match gmatch gsub pack unpack packsize`
+- `utf8`: `char len codepoint offset codes` + constant `charpattern`
+- `io`: `write read open lines type output input` + file-handle methods `read write close flush seek lines`
+- `table`: `insert remove concat unpack pack move create sort`
+- `debug`: `traceback getmetatable setmetatable gethook`
+- `os`: `time clock date getenv exit execute remove rename tmpname difftime setlocale`
+- Globals: `_VERSION _G`
+- `package`: stub with `loaded preload path cpath config`
+- `coroutine`: stub empty table (no functions)
 
 Everything below that is not in that list is ❌ unless flagged otherwise.
 
@@ -31,11 +36,11 @@ Returns all its arguments if `v` is truthy. If `v` is `nil` or `false`, raises
 an error with `message` (default `"assertion failed!"`). `message` may be any
 value; if it's not a string it's passed through unchanged to `error`.
 
-### `collectgarbage([opt [, arg]])` ❌
-GC control. Options: `"collect" "stop" "restart" "count" "step" "isrunning"
-"incremental" "generational" "param"`. **Recommended:** implement as a no-op
-returning sensible defaults (`"count"` → `0`, `"isrunning"` → `true`) so
-programs that defensively call it don't crash. True semantics are 🚫 — host GC.
+### `collectgarbage([opt [, arg]])` 🟡
+GC control. **Implemented as a smart stub:** `"count"` → `0.0`, `"isrunning"` →
+`true`, `"stop"/"step"` → `0`, `"generational"/"incremental"` → previous mode
+string (tracks last-set mode so round-trip assertions pass). True semantics are
+🚫 — host GC.
 
 ### `dofile([filename])` ❌
 Load and run a file as a chunk; returns its returns. Without `filename`, reads
@@ -43,13 +48,12 @@ stdin. Needs `load` + host file access.
 
 ### `error(message [, level])` 🟡
 Raises an error. `level` controls where the error's position is reported.
-**Implemented:** raise with payload. **Missing:** `level` argument, file:line
-prefixing of string messages.
+**Implemented:** raise with payload; `level` argument is accepted but currently
+ignored (file:line prefixing is not yet applied based on level).
 
-### `_G` ❌
-The globals table. Reading/writing `_G.x` should be equivalent to reading/
-writing global `x`. Requires reifying the global environment as a table —
-currently globals live in WASM globals slots.
+### `_G` ✅
+The globals table. Reading/writing `_G.x` is equivalent to reading/writing
+global `x`. Builtins and library tables appear as entries. `pairs(_G)` works.
 
 ### `getmetatable(object)` ✅
 Returns the metatable of `object` or `nil`. If the metatable has a
@@ -60,12 +64,10 @@ is ❌**.
 Returns iterator, state, control such that `for i, v in ipairs(t) do` yields
 `1, t[1]; 2, t[2]; …` until the first `nil`.
 
-### `load(chunk [, chunkname [, mode [, env]]])` ❌
-Compiles and returns a function. `chunk` is a string or a function returning
-string chunks (until `nil` or empty). `mode` ∈ `"b" "t" "bt"` selects binary /
-text. Returns `nil, errmsg` on syntax error. **Implementing this requires the
-compiler at runtime** (the Emscripten playground build already proves this is
-feasible).
+### `load(chunk [, chunkname [, mode [, env]]])` 🟡
+**Implemented as a stub:** always returns `(nil, "no load")`. Callers that do
+`local f, err = load(s); if not f then …` see the error string and take their
+failure branch. True runtime compilation is 🚫 in an AOT compiler.
 
 ### `loadfile([filename [, mode [, env]]])` ❌
 Like `load` but reads from a file. Needs host file access.
@@ -85,25 +87,26 @@ Calls `f(arg1, …)` in protected mode. Returns `true, …` on success or
 
 ### `print(…)` ✅
 Writes each argument to stdout, separated by tabs, with a trailing newline.
-Uses `tostring` on each. **Does not honour `__tostring`** because `tostring`
-itself doesn't yet.
+Uses `tostring` on each, honouring `__tostring`.
 
-### `rawequal(v1, v2)` ❌
-Raw equality, bypassing `__eq`. Cheap: just the existing eq path with the
-metamethod check skipped.
+### `rawequal(v1, v2)` ✅
+Raw equality, bypassing `__eq`.
 
-### `rawget(table, index)` ❌
-Bypasses `__index`. Cheap.
+### `rawget(table, index)` ✅
+Bypasses `__index`.
 
-### `rawlen(v)` ❌
+### `rawlen(v)` ✅
 Bypasses `__len`. Defined for strings and tables only.
 
-### `rawset(table, index, value)` ❌
-Bypasses `__newindex`. Returns `table`. Index must not be `nil` or `NaN`.
+### `rawset(table, index, value)` ✅
+Bypasses `__newindex`. Returns `table`.
 
-### `require(modname)` ❌
-Module loader. Searches `package.searchers`, caches in `package.loaded`. Whole
-machinery is ❌.
+### `require(modname)` ✅
+Static module loader. Walks `package.preload` then `package.loaded`; the
+standard stdlib libraries are pre-registered in `package.loaded` at startup so
+`require "string"`, `require "math"`, etc. return the same table as `string`,
+`math`, etc. Multi-file compilation (`-m`) bakes extra modules in via
+`package.preload`. Dynamic filesystem search is ❌.
 
 ### `select(n, …)` ✅
 - `select('#', …)` → varargs count.
@@ -114,13 +117,17 @@ machinery is ❌.
 Sets/clears the metatable of a table. `mt` must be `nil` or a table; otherwise
 error. **Does not check `__metatable` protection on the existing metatable.**
 
-### `tonumber(e [, base])` 🟡
+### `tonumber(e [, base])` ✅
 - Without `base`: converts strings/numbers to a number; returns `nil` on failure.
-- With `base` (2–36): parses `e` as an integer in that base; ❌.
+  Accepts decimal ints, hex `0x...` ints, floats with optional exponents,
+  leading/trailing whitespace.
+- With `base` (2–36): parses `e` as an integer in that base (case-insensitive);
+  returns `nil` for out-of-range digits; raises an error if base itself is
+  outside [2, 36].
 
-### `tostring(v)` 🟡
-Converts any value to a string. **Missing:** `__tostring` and `__name`
-metamethod support; floats currently round-trip via `%g` (matches reference).
+### `tostring(v)` ✅
+Converts any value to a string. Honours `__tostring` and `__name` metamethods.
+Floats round-trip via `%g` (matches reference).
 
 ### `type(v)` ✅
 Returns one of `"nil" "number" "string" "boolean" "table" "function" "thread" "userdata"`.
@@ -128,19 +135,21 @@ Returns one of `"nil" "number" "string" "boolean" "table" "function" "thread" "u
 ### `_VERSION` ✅
 Global string `"Lua 5.5"`.
 
-### `warn(msg1, …)` ❌
-Emits a warning. Special control messages `"@on"`, `"@off"` toggle output.
-Concatenates all string args.
+### `warn(msg1, …)` ✅
+Emits a warning to stderr. Special control messages `"@on"`, `"@off"` toggle
+output (accepted silently). Concatenates all string args.
 
-### `xpcall(f, msgh [, arg1, …])` ❌
-Like `pcall` but calls `msgh(err)` to produce the returned error value, with
-the original stack still live (so tracebacks can be captured).
+### `xpcall(f, msgh [, arg1, …])` ✅
+Like `pcall` but calls `msgh(err)` to produce the returned error value. The
+handler itself is protected: if it throws, its error replaces the original.
 
 ---
 
 ## 6.2 Coroutine Manipulation (`coroutine`)
 
-❌ Entire library. Blocked on WASM stack-switching.
+❌ Entire library. `coroutine` is an empty stub table (enough for
+`type(coroutine) == "table"` and `require "coroutine"` to work). Blocked on
+WASM stack-switching.
 
 | API | Description |
 |---|---|
@@ -157,101 +166,102 @@ the original stack still live (so tracebacks can be captured).
 
 ## 6.3 Modules (`require`, `package`)
 
-❌ Entire system.
+`require` is ✅ (static, see §6.1). `package` is a 🟡 stub table.
 
-| API | Description |
-|---|---|
-| `require(modname)` | Load module, cache result. |
-| `package.config` | Path-config string. |
-| `package.cpath` | C-loader search path. |
-| `package.loaded` | Cache of loaded modules. |
-| `package.loadlib(libname, funcname)` | Load a C library. 🚫 not applicable. |
-| `package.path` | Lua-loader search path. |
-| `package.preload` | Loader functions by module name. |
-| `package.searchers` | Ordered list of searchers tried by `require`. |
-| `package.searchpath(name, path [, sep [, rep]])` | Path search helper. |
-
-**Recommended scope cut**: implement a *static* `require` that resolves at
-compile time against a fixed set of module names baked into the wasm.
+| API | Status | Description |
+|---|---|---|
+| `require(modname)` | ✅ | Load module, cache result. Static; no fs search. |
+| `package.config` | ✅ | Standard path-config string (`"/\n;\n?\n!\n-\n"`). |
+| `package.cpath` | 🟡 | Present as empty string; no C loader. |
+| `package.loaded` | ✅ | Cache of loaded modules (stdlib pre-populated). |
+| `package.loadlib(libname, funcname)` | 🚫 | Load a C library. Not applicable. |
+| `package.path` | 🟡 | Present as empty string; no filesystem searcher. |
+| `package.preload` | ✅ | Loader functions by module name; `-m` populates it. |
+| `package.searchers` | ❌ | Ordered list of searchers tried by `require`. |
+| `package.searchpath(name, path [, sep [, rep]])` | ❌ | Path search helper. |
 
 ---
 
 ## 6.4 String Manipulation (`string`)
 
-### `string.byte(s [, i [, j]])` ❌
+### `string.byte(s [, i [, j]])` ✅
 Returns the byte values of `s[i] … s[j]` (defaults: `i = j = 1`). Negative
 indices count from the end.
 
-### `string.char(…)` ❌
+### `string.char(…)` ✅
 Returns a string built from the given byte values (each in `0..255`).
 
 ### `string.dump(function [, strip])` 🚫
 Dumps a function as bytecode. Not meaningful without a bytecode VM.
 
-### `string.find(s, pattern [, init [, plain]])` ❌
+### `string.find(s, pattern [, init [, plain]])` ✅
 Returns the start/end indices of the first match (and captures), or `nil`.
-`plain = true` disables pattern syntax. **Needs Lua patterns engine.**
+`plain = true` disables pattern syntax. Full Lua patterns engine implemented.
 
-### `string.format(fmt, …)` 🟡
-C-`printf`-like. **Implemented specifiers:** `%s %d %x %g %f %e %%`, optional
-`.N` precision. **Missing:** width, flags (`- + # 0 ' '`), `%i %o %u %X %c %q
-%a %A`.
+### `string.format(fmt, …)` ✅
+C-`printf`-like. **Implemented specifiers:** `%s %d %i %o %u %x %X %c %q %e
+%E %f %F %g %G %a %A %%`. Width, precision, and flags (`- + # 0 ' '`) are
+all supported (delegated to the JS host's `fmt_spec` helper).
 
-### `string.gmatch(s, pattern [, init])` ❌
-Iterator returning successive matches. Needs patterns.
+### `string.gmatch(s, pattern [, init])` ✅
+Iterator returning successive matches. Full patterns engine implemented.
 
-### `string.gsub(s, pattern, repl [, n])` ❌
+### `string.gsub(s, pattern, repl [, n])` ✅
 Global substitute; `repl` may be string, table, or function. Returns
-`(new_string, num_replacements)`. Needs patterns.
+`(new_string, num_replacements)`.
 
 ### `string.len(s)` ✅
 Byte length (same as `#s`). Defined only for strings.
 
-### `string.lower(s)` ❌
-ASCII lowercase (locale-aware in reference Lua — we'd ship ASCII-only).
+### `string.lower(s)` ✅
+ASCII lowercase.
 
-### `string.match(s, pattern [, init])` ❌
+### `string.match(s, pattern [, init])` ✅
 Returns captures of first match, or whole match if no captures, or `nil`.
 
-### `string.pack(fmt, v1, v2, …)` ❌
-Pack values to a binary string per a format spec. Format chars: `<>=!  b B h H i I l L j J f d n s z x X` plus integer-sized variants like `i4`. ~500 lines in reference.
+### `string.pack(fmt, v1, v2, …)` ✅
+Pack values to a binary string per a format spec. Format chars: `< > = ! b B
+h H i I l L j J f d n s z x X` plus sized variants like `i4`.
 
-### `string.packsize(fmt)` ❌
+### `string.packsize(fmt)` ✅
 Size in bytes of a `pack` format (no variable-sized parts allowed).
 
-### `string.rep(s, n [, sep])` ❌
+### `string.rep(s, n [, sep])` ✅
 `n` copies of `s`, optionally joined by `sep`.
 
-### `string.reverse(s)` ❌
+### `string.reverse(s)` ✅
 Byte-reversed string.
 
 ### `string.sub(s, i [, j])` ✅
 Substring `s[i..j]`, 1-based, inclusive. Negative indices count from the end.
 Defaults: `j = -1`.
 
-### `string.unpack(fmt, s [, pos])` ❌
+### `string.unpack(fmt, s [, pos])` ✅
 Inverse of `pack`. Returns unpacked values plus the position after the read.
 
-### `string.upper(s)` ❌
+### `string.upper(s)` ✅
 ASCII uppercase.
 
-### Lua patterns (sub-spec for find/match/gmatch/gsub)
-Character classes: `. %a %A %c %C %d %D %g %G %l %L %p %P %s %S %u %U %w %W %x %X` + `[set]` + literal char. Anchors `^` `$`. Repetition `* + - ?`. Captures `( … )` (with `()` for position capture). Escapes `%n` (back-ref), `%bxy` (balanced match), `%f[set]` (frontier). The pattern engine in `lstrlib.c` is ~400 lines; a faithful clean-room version is the single largest stdlib item.
+### Lua patterns
+✅ Full engine implemented. Character classes: `. %a %A %c %C %d %D %g %G %l
+%L %p %P %s %S %u %U %w %W %x %X` + `[set]` + literal char. Anchors `^` `$`.
+Repetition `* + - ?`. Captures `( … )` (with `()` for position capture).
+Escapes `%n` (back-ref), `%bxy` (balanced match), `%f[set]` (frontier).
 
 ---
 
 ## 6.5 UTF-8 Support (`utf8`)
 
-❌ Entire library. ~150 lines in reference.
+✅ Entire library implemented.
 
-| API | Description |
-|---|---|
-| `utf8.char(…)` | Codepoints → UTF-8 string. |
-| `utf8.charpattern` | Pattern `"[\0-\x7F\xC2-\xFD][\x80-\xBF]*"` matching one codepoint. |
-| `utf8.codepoint(s [, i [, j [, lax]]])` | Decode codepoints in range; `lax` skips validation. |
-| `utf8.codes(s [, lax])` | Iterator yielding `(pos, codepoint)`. |
-| `utf8.len(s [, i [, j [, lax]]])` | Number of codepoints, or `nil, errpos` on invalid byte. |
-| `utf8.offset(s, n [, i])` | Byte offset of the n-th codepoint. |
+| API | Status | Description |
+|---|---|---|
+| `utf8.char(…)` | ✅ | Codepoints → UTF-8 string. |
+| `utf8.charpattern` | ✅ | Pattern `"[\0-\x7F\xC2-\xFD][\x80-\xBF]*"` matching one codepoint. |
+| `utf8.codepoint(s [, i [, j [, lax]]])` | ✅ | Decode codepoints in range; `lax` skips validation. |
+| `utf8.codes(s [, lax])` | ✅ | Iterator yielding `(pos, codepoint)`. |
+| `utf8.len(s [, i [, j [, lax]]])` | ✅ | Number of codepoints, or `nil, errpos` on invalid byte. |
+| `utf8.offset(s, n [, i])` | ✅ | Byte offset of the n-th codepoint. |
 
 ---
 
@@ -260,28 +270,27 @@ Character classes: `. %a %A %c %C %d %D %g %G %l %L %p %P %s %S %u %U %w %W %x %
 ### `table.concat(list [, sep [, i [, j]]])` ✅
 Joins `list[i..j]` with `sep` (default `""`, `i=1`, `j=#list`).
 
-### `table.create(nseq [, nrec])` ❌
-New in 5.5. Allocates a table with pre-sized array and hash parts. We can
-honour by pre-sizing internal arrays.
+### `table.create(nseq [, nrec])` ✅
+New in 5.5. Allocates a table with pre-sized array and hash parts.
 
 ### `table.insert(list, [pos,] value)` ✅
 Inserts `value` at position `pos` (default `#list + 1`); shifts subsequent
 elements up by one.
 
-### `table.move(a1, f, e, t [, a2])` ❌
+### `table.move(a1, f, e, t [, a2])` ✅
 Copies `a1[f..e]` to `(a2 or a1)[t..]`. Handles overlapping ranges correctly.
 Returns the destination table.
 
-### `table.pack(…)` ❌
+### `table.pack(…)` ✅
 Returns `{n = select('#', …), [1] = arg1, …}`.
 
 ### `table.remove(list [, pos])` ✅
 Removes and returns `list[pos]` (default `#list`); shifts subsequent elements
 down by one.
 
-### `table.sort(list [, comp])` ❌
+### `table.sort(list [, comp])` ✅
 In-place sort. `comp(a, b)` returns true when `a` should precede `b`; default
-is `<`. Reference uses introspection-aware quicksort.
+is `<`.
 
 ### `table.unpack(list [, i [, j]])` ✅
 Returns `list[i], list[i+1], …, list[j]`.
@@ -293,29 +302,20 @@ Returns `list[i], list[i+1], …, list[j]`.
 ### Implemented ✅
 `math.abs(x)` · `math.ceil(x)` · `math.floor(x)` · `math.sqrt(x)` ·
 `math.sin(x)` · `math.cos(x)` · `math.tan(x)` · `math.asin(x)` ·
-`math.acos(x)` · `math.atan(y [, x])` (currently 1-arg only — verify) ·
-`math.exp(x)` · `math.log(x [, base])` (currently 1-arg only — verify) ·
-`math.min(…)` · `math.max(…)` · `math.pi` · `math.huge`.
+`math.acos(x)` · `math.atan(y [, x])` (1-arg and 2-arg atan2) ·
+`math.exp(x)` · `math.log(x [, base])` (1-arg natural log and 2-arg log-base) ·
+`math.min(…)` · `math.max(…)` ·
+`math.deg(x)` · `math.rad(x)` · `math.fmod(x, y)` · `math.modf(x)` ·
+`math.tointeger(x)` · `math.type(x)` · `math.ult(m, n)` ·
+`math.random([m [, n]])` · `math.randomseed([x [, y]])` ·
+`math.pi` · `math.huge` · `math.maxinteger` · `math.mininteger`.
 
 ### Missing ❌
 
 | API | Description |
 |---|---|
-| `math.deg(x)` | Radians → degrees. |
-| `math.rad(x)` | Degrees → radians. |
-| `math.fmod(x, y)` | `x - trunc(x/y)*y` (truncating, not floor). |
-| `math.modf(x)` | Returns `(integral_part, fractional_part)` as floats. |
 | `math.frexp(x)` | Returns `(m, e)` with `x = m·2^e`, `0.5 ≤ |m| < 1`. |
 | `math.ldexp(m, e)` | Returns `m·2^e`. |
-| `math.maxinteger` | `9223372036854775807`. |
-| `math.mininteger` | `-9223372036854775808`. |
-| `math.random([m [, n]])` | No args: `[0,1)`. `m`: `[1,m]`. `m,n`: `[m,n]`. Reference uses xoshiro256**. |
-| `math.randomseed([x [, y]])` | Seeds the PRNG; returns the seed pair used. |
-| `math.tointeger(x)` | Convert to integer if exact; else `nil`. |
-| `math.type(x)` | `"integer"` / `"float"` / `nil`. |
-| `math.ult(m, n)` | Unsigned integer less-than. |
-| `math.atan(y, x)` second arg | Two-arg form (atan2). |
-| `math.log(x, base)` second arg | log base `base`. |
 
 ---
 
@@ -324,107 +324,102 @@ Returns `list[i], list[i+1], …, list[j]`.
 ### `io.write(…)` ✅
 Writes each argument (string or number) to default output.
 
-### `io.read(…)` 🟡
+### `io.read(…)` ✅
 Reads from default input. Formats: `"l"` (line, no `\n`), `"L"` (line, with
-`\n`), `"a"` (all), `"n"` (number), or integer `n` (n bytes). **Implemented:**
-line-only. **Missing:** other formats + multiple formats per call.
+`\n`), `"a"` (all), `"n"` (number), or integer `n` (n bytes). No-arg form
+defaults to `"l"`. Returns `nil` at EOF for line/number/byte modes; `""` at
+EOF for `"a"`.
+
+### `io.open(filename [, mode])` ✅
+Opens a file; returns a file handle or `(nil, errmsg)`. Modes: `r w a r+ w+
+a+`, optionally `b`.
+
+### `io.lines([filename, …])` ✅
+Iterator over lines of a file (or default input when called with no args).
+
+### `io.type(obj)` ✅
+Returns `"file"` / `"closed file"` / `nil`.
+
+### `io.output([file])` / `io.input([file])` ✅
+Get/set default output/input file.
+
+### `io.stdin` / `io.stdout` / `io.stderr` ✅
+Standard file handles as table objects with `:read`/`:write`/`:close`/`:flush`
+methods.
 
 ### Missing ❌
 
 | API | Description |
 |---|---|
-| `io.open(filename [, mode])` | Open file; returns file handle or `nil, errmsg`. Modes: `r w a r+ w+ a+`, optionally `b`. |
-| `io.close([file])` | Close file (default: default output). |
-| `io.flush()` | Flush default output. |
-| `io.input([file])` / `io.output([file])` | Get/set default input/output. |
-| `io.lines([filename, …])` | Iterator over lines. |
-| `io.popen(prog [, mode])` | Pipe to/from subprocess. 🚫 unlikely in browser. |
-| `io.stderr` `io.stdin` `io.stdout` | Standard file handles. |
+| `io.close([file])` | Close file (default: default output). Not a top-level `io.*` entry; use `f:close()`. |
+| `io.flush()` | Flush default output. Not a top-level `io.*` entry; use `io.stdout:flush()`. |
+| `io.popen(prog [, mode])` | Pipe to/from subprocess. 🚫 in browser. |
 | `io.tmpfile()` | Anonymous temp file. |
-| `io.type(obj)` | `"file"` / `"closed file"` / `nil`. |
 
-### File methods ❌
-`f:close() f:flush() f:lines(…) f:read(…) f:seek([whence [, offset]])
-f:setvbuf(mode [, size]) f:write(…)`.
+### File methods ✅
+`f:close()` · `f:flush()` · `f:lines(…)` · `f:read(…)` · `f:seek([whence [, offset]])` · `f:write(…)`.
+`f:setvbuf(mode [, size])` is ❌.
 
 ---
 
 ## 6.9 Operating System Facilities (`os`)
 
-❌ Entire library. Most entries need a host capability layer.
+Most of the library is now implemented via host imports.
 
-| API | Description |
-|---|---|
-| `os.clock()` | CPU time used by the program (seconds, float). |
-| `os.date([format [, time]])` | Format a time value. `*t` / `!*t` return tables. |
-| `os.difftime(t2, t1)` | Seconds between two times. |
-| `os.execute([command])` | Shell out. 🚫 in browser. |
-| `os.exit([code [, close]])` | Terminate. |
-| `os.getenv(varname)` | Environment lookup. |
-| `os.remove(filename)` | Delete a file. |
-| `os.rename(oldname, newname)` | Move a file. |
-| `os.setlocale(locale [, category])` | Set locale. |
-| `os.time([t])` | Current time, or build a time from a table. |
-| `os.tmpname()` | Generate a unique temp filename. |
-
-**Browser-friendly subset to implement first:** `os.clock`, `os.time`,
-`os.difftime`, `os.date` (date formatting is pure-ish), `os.getenv` (host
-provides). Files and exec are harder.
+| API | Status | Description |
+|---|---|---|
+| `os.clock()` | ✅ | CPU time used by the program (seconds, float). |
+| `os.date([format [, time]])` | ✅ | Format a time value. `*t` / `!*t` return tables with `year month day hour min sec wday yday isdst`. |
+| `os.difftime(t2, t1)` | ✅ | Seconds between two times (as float). |
+| `os.execute([command])` | 🟡 | No command → `true` (shell "available"). With command → `(nil, "exit", 1)`. Cannot run subprocesses in wasm. |
+| `os.exit([code [, close]])` | ✅ | Terminate with given exit code. |
+| `os.getenv(varname)` | ✅ | Environment lookup via host import. |
+| `os.remove(filename)` | ✅ | Delete a file; returns `true` or `(nil, errmsg)`. |
+| `os.rename(oldname, newname)` | ✅ | Move a file; returns `true` or `(nil, errmsg)`. |
+| `os.setlocale(locale [, category])` | 🟡 | Only the `"C"` locale is supported; other locales return `nil`. |
+| `os.time([t])` | ✅ | Current wall-clock time (integer seconds), or build a time from a `{year,month,day,…}` table. |
+| `os.tmpname()` | ✅ | Generate a unique temp filename via host. |
 
 ---
 
 ## 6.10 The Debug Library (`debug`)
 
-❌ Entire library — and largely out of scope for an AOT compiler without a
-bytecode VM.
+Minimal subset implemented. The full library remains largely out of scope for
+an AOT compiler without a bytecode VM.
 
-| API | Description |
-|---|---|
-| `debug.debug()` | REPL prompt. |
-| `debug.gethook([thread])` | Current hook. |
-| `debug.getinfo([thread,] f [, what])` | Function/frame metadata. |
-| `debug.getlocal([thread,] f, local)` | Read local by index. |
-| `debug.getmetatable(value)` | Like `getmetatable` but ignores `__metatable`. ✅ feasible. |
-| `debug.getregistry()` | The Lua registry. 🚫 no C-API. |
-| `debug.getupvalue(f, up)` | Read upvalue. |
-| `debug.getuservalue(u, n)` | Userdata user values. 🚫. |
-| `debug.sethook([thread,] hook, mask [, count])` | Install a hook. |
-| `debug.setlocal([thread,] f, local, value)` | Write local. |
-| `debug.setmetatable(value, mt)` | Set metatable on any value. |
-| `debug.setupvalue(f, up, value)` | Write upvalue. |
-| `debug.setuservalue(u, value, n)` | 🚫. |
-| `debug.traceback([thread,] [msg [, level]])` | Stack traceback. |
-| `debug.upvalueid(f, n)` | Identity of an upvalue. |
-| `debug.upvaluejoin(f1, n1, f2, n2)` | Make two closures share an upvalue. |
-
-**Realistic subset:** `debug.traceback` (best-effort, using WASM exception
-metadata), `debug.getmetatable`, `debug.setmetatable`.
+| API | Status | Description |
+|---|---|---|
+| `debug.traceback([thread,] [msg [, level]])` | ✅ | Best-effort stack traceback using WASM exception metadata. |
+| `debug.getmetatable(value)` | ✅ | Like `getmetatable` but ignores `__metatable`. |
+| `debug.setmetatable(value, mt)` | ✅ | Set metatable on any value. |
+| `debug.gethook([thread])` | 🟡 | Stub: always returns `nil, "", 0` (no hooks installed). |
+| `debug.debug()` | ❌ | REPL prompt. |
+| `debug.getinfo([thread,] f [, what])` | ❌ | Function/frame metadata. |
+| `debug.getlocal([thread,] f, local)` | ❌ | Read local by index. |
+| `debug.getregistry()` | 🚫 | The Lua registry. No C-API. |
+| `debug.getupvalue(f, up)` | ❌ | Read upvalue. |
+| `debug.getuservalue(u, n)` | 🚫 | Userdata user values. |
+| `debug.sethook([thread,] hook, mask [, count])` | ❌ | Install a hook. |
+| `debug.setlocal([thread,] f, local, value)` | ❌ | Write local. |
+| `debug.setupvalue(f, up, value)` | ❌ | Write upvalue. |
+| `debug.setuservalue(u, value, n)` | 🚫 | |
+| `debug.upvalueid(f, n)` | ❌ | Identity of an upvalue. |
+| `debug.upvaluejoin(f1, n1, f2, n2)` | ❌ | Make two closures share an upvalue. |
 
 ---
 
-## Implementation order — recommended
+## Implementation order — recommended (remaining gaps)
 
-Smallest leverage → largest:
-
-1. **`raw{equal,get,set,len}`** (4 trivial primitives).
-2. **`table.{pack, unpack, move, create}`** — table-only, no patterns.
-3. **`string.{upper, lower, rep, reverse, byte, char}`** — pure-bytes.
-4. **`math` fillers**: `deg, rad, fmod, modf, tointeger, type, maxinteger, mininteger, ult`; second arg of `atan`/`log`.
-5. **`math.random` / `math.randomseed`** — xoshiro256** like reference.
-6. **`utf8.*`** — six entries, ~150 lines total.
-7. **Finish `string.format`** — width, flags, missing specifiers, `%q`.
-8. **Finish `io.read`** — all formats.
-9. **`table.sort`** — quicksort with comparator callback through `call_ref`.
-10. **`tostring`/`print` honour `__tostring`**; `tonumber` accepts `base`.
-11. **`xpcall`, `error(msg, level)`, `warn`, `_G`, `rawget`/`rawset` already done in step 1.**
-12. **Lua patterns** — `string.{find, match, gmatch, gsub}`. Biggest single item; needs its own design doc and test suite.
-13. **`string.pack` / `string.unpack` / `string.packsize`** — second biggest.
-14. **`io.open` + file methods** behind a host capability (Node `fs`, browser File API / OPFS).
-15. **`os.{clock, time, difftime, date, getenv}`** behind clock + env imports. `os.exit` last.
-16. **`load`** — needs the compiler at runtime. Existing Emscripten build proves it.
-17. **`require` / `package.*`** — static module table baked at compile time.
-18. **`debug.{traceback, getmetatable, setmetatable}`** — minimal subset.
-19. **`coroutine.*`** — wait for stack-switching proposal.
-
-Items 1–8 are roughly an afternoon each and close the majority of "I tried to
-run a normal-looking Lua program and it broke" gaps.
+1. **`io.close` / `io.flush` top-level entries** — trivial wrappers over the default-output handle.
+2. **`io.tmpfile`** — anonymous temp file via host.
+3. **`math.frexp` / `math.ldexp`** — two missing math functions; can delegate to host JS.
+4. **`error(msg, level)` level handling** — apply file:line prefix based on level.
+5. **`__metatable` protection in `setmetatable` / `getmetatable`** — one field check.
+6. **`__pairs` metamethod** — one check in `pairs`.
+7. **`os.execute` with command** — truly unsandboxable in browser; document as 🚫.
+8. **`package.searchers` / `package.searchpath`** — needed for full Lua module ecosystem.
+9. **`debug.*` remainder** — mostly 🚫 without a bytecode VM.
+10. **`coroutine.*`** — wait for stack-switching proposal.
+11. **`load`** — needs the compiler at runtime. Existing Emscripten build proves it is feasible.
+12. **`dofile` / `loadfile`** — need host file access + `load`.
+13. **`string.dump`** — 🚫 without bytecode VM.

@@ -32,16 +32,25 @@ Initialized in `$stdlib_init` to a fresh `$tab_new` populated with:
 
 | Key            | Value                                                  |
 |----------------|--------------------------------------------------------|
-| `"_VERSION"`   | `$LuaString "Lua 5.5"`                                 |
+| `"_VERSION"`   | `$LuaString "Lua 5.5"` (tree-shaken: only if referenced) |
 | `"math"`       | the math library table                                 |
 | `"string"`     | the string library table                               |
 | `"io"`         | the io library table                                   |
 | `"table"`      | the table library table                                |
 | `"utf8"`       | the utf8 library table                                 |
+| `"debug"`      | the debug library table                                |
+| `"os"`         | stub table (no functions)                              |
+| `"package"`    | `{ loaded={}, preload={}, path="", cpath="", config=… }` |
+| `"coroutine"`  | stub table (no functions)                              |
 | `"print"`      | `$g_builtin_print` (the closure)                       |
 | `"error"`      | `$g_builtin_error`                                     |
 | ... etc ...    | every other top-level builtin                          |
 | `"_G"`         | the table itself (self-reference)                      |
+| `"_ENV"`       | alias for `$g_globals` (same value as `_G`)            |
+
+All library entries except top-level builtins are tree-shaken: a library
+table is only built and installed if its global name was actually
+referenced in user code.
 
 The `_G` self-reference works because `$tab_set` accepts a `$LuaTable` as
 a value (it's `anyref`).
@@ -107,28 +116,31 @@ real-Lua's perf model, not regressing.
 Real programs cache builtins to locals when they matter
 (`local print = print`); that pattern remains optimal here.
 
-## Migration plan (one PR)
+## Migration plan (shipped)
 
-1. Add the `$g_globals` declaration in the prelude.
-2. Rewrite `$stdlib_init` to build the unified table (instead of
+1. Added the `$g_globals` declaration in the prelude.
+2. Rewrote `$stdlib_init` to build the unified table (instead of
    per-library `$g_user_<idx>`).
-3. Pre-declare `_G` in the parser; in `$stdlib_init` map it to the
-   table itself.
-4. Switch `emit_var_read` and `emit_target_open` for VAR_BUILTIN /
+3. Pre-declared `_G` in the parser; `$stdlib_init` maps it to the
+   table itself. `_ENV` is also installed as an alias (not pre-declared
+   in the parser, but auto-registered when referenced in user code).
+4. Switched `emit_var_read` and `emit_target_open` for VAR_BUILTIN /
    VAR_GLOBAL to emit `$tab_get` / `$tab_set` on `$g_globals`.
-5. Drop the per-user-global wasm-global emission from codegen.
-6. Run the suite. Anything that breaks tells us what we missed.
+5. Dropped the per-user-global wasm-global emission from codegen.
+6. Library entries are tree-shaken via a `gref[]` liveness pass.
 
 ## Test coverage
 
-A new fixture exercising:
+Fixture `tests/fixtures/globals_G.lua` (golden `tests/e2e/expected/globals_G.txt`) covers:
 
 - `_G.x` read / write equivalence with bare `x`.
 - `_G._G == _G`.
-- `_G.print = nil; pcall(print)` errors.
-- `for k, v in pairs(_G) do` iterates every entry.
-- Library access through `_G`: `_G.math.floor(1.5) == 1`.
+- `_G.print = nil` / reassign through `_G` — rebinding is honoured.
+- `for k in pairs(_G) do` iterates every entry; count > 10.
+- Library access through `_G`: `_G.math.floor(1.7) == 1`, `_G.string.upper("ok") == "OK"`.
 - `_G` itself is a table: `type(_G) == "table"`, `getmetatable(_G) == nil`.
+- `_G._VERSION == "Lua 5.5"`.
+- Nil-assignment removes the entry: `_G.foo = nil; print(foo) --> nil`.
 
 ## Out of scope
 
@@ -136,5 +148,13 @@ A new fixture exercising:
   in chunk-level scope. Implementing the `_ENV` lexical (so user can
   shadow it locally to sandbox a chunk) is meaningfully more work —
   defer to a future milestone if a real use case comes up.
+
+  **What shipped:** `"_ENV"` is installed in `$g_globals` as a plain alias
+  pointing at `$g_globals` itself (same as `_G`). It is not pre-declared
+  in the parser's pre-seeded globals list, but the parser auto-declares any
+  name it encounters, so bare `_ENV` references in user code resolve
+  through `$g_globals` at runtime. Shadowing `_ENV` locally to sandbox a
+  chunk is not implemented.
+
 - Strict mode (`global <const> *` opt-in). Reuses the same plumbing
   once `_G` lands.

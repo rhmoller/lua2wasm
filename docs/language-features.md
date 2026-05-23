@@ -20,7 +20,7 @@ mirror the manual so it's easy to cross-check.
 |---|---|---|
 | Line comment `-- …` | ✅ | |
 | Long comment `--[[ … ]]` (level 0) | ✅ | |
-| Long comment `--[=[ … ]=]`, `--[==[ … ]==]` (level N) | ❌ | lexer only knows level 0 |
+| Long comment `--[=[ … ]=]`, `--[==[ … ]==]` (level N) | ✅ | any level N; `try_open_long_bracket` counts `=`s generically |
 
 ### Numeric literals
 | Form | Status | Notes |
@@ -28,8 +28,8 @@ mirror the manual so it's easy to cross-check.
 | Decimal int `123` | ✅ | |
 | Decimal float `3.14` | ✅ | |
 | Exponent `1e10`, `2.5E-3` | ✅ | |
-| Hex int `0xFF`, `0Xff` | ❌ | lexer treats `0` as int, then `xFF` as identifier |
-| Hex float `0x1.8p3`, `0x1p-4` | ❌ | |
+| Hex int `0xFF`, `0Xff` | ✅ | wraps mod 2^64 (long literals denote low 64 bits) |
+| Hex float `0x1.8p3`, `0x1p-4` | ✅ | parsed via C99 `strtod`; presence of `.` or `p` forces float |
 | Numeric underscores (not Lua std) | 🚫 | not in Lua 5.5 |
 
 ### String literals
@@ -39,11 +39,11 @@ mirror the manual so it's easy to cross-check.
 | Escapes `\n \t \\ \" \' \0 \a \b \f \r \v` | ✅ | |
 | `\xHH` (2 hex digits) | ✅ | |
 | `\u{H…}` (UTF-8, up to 6-byte form ≤ 0x7FFFFFFF) | ✅ | matches reference Lua's accepted range |
-| `\ddd` (1–3 decimal digits) | ❌ | |
-| `\z` (skip following whitespace, incl. newlines) | ❌ | |
-| `\<newline>` → literal `\n` | ❌ | |
+| `\ddd` (1–3 decimal digits) | ✅ | value must fit in a byte (0–255) |
+| `\z` (skip following whitespace, incl. newlines) | ✅ | |
+| `\<newline>` → literal `\n` | ✅ | CR/LF/CRLF/LFCR all collapse to one `\n` |
 | Long bracket `[[ … ]]`, leading newline stripped | ✅ | |
-| Long bracket level N `[=[ … ]=]`, `[==[ … ]==]` | ❌ | |
+| Long bracket level N `[=[ … ]=]`, `[==[ … ]==]` | ✅ | any level N |
 
 ---
 
@@ -62,8 +62,7 @@ mirror the manual so it's easy to cross-check.
 | `userdata` (light & full) | 🚫 | no embedding API by design |
 
 Type checks (`type(x)`): ✅ returns canonical names. `math.type(x)` for
-`integer`/`float` distinction: ❌ (not yet exposed; representation already
-distinguishes).
+`integer`/`float` distinction: ✅ returns `"integer"` / `"float"` / `nil` (fail for non-number).
 
 ---
 
@@ -83,8 +82,8 @@ distinguishes).
 | `local x, y, z = e1, e2, e3` | ✅ | multi-assign with adjustment |
 | `local x = f()` (multret adjusted to 1) | ✅ | |
 | `local x, y = f()` (multret expanded) | ✅ | |
-| Attribute `local x <const> = …` | ❌ | parser sees `<` as `LT` |
-| Attribute `local x <close> = …` | ❌ | no to-be-closed semantics |
+| Attribute `local x <const> = …` | ✅ | compile-time rejection of reassignment; prefix form `local <const> a, b` also works |
+| Attribute `local x <close> = …` | 🟡 | `__close(value, nil)` called in reverse order at natural block exit; nil/false skipped; early exits (`return`/`break`/`goto`/error) do not yet trigger close |
 | Lexical block scoping, shadowing | ✅ | |
 
 ### 3.3.3 Assignment
@@ -105,7 +104,7 @@ distinguishes).
 | `repeat … until e` (cond sees locals from body) | ✅ |
 | `break` | ✅ |
 | `return e1, …` (must be last in block) | ✅ |
-| `goto label` / `::label::` | ❌ |
+| `goto label` / `::label::` | ✅ | forward and backward jumps; lowered to WASM `br` on labelled blocks; Lua scoping rule enforced (cannot jump into scope of a local) |
 
 ### 3.3.5 For statements
 | Item | Status | Notes |
@@ -138,27 +137,27 @@ distinguishes).
 | `+` `-` `*` | ✅ | int×int → int, else float |
 | `/` (float division, always float) | ✅ | |
 | `//` (floor division) | ✅ | int and float forms |
-| `%` (modulo) | 🟡 | integer only; float `%` currently returns 0 |
+| `%` (modulo) | ✅ | int and float floor-mod; `a - floor(a/b)*b` |
 | `^` (exponent, always float) | ✅ | |
 | Unary `-` | ✅ | |
-| `__add` / `__sub` / `__mul` / `__div` / `__mod` / `__pow` / `__unm` / `__idiv` metamethods | 🟡 | only `__add` |
+| `__add` / `__sub` / `__mul` / `__div` / `__mod` / `__pow` / `__unm` / `__idiv` metamethods | ✅ | all eight; consulted when operand is non-numeric |
 
 ### 3.4.2 Bitwise operators
-| Op | Status |
-|---|---|
-| `&` `\|` `~` (xor) `<<` `>>` (binary) | ❌ |
-| Unary `~` (bnot) | ❌ |
-| `__band/__bor/__bxor/__bnot/__shl/__shr` metamethods | ❌ |
+| Op | Status | Notes |
+|---|---|---|
+| `&` `\|` `~` (xor) `<<` `>>` (binary) | ✅ | 64-bit integer semantics; negative shift counts swap direction; `\|count\| >= 64` yields 0 |
+| Unary `~` (bnot) | ✅ | |
+| `__band/__bor/__bxor/__bnot/__shl/__shr` metamethods | ✅ | fired when operand is not integer-convertible |
 
-Lexer reserves the tokens; parser has no production for them yet.
+Float operands with no fractional part in signed i64 range are accepted (Lua's "convertible to integer" rule).
 
 ### 3.4.3 Coercions and conversions
-| Item | Status |
-|---|---|
-| Int↔float promotion in arithmetic | ✅ |
-| String→number coercion in arithmetic (e.g. `"3" + 1`) | ❌ |
-| Number→string coercion in `..` | ✅ |
-| Integer-valued float comparison rules | ✅ |
+| Item | Status | Notes |
+|---|---|---|
+| Int↔float promotion in arithmetic | ✅ | |
+| String→number coercion in arithmetic (e.g. `"3" + 1`) | ✅ | via `$coerce_num`; leading/trailing whitespace stripped; `"3e0" + 0` → float |
+| Number→string coercion in `..` | ✅ | |
+| Integer-valued float comparison rules | ✅ | |
 
 ### 3.4.4 Relational operators
 | Op | Status | Notes |
@@ -166,7 +165,7 @@ Lexer reserves the tokens; parser has no production for them yet.
 | `==` `~=` | ✅ | structural for strings; reference equality for tables/functions |
 | `<` `<=` `>` `>=` | ✅ | numbers and strings |
 | `__eq` metamethod | ✅ | |
-| `__lt` / `__le` metamethods | ❌ | |
+| `__lt` / `__le` metamethods | ✅ | |
 
 ### 3.4.5 Logical operators
 | Op | Status |
@@ -176,22 +175,21 @@ Lexer reserves the tokens; parser has no production for them yet.
 | `not` | ✅ |
 
 ### 3.4.6 String concatenation
-| Item | Status |
-|---|---|
-| `..` (right-associative) | ✅ |
-| Number→string coercion via `..` | ✅ |
-| `__concat` metamethod | ❌ |
+| Item | Status | Notes |
+|---|---|---|
+| `..` (right-associative) | ✅ | |
+| Number→string coercion via `..` | ✅ | |
+| `__concat` metamethod | ✅ | fired when either operand is non-string non-number; left operand's handler wins |
 
 ### 3.4.7 Length operator
-| Item | Status |
-|---|---|
-| `#s` for strings (byte length) | ✅ |
-| `#t` for tables (border) | ✅ |
-| `__len` metamethod | ❌ |
+| Item | Status | Notes |
+|---|---|---|
+| `#s` for strings (byte length) | ✅ | |
+| `#t` for tables (border) | ✅ | |
+| `__len` metamethod | ✅ | overrides border rule on tables; also fires on other non-string values |
 
 ### 3.4.8 Precedence
-Matches Lua 5.5 precedence table for all operators that are implemented.
-Bitwise operators not yet slotted into the precedence climb.
+Matches Lua 5.5 precedence table fully: `or` < `and` < comparisons < `|` < `~` (bxor) < `&` < `<< >>` < `..` < `+ -` < `* / // %` < unary < `^`.
 
 ### 3.4.9 Table constructors
 | Form | Status |
@@ -205,13 +203,13 @@ Bitwise operators not yet slotted into the precedence climb.
 | Trailing `,` or `;` separator | ✅ |
 
 ### 3.4.10 Function calls
-| Form | Status |
-|---|---|
-| `f(args)` | ✅ |
-| `f"string"` (paren-less single string arg) | ✅ |
-| `f{table}` (paren-less single table arg) | ✅ |
-| `obj:method(args)` | ✅ |
-| `__call` metamethod | ❌ |
+| Form | Status | Notes |
+|---|---|---|
+| `f(args)` | ✅ | |
+| `f"string"` (paren-less single string arg) | ✅ | |
+| `f{table}` (paren-less single table arg) | ✅ | |
+| `obj:method(args)` | ✅ | |
+| `__call` metamethod | ✅ | `$lua_call_any` walks the `__call` chain; cycle limit enforced |
 
 ### 3.4.11 Function definitions (as expressions)
 See §3.3.6. All forms supported.
@@ -227,38 +225,38 @@ capture across nested closures: ✅.
 ## 3.6 Error handling
 | Item | Status | Notes |
 |---|---|---|
-| `error(v)` raise | ✅ | no level annotation |
-| `error(v, level)` | ❌ | |
+| `error(v)` raise | ✅ | |
+| `error(v, level)` | ✅ | level 0 disables prefix; level N walks the call-frame stack |
 | `pcall(f, …)` → `(ok, …)` | ✅ | |
-| `xpcall(f, msgh, …)` | ❌ | |
+| `xpcall(f, msgh, …)` | ✅ | msgh called on error; its return value is the second result |
 | `assert(v[, msg])` | ✅ | |
-| Stack tracebacks | ❌ | |
+| Stack tracebacks | 🟡 | `debug.traceback` walks the `$call_lines` frame stack; limited to source positions (no function names, no `debug.getinfo`) |
 | Underlying mechanism | — | WASM `throw $LuaError` + `try_table` |
 
 ---
 
 ## 3.7 Metatables and metamethods
 
-| Metamethod | Status |
-|---|---|
-| `__index` (table) | ✅ |
-| `__index` (function) | ✅ |
-| `__newindex` (table or function) | ❌ |
-| `__call` | ❌ |
-| `__add` | ✅ |
-| `__sub` `__mul` `__div` `__mod` `__pow` `__unm` `__idiv` | ❌ |
-| `__band` `__bor` `__bxor` `__bnot` `__shl` `__shr` | ❌ |
-| `__concat` | ❌ |
-| `__len` | ❌ |
-| `__eq` | ✅ |
-| `__lt` `__le` | ❌ |
-| `__tostring` | ❌ |
-| `__metatable` (protect metatable) | ❌ |
-| `__pairs` | ❌ |
-| `__gc` | 🚫 (no finalizers on host GC) |
-| `__close` | ❌ (depends on `<close>`) |
-| `__name` | ❌ |
-| `__mode` (weak tables) | 🚫 (no weak refs in WasmGC today) |
+| Metamethod | Status | Notes |
+|---|---|---|
+| `__index` (table) | ✅ | |
+| `__index` (function) | ✅ | |
+| `__newindex` (table or function) | ✅ | fires only for absent keys; `rawset` bypasses |
+| `__call` | ✅ | walks chain; callee prepended to args |
+| `__add` | ✅ | |
+| `__sub` `__mul` `__div` `__mod` `__pow` `__unm` `__idiv` | ✅ | |
+| `__band` `__bor` `__bxor` `__bnot` `__shl` `__shr` | ✅ | fired when operand is not integer-convertible |
+| `__concat` | ✅ | |
+| `__len` | ✅ | |
+| `__eq` | ✅ | |
+| `__lt` `__le` | ✅ | |
+| `__tostring` | ✅ | `tostring`, `print`, and `string.format %s` all honour it |
+| `__metatable` (protect metatable) | ✅ | `getmetatable` returns the value; `setmetatable` raises |
+| `__pairs` | ❌ | |
+| `__gc` | 🚫 | no finalizers on host GC |
+| `__close` | 🟡 | natural block exit only; early exits (`return`/`break`/`goto`/error) not yet wired — see §3.3.2 |
+| `__name` | ✅ | renames the type in `tostring` output and type-aware error messages |
+| `__mode` (weak tables) | 🚫 | no weak refs in WasmGC today |
 
 ---
 
@@ -275,14 +273,14 @@ browsers.
 
 ---
 
-## Syntax gaps — concrete implementation list
+## Remaining gaps — concrete implementation list
 
-Ordered by leverage (smallest first):
+Ordered by estimated effort (smallest first):
 
-1. **Numeric literals**: hex `0x…`, hex-float `0x1.8p…`, `\ddd` and `\z` string escapes, level-N long brackets.
-2. **`<const>` / `<close>` attributes** — parser needs to special-case `<` after `local` name list; runtime semantics for `<close>` needs `__close` and to-be-closed scope tracking.
-3. **`goto` / `::label::`** — parser productions + a forward-fixup pass; codegen as WASM `br` to labelled block. Lua scoping rule: a goto cannot jump into the scope of a local.
-4. **Bitwise operators** — six binary + one unary, plus six metamethods. Requires int-only semantics with float-with-integer-value coercion (Lua's "convertible to integer" rule).
-5. **String→number coercion in arithmetic** (`"3" + 1` → `4`).
-6. **Missing arithmetic metamethods** (`__sub/__mul/__div/__mod/__pow/__unm/__idiv`) and **`__concat`/`__len`/`__lt`/`__le`/`__newindex`/`__call`/`__tostring`** — each is a small addition to the existing metamethod dispatch in `prelude.wat`.
-7. **`error(v, level)`** + **`xpcall(f, msgh, …)`** — wire a handler call into the `try_table` catch path.
+1. **`__pairs`** — the `pairs` builtin currently uses the raw next-based iteration; a `__pairs` lookup before falling through would be a small addition.
+2. **`<close>` on early exits** — `__close` fires at natural block exit but not on `return`, `break`, `goto`, or error unwinds through an active close scope. Completing it needs an active-close-scope stack in codegen plus per-scope `try_table` unwinding — a milestone, not a small fix.
+3. **`__gc`** — 🚫 not applicable; no finalizers in WasmGC.
+4. **`__mode` (weak tables)** — 🚫 not applicable; no weak refs in WasmGC.
+5. **Full `debug.*` library** — `debug.traceback` walks the frame stack (source positions only; no function names). `debug.getinfo` is unimplemented — its `nparams`/`nups`/`isvararg`/`linedefined` fields need per-function metadata that an AOT compiler without debug info doesn't retain.
+6. **`load` / `loadfile`** — AOT-only; would need the compiler shipped at runtime. `require` works via `-m FILE` static modules.
+7. **Coroutines** — blocked on the WASM stack-switching proposal shipping in browsers.

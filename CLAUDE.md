@@ -78,6 +78,8 @@ Bug fixes follow the same shape: failing test first, fix second, same commit.
 | `src/codegen.{c,h}` | emits WAT via `WatBuilder`; embeds `runtime/prelude.wat` |
 | `src/builtins.{c,h}`| single source of truth: builtin name → wasm symbol |
 | `src/wat_builder.{c,h}` | dynamic WAT string buffer |
+| `src/xalloc.{c,h}`  | OOM-aborting malloc/realloc wrappers used across the compiler |
+| `src/emscripten_entry.c` | browser entry point (`EMSCRIPTEN_KEEPALIVE` exports); Emscripten only |
 | `runtime/host.mjs`  | reference host that runs a compiled module |
 | `runtime/playground.html` | in-browser editor + compile + run (Emscripten only) |
 | `tests/e2e/`        | data-driven e2e suite (manifest + goldens) |

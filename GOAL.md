@@ -18,7 +18,7 @@ project's signature constraint:
 ## Why this is worth doing
 
 1. **A real test of WasmGC.** WasmGC shipped in browsers in late 2023 and
-   Safari dropped its objection in late 2025, but few real compilers exercise
+   Safari joined (18.x) in 2024–2025, but few real compilers exercise
    the full type system (subtyping, recursive types, i31ref, exception
    handling). Lua's dynamic-typed-but-structured semantics are a good fit and
    a good stress test.
@@ -52,8 +52,8 @@ project's signature constraint:
   output makes everything debuggable; we can swap in a binary encoder later
   behind the same builder API.
 - **Static prelude.** Runtime helpers (`$lua_add`, `$lua_eq`, `$lua_concat`,
-  string conversion, …) are written as WAT and embedded as a C string
-  literal. They are *not* generated per program.
+  string conversion, …) are written as WAT in `runtime/prelude.wat` and
+  embedded via C23 `#embed`. They are *not* generated per program.
 - **Value representation locked early.** See the table in README. New value
   kinds get added; existing ones do not change shape.
 
@@ -124,8 +124,9 @@ handling, metatables, and coroutines.
   (Lua 5.5 rule).
 - Generic `for k, v in iter do ... end` (depends on phase 3's multi-return).
 - `repeat ... until cond`, `break`, `goto` / `::label::`.
-- Globals with Lua 5.5 **`global` declarations** — undeclared global access
-  is a compile-time error.
+- Globals: traditional Lua implicit globals (`x = 42` at top level just works;
+  undeclared name reads yield `nil`). Explicit `global x` declarations also
+  supported. Strict mode (compile error on undeclared) is a future opt-in.
 - Fixture: a self-contained "data crunch" script using all of the above.
 
 ### Phase 6 — Errors ✓ **done**
@@ -175,7 +176,7 @@ Blocked on: WASM **stack-switching proposal** shipping in browsers
 ### Phase 10 — Polish, packaging, perf  ✓ **done** (subset: single-file HTML packager + README)
 
 - `wasm-opt` integration in the build pipeline.
-- A web playground (Monaco editor + live compile + run) under `runtime/web/`.
+- A web playground (CodeMirror editor + live compile + run) at `runtime/playground.html`. ✓ **done**
 - A CLI flag to embed the wasm + a tiny JS loader into a single HTML file
   ("ship a Lua script as a self-contained webpage").
 - A benchmark suite vs. reference Lua, vs. LuaJIT, vs. Fengari (Lua in JS).
@@ -213,9 +214,8 @@ This project will be considered "complete enough" when:
   *Status* section in the README, and a tagged commit.
 - New language features land behind an end-to-end fixture before they land
   as syntax in the parser. "If you can't print it, you didn't build it."
-- The runtime prelude stays hand-written WAT until it gets unwieldy. When
-  it does, we factor it into a separate `runtime/prelude.wat` and `#include`
-  it via the build.
+- The runtime prelude is `runtime/prelude.wat` — hand-written WAT, embedded
+  into the compiler via C23 `#embed`. Editing it re-links `codegen.c`.
 - Phase boundaries are commitments to the *user*, not handcuffs. If a small
   feature obviously belongs with the current phase, it lands in the current
   phase.

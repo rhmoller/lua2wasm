@@ -27,7 +27,7 @@ per `docs/lessons.md` — clean-room from the manual.
 | Group | Options | Notes |
 |---|---|---|
 | Endianness | `<` `>` `=` | LE, BE, native. Reset stays sticky until next option. |
-| Alignment | `![n]` | Sets max alignment; default `!1` (no align). `n` ∈ 1..16; must be a power of 2. |
+| Alignment | `![n]` | Sets max alignment; `!` alone defaults to 8 (native). `n` ∈ 1..16; must be a power of 2. |
 | Signed int | `b` `h` `l` `j` `i[n]` | Sign-extend on unpack; overflow-check on pack. |
 | Unsigned int | `B` `H` `L` `J` `T` `I[n]` | Zero-extend. |
 | Float | `f` `d` `n` | 4 / 8 / 8 bytes via IEEE-754 bitcast. |
@@ -38,7 +38,8 @@ per `docs/lessons.md` — clean-room from the manual.
 For `!n`, `s[n]`, `i[n]`, `I[n]`: `n` ∈ 1..16.
 
 Per the manual, every format string starts as if prefixed by `!1=`:
-no alignment, native endianness.
+no alignment, native endianness. (`!` without `[n]` resets alignment
+to 8, the native max; the *initial* state is still `max_align = 1`.)
 
 ### Our "native" sizes
 
@@ -76,48 +77,39 @@ its `n`-byte size prefix.
 ## Strategy
 
 The format string is tiny (~tens of chars) and is parsed once per
-call. No bytecode compilation — just walk the format twice for `pack`
-(once to size, once to fill) or once with appending for `unpack` and
-`packsize`. Mirrors the pattern milestone's lesson that "don't
+call. No bytecode compilation — just walk the format character by
+character. Mirrors the pattern milestone's lesson that "don't
 pre-compile the cheap case".
 
-```
-$fmt_scan(fmt, callback, state):
-  loop over fmt bytes:
-    skip spaces
-    decode one option (incl. optional [n] suffix)
-    callback(option, n, state)
-```
+For `packsize`: one pass, accumulating `(alignment-pad + size)` per
+option; raises on `z`/`s`.
 
-For `packsize`: callback accumulates `(padding + size)` per option,
-raises on `z`/`s`.
+For `pack`: single-pass using a `$Builder` (amortized-doubling
+backing array). Bytes are appended as each option is processed;
+`$builder_finish` trims to exact length and returns the `$LuaString`.
+(A two-pass size-then-fill approach was considered, but the `$Builder`
+is equally simple and already available — no need to do the format
+walk twice.)
 
-For `pack`: two passes. Pass 1 walks the format to compute the total
-size; pass 2 allocates `(array.new $LuaArr 0 total)` and walks again
-to write bytes.
-
-For `unpack`: one pass, reading bytes and pushing decoded values onto
-a growing `$ArgArr`.
-
-> Why two passes for `pack` and not for `unpack`?
-> — `pack`'s output size depends only on the *format and arg lengths*,
-> both available without writing; pre-sizing avoids a `$Builder` grow
-> loop. `unpack`'s output count equals the option count and is also
-> known after a format-only walk, so we could pre-size the `$ArgArr`
-> the same way. **Yes — do that too**, so both entries allocate once.
+For `unpack`: one pass. The output count equals the value-producing
+option count, which is known after a quick format-only pre-scan
+(`$pack_count_values`). The `$ArgArr` is pre-allocated once with
+`array.new $ArgArr null (nval + 1)` before the decode loop.
 
 ## State machine
 
-Carry through the scanner:
+Each entry point carries three mutable locals (no separate struct):
 
-```wat
-(type $PackState (struct
-  (field $endian_le (mut i32))   ;; 1 = little-endian, 0 = big-endian
-  (field $max_align (mut i32))   ;; current max alignment (default 1)
-  (field $offset    (mut i32))   ;; bytes written / read so far
-  (field $opt_count (mut i32)))) ;; number of value-bearing options seen
-                                 ;; (drives the $ArgArr size for unpack)
-```
+| Local | Initial | Meaning |
+|---|---|---|
+| `$endian_le` | 1 | 1 = little-endian, 0 = big-endian |
+| `$max_align` | 1 | current max alignment |
+| `$offset` | 0 | bytes written / read so far |
+
+(`$builtin_string_pack` tracks the running length through the
+`$Builder`'s `$len` field instead of a separate `$offset` local.
+`$builtin_string_unpack` uses a `$pack_count_values` pre-scan to
+size its `$ArgArr`, then tracks `$out_idx` as the decode cursor.)
 
 Configuration options (`<`, `>`, `=`, `!`, `Xop`) only mutate state;
 they do not advance any arg or value cursor.
@@ -145,10 +137,15 @@ Unpack signed:
 4. Push as Lua integer.
 
 Unpack unsigned:
-1. Read into `i64` zero-extended.
-2. If the result doesn't fit a Lua integer (top bit set on an 8-byte
-   read), per the manual `unpack` raises overflow.
-3. Push as Lua integer.
+1. Read into `i64` zero-extended (only the first 8 bytes contribute to
+   the assembled value; `$pack_read_int` stops at byte 7).
+2. For `n > 8`: the extra bytes beyond byte 7 must all be `0x00`
+   (unsigned means no sign-fill); `$pack_check_fit` raises
+   "data does not fit" if any differ.
+3. For `n ≤ 8`: no overflow check — the 64-bit bit pattern is returned
+   as-is. Values with the top bit set (e.g. a packed `J` of
+   `0xFFFFFFFFFFFFFFFF`) become negative Lua integers.
+4. Push as Lua integer.
 
 ### Floats
 
@@ -192,61 +189,64 @@ value or any of the option's payload.
 ### `string.packsize(fmt)`
 
 ```
-state = { endian_le=1, max_align=1, offset=0 }
+endian_le=1, max_align=1, offset=0
 for each option in fmt:
   if option is 's' or 'z': raise
-  if option is configuration: update state
-  else: state.offset += pad(state, size) + size
-return state.offset as Lua int
+  if option is configuration: update endian_le / max_align
+  elif option is 'x': offset += 1
+  elif option is 'X op': offset = pack_align(offset, size_of(op), max_align)
+  elif option is 'c[n]': offset += n   ;; unaligned
+  else: offset = pack_align(offset, size, max_align) + size
+return offset as Lua int
 ```
 
 ### `string.pack(fmt, ...)`
 
 ```
 state, arg_idx = init, 1
-total = packsize_walk(fmt)         ;; first pass
-out = array.new $LuaArr 0 total
+b = builder_new()
 for each option in fmt:
   if configuration: update state
-  elif padding (x): write 0, advance
-  else: write arg[arg_idx]; arg_idx += 1
-return $LuaString(out)
+  elif padding (x or Xop): append zero byte(s)
+  else: append encoded arg[arg_idx]; arg_idx += 1
+return builder_finish(b)   ;; trims to exact length
 ```
 
 ### `string.unpack(fmt, s [, pos])`
 
 ```
-state, arg_idx = init, 0
-nval = count_value_options(fmt)
+endian_le=1, max_align=1, offset = (pos or 1) - 1
+nval = pack_count_values(fmt)
 res = array.new $ArgArr null (nval + 1)   ;; values + final pos
-state.offset = pos - 1   ;; 0-based
+out_idx = 0
 for each option in fmt:
-  if configuration: update state
-  elif padding (x): advance
+  if configuration: update endian_le / max_align
+  elif padding (x or Xop): advance offset
   else:
-    val = decode(state, s.bytes)
-    array.set $ArgArr res arg_idx val; arg_idx += 1
-array.set $ArgArr res nval ($make_int (state.offset + 1))
+    val = decode(option, s.bytes, offset, endian_le, max_align)
+    array.set $ArgArr res out_idx val; out_idx += 1
+array.set $ArgArr res nval (make_int(offset + 1))
 return res
 ```
 
 ## Helper signatures (in WAT)
 
 ```wat
-;; Pad bytes for current option of size $sz given $max_align.
-;; Returns padding count; advances state.offset accordingly.
-(func $pack_pad
-  (param $state (ref $PackState)) (param $sz i32)
+;; Advance $offset to satisfy alignment for an option of size $sz.
+;; Returns the (possibly increased) new offset. Raises if the required
+;; stride (min($sz, $max_align)) is not a positive power of 2.
+(func $pack_align
+  (param $offset i32) (param $sz i32) (param $max_align i32)
   (result i32))
 
-;; Parse an optional [n] suffix at $fmt[$ppos+1]; returns
-;; (default_if_absent_or_n, new_ppos). Default is per-caller (e.g.
-;; size_t for s, native int for i/I, 1 for !).
+;; Parse an optional decimal n suffix starting at $bytes[$ppos]; returns
+;; (n_or_default, new_ppos). Default is per-caller (e.g. 8 for s/!,
+;; 4 for i/I, -1 as sentinel for c).
 (func $pack_n_suffix
   (param $fmt (ref $LuaArr)) (param $ppos i32) (param $default i32)
   (result i32 i32))
 
-;; Read/write n bytes at $buf[$off]. Endianness from state.
+;; Read/write n bytes at $buf[$off]. Endianness from $le (1=LE, 0=BE).
 ;; Returns the i64 value (for read) / nothing (for write).
 (func $pack_write_int
   (param $buf (ref $LuaArr)) (param $off i32) (param $n i32)
@@ -258,11 +258,22 @@ return res
 ;; Sign-extend an $n-byte value loaded into an i64.
 (func $pack_signext (param $val i64) (param $n i32) (result i64))
 
-;; Overflow check for pack: returns 1 if $val fits in $n bytes
-;; under $is_signed semantics; 0 otherwise.
-(func $pack_fits
-  (param $val i64) (param $n i32) (param $is_signed i32)
-  (result i32))
+;; Overflow checks for pack: return 1 if $val fits in $n bytes.
+;; For n >= 8 always returns 1.
+(func $pack_fits_unsigned (param $val i64) (param $n i32) (result i32))
+(func $pack_fits_signed   (param $val i64) (param $n i32) (result i32))
+
+;; Overflow check for unpack with n > 8: validates the bytes beyond
+;; byte 7 hold the correct sign-fill (0x00 for unsigned; 0x00 or 0xFF
+;; for signed depending on the sign bit). Raises "data does not fit"
+;; on mismatch. No-op for n <= 8.
+(func $pack_check_fit
+  (param $buf (ref $LuaArr)) (param $off i32) (param $sz i32)
+  (param $le i32) (param $is_signed i32) (param $val i64))
+
+;; Count value-producing options (everything except < > = ! x X and space).
+;; Used by unpack to pre-size its $ArgArr.
+(func $pack_count_values (param $bytes (ref $LuaArr)) (result i32))
 ```
 
 The float read/write uses `f32.reinterpret_i32` / `i32.reinterpret_f32`
@@ -272,7 +283,7 @@ and the i64 equivalents directly inline — no separate helper.
 
 | Step | What | Fixture |
 |---|---|---|
-| 1 | `$pack_pad` + `$pack_n_suffix` + `packsize` for fixed-size options (no s/z). Covers parser, alignment math, the power-of-2 check, and `Xop` walking. | `string.packsize` only, ~12 assertions across native ints, `c[n]`, `!n`, `x`, `Xop`. |
+| 1 | `$pack_align` + `$pack_n_suffix` + `packsize` for fixed-size options (no s/z). Covers parser, alignment math, the power-of-2 check, and `Xop` walking. | `string.packsize` only, ~12 assertions across native ints, `c[n]`, `!n`, `x`, `Xop`. |
 | 2 | `pack`/`unpack` for unsigned ints (`B H I[n] J L T`), LE only, no alignment. Round-trip. | round-trip ~10 values; verify `pos` return from unpack. |
 | 3 | Signed ints (`b h i[n] j l`). Sign-extend + overflow check. | round-trip including negative values; overflow-raises fixture under `pcall`. |
 | 4 | Endianness flags `< > =`. Per-option BE byte ordering. | pack same value under `<` and `>`; verify byte order; cross-endian unpack. |
@@ -295,9 +306,8 @@ Each step closes with a green `ctest`.
 - `array.copy $LuaArr $LuaArr` — `c[n]` and `z`/`s` body copies.
 - `throw $LuaError` for the various raise paths.
 
-No new types needed beyond the small `$PackState` struct above; even
-that could be three locals threaded through helpers, but a struct is
-clearer at the cost of one allocation per top-level call.
+No new types needed; state is three locals per entry point rather than a
+dedicated struct.
 
 ## Out of scope
 
@@ -316,9 +326,10 @@ clearer at the cost of one allocation per top-level call.
   checks in `$pack_read_int`/`$pack_write_int` will read array bytes
   in conditions like `(i32.and in_bounds (read_byte_eq_x))`. Use
   `if/then/else` for any byte-read guarded by a length check.
-- **Sign vs unsigned overflow.** `$pack_fits` must distinguish: for
-  signed n=1, valid range is `[-128, 127]`; for unsigned n=1,
-  `[0, 255]`. Off-by-one on the negative boundary is the classic bug.
+- **Sign vs unsigned overflow.** `$pack_fits_signed`/`$pack_fits_unsigned`
+  are separate functions. For signed n=1, valid range is `[-128, 127]`;
+  for unsigned n=1, `[0, 255]`. Off-by-one on the negative boundary is
+  the classic bug.
 - **Endianness state is sticky.** A `>` flag affects every subsequent
   option until another flag. Easy to test with `<i4>i4`.
 - **`Xop` size parsing.** We need to parse the option-letter (and any

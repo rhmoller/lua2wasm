@@ -6631,7 +6631,7 @@
   ;; suffix. Returns (size, new_ppos). Raises on:
   ;;   - unknown letter
   ;;   - i[N] / I[N] with N outside [1, 16]
-  ;;   - c without [N], or c0
+  ;;   - c without [N] (c0 is valid and means zero bytes)
   ;; Caller handles configuration options (< > = ! x X space) and the
   ;; variable-length string options (s z) before invoking this.
   (func $pack_opt_size
@@ -6940,10 +6940,9 @@
     (array.new_fixed $ArgArr 1
       (call $make_int (i64.extend_i32_s (local.get $offset)))))
 
-  ;; string.pack(fmt, v1, v2, ...) — milestone 21 step 2: unsigned ints
-  ;; (B H I[N] J L T), x padding, !N alignment, Xop, < > = endianness.
-  ;; Signed ints / floats / c / s / z land in later steps; this dispatch
-  ;; raises on them.
+  ;; string.pack(fmt, v1, v2, ...) — builds output via $Builder.
+  ;; Handles all format options: b/B/h/H/i[N]/I[N]/l/L/j/J/T,
+  ;; f/d/n, c[N], z, s[N], x, Xop, < > = endianness, !N alignment.
   (func $builtin_string_pack (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr))
     (result (ref $ArgArr))
@@ -7181,9 +7180,8 @@
       (br $lp)))
     (array.new_fixed $ArgArr 1 (call $builder_finish (local.get $b))))
 
-  ;; string.unpack(fmt, s [, pos]) — same coverage as $builtin_string_pack
-  ;; (step 2: unsigned ints, x, !N, Xop, < > =). Returns values…, pos
-  ;; (one-past-last-consumed byte, 1-based).
+  ;; string.unpack(fmt, s [, pos]) — same format coverage as $builtin_string_pack.
+  ;; Returns values…, pos (one-past-last-consumed byte, 1-based).
   (func $builtin_string_unpack (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr))
     (result (ref $ArgArr))

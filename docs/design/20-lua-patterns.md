@@ -31,6 +31,7 @@ and from public knowledge of Lua's pattern language.
 | `%u` / `%U` | uppercase / not |
 | `%w` / `%W` | alphanumeric / not |
 | `%x` / `%X` | hex digit / not |
+| `%z` / `%Z` | null byte (`\0`) / non-null |
 | `%<magic>` | the magic char literally (`%%`, `%(`, `%[`, etc.) |
 | `[set]` | char-class set; see below |
 
@@ -182,11 +183,11 @@ the pattern, not on the current item.
 ;; quantifier suffix.
 (func $item_end (param $pat (ref $LuaArr)) (param $ppos i32) (result i32))
 
-;; Tests a byte against a [set]. $sstart points at the byte AFTER
-;; the opening '['; $send is the position of the closing ']'.
+;; Tests a byte against a [set]. $lpos is the position of the opening
+;; '['; the function walks the body to find the matching ']' itself.
 (func $match_set
   (param $byte i32) (param $pat (ref $LuaArr))
-  (param $sstart i32) (param $send i32) (result i32))
+  (param $lpos i32) (result i32))
 
 ;; Tests a byte against a single char class %X (X is the literal letter
 ;; after '%').
@@ -202,8 +203,9 @@ the pattern, not on the current item.
 - `'x' / 'X'` — `'0'..'9' 'a'..'f' 'A'..'F'`
 - `'l' / 'L'`, `'u' / 'U'`, `'p' / 'P'`, `'c' / 'C'`, `'g' / 'G'` —
   the respective ranges
+- `'z' / 'Z'` — null byte (`\0`) / non-null
 - For uppercase letters X: negated form (`%A` → NOT `%a`).
-- For non-letter `%X`: literal X (e.g., `%%` → matches `%`).
+- For non-class `%X`: literal X (e.g., `%%` → matches `%`).
 
 Implementation: per-bit lookups in inlined ranges. ~50 lines of WAT,
 zero allocations.
@@ -242,24 +244,29 @@ Same scan as `find`, but:
 
 ### `string.gmatch(s, pat, init)`
 
-Returns a new closure with three upvalues: `(s, pat, cursor)`. The
-closure body runs one match attempt from `cursor`, returns the
-captures (or whole match), and updates `cursor` past the match
-(advancing by at least one byte on empty matches to avoid an infinite
-loop). Returns nothing on no-match → the generic-for loop terminates.
+Returns a new closure with four upvalues: `(s, pat, cursor, lastmatch)`.
+The closure body runs one match attempt from `cursor`, returns the
+captures (or whole match), and updates `cursor` and `lastmatch` past
+the match. Returns nothing on no-match → the generic-for loop
+terminates.
 
 Building a closure from a builtin with upvalues is something the
 runtime hasn't needed before. The factory builds a `$LuaClosure` with
-a `$UpvalArr` of three boxes manually:
+a `$UpvalArr` of four boxes manually:
 
 ```wat
 (struct.new $LuaClosure
-  (ref.func $gmatch_step)
-  (array.new_fixed $UpvalArr 3 box_s box_pat box_cursor_box))
+  (ref.func $builtin_string_gmatch_iter)
+  (array.new_fixed $UpvalArr 4 box_s box_pat box_cursor box_lastmatch))
 ```
 
-`$gmatch_step` reads `s` and `pat` from upvalues, reads `cursor`, runs
-one match, writes back the updated cursor, returns captures.
+`$builtin_string_gmatch_iter` reads `s` and `pat` from upvalues, reads
+`cursor` and `lastmatch`, runs one match, writes back the updated
+cursor and lastmatch, returns captures. The `lastmatch` upvalue holds
+the end position of the previous accepted match; the iterator rejects
+an empty match that falls exactly at `lastmatch` to prevent an infinite
+loop on patterns like `"a*"` (the progress guard described in the Risk
+section).
 
 ### `string.gsub(s, pat, repl, n)`
 
@@ -307,24 +314,20 @@ machinery `table.sort` already uses.
 
 ## Implementation order and per-step fixtures
 
-This is the biggest single milestone. Land it in small commits, each
-with a fixture covering exactly what was added.
+**Status: shipped** (all 9 steps landed in 9 commits; see lessons.md §"When
+the design doc held up").
 
 | Step | What | Fixture |
 |---|---|---|
 | 1 | Helpers: `$match_class`, `$match_set`, `$item_end`. No user-visible behaviour change yet. | none (covered transitively by later steps) |
-| 2 | `$match_pat` core: literals, `.`, classes, sets, quantifiers, `^` / `$`. | `string.find(s, pat, init, false)` with no captures or specials |
-| 3 | Captures (`(...)`, `()`, `%n` back-references). | fixture covering capture cases for `find`/`match` |
-| 4 | `string.match` entry point. | match-only fixture |
-| 5 | `%bxy` and `%f[set]`. | balanced-match + frontier fixture |
-| 6 | `string.gmatch`. | iterator fixture (counts, captures, with anchor edge) |
-| 7 | `string.gsub` with string repl. | string-repl fixture |
-| 8 | `string.gsub` with table and function repls. | repl-variants fixture |
-| 9 | `string.find` plain mode + final polish. | plain-flag fixture |
-
-Each step ends with the full ctest green before the next starts. Steps
-might combine if they're trivially small (e.g., 8 could fold into 7
-once gsub structure is in place).
+| 2 | `$match_pat` core: literals, `.`, classes, sets, quantifiers, `^` / `$`. | `tests/fixtures/patterns_find_basic.lua` |
+| 3 | Captures (`(...)`, `()`, `%n` back-references). | `tests/fixtures/patterns_captures.lua` |
+| 4 | `string.match` entry point. | `tests/fixtures/patterns_match.lua` |
+| 5 | `%bxy` and `%f[set]`. | `tests/fixtures/patterns_balanced_frontier.lua` |
+| 6 | `string.gmatch`. | `tests/fixtures/patterns_gmatch.lua` |
+| 7 | `string.gsub` with string repl. | `tests/fixtures/patterns_gsub_string.lua` |
+| 8 | `string.gsub` with table and function repls. | `tests/fixtures/patterns_gsub_repl.lua` |
+| 9 | `string.find` plain mode + final polish. | `tests/fixtures/patterns_soak.lua` |
 
 ## Out of scope
 
@@ -359,15 +362,21 @@ once gsub structure is in place).
 
 ## Acceptance criteria
 
-When the milestone closes:
+**Met.** All criteria were satisfied when the milestone closed.
 
-- All four entry points pass against fixtures derived from the manual's
-  examples (and from manually-authored corner cases — not by reading
-  reference Lua's source).
-- A "soak" fixture runs `gsub` and `gmatch` on enough varied inputs
-  to exercise every pattern feature documented in this doc.
+- All four entry points pass against per-step fixtures (manually
+  authored corner cases, not derived from reference Lua source). The
+  soak fixture (`tests/fixtures/patterns_soak.lua`) exercises every
+  pattern feature documented in this doc.
 - Performance: matches a 10kB subject against a non-pathological
-  pattern in well under a second. (No formal benchmark — just a
-  smoke check.)
-- `lessons.md` retro entry: did the design hold? What surprised? Add
-  to the recurring-failure-modes list if anything cascaded.
+  pattern in well under a second. (Verified by smoke check.)
+- `lessons.md` retro entry added under "When the design doc held up
+  (milestone 20, patterns)".
+
+Notable surprises during implementation (detailed in `lessons.md`):
+- `i32.and` is not short-circuit in WAT — bit twice (set-range guard in
+  step 2, `?`-quantifier sub-read in step 7).
+- `%b''` with the same open/close character is undefined by the Lua
+  spec; the implementation silently fails to match; fixtures skip it.
+- gsub with function repl + string method-call syntax doesn't work
+  until string metatables are wired up (separate gap, not a pattern bug).
