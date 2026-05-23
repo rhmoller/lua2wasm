@@ -225,3 +225,154 @@ test("return_call (tail call)", async () => {
     (e, who) => assert.equal(e.f(41), 42, who),
   );
 });
+
+// --- increment 3: WasmGC types and ops ---------------------------------
+
+test("struct.new / struct.get", async () => {
+  await check(
+    `(module
+       (type $pair (struct (field i32) (field i32)))
+       (func (export "f") (result i32)
+         (struct.get $pair 1 (struct.new $pair (i32.const 10) (i32.const 20)))))`,
+    (e, who) => assert.equal(e.f(), 20, who),
+  );
+});
+
+test("struct.set on a mutable field", async () => {
+  await check(
+    `(module
+       (type $box (struct (field (mut i32))))
+       (func (export "f") (result i32)
+         (local $b (ref $box))
+         (local.set $b (struct.new $box (i32.const 1)))
+         (struct.set $box 0 (local.get $b) (i32.const 99))
+         (struct.get $box 0 (local.get $b))))`,
+    (e, who) => assert.equal(e.f(), 99, who),
+  );
+});
+
+test("array.new_fixed / array.set / array.get / array.len", async () => {
+  await check(
+    `(module
+       (type $arr (array (mut i32)))
+       (func (export "f") (result i32)
+         (local $a (ref $arr))
+         (local.set $a (array.new_fixed $arr 3 (i32.const 5) (i32.const 6) (i32.const 7)))
+         (array.set $arr (local.get $a) (i32.const 1) (i32.const 60))
+         (i32.add (array.get $arr (local.get $a) (i32.const 1))
+                  (array.len (local.get $a)))))`,
+    (e, who) => assert.equal(e.f(), 63, who),
+  );
+});
+
+test("array.new (fill) and packed i8 array.get_u", async () => {
+  await check(
+    `(module
+       (type $i32a (array (mut i32)))
+       (type $bytes (array (mut i8)))
+       (func (export "fill") (result i32)
+         (array.get $i32a (array.new $i32a (i32.const 9) (i32.const 4)) (i32.const 2)))
+       (func (export "byte") (result i32)
+         (array.get_u $bytes
+           (array.new_fixed $bytes 2 (i32.const 200) (i32.const 1)) (i32.const 0))))`,
+    (e, who) => {
+      assert.equal(e.fill(), 9, who);
+      assert.equal(e.byte(), 200, who);
+    },
+  );
+});
+
+test("array.copy", async () => {
+  await check(
+    `(module
+       (type $arr (array (mut i32)))
+       (func (export "f") (result i32)
+         (local $a (ref $arr)) (local $b (ref $arr))
+         (local.set $a (array.new_fixed $arr 3 (i32.const 1) (i32.const 2) (i32.const 3)))
+         (local.set $b (array.new $arr (i32.const 0) (i32.const 3)))
+         (array.copy $arr $arr (local.get $b) (i32.const 0) (local.get $a) (i32.const 0)
+                     (i32.const 3))
+         (array.get $arr (local.get $b) (i32.const 2))))`,
+    (e, who) => assert.equal(e.f(), 3, who),
+  );
+});
+
+test("ref.test / ref.cast through anyref", async () => {
+  await check(
+    `(module
+       (type $box (struct (field i32)))
+       (func (export "f") (result i32)
+         (local $a anyref)
+         (local.set $a (struct.new $box (i32.const 42)))
+         (i32.add (ref.test (ref $box) (local.get $a))
+                  (struct.get $box 0 (ref.cast (ref $box) (local.get $a))))))`,
+    (e, who) => assert.equal(e.f(), 43, who),
+  );
+});
+
+test("ref.null / ref.is_null", async () => {
+  await check(
+    `(module
+       (type $box (struct (field i32)))
+       (func (export "f") (result i32) (ref.is_null (ref.null $box))))`,
+    (e, who) => assert.equal(e.f(), 1, who),
+  );
+});
+
+test("ref.i31 / i31.get_s", async () => {
+  await check(
+    `(module (func (export "f") (result i32) (i31.get_s (ref.i31 (i32.const -5)))))`,
+    (e, who) => assert.equal(e.f(), -5, who),
+  );
+});
+
+test("ref.eq", async () => {
+  await check(
+    `(module
+       (type $box (struct (field i32)))
+       (func (export "f") (result i32)
+         (local $a (ref $box))
+         (local.set $a (struct.new $box (i32.const 0)))
+         (i32.add (ref.eq (local.get $a) (local.get $a))
+                  (ref.eq (local.get $a) (struct.new $box (i32.const 0))))))`,
+    (e, who) => assert.equal(e.f(), 1, who),
+  );
+});
+
+test("recursive type (self-referential struct)", async () => {
+  await check(
+    `(module
+       (rec (type $node (struct (field i32) (field (ref null $node)))))
+       (func (export "f") (result i32)
+         (local $a (ref $node))
+         (local.set $a (struct.new $node (i32.const 1) (ref.null $node)))
+         (local.set $a (struct.new $node (i32.const 2) (local.get $a)))
+         (i32.add (struct.get $node 0 (local.get $a))
+                  (struct.get $node 0
+                    (ref.cast (ref $node) (struct.get $node 1 (local.get $a)))))))`,
+    (e, who) => assert.equal(e.f(), 3, who),
+  );
+});
+
+test("subtyping with (sub ...)", async () => {
+  await check(
+    `(module
+       (type $base (sub (struct (field i32))))
+       (type $derived (sub $base (struct (field i32) (field i32))))
+       (func (export "f") (result i32)
+         (local $d (ref $derived))
+         (local.set $d (struct.new $derived (i32.const 7) (i32.const 8)))
+         (struct.get $base 0 (local.get $d))))`,
+    (e, who) => assert.equal(e.f(), 7, who),
+  );
+});
+
+test("GC const-expr in a global init", async () => {
+  await check(
+    `(module
+       (type $box (struct (field i32)))
+       (global $g (ref $box) (struct.new $box (i32.const 77)))
+       (func (export "f") (result i32) (struct.get $box 0 (global.get $g))))`,
+    (e, who) => assert.equal(e.f(), 77, who),
+  );
+});

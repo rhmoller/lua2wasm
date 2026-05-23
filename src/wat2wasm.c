@@ -164,6 +164,21 @@ typedef struct SExpr {
     struct SExpr *next;
 } SExpr;
 
+/* --- declared types ---------------------------------------------------- */
+
+/* One declared (type ...) entry. `comptype` is the (func..)/(struct..)/
+ * (array..) node; sub-typing and (for structs) field names are recorded so
+ * the encoder and instruction stream can resolve them by name. */
+typedef struct DeclType {
+    const char *name;
+    const SExpr *comptype;
+    int has_sub, is_final;
+    const SExpr *supers[8];
+    size_t n_supers;
+    const char **field_names; /* struct field names (NULL entries if anon) */
+    size_t n_fields;
+} DeclType;
+
 /* --- assembler context ------------------------------------------------- */
 
 struct SigTable;
@@ -182,7 +197,11 @@ typedef struct {
     size_t n_func_names;
     const char **global_names;
     size_t n_global_names;
-    struct SigTable *sigs; /* for interning block signature types */
+    /* declared types (index -> def) for $name / field resolution. Synthesized
+     * func types are appended after these, starting at n_decl_types. */
+    const DeclType *decls;
+    size_t n_decl_types;
+    struct SigTable *sigs; /* synthesized func/block signature types */
 } Ctx;
 
 static void fail(Ctx *c, const char *fmt, ...) {
@@ -490,31 +509,141 @@ static double parse_double(Ctx *c, const char *s) {
     return d;
 }
 
-/* --- value types ------------------------------------------------------- */
+/* --- value, heap, and storage types ------------------------------------ */
 
-/* Numeric value type byte, or 0 if `s` isn't one we handle yet. */
-static uint8_t numtype_byte(const char *s) {
-    if (strcmp(s, "i32") == 0) return 0x7f;
-    if (strcmp(s, "i64") == 0) return 0x7e;
-    if (strcmp(s, "f32") == 0) return 0x7d;
-    if (strcmp(s, "f64") == 0) return 0x7c;
+/* Resolve a $type / numeric token to a type index. */
+static uint32_t resolve_type(Ctx *c, const SExpr *n) {
+    if (!is_atom(n)) fail(c, "expected a type");
+    if (n->atom[0] == '$') {
+        for (size_t i = 0; i < c->n_decl_types; i++)
+            if (c->decls[i].name && strcmp(c->decls[i].name, n->atom) == 0) return (uint32_t)i;
+        fail(c, "unknown type '%s'", n->atom);
+    }
+    return (uint32_t)parse_uint(c, n->atom);
+}
+
+/* Abstract heap-type byte for a shorthand name (0 if not one). */
+static uint8_t abstract_heaptype(const char *s) {
+    if (!strcmp(s, "func")) return 0x70;
+    if (!strcmp(s, "extern")) return 0x6f;
+    if (!strcmp(s, "any")) return 0x6e;
+    if (!strcmp(s, "eq")) return 0x6d;
+    if (!strcmp(s, "i31")) return 0x6c;
+    if (!strcmp(s, "struct")) return 0x6b;
+    if (!strcmp(s, "array")) return 0x6a;
+    if (!strcmp(s, "none")) return 0x71;
+    if (!strcmp(s, "nofunc")) return 0x73;
+    if (!strcmp(s, "noextern")) return 0x72;
     return 0;
 }
 
-static uint8_t valtype_byte(Ctx *c, const SExpr *n) {
-    if (!is_atom(n)) fail(c, "expected a value type");
-    uint8_t b = numtype_byte(n->atom);
-    if (!b) fail(c, "unsupported value type '%s'", n->atom);
-    return b;
+/* A heap type: an abstract name (negative-sleb byte) or a concrete type
+ * (non-negative sleb index). */
+static void emit_heaptype(Ctx *c, const SExpr *n, Buf *out) {
+    if (!is_atom(n)) fail(c, "expected a heap type");
+    if (n->atom[0] != '$') {
+        uint8_t b = abstract_heaptype(n->atom);
+        if (b) {
+            buf_byte(out, b);
+            return;
+        }
+    }
+    buf_sleb(out, (int64_t)resolve_type(c, n));
+}
+
+/* Value-type byte for an abstract reference shorthand (0 if not one). */
+static uint8_t abstract_reftype(const char *s) {
+    if (!strcmp(s, "funcref")) return 0x70;
+    if (!strcmp(s, "externref")) return 0x6f;
+    if (!strcmp(s, "anyref")) return 0x6e;
+    if (!strcmp(s, "eqref")) return 0x6d;
+    if (!strcmp(s, "i31ref")) return 0x6c;
+    if (!strcmp(s, "structref")) return 0x6b;
+    if (!strcmp(s, "arrayref")) return 0x6a;
+    if (!strcmp(s, "nullref")) return 0x71;
+    if (!strcmp(s, "nullfuncref")) return 0x73;
+    if (!strcmp(s, "nullexternref")) return 0x72;
+    return 0;
+}
+
+/* A value type: numeric, an abstract ref shorthand, or (ref [null] heaptype). */
+static void emit_valtype(Ctx *c, const SExpr *n, Buf *out) {
+    if (is_atom(n)) {
+        const char *s = n->atom;
+        if (!strcmp(s, "i32")) {
+            buf_byte(out, 0x7f);
+            return;
+        }
+        if (!strcmp(s, "i64")) {
+            buf_byte(out, 0x7e);
+            return;
+        }
+        if (!strcmp(s, "f32")) {
+            buf_byte(out, 0x7d);
+            return;
+        }
+        if (!strcmp(s, "f64")) {
+            buf_byte(out, 0x7c);
+            return;
+        }
+        uint8_t r = abstract_reftype(s);
+        if (r) {
+            buf_byte(out, r);
+            return;
+        }
+        fail(c, "unsupported value type '%s'", s);
+    }
+    if (head(n) && strcmp(head(n), "ref") == 0) {
+        const SExpr *k = n->first->next;
+        int nullable = 0;
+        if (atom_eq(k, "null")) {
+            nullable = 1;
+            k = k->next;
+        }
+        if (!k) fail(c, "(ref ...) needs a heap type");
+        buf_byte(out, nullable ? 0x63 : 0x64);
+        emit_heaptype(c, k, out);
+        return;
+    }
+    fail(c, "expected a value type");
+}
+
+/* A storage type: a packed type (i8/i16) or a value type. */
+static void emit_storagetype(Ctx *c, const SExpr *n, Buf *out) {
+    if (is_atom(n)) {
+        if (!strcmp(n->atom, "i8")) {
+            buf_byte(out, 0x78);
+            return;
+        }
+        if (!strcmp(n->atom, "i16")) {
+            buf_byte(out, 0x77);
+            return;
+        }
+    }
+    emit_valtype(c, n, out);
+}
+
+/* Encode one value type and copy it into a freshly malloc'd buffer. */
+static void valtype_bytes(Ctx *c, const SExpr *n, uint8_t **out, size_t *len) {
+    Buf t;
+    buf_init(&t);
+    emit_valtype(c, n, &t);
+    *out = xreserve(t.len);
+    memcpy(*out, t.data, t.len);
+    *len = t.len;
+    buf_free(&t);
 }
 
 /* --- function signatures (type section) -------------------------------- */
 
+/* A function signature, with params/results stored as the *encoded* value-type
+ * bytes (concatenated) plus their counts. Storing bytes lets reference types,
+ * which are multi-byte, intern and emit uniformly. */
 typedef struct {
     uint8_t *params;
-    size_t n_params;
+    size_t params_len, n_params;
     uint8_t *results;
-    size_t n_results;
+    size_t results_len, n_results;
 } FuncSig;
 
 typedef struct SigTable {
@@ -522,15 +651,15 @@ typedef struct SigTable {
     size_t n, cap;
 } SigTable;
 
-/* Intern a func signature, returning its type index. The table keeps its own
- * copies of the param/result vectors, so callers retain ownership of theirs
- * (stack arrays are fine). */
-static uint32_t sig_intern(SigTable *t, const uint8_t *params, size_t np,
-                           const uint8_t *results, size_t nr) {
+/* Intern a func signature, returning its (synthesized-table-local) index. The
+ * table keeps its own copies, so callers retain ownership of their buffers. */
+static uint32_t sig_intern(SigTable *t, const uint8_t *params, size_t plen, size_t np,
+                           const uint8_t *results, size_t rlen, size_t nr) {
     for (size_t i = 0; i < t->n; i++)
         if (t->sigs[i].n_params == np && t->sigs[i].n_results == nr &&
-            memcmp(t->sigs[i].params, params, np) == 0 &&
-            memcmp(t->sigs[i].results, results, nr) == 0)
+            t->sigs[i].params_len == plen && t->sigs[i].results_len == rlen &&
+            memcmp(t->sigs[i].params, params, plen) == 0 &&
+            memcmp(t->sigs[i].results, results, rlen) == 0)
             return (uint32_t)i;
     if (t->n == t->cap) {
         t->cap = t->cap ? t->cap * 2 : 8;
@@ -538,11 +667,13 @@ static uint32_t sig_intern(SigTable *t, const uint8_t *params, size_t np,
     }
     FuncSig *s = &t->sigs[t->n];
     s->n_params = np;
-    s->params = np ? xreserve(np) : NULL;
-    memcpy(s->params, params, np);
+    s->params_len = plen;
+    s->params = plen ? xreserve(plen) : NULL;
+    memcpy(s->params, params, plen);
     s->n_results = nr;
-    s->results = nr ? xreserve(nr) : NULL;
-    memcpy(s->results, results, nr);
+    s->results_len = rlen;
+    s->results = rlen ? xreserve(rlen) : NULL;
+    memcpy(s->results, results, rlen);
     return (uint32_t)t->n++;
 }
 
@@ -558,7 +689,8 @@ static void sig_table_free(SigTable *t) {
 
 typedef struct {
     const char *name; /* $id, or NULL */
-    uint8_t type;
+    uint8_t *type;    /* encoded value-type bytes (owned) */
+    size_t type_len;
 } Local;
 
 typedef struct {
@@ -580,13 +712,15 @@ static void fc_push_label(FuncCtx *f, const char *name) {
 
 static void fc_pop_label(FuncCtx *f) { f->n_labels--; }
 
-static void fc_add_local(FuncCtx *f, const char *name, uint8_t type) {
+/* Takes ownership of `type` (a malloc'd encoded value-type buffer). */
+static void fc_add_local(FuncCtx *f, const char *name, uint8_t *type, size_t type_len) {
     if (f->n_locals == f->cap_locals) {
         f->cap_locals = f->cap_locals ? f->cap_locals * 2 : 8;
         f->locals = xgrow(f->locals, f->cap_locals * sizeof *f->locals);
     }
     f->locals[f->n_locals].name = name;
     f->locals[f->n_locals].type = type;
+    f->locals[f->n_locals].type_len = type_len;
     f->n_locals++;
 }
 
@@ -764,57 +898,100 @@ static const OpEntry *find_op(const char *name) {
 
 /* --- block types ------------------------------------------------------- */
 
-#define MAX_BLOCKTYPE 64
+#define MAX_BLOCKTYPE 128
 
 typedef struct {
+    int has_type;        /* (type $t) form */
+    uint32_t type_index; /* declared index when has_type */
     uint8_t params[MAX_BLOCKTYPE];
-    size_t np;
+    size_t params_len, np;
     uint8_t results[MAX_BLOCKTYPE];
-    size_t nr;
+    size_t results_len, nr;
 } BlockType;
 
-/* Collect the value types in a (param ...) / (result ...) group. */
-static void collect_valtypes(Ctx *c, const SExpr *grp, uint8_t *arr, size_t *n) {
-    const SExpr *k = grp->first->next;
-    if (k && is_atom(k) && k->atom[0] == '$') {
-        if (*n >= MAX_BLOCKTYPE) fail(c, "block type too large");
-        arr[(*n)++] = valtype_byte(c, k->next);
-        return;
+/* Append one encoded value type to a fixed byte array, bumping its count. */
+static void bt_add(Ctx *c, const SExpr *tn, uint8_t *arr, size_t *len, size_t *count) {
+    Buf t;
+    buf_init(&t);
+    emit_valtype(c, tn, &t);
+    if (*len + t.len > MAX_BLOCKTYPE) {
+        buf_free(&t);
+        fail(c, "block type too large");
     }
-    for (; k; k = k->next) {
-        if (*n >= MAX_BLOCKTYPE) fail(c, "block type too large");
-        arr[(*n)++] = valtype_byte(c, k);
-    }
+    memcpy(arr + *len, t.data, t.len);
+    *len += t.len;
+    (*count)++;
+    buf_free(&t);
 }
 
-/* Parse leading (param)/(result) forms of a block/loop/if into `bt`; return
- * the first child that is not part of the type signature. */
+/* Collect the value types in a (param ...) / (result ...) group. */
+static void collect_valtypes(Ctx *c, const SExpr *grp, uint8_t *arr, size_t *len, size_t *count) {
+    const SExpr *k = grp->first->next;
+    if (k && is_atom(k) && k->atom[0] == '$') {
+        bt_add(c, k->next, arr, len, count);
+        return;
+    }
+    for (; k; k = k->next) bt_add(c, k, arr, len, count);
+}
+
+/* Parse leading (type)/(param)/(result) forms of a block/loop/if into `bt`;
+ * return the first child that is not part of the type signature. */
 static const SExpr *parse_blocktype(Ctx *c, const SExpr *k, BlockType *bt) {
-    bt->np = 0;
-    bt->nr = 0;
+    memset(bt, 0, sizeof *bt);
     for (; k; k = k->next) {
         const char *h = head(k);
         if (h && strcmp(h, "param") == 0)
-            collect_valtypes(c, k, bt->params, &bt->np);
+            collect_valtypes(c, k, bt->params, &bt->params_len, &bt->np);
         else if (h && strcmp(h, "result") == 0)
-            collect_valtypes(c, k, bt->results, &bt->nr);
-        else if (h && strcmp(h, "type") == 0)
-            fail(c, "(type ...) block types are not supported yet");
-        else
+            collect_valtypes(c, k, bt->results, &bt->results_len, &bt->nr);
+        else if (h && strcmp(h, "type") == 0) {
+            bt->has_type = 1;
+            bt->type_index = resolve_type(c, k->first->next);
+        } else
             break;
     }
     return k;
 }
 
 static void emit_blocktype(Ctx *c, const BlockType *bt, Buf *out) {
-    if (bt->np == 0 && bt->nr == 0) {
+    if (bt->has_type) {
+        buf_sleb(out, (int64_t)bt->type_index);
+    } else if (bt->np == 0 && bt->nr == 0) {
         buf_byte(out, 0x40); /* empty */
     } else if (bt->np == 0 && bt->nr == 1) {
-        buf_byte(out, bt->results[0]); /* single value type */
+        buf_bytes(out, bt->results, bt->results_len); /* single value type */
     } else {
-        uint32_t idx = sig_intern(c->sigs, bt->params, bt->np, bt->results, bt->nr);
-        buf_sleb(out, (int64_t)idx);
+        uint32_t idx = sig_intern(c->sigs, bt->params, bt->params_len, bt->np, bt->results,
+                                  bt->results_len, bt->nr);
+        buf_sleb(out, (int64_t)(c->n_decl_types + idx));
     }
+}
+
+/* Resolve a struct field reference ($name or numeric) to a field index. */
+static uint32_t resolve_field(Ctx *c, uint32_t tidx, const SExpr *n) {
+    if (!is_atom(n)) fail(c, "expected a field index");
+    if (n->atom[0] == '$') {
+        if (tidx >= c->n_decl_types) fail(c, "field name on a non-struct type");
+        const DeclType *d = &c->decls[tidx];
+        for (size_t i = 0; i < d->n_fields; i++)
+            if (d->field_names[i] && strcmp(d->field_names[i], n->atom) == 0) return (uint32_t)i;
+        fail(c, "unknown field '%s'", n->atom);
+    }
+    return (uint32_t)parse_uint(c, n->atom);
+}
+
+/* For ref.test / ref.cast: split a (ref [null] heaptype) immediate into its
+ * nullability and heap-type node. */
+static const SExpr *reftype_parts(Ctx *c, const SExpr *n, int *nullable) {
+    if (!(head(n) && strcmp(head(n), "ref") == 0)) fail(c, "expected a (ref ...) type");
+    const SExpr *k = n->first->next;
+    *nullable = 0;
+    if (atom_eq(k, "null")) {
+        *nullable = 1;
+        k = k->next;
+    }
+    if (!k) fail(c, "(ref ...) needs a heap type");
+    return k;
 }
 
 /* --- instruction encoding ---------------------------------------------- */
@@ -948,6 +1125,140 @@ static void encode_instr(Ctx *c, FuncCtx *f, const SExpr *n, Buf *out) {
         return;
     }
 
+    /* --- WasmGC -------------------------------------------------------- */
+    if (strcmp(op, "ref.null") == 0) {
+        buf_byte(out, 0xd0);
+        emit_heaptype(c, arg1, out);
+        return;
+    }
+    if (strcmp(op, "ref.func") == 0) {
+        uint32_t fi = resolve_index(c, c->func_names, c->n_func_names, arg1, "function");
+        buf_byte(out, 0xd2);
+        buf_uleb(out, fi);
+        return;
+    }
+    if (strcmp(op, "ref.is_null") == 0) {
+        encode_operands(c, f, arg1, out);
+        buf_byte(out, 0xd1);
+        return;
+    }
+    if (strcmp(op, "ref.as_non_null") == 0) {
+        encode_operands(c, f, arg1, out);
+        buf_byte(out, 0xd4);
+        return;
+    }
+    if (strcmp(op, "ref.eq") == 0) {
+        encode_operands(c, f, arg1, out);
+        buf_byte(out, 0xd3);
+        return;
+    }
+    if (strcmp(op, "ref.i31") == 0 || strcmp(op, "i31.get_s") == 0 ||
+        strcmp(op, "i31.get_u") == 0) {
+        encode_operands(c, f, arg1, out);
+        buf_byte(out, 0xfb);
+        buf_uleb(out, op[0] == 'r' ? 0x1c : op[8] == 's' ? 0x1d
+                                                         : 0x1e);
+        return;
+    }
+    if (strcmp(op, "ref.test") == 0 || strcmp(op, "ref.cast") == 0) {
+        int nullable;
+        const SExpr *ht = reftype_parts(c, arg1, &nullable);
+        encode_operands(c, f, arg1->next, out);
+        buf_byte(out, 0xfb);
+        if (strcmp(op, "ref.test") == 0)
+            buf_uleb(out, nullable ? 0x15 : 0x14);
+        else
+            buf_uleb(out, nullable ? 0x17 : 0x16);
+        emit_heaptype(c, ht, out);
+        return;
+    }
+    if (strcmp(op, "struct.new") == 0 || strcmp(op, "struct.new_default") == 0) {
+        uint32_t t = resolve_type(c, arg1);
+        encode_operands(c, f, arg1->next, out);
+        buf_byte(out, 0xfb);
+        buf_uleb(out, strcmp(op, "struct.new") == 0 ? 0x00 : 0x01);
+        buf_uleb(out, t);
+        return;
+    }
+    if (strcmp(op, "struct.get") == 0 || strcmp(op, "struct.get_s") == 0 ||
+        strcmp(op, "struct.get_u") == 0) {
+        uint32_t t = resolve_type(c, arg1);
+        uint32_t fld = resolve_field(c, t, arg1->next);
+        encode_operands(c, f, arg1->next->next, out);
+        buf_byte(out, 0xfb);
+        buf_uleb(out, strcmp(op, "struct.get") == 0     ? 0x02
+                      : strcmp(op, "struct.get_s") == 0 ? 0x03
+                                                        : 0x04);
+        buf_uleb(out, t);
+        buf_uleb(out, fld);
+        return;
+    }
+    if (strcmp(op, "struct.set") == 0) {
+        uint32_t t = resolve_type(c, arg1);
+        uint32_t fld = resolve_field(c, t, arg1->next);
+        encode_operands(c, f, arg1->next->next, out);
+        buf_byte(out, 0xfb);
+        buf_uleb(out, 0x05);
+        buf_uleb(out, t);
+        buf_uleb(out, fld);
+        return;
+    }
+    if (strcmp(op, "array.new") == 0 || strcmp(op, "array.new_default") == 0) {
+        uint32_t t = resolve_type(c, arg1);
+        encode_operands(c, f, arg1->next, out);
+        buf_byte(out, 0xfb);
+        buf_uleb(out, strcmp(op, "array.new") == 0 ? 0x06 : 0x07);
+        buf_uleb(out, t);
+        return;
+    }
+    if (strcmp(op, "array.new_fixed") == 0) {
+        uint32_t t = resolve_type(c, arg1);
+        const SExpr *nnode = arg1->next;
+        if (!is_atom(nnode)) fail(c, "array.new_fixed needs an element count");
+        uint64_t count = parse_uint(c, nnode->atom);
+        encode_operands(c, f, nnode->next, out);
+        buf_byte(out, 0xfb);
+        buf_uleb(out, 0x08);
+        buf_uleb(out, t);
+        buf_uleb(out, count);
+        return;
+    }
+    if (strcmp(op, "array.get") == 0 || strcmp(op, "array.get_s") == 0 ||
+        strcmp(op, "array.get_u") == 0) {
+        uint32_t t = resolve_type(c, arg1);
+        encode_operands(c, f, arg1->next, out);
+        buf_byte(out, 0xfb);
+        buf_uleb(out, strcmp(op, "array.get") == 0     ? 0x0b
+                      : strcmp(op, "array.get_s") == 0 ? 0x0c
+                                                       : 0x0d);
+        buf_uleb(out, t);
+        return;
+    }
+    if (strcmp(op, "array.set") == 0 || strcmp(op, "array.fill") == 0) {
+        uint32_t t = resolve_type(c, arg1);
+        encode_operands(c, f, arg1->next, out);
+        buf_byte(out, 0xfb);
+        buf_uleb(out, strcmp(op, "array.set") == 0 ? 0x0e : 0x10);
+        buf_uleb(out, t);
+        return;
+    }
+    if (strcmp(op, "array.len") == 0) {
+        encode_operands(c, f, arg1, out);
+        buf_byte(out, 0xfb);
+        buf_uleb(out, 0x0f);
+        return;
+    }
+    if (strcmp(op, "array.copy") == 0) {
+        uint32_t dt = resolve_type(c, arg1);
+        uint32_t st = resolve_type(c, arg1->next);
+        encode_operands(c, f, arg1->next->next, out);
+        buf_byte(out, 0xfb);
+        buf_uleb(out, 0x11);
+        buf_uleb(out, dt);
+        buf_uleb(out, st);
+        return;
+    }
+
     /* Zero-immediate ops: encode folded operands, then the opcode. */
     const OpEntry *e = find_op(op);
     if (e) {
@@ -965,49 +1276,71 @@ typedef struct {
     const char *name;        /* $id or NULL */
     const char *export_name; /* decoded export string or NULL */
     size_t export_len;
-    uint32_t type_index;
-    FuncSig sig;
+    int has_type_ref;    /* references a declared type via (type $x) */
+    uint32_t type_ref;   /* the declared index, when has_type_ref */
+    uint32_t type_index; /* final type index, assigned in assemble() */
+    FuncSig sig;         /* the inline signature (also used to intern) */
     FuncCtx fc;
     const SExpr *body_first; /* first body instruction node */
 } Func;
 
-/* Collect a (param ...) / (local ...) group into the function context and,
- * for params, the signature param list. */
-static void collect_locals(Ctx *c, const SExpr *grp, FuncCtx *f, uint8_t **vec,
-                           size_t *n, size_t *cap, int is_param) {
-    const SExpr *k = grp->first->next; /* skip head keyword */
-    if (k && is_atom(k) && k->atom[0] == '$') {
-        /* (param $id valtype) — exactly one named type */
+/* Collect a (param ...) / (result ...) / (local ...) group. When `sig` is
+ * non-NULL the encoded value types are appended to it (and counted into
+ * *count); when `f` is non-NULL the entries also become locals. */
+static void collect_group(Ctx *c, const SExpr *grp, Buf *sig, size_t *count, FuncCtx *f,
+                          int is_param) {
+    const SExpr *k = grp->first->next;
+    int named = (k && is_atom(k) && k->atom[0] == '$');
+    if (named) {
         const SExpr *tn = k->next;
-        uint8_t b = valtype_byte(c, tn);
-        if (vec) {
-            if (*n == *cap) {
-                *cap = *cap ? *cap * 2 : 4;
-                *vec = xgrow(*vec, *cap);
-            }
-            (*vec)[(*n)++] = b;
+        if (sig) {
+            emit_valtype(c, tn, sig);
+            (*count)++;
         }
-        fc_add_local(f, k->atom, b);
-        if (is_param) f->n_params++;
+        if (f) {
+            uint8_t *tb;
+            size_t tl;
+            valtype_bytes(c, tn, &tb, &tl);
+            fc_add_local(f, k->atom, tb, tl);
+            if (is_param) f->n_params++;
+        }
         return;
     }
     for (; k; k = k->next) {
-        uint8_t b = valtype_byte(c, k);
-        if (vec) {
-            if (*n == *cap) {
-                *cap = *cap ? *cap * 2 : 4;
-                *vec = xgrow(*vec, *cap);
-            }
-            (*vec)[(*n)++] = b;
+        if (sig) {
+            emit_valtype(c, k, sig);
+            (*count)++;
         }
-        fc_add_local(f, NULL, b);
-        if (is_param) f->n_params++;
+        if (f) {
+            uint8_t *tb;
+            size_t tl;
+            valtype_bytes(c, k, &tb, &tl);
+            fc_add_local(f, NULL, tb, tl);
+            if (is_param) f->n_params++;
+        }
     }
+}
+
+/* Count the params declared in a (func ...) comptype node. */
+static size_t count_comptype_params(const SExpr *func) {
+    size_t n = 0;
+    for (const SExpr *k = func->first->next; k; k = k->next) {
+        if (!(head(k) && strcmp(head(k), "param") == 0)) continue;
+        const SExpr *p = k->first->next;
+        if (p && is_atom(p) && p->atom[0] == '$')
+            n++;
+        else
+            for (; p; p = p->next) n++;
+    }
+    return n;
 }
 
 static void parse_func(Ctx *c, const SExpr *fn, Func *out) {
     memset(out, 0, sizeof *out);
-    size_t pcap = 0, rcap = 0;
+    Buf params, results;
+    buf_init(&params);
+    buf_init(&results);
+    size_t np = 0, nr = 0;
     int body_started = 0;
     for (const SExpr *k = fn->first->next; k; k = k->next) {
         if (!body_started && is_atom(k) && k->atom[0] == '$') {
@@ -1022,30 +1355,53 @@ static void parse_func(Ctx *c, const SExpr *fn, Func *out) {
             out->export_len = s->atom_len;
             continue;
         }
+        if (!body_started && h && strcmp(h, "type") == 0) {
+            out->has_type_ref = 1;
+            out->type_ref = resolve_type(c, k->first->next);
+            continue;
+        }
         if (!body_started && h && strcmp(h, "param") == 0) {
-            collect_locals(c, k, &out->fc, &out->sig.params, &out->sig.n_params, &pcap, 1);
+            collect_group(c, k, &params, &np, &out->fc, 1);
             continue;
         }
         if (!body_started && h && strcmp(h, "result") == 0) {
-            for (const SExpr *r = k->first->next; r; r = r->next) {
-                if (out->sig.n_results == rcap) {
-                    rcap = rcap ? rcap * 2 : 4;
-                    out->sig.results = xgrow(out->sig.results, rcap);
-                }
-                out->sig.results[out->sig.n_results++] = valtype_byte(c, r);
-            }
+            collect_group(c, k, &results, &nr, NULL, 0);
             continue;
         }
         if (!body_started && h && strcmp(h, "local") == 0) {
-            collect_locals(c, k, &out->fc, NULL, NULL, NULL, 0);
+            collect_group(c, k, NULL, NULL, &out->fc, 0);
             continue;
         }
-        if (!body_started && h && strcmp(h, "type") == 0) {
-            fail(c, "(type ...) references are not supported yet");
-        }
-        /* First non-meta node: the body begins here. */
         body_started = 1;
         if (!out->body_first) out->body_first = k;
+    }
+
+    /* Finalize the inline signature (kept even when (type $x) is used, so the
+     * func can be interned if no declared type matches). */
+    out->sig.n_params = np;
+    out->sig.params_len = params.len;
+    out->sig.params = xreserve(params.len ? params.len : 1);
+    memcpy(out->sig.params, params.data, params.len);
+    out->sig.n_results = nr;
+    out->sig.results_len = results.len;
+    out->sig.results = xreserve(results.len ? results.len : 1);
+    memcpy(out->sig.results, results.data, results.len);
+    buf_free(&params);
+    buf_free(&results);
+
+    /* If a (type $x) func omits its (param ...) list, recover the param count
+     * from the declared type so declared locals are indexed after the params. */
+    if (out->has_type_ref && np == 0 && out->type_ref < c->n_decl_types) {
+        const SExpr *ct = c->decls[out->type_ref].comptype;
+        if (ct && head(ct) && strcmp(head(ct), "func") == 0) {
+            size_t cnt = count_comptype_params(ct);
+            for (size_t i = 0; i < cnt; i++) {
+                uint8_t *ph = xreserve(1);
+                ph[0] = 0x7f; /* placeholder; param types aren't re-emitted */
+                fc_add_local(&out->fc, NULL, ph, 1);
+                out->fc.n_params++;
+            }
+        }
     }
 }
 
@@ -1053,7 +1409,8 @@ static void parse_func(Ctx *c, const SExpr *fn, Func *out) {
 
 typedef struct {
     const char *name; /* $id or NULL */
-    uint8_t type;     /* value type byte */
+    uint8_t *type;    /* encoded value-type bytes (owned) */
+    size_t type_len;
     int is_mut;
     const SExpr *init; /* init const-expression instruction node */
 } Global;
@@ -1068,9 +1425,9 @@ static void parse_global(Ctx *c, const SExpr *g, Global *out) {
     if (!k) fail(c, "global needs a type");
     if (head(k) && strcmp(head(k), "mut") == 0) {
         out->is_mut = 1;
-        out->type = valtype_byte(c, k->first->next);
+        valtype_bytes(c, k->first->next, &out->type, &out->type_len);
     } else {
-        out->type = valtype_byte(c, k);
+        valtype_bytes(c, k, &out->type, &out->type_len);
     }
     k = k->next;
     if (!k) fail(c, "global needs an init expression");
@@ -1088,7 +1445,8 @@ static void prewalk_instr(Ctx *c, const SExpr *n) {
         if (k && is_atom(k) && k->atom[0] == '$') k = k->next;
         BlockType bt;
         parse_blocktype(c, k, &bt);
-        if (bt.np > 0 || bt.nr > 1) sig_intern(c->sigs, bt.params, bt.np, bt.results, bt.nr);
+        if (!bt.has_type && (bt.np > 0 || bt.nr > 1))
+            sig_intern(c->sigs, bt.params, bt.params_len, bt.np, bt.results, bt.results_len, bt.nr);
     }
     for (const SExpr *k = n->first ? n->first->next : NULL; k; k = k->next)
         if (k->is_list) prewalk_instr(c, k);
@@ -1115,9 +1473,12 @@ static void encode_code(Ctx *c, Func *fn, Buf *code) {
     size_t groups = 0;
     for (size_t i = first_local; i < fn->fc.n_locals;) {
         size_t j = i + 1;
-        while (j < fn->fc.n_locals && fn->fc.locals[j].type == fn->fc.locals[i].type) j++;
+        while (j < fn->fc.n_locals && fn->fc.locals[j].type_len == fn->fc.locals[i].type_len &&
+               memcmp(fn->fc.locals[j].type, fn->fc.locals[i].type, fn->fc.locals[i].type_len) ==
+                   0)
+            j++;
         buf_uleb(&locals, j - i);
-        buf_byte(&locals, fn->fc.locals[i].type);
+        buf_bytes(&locals, fn->fc.locals[i].type, fn->fc.locals[i].type_len);
         groups++;
         i = j;
     }
@@ -1139,39 +1500,211 @@ static void encode_code(Ctx *c, Func *fn, Buf *code) {
     buf_free(&body);
 }
 
+/* --- declared type parsing + encoding ---------------------------------- */
+
+/* Parse one (type $name <typedef>) node, where <typedef> is a comptype
+ * (struct/array/func) optionally wrapped in (sub [final] $super* <comptype>). */
+static void parse_decltype(Ctx *c, const SExpr *tn, DeclType *out) {
+    memset(out, 0, sizeof *out);
+    const SExpr *k = tn->first->next;
+    if (k && is_atom(k) && k->atom[0] == '$') {
+        out->name = k->atom;
+        k = k->next;
+    }
+    if (!k) fail(c, "type needs a definition");
+    if (head(k) && strcmp(head(k), "sub") == 0) {
+        out->has_sub = 1;
+        const SExpr *s = k->first->next;
+        if (atom_eq(s, "final")) {
+            out->is_final = 1;
+            s = s->next;
+        }
+        for (; s; s = s->next) {
+            if (is_atom(s) && s->atom[0] == '$') {
+                if (out->n_supers >= 8) fail(c, "too many supertypes");
+                out->supers[out->n_supers++] = s;
+            } else {
+                out->comptype = s;
+            }
+        }
+        if (!out->comptype) fail(c, "(sub ...) without a type definition");
+    } else {
+        out->comptype = k;
+    }
+    /* Record struct field names so struct.get/set can resolve them by name. */
+    if (head(out->comptype) && strcmp(head(out->comptype), "struct") == 0) {
+        size_t cnt = 0;
+        for (const SExpr *fk = out->comptype->first->next; fk; fk = fk->next) {
+            if (!(head(fk) && strcmp(head(fk), "field") == 0)) continue;
+            const SExpr *p = fk->first->next;
+            if (p && is_atom(p) && p->atom[0] == '$')
+                cnt++;
+            else
+                for (; p; p = p->next) cnt++;
+        }
+        out->n_fields = cnt;
+        out->field_names = xreserve((cnt ? cnt : 1) * sizeof *out->field_names);
+        size_t fi = 0;
+        for (const SExpr *fk = out->comptype->first->next; fk; fk = fk->next) {
+            if (!(head(fk) && strcmp(head(fk), "field") == 0)) continue;
+            const SExpr *p = fk->first->next;
+            if (p && is_atom(p) && p->atom[0] == '$')
+                out->field_names[fi++] = p->atom;
+            else
+                for (; p; p = p->next) out->field_names[fi++] = NULL;
+        }
+    }
+}
+
+/* Emit one field type: a storage type plus a mutability byte. */
+static void emit_one_field(Ctx *c, const SExpr *ft, Buf *out) {
+    if (head(ft) && strcmp(head(ft), "mut") == 0) {
+        emit_storagetype(c, ft->first->next, out);
+        buf_byte(out, 1);
+    } else {
+        emit_storagetype(c, ft, out);
+        buf_byte(out, 0);
+    }
+}
+
+/* Emit the fields of one (field ...) group, counting them. */
+static void emit_field_group(Ctx *c, const SExpr *grp, Buf *out, size_t *nf) {
+    const SExpr *k = grp->first->next;
+    if (k && is_atom(k) && k->atom[0] == '$') {
+        emit_one_field(c, k->next, out);
+        (*nf)++;
+        return;
+    }
+    for (; k; k = k->next) {
+        emit_one_field(c, k, out);
+        (*nf)++;
+    }
+}
+
+static void emit_comptype(Ctx *c, const SExpr *ct, Buf *out) {
+    const char *h = head(ct);
+    if (!h) fail(c, "invalid type definition");
+    if (strcmp(h, "func") == 0) {
+        Buf p, r;
+        buf_init(&p);
+        buf_init(&r);
+        size_t np = 0, nr = 0;
+        for (const SExpr *k = ct->first->next; k; k = k->next) {
+            const char *kh = head(k);
+            if (kh && strcmp(kh, "param") == 0)
+                collect_group(c, k, &p, &np, NULL, 0);
+            else if (kh && strcmp(kh, "result") == 0)
+                collect_group(c, k, &r, &nr, NULL, 0);
+        }
+        buf_byte(out, 0x60);
+        buf_uleb(out, np);
+        buf_append(out, &p);
+        buf_uleb(out, nr);
+        buf_append(out, &r);
+        buf_free(&p);
+        buf_free(&r);
+    } else if (strcmp(h, "struct") == 0) {
+        Buf fields;
+        buf_init(&fields);
+        size_t nf = 0;
+        for (const SExpr *k = ct->first->next; k; k = k->next)
+            if (head(k) && strcmp(head(k), "field") == 0) emit_field_group(c, k, &fields, &nf);
+        buf_byte(out, 0x5f);
+        buf_uleb(out, nf);
+        buf_append(out, &fields);
+        buf_free(&fields);
+    } else if (strcmp(h, "array") == 0) {
+        buf_byte(out, 0x5e);
+        emit_one_field(c, ct->first->next, out);
+    } else {
+        fail(c, "unsupported type definition '%s'", h);
+    }
+}
+
+static void emit_subtype(Ctx *c, const DeclType *d, Buf *out) {
+    if (d->has_sub) {
+        buf_byte(out, d->is_final ? 0x4f : 0x50);
+        buf_uleb(out, d->n_supers);
+        for (size_t i = 0; i < d->n_supers; i++) buf_uleb(out, resolve_type(c, d->supers[i]));
+    }
+    emit_comptype(c, d->comptype, out);
+}
+
 /* --- top-level assembly ------------------------------------------------ */
+
+/* A rectype entry in the type section: either an explicit rec group or a
+ * single standalone type, spanning [start, start+count) declared indices. */
+typedef struct {
+    int is_rec;
+    size_t start, count;
+} TypeGroup;
 
 static int assemble(Ctx *c, const SExpr *module, uint8_t **out_bytes, size_t *out_len) {
     if (!module || !atom_eq(module->first, "module"))
         fail(c, "expected a top-level (module ...)");
 
-    /* Collect functions and globals (in source order within each kind). */
     Func *funcs = NULL;
     size_t n_funcs = 0, cap_funcs = 0;
     Global *globals = NULL;
     size_t n_globals = 0, cap_globals = 0;
+    DeclType *decls = NULL;
+    size_t n_decls = 0, cap_decls = 0;
+    TypeGroup *groups = NULL;
+    size_t n_groups = 0, cap_groups = 0;
     SigTable sigs = {0};
     c->sigs = &sigs;
 
+#define PUSH(arr, n, cap, init)                          \
+    do {                                                 \
+        if ((n) == (cap)) {                              \
+            (cap) = (cap) ? (cap) * 2 : (init);          \
+            (arr) = xgrow((arr), (cap) * sizeof *(arr)); \
+        }                                                \
+    } while (0)
+
+    /* Pass A: declared types (so funcs/globals/bodies can resolve them). */
+    for (const SExpr *k = module->first->next; k; k = k->next) {
+        const char *h = head(k);
+        if (h && strcmp(h, "type") == 0) {
+            PUSH(decls, n_decls, cap_decls, 8);
+            PUSH(groups, n_groups, cap_groups, 8);
+            groups[n_groups++] = (TypeGroup){.is_rec = 0, .start = n_decls, .count = 1};
+            parse_decltype(c, k, &decls[n_decls++]);
+        } else if (h && strcmp(h, "rec") == 0) {
+            size_t start = n_decls;
+            for (const SExpr *t = k->first->next; t; t = t->next) {
+                if (!(head(t) && strcmp(head(t), "type") == 0)) fail(c, "(rec ...) holds types");
+                PUSH(decls, n_decls, cap_decls, 8);
+                parse_decltype(c, t, &decls[n_decls++]);
+            }
+            PUSH(groups, n_groups, cap_groups, 8);
+            groups[n_groups++] = (TypeGroup){.is_rec = 1, .start = start, .count = n_decls - start};
+        }
+    }
+    c->decls = decls;
+    c->n_decl_types = n_decls;
+
+    /* Pass B: functions and globals. */
     for (const SExpr *k = module->first->next; k; k = k->next) {
         const char *h = head(k);
         if (h && strcmp(h, "func") == 0) {
-            if (n_funcs == cap_funcs) {
-                cap_funcs = cap_funcs ? cap_funcs * 2 : 8;
-                funcs = xgrow(funcs, cap_funcs * sizeof *funcs);
-            }
-            parse_func(c, k, &funcs[n_funcs]);
-            funcs[n_funcs].type_index =
-                sig_intern(&sigs, funcs[n_funcs].sig.params, funcs[n_funcs].sig.n_params,
-                           funcs[n_funcs].sig.results, funcs[n_funcs].sig.n_results);
-            n_funcs++;
+            PUSH(funcs, n_funcs, cap_funcs, 8);
+            Func *fn = &funcs[n_funcs++];
+            parse_func(c, k, fn);
+            fn->type_index = fn->has_type_ref
+                                 ? fn->type_ref
+                                 : (uint32_t)(n_decls + sig_intern(&sigs, fn->sig.params,
+                                                                   fn->sig.params_len,
+                                                                   fn->sig.n_params, fn->sig.results,
+                                                                   fn->sig.results_len,
+                                                                   fn->sig.n_results));
         } else if (h && strcmp(h, "global") == 0) {
-            if (n_globals == cap_globals) {
-                cap_globals = cap_globals ? cap_globals * 2 : 8;
-                globals = xgrow(globals, cap_globals * sizeof *globals);
-            }
-            parse_global(c, k, &globals[n_globals]);
-            n_globals++;
+            PUSH(globals, n_globals, cap_globals, 8);
+            parse_global(c, k, &globals[n_globals++]);
+        } else if (h && strcmp(h, "type") == 0) {
+            continue; /* handled in pass A */
+        } else if (h && strcmp(h, "rec") == 0) {
+            continue;
         } else if (h) {
             fail(c, "unsupported module field '%s'", h);
         } else {
@@ -1179,7 +1712,7 @@ static int assemble(Ctx *c, const SExpr *module, uint8_t **out_bytes, size_t *ou
         }
     }
 
-    /* Build name -> index tables for the body encoder. */
+    /* Name -> index tables for the body encoder. */
     const char **func_names = xreserve((n_funcs ? n_funcs : 1) * sizeof *func_names);
     for (size_t i = 0; i < n_funcs; i++) func_names[i] = funcs[i].name;
     const char **global_names = xreserve((n_globals ? n_globals : 1) * sizeof *global_names);
@@ -1193,16 +1726,26 @@ static int assemble(Ctx *c, const SExpr *module, uint8_t **out_bytes, size_t *ou
     for (size_t i = 0; i < n_funcs; i++)
         for (const SExpr *k = funcs[i].body_first; k; k = k->next) prewalk_instr(c, k);
 
-    /* Type section (id 1). */
+    /* Type section (id 1): declared rectypes, then synthesized func types. */
     Buf types;
     buf_init(&types);
-    buf_uleb(&types, sigs.n);
+    buf_uleb(&types, n_groups + sigs.n);
+    for (size_t g = 0; g < n_groups; g++) {
+        if (groups[g].is_rec) {
+            buf_byte(&types, 0x4e);
+            buf_uleb(&types, groups[g].count);
+            for (size_t i = groups[g].start; i < groups[g].start + groups[g].count; i++)
+                emit_subtype(c, &decls[i], &types);
+        } else {
+            emit_subtype(c, &decls[groups[g].start], &types);
+        }
+    }
     for (size_t i = 0; i < sigs.n; i++) {
-        buf_byte(&types, 0x60); /* func */
+        buf_byte(&types, 0x60); /* func (final, no supertype) */
         buf_uleb(&types, sigs.sigs[i].n_params);
-        buf_bytes(&types, sigs.sigs[i].params, sigs.sigs[i].n_params);
+        buf_bytes(&types, sigs.sigs[i].params, sigs.sigs[i].params_len);
         buf_uleb(&types, sigs.sigs[i].n_results);
-        buf_bytes(&types, sigs.sigs[i].results, sigs.sigs[i].n_results);
+        buf_bytes(&types, sigs.sigs[i].results, sigs.sigs[i].results_len);
     }
 
     /* Function section (id 3). */
@@ -1217,7 +1760,7 @@ static int assemble(Ctx *c, const SExpr *module, uint8_t **out_bytes, size_t *ou
     buf_uleb(&globalsec, n_globals);
     FuncCtx no_locals = {0};
     for (size_t i = 0; i < n_globals; i++) {
-        buf_byte(&globalsec, globals[i].type);
+        buf_bytes(&globalsec, globals[i].type, globals[i].type_len);
         buf_byte(&globalsec, globals[i].is_mut ? 1 : 0);
         encode_instr(c, &no_locals, globals[i].init, &globalsec);
         buf_byte(&globalsec, 0x0b); /* end */
@@ -1266,15 +1809,21 @@ static int assemble(Ctx *c, const SExpr *module, uint8_t **out_bytes, size_t *ou
     for (size_t i = 0; i < n_funcs; i++) {
         free(funcs[i].sig.params);
         free(funcs[i].sig.results);
+        for (size_t j = 0; j < funcs[i].fc.n_locals; j++) free(funcs[i].fc.locals[j].type);
         free(funcs[i].fc.locals);
         free(funcs[i].fc.labels);
     }
+    for (size_t i = 0; i < n_globals; i++) free(globals[i].type);
+    for (size_t i = 0; i < n_decls; i++) free((void *)decls[i].field_names);
     free(funcs);
     free(globals);
+    free(decls);
+    free(groups);
     free(func_names);
     free(global_names);
     sig_table_free(&sigs);
     return 0;
+#undef PUSH
 }
 
 /* --- public entry point ------------------------------------------------ */
