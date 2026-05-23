@@ -288,11 +288,6 @@
     <input type="checkbox" id="treeshake" style="vertical-align:middle">
     tree-shake
   </label>
-  <label style="margin-left:.25em;font-size:.85em;color:#888;cursor:pointer"
-         title="Run Binaryen's -Oz pass over the module wat2wasm produced (optimization only; assembly is still done in-page). Big win paired with tree-shake. Loads Binaryen from a CDN on first use.">
-    <input type="checkbox" id="wasmopt" style="vertical-align:middle">
-    wasm-opt -Oz
-  </label>
   <span id="status" style="color:#888"></span>
   <button id="theme-toggle" style="margin-left:auto"
           title="Toggle Catppuccin Mocha (dark) / Latte (light)">
@@ -316,7 +311,7 @@
 </main>
 
 <footer>
-  Pipeline: <code>Lua → lua2wasm (in WASM) → WAT → wat2wasm → [wasm-opt] → WASM-GC → execute</code>
+  Pipeline: <code>Lua → lua2wasm (in WASM) → WAT → wat2wasm → WASM-GC → execute</code>
   · Runs in any current browser (Chrome 137+, Firefox 131+, Safari 18.4+).
   · color theme by <a href="https://catppuccin.com" target="_blank" rel="noopener">catppuccin.com</a>
   · build <a id="build-hash" href="https://github.com/rhmoller/lua2wasm/commits/main" target="_blank" rel="noopener"><code>dev</code></a>
@@ -896,35 +891,6 @@ function watToWasm(wat) {
   }
 }
 
-/* ----- optional -Oz optimization (Binaryen, lazy-loaded) -----
- * wat2wasm assembles; Binaryen is used only to optimize the module it
- * produced. Loaded from a CDN on first use so the default path stays
- * dependency-free. */
-const wasmOptCB = document.getElementById("wasmopt");
-let binaryenP = null;
-async function optimizeWasm(bytes) {
-  if (!binaryenP) {
-    const prev = status.textContent;
-    status.textContent = "loading binaryen…";
-    binaryenP = import("https://cdn.jsdelivr.net/npm/binaryen@121.0.0/index.js")
-      .then(m => m.default);
-    try {
-      await binaryenP;
-    } finally {
-      status.textContent = prev; /* restore "ready …"; don't leave the spinner up */
-    }
-  }
-  const bin = await binaryenP;
-  bin.setOptimizeLevel(2);
-  bin.setShrinkLevel(2);
-  const mod = bin.readBinary(bytes);
-  mod.setFeatures(bin.Features.All);
-  mod.optimize();
-  const out = mod.emitBinary();
-  mod.dispose();
-  return out;
-}
-
 /* ----- runtime host ----- */
 let curInstance;
 const helpers = makeHelpers({ getInstance: () => curInstance, formatFloat, cFormatG });
@@ -955,10 +921,8 @@ async function run() {
   const t1 = performance.now();
 
   let bytes;
-  try {
-    bytes = watToWasm(wat);
-    if (wasmOptCB && wasmOptCB.checked) bytes = await optimizeWasm(bytes);
-  } catch (e) { logLine("ERROR (assemble): " + e.message, "err"); return; }
+  try { bytes = watToWasm(wat); }
+  catch (e) { logLine("ERROR (assemble): " + e.message, "err"); return; }
   const t2 = performance.now();
 
   try {
