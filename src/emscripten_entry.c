@@ -96,7 +96,7 @@ EMSCRIPTEN_KEEPALIVE
 uint8_t *lua2wasm_assemble(const char *wat, int *out_len, char *err, int errcap) {
     uint8_t *bytes = NULL;
     size_t n = 0;
-    if (wat_assemble(wat, strlen(wat), &bytes, &n, err, (size_t)errcap) != 0) {
+    if (wat_assemble(wat, strlen(wat), 1 /* dce */, &bytes, &n, err, (size_t)errcap) != 0) {
         if (out_len) *out_len = 0;
         return NULL;
     }

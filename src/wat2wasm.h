@@ -19,11 +19,15 @@
 /* Assemble `wat` (a NUL-terminated module in text format; `wat_len` is its
  * length, excluding the terminator) into a binary wasm module.
  *
+ * When `dce` is non-zero, functions not reachable from the module's exports or
+ * global initializers (following call / ref.func edges) are dropped — a
+ * behavior-preserving size optimization.
+ *
  * On success: returns 0, sets *out_bytes to a heap buffer (caller frees with
  * free()) and *out_len to its length.
  * On failure: returns non-zero and writes a diagnostic into `err`
  * (NUL-terminated, truncated to errcap); the out-params are untouched. */
-int wat_assemble(const char *wat, size_t wat_len, uint8_t **out_bytes,
+int wat_assemble(const char *wat, size_t wat_len, int dce, uint8_t **out_bytes,
                  size_t *out_len, char *err, size_t errcap);
 
 #endif

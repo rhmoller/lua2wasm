@@ -34,6 +34,7 @@ function assembleWith(bin, args, wat) {
 }
 
 const ours = (wat) => assembleWith(WAT2WASM, [], wat);
+const oursDce = (wat) => assembleWith(WAT2WASM, ["--dce"], wat);
 const reference = (wat) =>
   assembleWith(WASM_AS, ["--all-features", "--disable-custom-descriptors"], wat);
 
@@ -450,4 +451,44 @@ test("passive data + array.new_data", async () => {
                   (array.get_u $bytes (local.get $a) (i32.const 3)))))`,
     (e, who) => assert.equal(e.f(), 5, who),
   );
+});
+
+// --- dead-code elimination (--dce) -------------------------------------
+
+test("dce removes an unreachable function", async () => {
+  const wat = `(module
+     (func (export "f") (result i32) (i32.const 1))
+     (func $dead (result i32) (i32.const 2)))`;
+  const plain = ours(wat);
+  const dced = oursDce(wat);
+  assert.ok(dced.length < plain.length, "dce output should be smaller");
+  assert.equal((await instantiate(dced)).f(), 1);
+  assert.equal((await instantiate(plain)).f(), 1);
+});
+
+test("dce keeps functions reached indirectly via call_ref/ref.func", async () => {
+  const wat = `(module
+     (type $t (func (result i32)))
+     (func $g (result i32) (i32.const 42))
+     (func (export "f") (result i32) (call_ref $t (ref.func $g))))`;
+  assert.equal((await instantiate(oursDce(wat))).f(), 42);
+});
+
+test("dce keeps functions rooted by a global initializer", async () => {
+  const wat = `(module
+     (type $t (func (result i32)))
+     (func $g (result i32) (i32.const 7))
+     (global $cl (ref $t) (ref.func $g))
+     (func (export "f") (result i32) (call_ref $t (global.get $cl))))`;
+  assert.equal((await instantiate(oursDce(wat))).f(), 7);
+});
+
+test("dce keeps a transitive callee but drops its unused sibling", async () => {
+  const wat = `(module
+     (func $helper (result i32) (i32.const 9))
+     (func $unused (result i32) (i32.const 8))
+     (func (export "f") (result i32) (call $helper)))`;
+  const dced = oursDce(wat);
+  assert.equal((await instantiate(dced)).f(), 9);
+  assert.ok(dced.length < ours(wat).length, "dce should drop $unused");
 });

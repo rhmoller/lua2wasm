@@ -249,6 +249,13 @@ Requirements (required vs optional):
 ./build/lua2wasm input.lua -o output.wasm   # binary module (use -o output.wat for text)
 ```
 
+`-o .wasm` output runs **dead-code elimination** by default — prelude functions
+and globals the program can't reach are dropped (behavior-preserving). Add
+`--tree-shake` to also prune builtins the program never names literally, which
+shrinks modules dramatically (e.g. `print("hi")`: 42 KB → ~9 KB) at the cost of
+dynamic `_G["name"]` lookups of un-named builtins returning nil. `--no-dce`
+disables the DCE pass.
+
 Run under Node:
 
 ```sh
@@ -332,7 +339,7 @@ anything large.
 4. Dynamic error messages with the offending value embedded (e.g. `"invalid format option 'r'"` instead of just `"invalid format"`).
 5. Coroutines — blocked on the WASM stack-switching proposal landing in browsers.
 6. Source maps so DevTools can step from compiled WASM back into Lua.
-7. An optimization pass over the assembled module in the *CLI*. The CLI assembles with the built-in `wat2wasm` and stops there — no optimizer runs. (The playground offers an optional Binaryen `-Oz` pass, lazy-loaded only when the `wasm-opt` toggle is on, over the bytes `wat2wasm` produced.) A built-in native pass would let the CLI shrink output without an external dependency.
+7. A more aggressive size optimizer. `-o .wasm` already runs dead-code elimination (functions + globals), and `--tree-shake` prunes unused builtins, but there's no instruction-level optimization or inlining like Binaryen's `wasm-opt -Oz` (which the playground still offers as an optional pass). A built-in native pass would close the remaining gap without an external dependency.
 
 ## Contributing
 

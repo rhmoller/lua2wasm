@@ -207,7 +207,20 @@ typedef struct {
     const DeclType *decls;
     size_t n_decl_types;
     struct SigTable *sigs; /* synthesized func/block signature types */
+    /* dead-code elimination: when non-NULL, map an old function/global index to
+     * its index in the pruned output. Applied wherever such an index is
+     * emitted (calls, ref.func, global.get/set, exports, elem). */
+    const uint32_t *func_remap;
+    const uint32_t *global_remap;
 } Ctx;
+
+/* Apply the DCE remaps to a function / global index, if active. */
+static uint32_t map_func(Ctx *c, uint32_t old) {
+    return c->func_remap ? c->func_remap[old] : old;
+}
+static uint32_t map_global(Ctx *c, uint32_t old) {
+    return c->global_remap ? c->global_remap[old] : old;
+}
 
 static void fail(Ctx *c, const char *fmt, ...) {
     if (c->err && c->errcap) {
@@ -1099,7 +1112,7 @@ static void encode_instr(Ctx *c, FuncCtx *f, const SExpr *n, Buf *out) {
         uint32_t idx = resolve_index(c, c->global_names, c->n_global_names, arg1, "global");
         encode_operands(c, f, arg1->next, out);
         buf_byte(out, op[7] == 'g' ? 0x23 : 0x24);
-        buf_uleb(out, idx);
+        buf_uleb(out, map_global(c, idx));
         return;
     }
 
@@ -1108,7 +1121,7 @@ static void encode_instr(Ctx *c, FuncCtx *f, const SExpr *n, Buf *out) {
         uint32_t idx = resolve_index(c, c->func_names, c->n_func_names, arg1, "function");
         encode_operands(c, f, arg1->next, out);
         buf_byte(out, op[0] == 'c' ? 0x10 : 0x12);
-        buf_uleb(out, idx);
+        buf_uleb(out, map_func(c, idx));
         return;
     }
 
@@ -1276,7 +1289,7 @@ static void encode_instr(Ctx *c, FuncCtx *f, const SExpr *n, Buf *out) {
     if (strcmp(op, "ref.func") == 0) {
         uint32_t fi = resolve_index(c, c->func_names, c->n_func_names, arg1, "function");
         buf_byte(out, 0xd2);
-        buf_uleb(out, fi);
+        buf_uleb(out, map_func(c, fi));
         return;
     }
     if (strcmp(op, "ref.is_null") == 0) {
@@ -1819,6 +1832,46 @@ static void collect_reffunc(Ctx *c, const SExpr *n, uint8_t *declared) {
         if (k->is_list) collect_reffunc(c, k, declared);
 }
 
+/* DCE reachability worklist: a single index space, [0, n_func_names) for
+ * functions and [n_func_names, ...) for globals. */
+static void dce_mark(Ctx *c, uint8_t *reach, uint32_t *stack, size_t *sp, uint32_t e) {
+    if (!reach[e]) {
+        reach[e] = 1;
+        stack[(*sp)++] = e;
+    }
+}
+
+/* Mark the functions and globals referenced anywhere in an instruction
+ * sequence (folded or plain). A direct call definitely runs its target; a
+ * ref.func takes a function's address (reachable via call_ref); global.get /
+ * global.set reference a global — all keep the target. */
+static void dce_scan(Ctx *c, const SExpr *seq, uint8_t *reach, uint32_t *stack, size_t *sp) {
+    uint32_t gbase = (uint32_t)c->n_func_names;
+    for (const SExpr *k = seq; k; k = k->next) {
+        if (k->is_list) {
+            const char *op = head(k);
+            const SExpr *imm = k->first ? k->first->next : NULL;
+            if (op && (strcmp(op, "call") == 0 || strcmp(op, "return_call") == 0 ||
+                       strcmp(op, "ref.func") == 0))
+                dce_mark(c, reach, stack, sp,
+                         resolve_index(c, c->func_names, c->n_func_names, imm, "function"));
+            else if (op && (strcmp(op, "global.get") == 0 || strcmp(op, "global.set") == 0))
+                dce_mark(c, reach, stack, sp,
+                         gbase + resolve_index(c, c->global_names, c->n_global_names, imm, "global"));
+            dce_scan(c, imm, reach, stack, sp);
+        } else if (!k->is_string && k->next) {
+            if (strcmp(k->atom, "call") == 0 || strcmp(k->atom, "return_call") == 0 ||
+                strcmp(k->atom, "ref.func") == 0)
+                dce_mark(c, reach, stack, sp,
+                         resolve_index(c, c->func_names, c->n_func_names, k->next, "function"));
+            else if (strcmp(k->atom, "global.get") == 0 || strcmp(k->atom, "global.set") == 0)
+                dce_mark(c, reach, stack, sp,
+                         gbase +
+                             resolve_index(c, c->global_names, c->n_global_names, k->next, "global"));
+        }
+    }
+}
+
 /* --- section assembly -------------------------------------------------- */
 
 static void put_section(Buf *module, uint8_t id, const Buf *body) {
@@ -2006,7 +2059,7 @@ typedef struct {
     size_t start, count;
 } TypeGroup;
 
-static int assemble(Ctx *c, const SExpr *module, uint8_t **out_bytes, size_t *out_len) {
+static int assemble(Ctx *c, const SExpr *module, int dce, uint8_t **out_bytes, size_t *out_len) {
     if (!module || !atom_eq(module->first, "module"))
         fail(c, "expected a top-level (module ...)");
 
@@ -2130,6 +2183,51 @@ static int assemble(Ctx *c, const SExpr *module, uint8_t **out_bytes, size_t *ou
     c->data_names = data_names;
     c->n_data_names = n_datas;
 
+    /* Dead-code elimination over a joint function+global reachability. Roots
+     * are the exported functions; from there we follow call / ref.func edges
+     * (functions) and global.get / global.set edges (globals). A global is kept
+     * only if reachable code references it, so an unused builtin-closure global
+     * is dropped together with the function its initializer pins via ref.func.
+     * All imports are kept. The remaps renumber the survivors. The worklist
+     * index space is [0, n_all_funcs) for functions then globals after. */
+    uint8_t *reach = NULL;
+    uint32_t *func_remap = NULL;
+    uint32_t *global_remap = NULL;
+    if (dce) {
+        size_t universe = n_all_funcs + n_globals;
+        reach = xreserve(universe ? universe : 1);
+        memset(reach, 0, universe ? universe : 1);
+        uint32_t *stack = xreserve((universe ? universe : 1) * sizeof *stack);
+        size_t sp = 0;
+        for (size_t i = 0; i < n_funcs; i++)
+            if (funcs[i].export_name) dce_mark(c, reach, stack, &sp, (uint32_t)(n_imports + i));
+        while (sp) {
+            uint32_t e = stack[--sp];
+            if (e < n_all_funcs) {
+                if (e < n_imports) continue; /* imports have no body */
+                dce_scan(c, funcs[e - n_imports].body_first, reach, stack, &sp);
+            } else {
+                dce_scan(c, globals[e - n_all_funcs].init, reach, stack, &sp);
+            }
+        }
+        free(stack);
+        func_remap = xreserve((n_all_funcs ? n_all_funcs : 1) * sizeof *func_remap);
+        uint32_t nidx = 0;
+        for (size_t i = 0; i < n_imports; i++) func_remap[i] = nidx++;
+        for (size_t i = 0; i < n_funcs; i++) {
+            uint32_t old = (uint32_t)(n_imports + i);
+            func_remap[old] = reach[old] ? nidx++ : 0xffffffffu;
+        }
+        global_remap = xreserve((n_globals ? n_globals : 1) * sizeof *global_remap);
+        uint32_t gidx = 0;
+        for (size_t i = 0; i < n_globals; i++)
+            global_remap[i] = reach[n_all_funcs + i] ? gidx++ : 0xffffffffu;
+        c->func_remap = func_remap;
+        c->global_remap = global_remap;
+    }
+#define FUNC_LIVE(i)   (!dce || reach[n_imports + (i)])
+#define GLOBAL_LIVE(i) (!dce || reach[n_all_funcs + (i)])
+
     /* Intern block-signature types before emitting the type section. */
     for (size_t i = 0; i < n_funcs; i++)
         for (const SExpr *k = funcs[i].body_first; k; k = k->next) prewalk_instr(c, k);
@@ -2169,11 +2267,15 @@ static int assemble(Ctx *c, const SExpr *module, uint8_t **out_bytes, size_t *ou
         buf_uleb(&importsec, imports[i].type_index);
     }
 
-    /* Function section (id 3) — defined functions only. */
+    /* Function section (id 3) — live defined functions only. */
+    size_t n_live_funcs = 0;
+    for (size_t i = 0; i < n_funcs; i++)
+        if (FUNC_LIVE(i)) n_live_funcs++;
     Buf funcsec;
     buf_init(&funcsec);
-    buf_uleb(&funcsec, n_funcs);
-    for (size_t i = 0; i < n_funcs; i++) buf_uleb(&funcsec, funcs[i].type_index);
+    buf_uleb(&funcsec, n_live_funcs);
+    for (size_t i = 0; i < n_funcs; i++)
+        if (FUNC_LIVE(i)) buf_uleb(&funcsec, funcs[i].type_index);
 
     /* Tag section (id 13). */
     Buf tagsec;
@@ -2184,12 +2286,16 @@ static int assemble(Ctx *c, const SExpr *module, uint8_t **out_bytes, size_t *ou
         buf_uleb(&tagsec, tags[i].type_index);
     }
 
-    /* Global section (id 6). */
+    /* Global section (id 6) — live globals only. */
+    size_t n_live_globals = 0;
+    for (size_t i = 0; i < n_globals; i++)
+        if (GLOBAL_LIVE(i)) n_live_globals++;
     Buf globalsec;
     buf_init(&globalsec);
-    buf_uleb(&globalsec, n_globals);
+    buf_uleb(&globalsec, n_live_globals);
     FuncCtx no_locals = {0};
     for (size_t i = 0; i < n_globals; i++) {
+        if (!GLOBAL_LIVE(i)) continue;
         buf_bytes(&globalsec, globals[i].type, globals[i].type_len);
         buf_byte(&globalsec, globals[i].is_mut ? 1 : 0);
         encode_instr(c, &no_locals, globals[i].init, &globalsec);
@@ -2210,7 +2316,7 @@ static int assemble(Ctx *c, const SExpr *module, uint8_t **out_bytes, size_t *ou
         buf_uleb(&exports, funcs[i].export_len);
         buf_bytes(&exports, funcs[i].export_name, funcs[i].export_len);
         buf_byte(&exports, 0x00); /* func */
-        buf_uleb(&exports, (uint32_t)(n_imports + i));
+        buf_uleb(&exports, map_func(c, (uint32_t)(n_imports + i)));
     }
     for (size_t i = 0; i < n_tags; i++) {
         if (!tags[i].export_name) continue;
@@ -2236,6 +2342,11 @@ static int assemble(Ctx *c, const SExpr *module, uint8_t **out_bytes, size_t *ou
     for (size_t i = 0; i < n_funcs; i++)
         for (const SExpr *k = funcs[i].body_first; k; k = k->next) collect_reffunc(c, k, declared);
     for (size_t i = 0; i < n_globals; i++) collect_reffunc(c, globals[i].init, declared);
+    /* A dead function is never ref.func'd by surviving code, so drop it from
+     * the declarative segment too. */
+    if (dce)
+        for (size_t i = 0; i < n_all_funcs; i++)
+            if (!reach[i]) declared[i] = 0;
     size_t n_declared = 0;
     for (size_t i = 0; i < n_all_funcs; i++) n_declared += declared[i];
     Buf elemsec;
@@ -2246,7 +2357,7 @@ static int assemble(Ctx *c, const SExpr *module, uint8_t **out_bytes, size_t *ou
         buf_byte(&elemsec, 0x00); /* elemkind: funcref */
         buf_uleb(&elemsec, n_declared);
         for (size_t i = 0; i < n_all_funcs; i++)
-            if (declared[i]) buf_uleb(&elemsec, (uint32_t)i);
+            if (declared[i]) buf_uleb(&elemsec, map_func(c, (uint32_t)i));
     }
 
     /* Data count section (id 12) — required before code when array.new_data
@@ -2255,11 +2366,12 @@ static int assemble(Ctx *c, const SExpr *module, uint8_t **out_bytes, size_t *ou
     buf_init(&datacount);
     if (n_datas) buf_uleb(&datacount, n_datas);
 
-    /* Code section (id 10). */
+    /* Code section (id 10) — live functions only, matching the func section. */
     Buf code;
     buf_init(&code);
-    buf_uleb(&code, n_funcs);
-    for (size_t i = 0; i < n_funcs; i++) encode_code(c, &funcs[i], &code);
+    buf_uleb(&code, n_live_funcs);
+    for (size_t i = 0; i < n_funcs; i++)
+        if (FUNC_LIVE(i)) encode_code(c, &funcs[i], &code);
 
     /* Data section (id 11): passive segments. */
     Buf datasec;
@@ -2333,14 +2445,19 @@ static int assemble(Ctx *c, const SExpr *module, uint8_t **out_bytes, size_t *ou
     free(tag_names);
     free(data_names);
     free(declared);
+    free(reach);
+    free(func_remap);
+    free(global_remap);
     sig_table_free(&sigs);
     return 0;
 #undef PUSH
+#undef FUNC_LIVE
+#undef GLOBAL_LIVE
 }
 
 /* --- public entry point ------------------------------------------------ */
 
-int wat_assemble(const char *wat, size_t wat_len, uint8_t **out_bytes, size_t *out_len,
+int wat_assemble(const char *wat, size_t wat_len, int dce, uint8_t **out_bytes, size_t *out_len,
                  char *err, size_t errcap) {
     Ctx c;
     memset(&c, 0, sizeof c);
@@ -2360,7 +2477,7 @@ int wat_assemble(const char *wat, size_t wat_len, uint8_t **out_bytes, size_t *o
     skip_trivia(&c);
     if (c.pos < c.len) fail(&c, "unexpected content after top-level form");
 
-    int rc = assemble(&c, module, out_bytes, out_len);
+    int rc = assemble(&c, module, dce, out_bytes, out_len);
     arena_free(&c.arena);
     return rc;
 }

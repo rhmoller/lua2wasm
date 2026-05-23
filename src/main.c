@@ -102,11 +102,14 @@ int main(int argc, char **argv) {
     const char *modules[MAX_MODULES];
     int n_modules = 0;
     int tree_shake = 0;
+    int no_dce = 0;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) {
             out = argv[++i];
         } else if (strcmp(argv[i], "--tree-shake") == 0) {
             tree_shake = 1;
+        } else if (strcmp(argv[i], "--no-dce") == 0) {
+            no_dce = 1;
         } else if (strcmp(argv[i], "-m") == 0 && i + 1 < argc) {
             if (n_modules >= MAX_MODULES) {
                 fprintf(stderr, "too many -m modules (max %d)\n", MAX_MODULES);
@@ -222,7 +225,7 @@ int main(int argc, char **argv) {
         uint8_t *bytes = NULL;
         size_t n = 0;
         char asm_err[512] = {0};
-        if (wat_assemble(wat, strlen(wat), &bytes, &n, asm_err, sizeof asm_err) != 0) {
+        if (wat_assemble(wat, strlen(wat), !no_dce, &bytes, &n, asm_err, sizeof asm_err) != 0) {
             fprintf(stderr, "%s\n", asm_err);
             return 1;
         }

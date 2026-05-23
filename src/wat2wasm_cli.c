@@ -64,9 +64,12 @@ static void usage(const char *prog) {
 int main(int argc, char **argv) {
     const char *in = NULL;
     const char *out = NULL;
+    int dce = 0;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) {
             out = argv[++i];
+        } else if (strcmp(argv[i], "--dce") == 0) {
+            dce = 1; /* drop functions unreachable from exports/globals */
         } else if (argv[i][0] == '-') {
             /* Ignore wasm-as-style flags (--all-features, etc.). */
             continue;
@@ -89,7 +92,7 @@ int main(int argc, char **argv) {
     uint8_t *bytes = NULL;
     size_t len = 0;
     char err[512] = {0};
-    if (wat_assemble(wat, wat_len, &bytes, &len, err, sizeof err) != 0) {
+    if (wat_assemble(wat, wat_len, dce, &bytes, &len, err, sizeof err) != 0) {
         fprintf(stderr, "%s: %s\n", in, err);
         free(wat);
         return 1;
