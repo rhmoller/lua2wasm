@@ -288,11 +288,6 @@
     <input type="checkbox" id="treeshake" style="vertical-align:middle">
     tree-shake
   </label>
-  <label style="margin-left:.25em;font-size:.85em;color:#888;cursor:pointer"
-         title="Run binaryen's -Oz pass after assembling. Big win when paired with tree-shake; modest savings alone. Costs ~100ms compile time.">
-    <input type="checkbox" id="wasmopt" style="vertical-align:middle">
-    wasm-opt -Oz
-  </label>
   <span id="status" style="color:#888"></span>
   <button id="theme-toggle" style="margin-left:auto"
           title="Toggle Catppuccin Mocha (dark) / Latte (light)">
@@ -316,7 +311,7 @@
 </main>
 
 <footer>
-  Pipeline: <code>Lua → lua2wasm (in WASM) → WAT → Binaryen → WASM-GC → execute</code>
+  Pipeline: <code>Lua → lua2wasm (in WASM) → WAT → wat2wasm → WASM-GC → execute</code>
   · Runs in any current browser (Chrome 137+, Firefox 131+, Safari 18.4+).
   · color theme by <a href="https://catppuccin.com" target="_blank" rel="noopener">catppuccin.com</a>
   · build <a id="build-hash" href="https://github.com/rhmoller/lua2wasm/commits/main" target="_blank" rel="noopener"><code>dev</code></a>
@@ -400,7 +395,6 @@ const luaHighlightStyle = HighlightStyle.define([
   { tag: t.invalid,                       color: CTP.red, textDecoration: "underline" },
 ]);
 import createLua2WasmModule       from "../build-em/lua2wasm.js";
-import binaryen                   from "https://cdn.jsdelivr.net/npm/binaryen@121.0.0/index.js";
 import { InMemoryFs }             from "https://esm.sh/just-bash@latest";
 import { MATH_FNS, MATH2_FNS,
          makeHelpers, BufferedFile,
@@ -865,6 +859,7 @@ status.textContent = "loading compiler…";
 const Mod = await createLua2WasmModule({});
 const compileFn   = Mod.cwrap("lua2wasm_compile",    "number", ["string"]);
 const compileExFn = Mod.cwrap("lua2wasm_compile_ex", "number", ["string", "number"]);
+const assembleFn  = Mod.cwrap("lua2wasm_assemble",   "number", ["string", "number", "number", "number"]);
 const freeFn      = Mod.cwrap("lua2wasm_free",       null,     ["number"]);
 const treeShakeCB = document.getElementById("treeshake");
 function luaToWat(source) {
@@ -876,22 +871,24 @@ function luaToWat(source) {
   return text;
 }
 
-/* ----- binaryen wat -> wasm ----- */
-status.textContent = "loading binaryen…";
-const bin = binaryen;     /* default export is the ready API */
-/* -Oz = optimize level 2 + shrink level 2. Set once globally; the
- * watToWasm path opts in per call via the wasm-opt checkbox. */
-bin.setOptimizeLevel(2);
-bin.setShrinkLevel(2);
-const wasmOptCB = document.getElementById("wasmopt");
+/* ----- wat -> wasm (built-in assembler, no Binaryen) ----- */
 function watToWasm(wat) {
-  const mod = bin.parseText(wat);
-  mod.setFeatures(bin.Features.All);
-  if (!mod.validate()) throw new Error("Binaryen validation failed");
-  if (wasmOptCB && wasmOptCB.checked) mod.optimize();
-  const bytes = mod.emitBinary();
-  mod.dispose();
-  return bytes;
+  const ERR_CAP = 512;
+  const lenPtr = Mod._malloc(4);
+  const errPtr = Mod._malloc(ERR_CAP);
+  try {
+    const ptr = assembleFn(wat, lenPtr, errPtr, ERR_CAP);
+    if (ptr === 0) throw new Error(Mod.UTF8ToString(errPtr) || "assembly failed");
+    /* Re-read HEAPU8 after the call (memory may have grown). */
+    const h = Mod.HEAPU8;
+    const len = h[lenPtr] | (h[lenPtr + 1] << 8) | (h[lenPtr + 2] << 16) | (h[lenPtr + 3] << 24);
+    const bytes = h.slice(ptr, ptr + len); /* copy out before freeing */
+    freeFn(ptr);
+    return bytes;
+  } finally {
+    Mod._free(lenPtr);
+    Mod._free(errPtr);
+  }
 }
 
 /* ----- runtime host ----- */

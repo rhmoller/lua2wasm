@@ -1,14 +1,16 @@
-/* Browser-side entry point: compile a Lua source string to a WAT text
- * string. Only built when targeting emscripten. */
+/* Browser-side entry points: compile a Lua source string to WAT text, and
+ * assemble WAT to a binary wasm module. Only built when targeting emscripten. */
 #ifdef __EMSCRIPTEN__
 
 #include "codegen.h"
 #include "lexer.h"
 #include "parser.h"
+#include "wat2wasm.h"
 #include "wat_builder.h"
 #include "xalloc.h"
 
 #include <emscripten.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -85,5 +87,21 @@ cleanup:
 
 EMSCRIPTEN_KEEPALIVE
 void lua2wasm_free(char *p) { free(p); }
+
+/* Assemble a WAT string into a binary wasm module using the built-in
+ * assembler (no Binaryen). On success returns a malloc'd byte buffer (free
+ * with lua2wasm_free) and writes its length to *out_len. On failure returns
+ * NULL, sets *out_len to 0, and writes a message into err (capacity errcap). */
+EMSCRIPTEN_KEEPALIVE
+uint8_t *lua2wasm_assemble(const char *wat, int *out_len, char *err, int errcap) {
+    uint8_t *bytes = NULL;
+    size_t n = 0;
+    if (wat_assemble(wat, strlen(wat), &bytes, &n, err, (size_t)errcap) != 0) {
+        if (out_len) *out_len = 0;
+        return NULL;
+    }
+    if (out_len) *out_len = (int)n;
+    return bytes;
+}
 
 #endif /* __EMSCRIPTEN__ */

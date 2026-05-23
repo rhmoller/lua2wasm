@@ -318,7 +318,7 @@ flowchart LR
 | `src/wat2wasm.{c,h}`     | Self-contained WAT→wasm binary assembler (library + standalone `wat2wasm` CLI; no Binaryen)      |
 | `src/emscripten_entry.c` | One-function entry point used when the compiler is itself compiled to WASM for the playground   |
 | `runtime/host.mjs`       | Reference host: instantiates a compiled module and renders `print` output                        |
-| `runtime/playground.html`| CodeMirror editor + in-browser compile + Binaryen.js wat→wasm + execute                          |
+| `runtime/playground.html`| CodeMirror editor + in-browser compile + built-in wat→wasm + execute                            |
 | `tests/`                 | µnit unit tests + bash end-to-end fixtures + the `wat2wasm` assembler harness (currently 131 in CTest, all green); `scripts/smoke-official-tests.sh` runs the AOT pipeline over every file in [`official-tests/lua-5.5.0-tests/`](https://www.lua.org/tests/) for a compatibility scorecard |
 
 ## Deferred / planned
