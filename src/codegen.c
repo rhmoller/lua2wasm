@@ -3746,7 +3746,7 @@ static void compute_live_set(const ParseResult *pr, int n_builtins,
      * iterator closures so callers get identity-stable iterators. Those
      * globals only exist when their builtin is live, and the prelude
      * body is always present in the binary (we don't drop unused
-     * prelude funcs), so wasm-as would reject an unresolved global.
+     * prelude funcs), so the assembler would reject an unresolved global.
      *
      * Force these three "iterator" builtins live unconditionally so the
      * singleton globals + their elem declares are always emitted,

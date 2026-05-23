@@ -15,8 +15,10 @@ ctest --test-dir build --output-on-failure # run the full suite (must be green)
 You need:
 - Clang 19+ (for C23 `#embed` of the runtime prelude)
 - CMake ≥ 3.25, Ninja or Make
-- [Binaryen](https://github.com/WebAssembly/binaryen)'s `wasm-as` on `$PATH`
 - Node 22+ for the host runner (`runtime/host.mjs`) and the playground
+- (optional) [Binaryen](https://github.com/WebAssembly/binaryen)'s `wasm-as`
+  — only used as a differential oracle by the `wat2wasm` tests; the compiler
+  ships its own WAT→wasm assembler
 
 Everything below is enforced by `ctest` — get to a green run before
 opening a PR.
@@ -82,8 +84,9 @@ No AI-attribution trailers (no `Co-Authored-By: Claude`).
 - `tests/test_lexer.c`, `tests/test_parser.c`, `tests/test_codegen.c`
   — µnit unit tests (positive cases and a growing set of negatives).
 - `tests/e2e/` — the data-driven end-to-end suite. `manifest.tsv` lists
-  `<name>\t<fixture>` rows; `run.sh` compiles each fixture (→ `wasm-as` →
-  Node) and diffs stdout against `tests/e2e/expected/<name>.txt`. CMake
+  `<name>\t<fixture>` rows; `run.sh` compiles each fixture straight to a
+  `.wasm` module, runs it under Node, and diffs stdout against
+  `tests/e2e/expected/<name>.txt`. CMake
   registers one `test_e2e_<name>` per row. Regenerate goldens after an
   intended output change with `tests/e2e/regen.sh`.
 - `tests/test_e2e_*.sh` — the handful of end-to-end tests that need a custom

@@ -48,9 +48,9 @@ project's signature constraint:
 
 - **Frontend in C23 with clang + CMake.** Tests via vendored µnit. Hand-rolled
   recursive-descent parser, no parser generator.
-- **Emit WAT text, post-process with Binaryen's `wasm-as`.** Human-readable
-  output makes everything debuggable; we can swap in a binary encoder later
-  behind the same builder API.
+- **Emit WAT text, then assemble it with our own `wat2wasm`.** Human-readable
+  output keeps everything debuggable; a self-contained WAT→wasm assembler
+  (`src/wat2wasm.c`) turns it into a binary module with no external toolchain.
 - **Static prelude.** Runtime helpers (`$lua_add`, `$lua_eq`, `$lua_concat`,
   string conversion, …) are written as WAT in `runtime/prelude.wat` and
   embedded via C23 `#embed`. They are *not* generated per program.
@@ -65,7 +65,7 @@ The fixture grows monotonically — new phases must not break old fixtures.
 ### Phase 1 — Hello world ✓ **done**
 
 Goal: prove the entire pipeline (lexer, parser, codegen, WAT emission,
-`wasm-as`, host runtime) for the smallest non-trivial program.
+`wat2wasm`, host runtime) for the smallest non-trivial program.
 
 - Fixture: `print(1 + 2)` → `3`
 - Stretch: just one expression, just one builtin.
@@ -180,7 +180,9 @@ Blocked on: WASM **stack-switching proposal** shipping in browsers
 - A CLI flag to embed the wasm + a tiny JS loader into a single HTML file
   ("ship a Lua script as a self-contained webpage").
 - A benchmark suite vs. reference Lua, vs. LuaJIT, vs. Fengari (Lua in JS).
-- A real binary-encoder backend that replaces the WAT/`wasm-as` pipeline.
+- A direct binary-encoder backend in codegen that bypasses the WAT text
+  intermediate entirely. (The built-in `wat2wasm` assembler already removed
+  the external `wasm-as` dependency; this would drop the text step too.)
 
 ## Success criteria
 

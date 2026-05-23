@@ -18,23 +18,26 @@ browser.
 in-browser editor that compiles and runs your Lua right on the page. No
 install needed.
 
-For local development the default flow needs **no Emscripten** — just
-`clang`, `cmake`, Binaryen's `wasm-as`, and Node ≥ 22.
+For local development the default flow needs **no Emscripten** and **no
+Binaryen** — just `clang`, `cmake`, and Node ≥ 22. The WAT→wasm assembler
+is built into the compiler.
 
 ```sh
 # 1. Build the compiler (a native binary)
 CC=clang cmake -S . -B build -G Ninja
 cmake --build build
 
-# 2. Compile a Lua program to a .wasm module
+# 2. Compile a Lua program straight to a .wasm module
 echo 'print("hello from " .. "lua2wasm")' > /tmp/hello.lua
-./build/lua2wasm /tmp/hello.lua -o /tmp/hello.wat
-wasm-as --all-features --disable-custom-descriptors -o /tmp/hello.wasm /tmp/hello.wat
+./build/lua2wasm /tmp/hello.lua -o /tmp/hello.wasm
 
 # 3. Run it
 node --experimental-wasm-exnref runtime/host.mjs /tmp/hello.wasm
 #   → hello from lua2wasm
 ```
+
+(Use `-o /tmp/hello.wat` to emit human-readable text instead; the standalone
+`wat2wasm` binary assembles `.wat` → `.wasm` if you want the two-step flow.)
 
 Or wrap that module up as a self-contained HTML page (no server needed) with
 [`scripts/package-html.sh`](scripts/package-html.sh) — see the
@@ -236,15 +239,14 @@ Requirements (required vs optional):
 |------------|----------|--------------------------------------------------------------------------------------------------------------------------------------|
 | `clang`    | ≥ 19     | building the native compiler binary (C23 `#embed` requires clang ≥ 19)                                                              |
 | `cmake`    | ≥ 3.25   | building the native compiler binary                                                                                                  |
-| `binaryen` | recent   | `wasm-as` for `.wat` → `.wasm`. We use Binaryen rather than wabt because as of mid-2026 wabt 1.0.39 doesn't accept modern GC text syntax (`anyref`, recursive `(ref null $t)`, etc.) |
 | `node`     | ≥ 22     | running compiled `.wasm` modules from the command line (Browser hosts work equivalently, no Node needed there)                       |
+| `binaryen` | recent   | **optional** — `wasm-as` is used only as a differential oracle by the `wat2wasm` unit tests; the compiler ships its own WAT→wasm assembler |
 | `emcc`     | ≥ 4.0    | **optional** — only for cross-compiling the compiler itself to WASM so the playground page can call it. Skip if you don't need the playground. |
 
 ## Using the CLI
 
 ```sh
-./build/lua2wasm input.lua -o output.wat
-wasm-as --all-features --disable-custom-descriptors -o output.wasm output.wat
+./build/lua2wasm input.lua -o output.wasm   # binary module (use -o output.wat for text)
 ```
 
 Run under Node:
@@ -291,7 +293,7 @@ flowchart LR
   src["Lua source"] --> lex[lexer]
   lex --> par[parser]
   par --> cg[codegen]
-  cg --> wa["wasm-as<br/>(Binaryen)"]
+  cg --> wa["wat2wasm<br/>(built-in assembler)"]
   wa --> out[".wasm"]
 
   prelude[("static WAT prelude<br/>type defs · runtime<br/>helpers · builtin<br/>closures · stdlib init")] -.embedded.-> cg
@@ -313,10 +315,11 @@ flowchart LR
 | `src/codegen.{c,h}`      | Emits WAT to a `WatBuilder`; embeds a static runtime prelude                                     |
 | `src/builtins.{c,h}`     | Single source of truth for builtin names → wasm function symbols                                 |
 | `src/wat_builder.{c,h}`  | Dynamic string buffer for WAT emission                                                            |
+| `src/wat2wasm.{c,h}`     | Self-contained WAT→wasm binary assembler (library + standalone `wat2wasm` CLI; no Binaryen)      |
 | `src/emscripten_entry.c` | One-function entry point used when the compiler is itself compiled to WASM for the playground   |
 | `runtime/host.mjs`       | Reference host: instantiates a compiled module and renders `print` output                        |
 | `runtime/playground.html`| CodeMirror editor + in-browser compile + Binaryen.js wat→wasm + execute                          |
-| `tests/`                 | µnit unit tests + bash end-to-end fixtures (currently 130 in CTest, all green); `scripts/smoke-official-tests.sh` runs the AOT pipeline over every file in [`official-tests/lua-5.5.0-tests/`](https://www.lua.org/tests/) for a compatibility scorecard |
+| `tests/`                 | µnit unit tests + bash end-to-end fixtures + the `wat2wasm` assembler harness (currently 131 in CTest, all green); `scripts/smoke-official-tests.sh` runs the AOT pipeline over every file in [`official-tests/lua-5.5.0-tests/`](https://www.lua.org/tests/) for a compatibility scorecard |
 
 ## Deferred / planned
 
@@ -329,7 +332,7 @@ anything large.
 4. Dynamic error messages with the offending value embedded (e.g. `"invalid format option 'r'"` instead of just `"invalid format"`).
 5. Coroutines — blocked on the WASM stack-switching proposal landing in browsers.
 6. Source maps so DevTools can step from compiled WASM back into Lua.
-7. `wasm-opt` step in the *CLI* build pipeline. The playground already runs Binaryen optimization opt-in; the CLI flow just calls `wasm-as` and stops there.
+7. `wasm-opt` step in the *CLI* build pipeline. The playground already runs Binaryen optimization opt-in; the CLI flow assembles with the built-in `wat2wasm` and stops there (no optimization pass).
 
 ## Contributing
 

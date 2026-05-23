@@ -26,14 +26,15 @@ ctest --test-dir build --output-on-failure # run the full suite (must be green)
 
 Run a single test: `ctest --test-dir build -R test_e2e_<name> --output-on-failure`.
 
-Needs: clang ≥ 19 (C23 `#embed` of the prelude), cmake ≥ 3.25, Binaryen's
-`wasm-as` on `$PATH`, Node ≥ 22.
+Needs: clang ≥ 19 (C23 `#embed` of the prelude), cmake ≥ 3.25, Node ≥ 22.
+The WAT→wasm assembler is built in (`src/wat2wasm.c`, also the standalone
+`wat2wasm` CLI), so Binaryen's `wasm-as` is no longer required — it's only
+used as an optional differential oracle by the `wat2wasm` unit tests.
 
 ## Compile & run a Lua program
 
 ```sh
-./build/lua2wasm input.lua -o out.wat
-wasm-as --all-features --disable-custom-descriptors -o out.wasm out.wat
+./build/lua2wasm input.lua -o out.wasm   # binary module directly (-o out.wat for text)
 node --experimental-wasm-exnref runtime/host.mjs out.wasm
 ```
 
@@ -78,6 +79,7 @@ Bug fixes follow the same shape: failing test first, fix second, same commit.
 | `src/codegen.{c,h}` | emits WAT via `WatBuilder`; embeds `runtime/prelude.wat` |
 | `src/builtins.{c,h}`| single source of truth: builtin name → wasm symbol |
 | `src/wat_builder.{c,h}` | dynamic WAT string buffer |
+| `src/wat2wasm.{c,h}`| self-contained WAT→wasm binary assembler (lib + `wat2wasm` CLI) |
 | `src/xalloc.{c,h}`  | OOM-aborting malloc/realloc wrappers used across the compiler |
 | `src/emscripten_entry.c` | browser entry point (`EMSCRIPTEN_KEEPALIVE` exports); Emscripten only |
 | `runtime/host.mjs`  | reference host that runs a compiled module |
