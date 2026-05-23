@@ -332,7 +332,7 @@ anything large.
 4. Dynamic error messages with the offending value embedded (e.g. `"invalid format option 'r'"` instead of just `"invalid format"`).
 5. Coroutines — blocked on the WASM stack-switching proposal landing in browsers.
 6. Source maps so DevTools can step from compiled WASM back into Lua.
-7. An optimization pass over the assembled module (size/throughput). Both the CLI and the playground now assemble with the built-in `wat2wasm` and stop there — no optimizer runs. Reintroducing one (e.g. an optional `wasm-opt`, or a native pass) would be opt-in.
+7. An optimization pass over the assembled module in the *CLI*. The CLI assembles with the built-in `wat2wasm` and stops there — no optimizer runs. (The playground offers an optional Binaryen `-Oz` pass, lazy-loaded only when the `wasm-opt` toggle is on, over the bytes `wat2wasm` produced.) A built-in native pass would let the CLI shrink output without an external dependency.
 
 ## Contributing
 
