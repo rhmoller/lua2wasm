@@ -31,6 +31,17 @@ target_compile_options(lua2wasm_core PRIVATE --embed-dir=${CMAKE_SOURCE_DIR}/run
 set_source_files_properties(src/codegen.c PROPERTIES
     OBJECT_DEPENDS ${CMAKE_SOURCE_DIR}/runtime/prelude.wat)
 
+# wat2wasm: a standalone WAT -> wasm binary assembler. Self-contained (no
+# dependency on lua2wasm_core or the runtime), so it links cleanly into both
+# the lua2wasm compiler (for direct -o .wasm output) and its own CLI.
+add_library(wat2wasm_core STATIC src/wat2wasm.c)
+target_include_directories(wat2wasm_core PUBLIC src)
+
+add_executable(wat2wasm src/wat2wasm_cli.c)
+target_link_libraries(wat2wasm PRIVATE wat2wasm_core)
+
+# lua2wasm gains direct -o .wasm output once the assembler is feature-complete
+# (see task: integrate). Until then it keeps emitting WAT and is unchanged.
 add_executable(lua2wasm src/main.c)
 target_link_libraries(lua2wasm PRIVATE lua2wasm_core)
 
@@ -159,6 +170,23 @@ add_test(
     NAME test_host_format
     COMMAND node --test ${CMAKE_SOURCE_DIR}/tests/test_host_format.mjs
 )
+
+# wat2wasm assembler: TDD harness. Each case assembles a tiny WAT module with
+# our wat2wasm, instantiates it under Node, and asserts behavior; when wasm-as
+# is on PATH it cross-checks against that reference assembler.
+find_program(WASM_AS_PROG NAMES wasm-as)
+add_test(
+    NAME test_wat2wasm
+    COMMAND node --experimental-wasm-exnref --test
+            ${CMAKE_SOURCE_DIR}/tests/wat2wasm/run.mjs
+)
+if(WASM_AS_PROG)
+    set_tests_properties(test_wat2wasm PROPERTIES ENVIRONMENT
+        "WAT2WASM=$<TARGET_FILE:wat2wasm>;WASM_AS=${WASM_AS_PROG}")
+else()
+    set_tests_properties(test_wat2wasm PROPERTIES ENVIRONMENT
+        "WAT2WASM=$<TARGET_FILE:wat2wasm>")
+endif()
 
 add_test(
     NAME test_playground_presets_in_sync
