@@ -1730,6 +1730,93 @@
         (i32.add (local.get $h) (i32.const 1))))
       (br $probe)))
 
+  ;; Bootstrap-only hash insert: append a fresh, unique key into the hash part,
+  ;; self-growing keys/vals and self-rehashing the index as needed. Unlike
+  ;; $tab_set_hash it never calls $tab_grow / $tab_index_rebuild / $tab_demote /
+  ;; the array-part setter, so a program that performs no table writes of its
+  ;; own leaves that whole write path unreferenced and the DCE pass drops it.
+  ;; Preconditions (guaranteed by $stdlib_init): the key is absent (so we can
+  ;; skip the find-and-update step) and string-typed (so it belongs in the hash
+  ;; part, never the array prefix).
+  (func $tab_bootstrap_set (param $t (ref $LuaTable)) (param $k anyref) (param $v anyref)
+    (local $n i32) (local $cap i32) (local $mask i32) (local $h i32) (local $i i32)
+    (local $keys (ref null $TArr)) (local $vals (ref null $TArr)) (local $idx (ref null $IArr))
+    (local $nk (ref $TArr)) (local $nv (ref $TArr))
+    (local.set $n (struct.get $LuaTable $n (local.get $t)))
+    (local.set $cap (struct.get $LuaTable $cap (local.get $t)))
+    ;; grow keys/vals to fit one more entry (geometric, initial 4)
+    (if (i32.ge_s (local.get $n) (local.get $cap))
+      (then
+        (local.set $cap (if (result i32) (i32.eqz (local.get $cap))
+          (then (i32.const 4)) (else (i32.mul (local.get $cap) (i32.const 2)))))
+        (local.set $nk (array.new $TArr (ref.null any) (local.get $cap)))
+        (local.set $nv (array.new $TArr (ref.null any) (local.get $cap)))
+        (local.set $keys (struct.get $LuaTable $keys (local.get $t)))
+        (local.set $vals (struct.get $LuaTable $vals (local.get $t)))
+        (if (i32.eqz (ref.is_null (local.get $keys)))
+          (then
+            (array.copy $TArr $TArr (local.get $nk) (i32.const 0)
+              (ref.as_non_null (local.get $keys)) (i32.const 0) (local.get $n))
+            (array.copy $TArr $TArr (local.get $nv) (i32.const 0)
+              (ref.as_non_null (local.get $vals)) (i32.const 0) (local.get $n))))
+        (struct.set $LuaTable $keys (local.get $t) (local.get $nk))
+        (struct.set $LuaTable $vals (local.get $t) (local.get $nv))
+        (struct.set $LuaTable $cap  (local.get $t) (local.get $cap))))
+    ;; ensure the index keeps the new entry under 50% load; rebuild it bigger
+    ;; (power-of-two capacity ≥ 2*(n+1), minimum 8) from scratch when needed.
+    (local.set $idx  (struct.get $LuaTable $idx  (local.get $t)))
+    (local.set $mask (struct.get $LuaTable $mask (local.get $t)))
+    (if (i32.or (ref.is_null (local.get $idx))
+                (i32.gt_u (i32.shl (i32.add (local.get $n) (i32.const 1)) (i32.const 1))
+                          (i32.add (local.get $mask) (i32.const 1))))
+      (then
+        (local.set $cap (i32.const 8))
+        (block $sized (loop $grow
+          (br_if $sized (i32.ge_u (local.get $cap)
+            (i32.shl (i32.add (local.get $n) (i32.const 1)) (i32.const 1))))
+          (local.set $cap (i32.shl (local.get $cap) (i32.const 1)))
+          (br $grow)))
+        (local.set $mask (i32.sub (local.get $cap) (i32.const 1)))
+        (local.set $idx (array.new $IArr (i32.const 0) (local.get $cap)))
+        (local.set $keys (struct.get $LuaTable $keys (local.get $t)))
+        (local.set $i (i32.const 0))
+        (block $rdone (loop $rlp
+          (br_if $rdone (i32.ge_s (local.get $i) (local.get $n)))
+          (local.set $h (i32.and (local.get $mask) (call $lua_hash
+            (array.get $TArr (ref.as_non_null (local.get $keys)) (local.get $i)))))
+          (block $placed (loop $rprobe
+            (if (i32.eqz (array.get $IArr (ref.as_non_null (local.get $idx)) (local.get $h)))
+              (then
+                (array.set $IArr (ref.as_non_null (local.get $idx)) (local.get $h)
+                  (i32.add (local.get $i) (i32.const 1)))
+                (br $placed)))
+            (local.set $h (i32.and (local.get $mask) (i32.add (local.get $h) (i32.const 1))))
+            (br $rprobe)))
+          (local.set $i (i32.add (local.get $i) (i32.const 1)))
+          (br $rlp)))
+        (struct.set $LuaTable $idx  (local.get $t) (local.get $idx))
+        (struct.set $LuaTable $mask (local.get $t) (local.get $mask))
+        (struct.set $LuaTable $used (local.get $t) (local.get $n))))
+    ;; append the new key/value, then probe-insert it into the index
+    (array.set $TArr (ref.as_non_null (struct.get $LuaTable $keys (local.get $t)))
+      (local.get $n) (local.get $k))
+    (array.set $TArr (ref.as_non_null (struct.get $LuaTable $vals (local.get $t)))
+      (local.get $n) (local.get $v))
+    (struct.set $LuaTable $n (local.get $t) (i32.add (local.get $n) (i32.const 1)))
+    (local.set $idx  (struct.get $LuaTable $idx  (local.get $t)))
+    (local.set $mask (struct.get $LuaTable $mask (local.get $t)))
+    (local.set $h (i32.and (local.get $mask) (call $lua_hash (local.get $k))))
+    (loop $probe
+      (if (i32.eqz (array.get $IArr (ref.as_non_null (local.get $idx)) (local.get $h)))
+        (then
+          (array.set $IArr (ref.as_non_null (local.get $idx)) (local.get $h)
+            (i32.add (local.get $n) (i32.const 1)))
+          (struct.set $LuaTable $used (local.get $t)
+            (i32.add (struct.get $LuaTable $used (local.get $t)) (i32.const 1)))
+          (return)))
+      (local.set $h (i32.and (local.get $mask) (i32.add (local.get $h) (i32.const 1))))
+      (br $probe)))
+
   ;; `t[k] = v` with __newindex dispatch. Used by user-code assignments.
   ;; Table-constructor inserts go through bare \$tab_set since they target
   ;; freshly built tables with no metatable.

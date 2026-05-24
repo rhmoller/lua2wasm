@@ -110,6 +110,13 @@ add_test(
             ${CMAKE_BINARY_DIR}
 )
 add_test(
+    NAME test_e2e_tree_shake_bootstrap
+    COMMAND bash ${CMAKE_SOURCE_DIR}/tests/test_e2e_tree_shake_bootstrap.sh
+            $<TARGET_FILE:lua2wasm>
+            ${CMAKE_SOURCE_DIR}
+            ${CMAKE_BINARY_DIR}
+)
+add_test(
     NAME test_e2e_io_read_full
     COMMAND bash ${CMAKE_SOURCE_DIR}/tests/test_e2e_io_read_full.sh
             $<TARGET_FILE:lua2wasm>

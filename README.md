@@ -253,9 +253,12 @@ Requirements (required vs optional):
 and globals the program can't reach are dropped, along with the function-type
 signatures left orphaned once those functions are gone (all behavior-preserving).
 Add `--tree-shake` to also prune builtins the program never names literally, which
-shrinks modules dramatically (e.g. `print("hi")`: 42 KB → ~9 KB) at the cost of
-dynamic `_G["name"]` lookups of un-named builtins returning nil. `--no-dce`
-disables the DCE pass.
+shrinks modules dramatically (e.g. `print("hi")`: 42 KB → ~7.6 KB) at the cost of
+dynamic `_G["name"]` lookups of un-named builtins returning nil. As a further
+`--tree-shake` win, a program that writes no tables of its own has `_G` and the
+library tables populated by an append-only bootstrap insert, so the table
+grow/rehash write path is dead-code eliminated entirely. `--no-dce` disables the
+DCE pass.
 
 Run under Node:
 

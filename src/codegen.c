@@ -220,6 +220,11 @@ typedef struct {
     WatBuilder *w;
     const ParseResult *pr; /* for VAR_GLOBAL name lookup */
     StrPool strs;
+    /* Runtime function the stdlib bootstrap uses to install _G / library
+     * entries: "$tab_bootstrap_set" (append-only, lets DCE drop the table
+     * write path) when the program writes no tables of its own, else the
+     * general "$tab_set". Chosen in codegen_module; see program_writes_table. */
+    const char *tab_set_fn;
     int next_label;
     int in_main;                       /* 1 while emitting $main body, 0 inside user fn */
     int break_labels[MAX_BREAK_DEPTH]; /* break targets for nested while/for/repeat */
@@ -473,17 +478,18 @@ static void emit_global_key(CG *c, const char *name, size_t name_len) {
                 sr.offset, sr.len);
 }
 
-/* `(call $tab_set (local.get $tgt) "key" (global.get $g_<glob>))` — the
- * shape used everywhere stdlib_init wires a builtin closure into a
- * library table or a sub-table like a file handle. */
-static void emit_tab_set_global(WatBuilder *out, const char *tgt,
+/* `(call <c->tab_set_fn> (local.get $tgt) "key" (global.get $g_<glob>))` — the
+ * shape used everywhere stdlib_init wires a builtin closure into a library
+ * table or a sub-table like a file handle. The setter is $tab_bootstrap_set or
+ * $tab_set per the DCE gate (see program_writes_table). */
+static void emit_tab_set_global(CG *c, const char *tgt,
                                 StrRef key, const char *glob) {
-    wat_appendf(out,
-                "    (call $tab_set (local.get %s)\n"
+    wat_appendf(c->w,
+                "    (call %s (local.get %s)\n"
                 "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
                 "        (i32.const %zu) (i32.const %zu)))\n"
                 "      (global.get $g_%s))\n",
-                tgt, key.offset, key.len, glob);
+                c->tab_set_fn, tgt, key.offset, key.len, glob);
 }
 
 /* `(global.set <glob> "<s>")` — set a wasm global to an interned string. */
@@ -496,33 +502,33 @@ static void emit_global_set_str(CG *c, const char *glob, const char *s, size_t l
                 glob, sr.offset, sr.len);
 }
 
-/* `(call $tab_set <target> "<key>" <value>)` where <target> and <value>
- * are complete WAT expressions. The general form behind every stdlib_init
- * table install whose value isn't itself a plain string. */
+/* `(call <c->tab_set_fn> <target> "<key>" <value>)` where <target> and <value>
+ * are complete WAT expressions. The general form behind every stdlib_init table
+ * install whose value isn't itself a plain string. */
 static void emit_tab_set_str(CG *c, const char *target,
                              const char *key, size_t klen, const char *value) {
     StrRef sr = strpool_add(&c->strs, key, klen);
     wat_appendf(c->w,
-                "    (call $tab_set %s\n"
+                "    (call %s %s\n"
                 "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
                 "        (i32.const %zu) (i32.const %zu)))\n"
                 "      %s)\n",
-                target, sr.offset, sr.len, value);
+                c->tab_set_fn, target, sr.offset, sr.len, value);
 }
 
-/* `(call $tab_set <target> "<key>" "<val>")` — install a string-valued
+/* `(call <c->tab_set_fn> <target> "<key>" "<val>")` — install a string-valued
  * entry; both key and value are interned (and deduplicated). */
 static void emit_tab_set_strval(CG *c, const char *target, const char *key,
                                 size_t klen, const char *val, size_t vlen) {
     StrRef ks = strpool_add(&c->strs, key, klen);
     StrRef vs = strpool_add(&c->strs, val, vlen);
     wat_appendf(c->w,
-                "    (call $tab_set %s\n"
+                "    (call %s %s\n"
                 "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
                 "        (i32.const %zu) (i32.const %zu)))\n"
                 "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
                 "        (i32.const %zu) (i32.const %zu))))\n",
-                target, ks.offset, ks.len, vs.offset, vs.len);
+                c->tab_set_fn, target, ks.offset, ks.len, vs.offset, vs.len);
 }
 
 static void emit_global_read(CG *c, const char *name, size_t name_len, int depth) {
@@ -3853,7 +3859,7 @@ static void emit_library_tables(CG *c, const unsigned char *gref, int nb) {
             if (key[0] == '_') continue;
             size_t key_len = strlen(key);
             StrRef sr = strpool_add(&c->strs, key, key_len);
-            emit_tab_set_global(out, "$tab", sr, builtin_func_name(bi) + 1);
+            emit_tab_set_global(c, "$tab", sr, builtin_func_name(bi) + 1);
         }
         /* Plain-value constants for the math library. */
         if (cls == BLT_LIB_MATH) {
@@ -3894,11 +3900,11 @@ static void emit_library_tables(CG *c, const unsigned char *gref, int nb) {
             for (size_t hi = 0; hi < sizeof(HANDLES) / sizeof(HANDLES[0]); hi++) {
                 wat_append(out, "    (local.set $h (call $tab_new))\n");
                 if (HANDLES[hi].method_glob)
-                    emit_tab_set_global(out, "$h", wkey, HANDLES[hi].method_glob);
+                    emit_tab_set_global(c, "$h", wkey, HANDLES[hi].method_glob);
                 else
-                    emit_tab_set_global(out, "$h", rkey, "io_handle_read");
-                emit_tab_set_global(out, "$h", ckey, "io_handle_noop");
-                emit_tab_set_global(out, "$h", fkey, "io_handle_noop");
+                    emit_tab_set_global(c, "$h", rkey, "io_handle_read");
+                emit_tab_set_global(c, "$h", ckey, "io_handle_noop");
+                emit_tab_set_global(c, "$h", fkey, "io_handle_noop");
                 /* __fd so io.type reports "file" for the standard streams. */
                 char fdexpr[48];
                 snprintf(fdexpr, sizeof fdexpr,
@@ -4006,6 +4012,95 @@ static void emit_require_bridge(CG *c, const unsigned char *gref) {
             }
         }
     }
+}
+
+/* --- table-write detection (the DCE gate for $tab_bootstrap_set) -------- *
+ * The bootstrap can install _G/library entries with either $tab_set or the
+ * append-only $tab_bootstrap_set. The latter never references the table grow/
+ * rehash/array-spill machinery, so for a program that performs no table writes
+ * of its own the whole write path goes unreferenced and the DCE pass drops it
+ * (~1KB on a minimal --tree-shake module). When the program *does* write a
+ * table the write path stays live regardless and the extra helper would be
+ * pure overhead, so we fall back to $tab_set.
+ *
+ * This is purely a size heuristic — both inserts populate _G identically, so a
+ * false positive only forgoes the win, never miscompiles. We flag any global
+ * or indexed assignment and any table constructor. A write reachable only
+ * through a builtin (rawset / table.insert / require) is not detected here; in
+ * that case bootstrap_set is a small, rare overhead, not a correctness issue. */
+static int expr_writes_table(const Expr *e);
+static int exprs_write_table(Expr **es, size_t n) {
+    for (size_t i = 0; i < n; i++)
+        if (expr_writes_table(es[i])) return 1;
+    return 0;
+}
+static int expr_writes_table(const Expr *e) {
+    if (!e) return 0;
+    switch (e->kind) {
+    case EXPR_TABLE: return 1; /* a constructor writes the new table */
+    case EXPR_CALL:
+        return expr_writes_table(e->as.call.callee) ||
+               exprs_write_table(e->as.call.args, e->as.call.nargs);
+    case EXPR_METHOD_CALL:
+        return expr_writes_table(e->as.method_call.recv) ||
+               exprs_write_table(e->as.method_call.args, e->as.method_call.nargs);
+    case EXPR_BINOP:
+        return expr_writes_table(e->as.binop.lhs) || expr_writes_table(e->as.binop.rhs);
+    case EXPR_UNOP: return expr_writes_table(e->as.unop.operand);
+    case EXPR_INDEX:
+        return expr_writes_table(e->as.index.table) || expr_writes_table(e->as.index.key);
+    default: return 0; /* EXPR_FUNCTION bodies are visited via pr->funcs */
+    }
+}
+static int block_writes_table(const Block *b);
+static int stmt_writes_table(const Stmt *s) {
+    if (!s) return 0;
+    switch (s->kind) {
+    case STMT_LOCAL: return exprs_write_table(s->as.local.values, (size_t)s->as.local.n_values);
+    case STMT_ASSIGN:
+        for (int i = 0; i < s->as.assign.n_targets; i++) {
+            const AssignTarget *t = &s->as.assign.targets[i];
+            if (t->kind == TGT_INDEX) return 1; /* t[k] = v */
+            if (t->kind == TGT_VAR &&
+                (t->as.var.kind == VAR_GLOBAL || t->as.var.kind == VAR_BUILTIN))
+                return 1; /* global write goes through _G */
+        }
+        return exprs_write_table(s->as.assign.values, (size_t)s->as.assign.n_values);
+    case STMT_GLOBAL:
+        return s->as.global_decl.n_values > 0; /* `global x = ...` writes _G */
+    case STMT_EXPR: return expr_writes_table(s->as.expr_stmt.expr);
+    case STMT_RETURN: return exprs_write_table(s->as.return_stmt.values, (size_t)s->as.return_stmt.n_values);
+    case STMT_IF:
+        for (size_t i = 0; i < s->as.if_stmt.narms; i++)
+            if (expr_writes_table(s->as.if_stmt.arms[i].cond) ||
+                block_writes_table(&s->as.if_stmt.arms[i].body))
+                return 1;
+        return s->as.if_stmt.has_else && block_writes_table(&s->as.if_stmt.else_body);
+    case STMT_WHILE:
+        return expr_writes_table(s->as.while_stmt.cond) ||
+               block_writes_table(&s->as.while_stmt.body);
+    case STMT_DO: return block_writes_table(&s->as.do_stmt.body);
+    case STMT_FOR_NUM:
+        return expr_writes_table(s->as.for_num.start) || expr_writes_table(s->as.for_num.stop) ||
+               expr_writes_table(s->as.for_num.step) || block_writes_table(&s->as.for_num.body);
+    case STMT_FOR_GEN:
+        return exprs_write_table(s->as.for_gen.exprs, (size_t)s->as.for_gen.n_exprs) ||
+               block_writes_table(&s->as.for_gen.body);
+    case STMT_REPEAT:
+        return block_writes_table(&s->as.repeat.body) || expr_writes_table(s->as.repeat.cond);
+    default: return 0; /* LOCAL_FUNC body via pr->funcs; BREAK/GOTO/LABEL write nothing */
+    }
+}
+static int block_writes_table(const Block *b) {
+    for (size_t i = 0; i < b->count; i++)
+        if (stmt_writes_table(b->items[i])) return 1;
+    return 0;
+}
+static int program_writes_table(const ParseResult *pr) {
+    if (block_writes_table(&pr->main_body)) return 1;
+    for (size_t i = 0; i < pr->funcs.count; i++)
+        if (block_writes_table(&pr->funcs.items[i]->body)) return 1;
+    return 0;
 }
 
 /* Emit `$main`, the top-level chunk: locals (boxed/unboxed per escape
@@ -4162,6 +4257,14 @@ int codegen_module(const ParseResult *pr, const char *src_name,
         for (int i = 0; i < nb; i++) live[i] = 1;
         for (size_t i = 0; i < pr->globals.count; i++) gref[i] = 1;
     }
+
+    /* Route the stdlib bootstrap through the append-only $tab_bootstrap_set
+     * only when it pays off: the program must write no tables of its own (else
+     * the general write path stays live regardless) and tree-shake must be on
+     * (otherwise every builtin — table.insert and friends — is kept, which
+     * keeps the write path live too). See program_writes_table. */
+    c.tab_set_fn =
+        (tree_shake && !program_writes_table(pr)) ? "$tab_bootstrap_set" : "$tab_set";
 
     /* elem declare for every live builtin func, so ref.func works in const init. */
     wat_append(out, "\n  (elem declare func");
