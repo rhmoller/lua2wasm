@@ -4578,6 +4578,12 @@
     (block $exit (loop $top
       (br_if $exit (i32.ge_s (local.get $lo) (local.get $hi)))
       (local.set $pivot (call $tab_get_arr_idx (local.get $t) (local.get $hi)))
+      ;; A valid order function is irreflexive: cmp(x,x) must be false. A
+      ;; reflexive comparator (return true, <=, >=) would otherwise just produce
+      ;; an unspecified order; reference Lua raises "invalid order function for
+      ;; sorting", detected here per pivot.
+      (if (call $cmp_lt (local.get $cmp) (local.get $pivot) (local.get $pivot))
+        (then (call $throw_lit (i32.const 1115) (i32.const 34))))
       (local.set $i (i32.sub (local.get $lo) (i32.const 1)))
       (local.set $j (local.get $lo))
       (block $pdone (loop $ploop

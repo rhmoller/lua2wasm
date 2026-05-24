@@ -128,3 +128,4 @@ pass	format_hash_dot	fuzzer-found (review #11): %#.0f/%#.0e force a decimal poin
 pass	nil_nan_key	fuzzer-found (review #8): nil/NaN table key raises on t[k]=v and {[k]=v}
 pass	builtin_arity	audit-found: builtins requiring an arg raise on zero args (luaL_checkany)
 pass	find_coerce	code-review #7: string.find coerces numeric subject/pattern args
+pass	sort_badcmp_detect	code-review #9: table.sort detects a reflexive (inconsistent) comparator
