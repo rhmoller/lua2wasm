@@ -1,0 +1,16 @@
+false	true
+false	true
+false	true
+false	true
+false	true
+false	true
+false	true
+false	true
+false	true
+false	true
+false	true
+234
+777
+3
+AB5
+42
