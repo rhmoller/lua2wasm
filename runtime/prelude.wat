@@ -4524,10 +4524,19 @@
   (func $builtin_table_sort (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
     (local $t (ref $LuaTable)) (local $cmp (ref null $LuaClosure)) (local $n i32)
+    (local $cmparg anyref)
     (local.set $t (call $arg_table (call $args_at (local.get $args) (i32.const 0))))
+    ;; A 2nd argument, when present and non-nil, must be a function — check it
+    ;; first so a wrong type is a catchable "function expected" error rather
+    ;; than an uncatchable ref.cast trap. nil leaves $cmp null (default order).
     (if (i32.gt_u (array.len (local.get $args)) (i32.const 1))
-      (then (local.set $cmp (ref.cast (ref $LuaClosure)
-              (call $args_at (local.get $args) (i32.const 1))))))
+      (then
+        (local.set $cmparg (call $args_at (local.get $args) (i32.const 1)))
+        (if (i32.eqz (ref.is_null (local.get $cmparg)))
+          (then
+            (if (i32.eqz (ref.test (ref $LuaClosure) (local.get $cmparg)))
+              (then (call $throw_lit (i32.const 1042) (i32.const 17))))   ;; "function expected"
+            (local.set $cmp (ref.cast (ref $LuaClosure) (local.get $cmparg)))))))
     (local.set $n (call $tab_len (local.get $t)))
     (if (i32.gt_s (local.get $n) (i32.const 1))
       (then (call $qsort (local.get $t) (i32.const 1) (local.get $n) (local.get $cmp))))
