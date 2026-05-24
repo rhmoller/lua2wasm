@@ -1,10 +1,11 @@
--- NaN key behavior pin-test.
--- $lua_eq_raw uses f64.eq, which is false for NaN==NaN. So a NaN
--- key is inserted but can never be retrieved. (Real Lua 5.4 raises
--- "table index is NaN" on insertion; matching that is future work.)
+-- A NaN table key raises "table index is NaN" (Lua §3.4.4) on a write — it
+-- cannot be stored. A read of an (absent) NaN key is fine and returns nil.
+-- (Previously NaN was silently inserted but irrecoverable; now fixed.)
+local function bad(f) local ok, e = pcall(f); return ok, type(e) end
 local nan = 0.0 / 0.0
-print(nan ~= nan)   -- true
+print(nan ~= nan)                                       -- true
+print(bad(function() local t = {}; t[nan] = "x" end))  -- false  string
+print(bad(function() return { [nan] = 1 } end))         -- false  string
 local t = {}
-t[nan] = "set"
-print(t[nan])       -- nil (irrecoverable)
-print(t[1])         -- nil (unrelated key)
+print(t[nan])   -- nil (lookup of an absent NaN key is not an error)
+print(t[1])     -- nil

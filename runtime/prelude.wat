@@ -1615,6 +1615,14 @@
   ;; hash part.
   (func $tab_set (param $t (ref $LuaTable)) (param $k anyref) (param $v anyref)
     (local $val i64) (local $ok i32)
+    ;; The single raw-set chokepoint: reject a nil or NaN key (Lua §3.4.4),
+    ;; matching rawset, so t[nil]=v / t[0/0]=v and {[nil]=v} all raise rather
+    ;; than silently store. (A nil VALUE — deletion — is fine; this guards $k.)
+    (if (ref.is_null (local.get $k))
+      (then (call $throw_lit (i32.const 261) (i32.const 18))))   ;; "table index is nil"
+    (if (call $is_float (local.get $k))
+      (then (if (f64.ne (call $as_float (local.get $k)) (call $as_float (local.get $k)))
+        (then (call $throw_lit (i32.const 279) (i32.const 18))))))   ;; "table index is NaN"
     (call $as_arr_key (local.get $k))
     (local.set $ok)
     (local.set $val)
