@@ -356,21 +356,21 @@ export function makeHelpers({ getInstance, formatFloat, cFormatG, cFormatF, cFor
         // value has no integer representation (non-integral float, or a
         // non-numeric value) so the caller can raise a catchable error rather
         // than silently formatting 0. Numeric strings are coerced, like Lua.
+        // A float has an integer representation only if it is integral AND fits
+        // in a Lua integer (i64); 1e308 is integral as a double but far beyond
+        // ±2^63, so %d on it must raise rather than emit a giant integer.
+        const floatToI64OrNull = (f) =>
+            (Number.isInteger(f) && f >= -9223372036854775808 && f < 9223372036854775808)
+                ? BigInt(f) : null;
         const asIntOrNull = () => {
             if (tag === 2) return exp().lua_get_int(valRef);
-            if (tag === 3) {
-                const f = exp().lua_get_float(valRef);
-                return (Number.isFinite(f) && Number.isInteger(f)) ? BigInt(f) : null;
-            }
+            if (tag === 3) return floatToI64OrNull(exp().lua_get_float(valRef));
             if (tag === 4) {
                 const p = parseLuaNumber(valRef, 0);
                 if (p === null || p === undefined) return null;
                 const pt = exp().lua_tag(p);
                 if (pt === 2) return exp().lua_get_int(p);
-                if (pt === 3) {
-                    const f = exp().lua_get_float(p);
-                    return (Number.isFinite(f) && Number.isInteger(f)) ? BigInt(f) : null;
-                }
+                if (pt === 3) return floatToI64OrNull(exp().lua_get_float(p));
             }
             return null;
         };
