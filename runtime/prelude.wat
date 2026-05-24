@@ -1422,10 +1422,14 @@
         (ref.cast (ref $LuaTable) (local.get $v)) (local.get $k)))))
     (if (ref.test (ref $LuaString) (local.get $v))
       (then
-        (local.set $tab (call $tab_get
-          (ref.as_non_null (global.get $g_globals))
-          (struct.new $LuaString (array.new_data $LuaArr $str_data
-            (i32.const 25) (i32.const 6)))))    ;; "string"
+        ;; Resolve through the string metatable's __index (the string library
+        ;; table, captured when the metatable was first built) rather than a
+        ;; live _G.string read — so reassigning `string` doesn't break methods,
+        ;; matching reference Lua, and any __index chain on that table is
+        ;; honoured. ($get_string_mt caches, so this is also one fewer hash
+        ;; lookup than re-fetching _G.string each time.)
+        (local.set $tab (call $tab_get_raw (call $get_string_mt)
+          (ref.as_non_null (global.get $g_mkey_index))))
         (if (ref.test (ref $LuaTable) (local.get $tab))
           (then (return (call $tab_get
             (ref.cast (ref $LuaTable) (local.get $tab)) (local.get $k)))))
@@ -3251,7 +3255,11 @@
     (if (i32.eqz (ref.is_null (global.get $g_string_mt)))
       (then (return (ref.as_non_null (global.get $g_string_mt)))))
     (local.set $mt (call $tab_new))
-    (call $tab_set (local.get $mt)
+    ;; Build the metatable with the append-only bootstrap insert (one fresh,
+    ;; absent key) rather than $tab_set, so wiring string indexing through here
+    ;; doesn't pull the table write path back in for a program that writes no
+    ;; tables of its own (keeps the --tree-shake write-path DCE win).
+    (call $tab_bootstrap_set (local.get $mt)
       (ref.as_non_null (global.get $g_mkey_index))
       (call $tab_get (ref.as_non_null (global.get $g_globals))
         (struct.new $LuaString
