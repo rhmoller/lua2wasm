@@ -6064,8 +6064,8 @@
       (struct.new $LuaClosure
         (ref.func $builtin_string_gmatch_iter)
         (array.new_fixed $UpvalArr 4
-          (struct.new $Box (call $args_at (local.get $args) (i32.const 0)))
-          (struct.new $Box (call $args_at (local.get $args) (i32.const 1)))
+          (struct.new $Box (call $arg_string (call $args_at (local.get $args) (i32.const 0))))
+          (struct.new $Box (call $arg_string (call $args_at (local.get $args) (i32.const 1))))
           (struct.new $Box (call $make_int
             (i64.extend_i32_s (i32.sub (local.get $init) (i32.const 1)))))
           (struct.new $Box (call $make_int (i64.const -1)))))))
