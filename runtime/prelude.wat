@@ -4143,7 +4143,8 @@
   (func $builtin_math_tointeger (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
     (local $v anyref) (local $f f64) (local $i i64)
-    (local.set $v (call $args_at (local.get $args) (i32.const 0)))
+    ;; Coerce a numeric-string argument first, like the other math.* fns.
+    (local.set $v (call $coerce_num (call $args_at (local.get $args) (i32.const 0))))
     (if (call $is_int (local.get $v))
       (then (return (array.new_fixed $ArgArr 1 (local.get $v)))))
     (if (call $is_float (local.get $v))
