@@ -130,3 +130,5 @@ pass	builtin_arity	audit-found: builtins requiring an arg raise on zero args (lu
 pass	find_coerce	code-review #7: string.find coerces numeric subject/pattern args
 pass	format_flag_validity	code-review #12: string.format rejects invalid flag/conversion combos
 pass	format_s_zeros	fuzzer-found: %s with a modifier rejects an embedded NUL (string contains zeros)
+xfail	sort_badcmp_gap	code-review #9: inconsistent-comparator detection not implemented (needs Hoare-partition port; cmp(x,x) is wrong)
+xfail	format_validation_gaps	code-review #12 (partial): %q modifiers, per-conv width/precision (%c), %p, %%, %F, length modifiers not validated
