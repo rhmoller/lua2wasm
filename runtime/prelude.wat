@@ -414,7 +414,7 @@
   ;; Float case: a - floor(a/b)*b directly.
   (func $lua_mod (param $a anyref) (param $b anyref) (result anyref)
     (local $ai i64) (local $bi i64) (local $r i64)
-    (local $af f64) (local $bf f64)
+    (local $af f64) (local $bf f64) (local $mf f64)
     (local $ca anyref) (local $cb anyref)
     (local.set $ca (call $coerce_num (local.get $a)))
     (local.set $cb (call $coerce_num (local.get $b)))
@@ -439,10 +439,16 @@
       (then
         (local.set $af (call $as_float (local.get $ca)))
         (local.set $bf (call $as_float (local.get $cb)))
-        (return (call $make_float
-          (f64.sub (local.get $af)
-                   (f64.mul (f64.floor (f64.div (local.get $af) (local.get $bf)))
-                            (local.get $bf)))))))
+        ;; Floor-mod via fmod, like Lua's luai_nummod: m = fmod(a,b) keeps the
+        ;; dividend's sign (incl. ±0); add b once when m is nonzero and its sign
+        ;; differs from b's, to bring it into the divisor's half-open range. A
+        ;; plain a-floor(a/b)*b instead yields +0 for every exact division.
+        (local.set $mf (call $host_math2 (i32.const 2) (local.get $af) (local.get $bf)))
+        (if (i32.and (f64.ne (local.get $mf) (f64.const 0))
+                     (i32.ne (f64.lt (local.get $mf) (f64.const 0))
+                             (f64.lt (local.get $bf) (f64.const 0))))
+          (then (local.set $mf (f64.add (local.get $mf) (local.get $bf)))))
+        (return (call $make_float (local.get $mf)))))
     (call $arith_mm (local.get $a) (local.get $b)
       (ref.as_non_null (global.get $g_mkey_mod))))
 

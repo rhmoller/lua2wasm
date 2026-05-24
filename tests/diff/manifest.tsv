@@ -120,3 +120,4 @@ xfail	debug_getinfo	nparams/nups/isvararg/linedefined need codegen debug metadat
 xfail	strict_global	Lua 5.5 strict-global rejection is compile-time (harness sees <compile-fail>)
 xfail	goto_into_scope	reject goto into a local's scope — compile-time parity (needs parser machinery)
 pass	math_fmod	fuzzer-found: float fmod precision for large magnitudes
+pass	float_mod_sign	fuzzer-found: float % zero-sign follows dividend, not always +0
