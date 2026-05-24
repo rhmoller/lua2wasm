@@ -493,7 +493,10 @@
 
   ;; Common path: a binary bitop. Try both operands as ints; if both
   ;; convert, run $op; else dispatch through the metamethod $key.
-  (func $bitop_band (param $a anyref) (param $b anyref) (result anyref)
+  ;; Each binary bitop: try both operands as integers; if both convert, run the
+  ;; op, else dispatch through the metamethod $key. Codegen calls these directly
+  ;; (BIN_BAND -> $lua_band, …), so there is no separate wrapper layer.
+  (func $lua_band (param $a anyref) (param $b anyref) (result anyref)
     (if (i32.and (call $try_to_int (local.get $a))
                  (call $try_to_int (local.get $b)))
       (then (return (call $make_int
@@ -502,7 +505,7 @@
     (call $arith_mm (local.get $a) (local.get $b)
       (ref.as_non_null (global.get $g_mkey_band))))
 
-  (func $bitop_bor (param $a anyref) (param $b anyref) (result anyref)
+  (func $lua_bor (param $a anyref) (param $b anyref) (result anyref)
     (if (i32.and (call $try_to_int (local.get $a))
                  (call $try_to_int (local.get $b)))
       (then (return (call $make_int
@@ -511,7 +514,7 @@
     (call $arith_mm (local.get $a) (local.get $b)
       (ref.as_non_null (global.get $g_mkey_bor))))
 
-  (func $bitop_bxor (param $a anyref) (param $b anyref) (result anyref)
+  (func $lua_bxor (param $a anyref) (param $b anyref) (result anyref)
     (if (i32.and (call $try_to_int (local.get $a))
                  (call $try_to_int (local.get $b)))
       (then (return (call $make_int
@@ -532,7 +535,7 @@
   (func $do_shr (param $v i64) (param $n i64) (result i64)
     (call $do_shl (local.get $v) (i64.sub (i64.const 0) (local.get $n))))
 
-  (func $bitop_shl (param $a anyref) (param $b anyref) (result anyref)
+  (func $lua_shl (param $a anyref) (param $b anyref) (result anyref)
     (if (i32.and (call $try_to_int (local.get $a))
                  (call $try_to_int (local.get $b)))
       (then (return (call $make_int
@@ -541,7 +544,7 @@
     (call $arith_mm (local.get $a) (local.get $b)
       (ref.as_non_null (global.get $g_mkey_shl))))
 
-  (func $bitop_shr (param $a anyref) (param $b anyref) (result anyref)
+  (func $lua_shr (param $a anyref) (param $b anyref) (result anyref)
     (if (i32.and (call $try_to_int (local.get $a))
                  (call $try_to_int (local.get $b)))
       (then (return (call $make_int
@@ -549,18 +552,6 @@
                        (call $as_int_unchecked (local.get $b)))))))
     (call $arith_mm (local.get $a) (local.get $b)
       (ref.as_non_null (global.get $g_mkey_shr))))
-
-  ;; Lua-visible names (codegen emits calls to these).
-  (func $lua_band (param $a anyref) (param $b anyref) (result anyref)
-    (call $bitop_band (local.get $a) (local.get $b)))
-  (func $lua_bor  (param $a anyref) (param $b anyref) (result anyref)
-    (call $bitop_bor  (local.get $a) (local.get $b)))
-  (func $lua_bxor (param $a anyref) (param $b anyref) (result anyref)
-    (call $bitop_bxor (local.get $a) (local.get $b)))
-  (func $lua_shl  (param $a anyref) (param $b anyref) (result anyref)
-    (call $bitop_shl  (local.get $a) (local.get $b)))
-  (func $lua_shr  (param $a anyref) (param $b anyref) (result anyref)
-    (call $bitop_shr  (local.get $a) (local.get $b)))
 
   ;; Unary bitwise NOT: ~v.
   (func $lua_bnot (param $a anyref) (result anyref)
@@ -1087,6 +1078,18 @@
             (i32.or (call $is_int (local.get $v))
                     (call $is_float (local.get $v)))))
 
+  ;; Bytes of a concat operand. Precondition: $is_concatable (string/int/float)
+  ;; — so unlike $lua_tostring this skips the __tostring metamethod probe and,
+  ;; for numbers, the throwaway $LuaString wrapper (`..` never consults
+  ;; __tostring, matching reference). Strings hand back their backing array.
+  (func $concat_bytes (param $v anyref) (result (ref $LuaArr))
+    (if (ref.test (ref $LuaString) (local.get $v))
+      (then (return (struct.get $LuaString $bytes
+        (ref.cast (ref $LuaString) (local.get $v))))))
+    (if (call $is_int (local.get $v))
+      (then (return (call $int_to_bytes (call $as_int (local.get $v))))))
+    (call $float_to_bytes (call $as_float (local.get $v))))
+
   (func $lua_concat (param $a anyref) (param $b anyref) (result anyref)
     (local $sa (ref $LuaArr)) (local $sb (ref $LuaArr)) (local $out (ref $LuaArr))
     (local $na i32) (local $nb i32)
@@ -1094,8 +1097,8 @@
                           (call $is_concatable (local.get $b))))
       (then (return (call $arith_mm (local.get $a) (local.get $b)
                       (ref.as_non_null (global.get $g_mkey_concat))))))
-    (local.set $sa (struct.get $LuaString $bytes (call $lua_tostring (local.get $a))))
-    (local.set $sb (struct.get $LuaString $bytes (call $lua_tostring (local.get $b))))
+    (local.set $sa (call $concat_bytes (local.get $a)))
+    (local.set $sb (call $concat_bytes (local.get $b)))
     (local.set $na (array.len (local.get $sa)))
     (local.set $nb (array.len (local.get $sb)))
     ;; Raise a Lua-level "too large" before wasm traps on array.new for
