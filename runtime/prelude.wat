@@ -4076,7 +4076,8 @@
   ;; math.fmod(x, y) — truncating remainder (rounds quotient toward zero).
   ;; Distinct from Lua's `%` operator (which is floor-modulo).
   ;; If both args are integers: integer result; y == 0 raises.
-  ;; Otherwise: float result via x - trunc(x/y)*y.
+  ;; Otherwise: precise C fmod via the host (JS `%`); a WAT x-trunc(x/y)*y
+  ;; cancels catastrophically for large |x| (e.g. fmod(1e308,255) -> 0).
   (func $builtin_math_fmod (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
     (local $a anyref) (local $b anyref) (local $iy i64)
@@ -4095,9 +4096,7 @@
     (local.set $fy (call $as_float_co (local.get $b)))
     (array.new_fixed $ArgArr 1
       (call $make_float
-        (f64.sub (local.get $fx)
-                 (f64.mul (f64.trunc (f64.div (local.get $fx) (local.get $fy)))
-                          (local.get $fy))))))
+        (call $host_math2 (i32.const 2) (local.get $fx) (local.get $fy)))))
 
   ;; math.modf(x) — returns (integral, fractional).
   ;; Integral part is returned as integer if it fits in i64, else as float.

@@ -16,7 +16,9 @@ export function cPow(x, y) {
     if (x === -1 && (y === Infinity || y === -Infinity)) return 1;
     return Math.pow(x, y);
 }
-export const MATH2_FNS = [Math.atan2, cPow];
+// JS `%` on numbers is the C fmod (truncated remainder), precise for all
+// magnitudes — unlike a WAT `x - trunc(x/y)*y`, which cancels for large x.
+export const MATH2_FNS = [Math.atan2, cPow, (x, y) => x % y];
 
 // --- filesystem support, shared by the Node runner and the playground ---
 //

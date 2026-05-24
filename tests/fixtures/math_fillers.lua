@@ -8,7 +8,7 @@ print(math.fmod(7, -3))           -- 1
 print(math.fmod(-7, -3))          -- -1
 print(math.fmod(7.5, 2.5))        -- 0.0
 print(math.fmod(7.0, 2.0))        -- 1.0
-print(math.fmod(-7.5, 2.5))       -- 0.0 (negative zero prints as 0.0)
+print(math.fmod(-7.5, 2.5))       -- -0.0 (fmod result takes the sign of the dividend)
 local ok = pcall(function() return math.fmod(1, 0) end)
 print(ok)                         -- false   (int / 0)
 
