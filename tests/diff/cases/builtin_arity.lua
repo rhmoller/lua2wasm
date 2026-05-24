@@ -1,0 +1,26 @@
+-- Builtins that require an argument (luaL_checkany etc.) must raise on zero
+-- args, not silently return nil or trap. Audit-found via a zero-arg sweep.
+local function probe(name, fn) local ok, e = pcall(fn); print(name, ok, ok and "-" or type(e)) end
+probe("tostring", tostring)
+probe("tonumber", tonumber)
+probe("rawequal", rawequal)
+probe("getmetatable", getmetatable)
+probe("ipairs", ipairs)
+probe("pairs", pairs)
+probe("math.type", math.type)
+probe("math.tointeger", math.tointeger)
+probe("math.max", math.max)
+probe("math.min", math.min)
+probe("string.pack", string.pack)
+probe("string.unpack", string.unpack)
+probe("string.packsize", string.packsize)
+-- controls that are already correct (must not regress)
+probe("string.char", string.char)
+probe("type", type)
+probe("math.floor", math.floor)
+probe("string.len", string.len)
+-- positive controls: valid args still work
+print("tostring(5)", tostring(5))
+print("math.max(3,7)", math.max(3, 7))
+print("rawequal(1,1)", rawequal(1, 1))
+print("getmetatable('x')", type(getmetatable("x")))

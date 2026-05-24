@@ -1,0 +1,21 @@
+tostring	false	string
+tonumber	false	string
+rawequal	false	string
+getmetatable	false	string
+ipairs	false	string
+pairs	false	string
+math.type	false	string
+math.tointeger	false	string
+math.max	false	string
+math.min	false	string
+string.pack	false	string
+string.unpack	false	string
+string.packsize	false	string
+string.char	true	-
+type	false	string
+math.floor	false	string
+string.len	false	string
+tostring(5)	5
+math.max(3,7)	7
+rawequal(1,1)	true
+getmetatable('x')	table

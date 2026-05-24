@@ -2318,6 +2318,14 @@
     (call $throw_lit (i32.const 669) (i32.const 15))   ;; "string expected"
     (unreachable))
 
+  ;; luaL_checkany: require an argument to be present at index $n (an explicit
+  ;; nil counts). Raises "value expected" when the call passed fewer args, so
+  ;; builtins like tostring()/getmetatable()/math.max() error instead of
+  ;; treating a missing argument as nil.
+  (func $need_arg (param $args (ref $ArgArr)) (param $n i32)
+    (if (i32.le_u (array.len (local.get $args)) (local.get $n))
+      (then (call $throw_lit (i32.const 620) (i32.const 14)))))   ;; "value expected"
+
   (func $builtin_error (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
     (local $msg anyref) (local $level i32) (local $idx i32)
@@ -2576,6 +2584,7 @@
   ;; rawequal(a, b): equality without consulting __eq.
   (func $builtin_rawequal (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
+    (call $need_arg (local.get $args) (i32.const 1))
     (array.new_fixed $ArgArr 1
       (call $lua_bool_to_ref
         (call $lua_rawequal
@@ -3161,6 +3170,7 @@
 
   (func $builtin_tostring (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
+    (call $need_arg (local.get $args) (i32.const 0))
     (array.new_fixed $ArgArr 1
       (call $lua_tostring (call $args_at (local.get $args) (i32.const 0)))))
 
@@ -3176,6 +3186,7 @@
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
     (local $v anyref) (local $base i32) (local $nargs i32)
     (local $arg1 anyref) (local $has_base i32)
+    (call $need_arg (local.get $args) (i32.const 0))
     (local.set $v (call $args_at (local.get $args) (i32.const 0)))
     (local.set $nargs (array.len (local.get $args)))
     ;; A nil second argument means "standard conversion", same as omitting it.
@@ -3272,6 +3283,7 @@
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
     ;; Use the singleton next closure so `pairs(t) == pairs(t)` returns
     ;; the same iterator both times — same identity contract as ipairs.
+    (call $need_arg (local.get $args) (i32.const 0))
     (array.new_fixed $ArgArr 3
       (global.get $g_builtin_next)
       (call $args_at (local.get $args) (i32.const 0))
@@ -3300,6 +3312,7 @@
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
     ;; Return the singleton iter closure so `ipairs{} == ipairs{}` holds
     ;; (reference Lua promises the iterator function is always the same).
+    (call $need_arg (local.get $args) (i32.const 0))
     (array.new_fixed $ArgArr 3
       (global.get $g_builtin_ipairs_iter)
       (call $args_at (local.get $args) (i32.const 0))
@@ -3355,6 +3368,7 @@
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
     (local $v anyref)
     (local $t (ref $LuaTable)) (local $mt (ref null $LuaTable)) (local $guard anyref)
+    (call $need_arg (local.get $args) (i32.const 0))
     (local.set $v (call $args_at (local.get $args) (i32.const 0)))
     ;; Strings share a metatable ({__index = string}); reference exposes it.
     (if (ref.test (ref $LuaString) (local.get $v))
@@ -4152,6 +4166,7 @@
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
     (local $v anyref) (local $f f64) (local $i i64)
     ;; Coerce a numeric-string argument first, like the other math.* fns.
+    (call $need_arg (local.get $args) (i32.const 0))
     (local.set $v (call $coerce_num (call $args_at (local.get $args) (i32.const 0))))
     (if (call $is_int (local.get $v))
       (then (return (array.new_fixed $ArgArr 1 (local.get $v)))))
@@ -4174,6 +4189,7 @@
   (func $builtin_math_type (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
     (local $v anyref)
+    (call $need_arg (local.get $args) (i32.const 0))
     (local.set $v (call $args_at (local.get $args) (i32.const 0)))
     (if (call $is_int (local.get $v))
       (then (return (array.new_fixed $ArgArr 1
@@ -4339,6 +4355,7 @@
   (func $builtin_math_min (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
     (local $n i32) (local $i i32) (local $best anyref) (local $v anyref)
+    (call $need_arg (local.get $args) (i32.const 0))
     (local.set $n (array.len (local.get $args)))
     (local.set $best (call $args_at (local.get $args) (i32.const 0)))
     (local.set $i (i32.const 1))
@@ -4354,6 +4371,7 @@
   (func $builtin_math_max (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
     (local $n i32) (local $i i32) (local $best anyref) (local $v anyref)
+    (call $need_arg (local.get $args) (i32.const 0))
     (local.set $n (array.len (local.get $args)))
     (local.set $best (call $args_at (local.get $args) (i32.const 0)))
     (local.set $i (i32.const 1))
@@ -7101,7 +7119,7 @@
     (local.set $endian_le (i32.const 1))
     (local.set $max_align (i32.const 1))
     (local.set $bytes (struct.get $LuaString $bytes
-      (ref.cast (ref $LuaString)
+      (call $arg_string
         (call $args_at (local.get $args) (i32.const 0)))))
     (local.set $len (array.len (local.get $bytes)))
     (block $done (loop $lp
@@ -7195,7 +7213,7 @@
     (local.set $arg_idx (i32.const 1))
     (local.set $b (call $builder_new))
     (local.set $bytes (struct.get $LuaString $bytes
-      (ref.cast (ref $LuaString)
+      (call $arg_string
         (call $args_at (local.get $args) (i32.const 0)))))
     (local.set $len (array.len (local.get $bytes)))
     (block $done (loop $lp
@@ -7432,7 +7450,7 @@
     (local.set $endian_le (i32.const 1))
     (local.set $max_align (i32.const 1))
     (local.set $bytes (struct.get $LuaString $bytes
-      (ref.cast (ref $LuaString)
+      (call $arg_string
         (call $args_at (local.get $args) (i32.const 0)))))
     (local.set $len (array.len (local.get $bytes)))
     (local.set $subj (struct.get $LuaString $bytes
