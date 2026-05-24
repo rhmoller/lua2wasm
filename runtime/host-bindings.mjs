@@ -448,8 +448,10 @@ export function makeHelpers({ getInstance, formatFloat, cFormatG, cFormatF, cFor
             }
             case "c": {
                 const iv = asIntOrNull(); if (iv === null) return -1;
+                // Mask the low byte on the BigInt (Number(iv) loses precision
+                // for |iv| >= 2^53 and JS & is 32-bit), then to a 0..255 char.
                 return writeFmtBuf(applyPad(
-                    String.fromCharCode(Number(iv) & 0xff), flags, width));
+                    String.fromCharCode(Number(iv & 0xffn)), flags, width));
             }
             case "d": case "i": {
                 const iv = asIntOrNull(); if (iv === null) return -1;
