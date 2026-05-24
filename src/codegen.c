@@ -475,6 +475,7 @@ static int i31_fits(int64_t v) {
 static void emit_expr(CG *c, const Expr *e, int depth);
 static void emit_block(CG *c, const Block *b, int depth);
 static void emit_stmt(CG *c, const Stmt *s, int depth);
+static void emit_block_stmts(CG *c, const Block *b, int depth);
 static void emit_close_upto(CG *c, int target, const char *err_wat, int depth);
 static int expr_is_int(CG *c, const Expr *e);
 static void emit_int_expr(CG *c, const Expr *e, int depth);
@@ -3018,10 +3019,20 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
         wat_appendf(c->w, "(block $brk_%d\n", label);
         emit_indent(c, depth + 1);
         wat_appendf(c->w, "(loop $cont_%d\n", label);
-        emit_block(c, &s->as.repeat.body, depth + 2);
+        /* A <close> var declared in the body stays in scope for the until
+         * condition and is closed AFTER it (Lua §3.3.5). Emit the body
+         * statements directly (emit_block would close at the body's end),
+         * evaluate the condition, then close the body's to-be-closed vars.
+         * $close_upto is a stack-neutral folded call, so it can sit between the
+         * condition's i32 result and the br_if that consumes it. */
+        int rbase = c->close_count;
+        emit_block_stmts(c, &s->as.repeat.body, depth + 2);
         emit_truthy(c, s->as.repeat.cond, depth + 2);
         emit_indent(c, depth + 2);
         wat_append(c->w, "i32.eqz\n");
+        if (c->close_count > rbase)
+            emit_close_upto(c, rbase, "(ref.null any)", depth + 2);
+        c->close_count = rbase;
         emit_indent(c, depth + 2);
         wat_appendf(c->w, "br_if $cont_%d\n", label);
         emit_indent(c, depth + 1);

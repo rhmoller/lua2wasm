@@ -130,3 +130,4 @@ gmatch_number	tests/fixtures/gmatch_number.lua
 close_decl_validate	tests/fixtures/close_decl_validate.lua
 close_goto	tests/fixtures/close_goto.lua
 close_errors	tests/fixtures/close_errors.lua
+close_repeat_until	tests/fixtures/close_repeat_until.lua

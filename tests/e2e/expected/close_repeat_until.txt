@@ -1,0 +1,2 @@
+body cond(false) close x body cond(true) close x
+stopped at n=3
