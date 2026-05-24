@@ -43,6 +43,26 @@ async function instantiate(bytes, imports) {
   return instance.exports;
 }
 
+// Read the leading vector count of a wasm section (e.g. the type section's
+// entry count), or 0 if the section is absent.
+function sectionCount(bytes, secId) {
+  let p = 8;
+  const uleb = () => {
+    let sh = 0, n = 0, b;
+    do { b = bytes[p++]; n |= (b & 0x7f) << sh; sh += 7; } while (b & 0x80);
+    return n >>> 0;
+  };
+  while (p < bytes.length) {
+    const id = bytes[p++];
+    const len = uleb();
+    const end = p + len;
+    if (id === secId) return uleb();
+    p = end;
+  }
+  return 0;
+}
+const typeCount = (b) => sectionCount(b, 1);
+
 // Assemble `wat` with our assembler (and wasm-as if present), instantiate
 // each, and run `run(exports, label)` against both.
 async function check(wat, run, imports = {}) {
@@ -491,4 +511,37 @@ test("dce keeps a transitive callee but drops its unused sibling", async () => {
   const dced = oursDce(wat);
   assert.equal((await instantiate(dced)).f(), 9);
   assert.ok(dced.length < ours(wat).length, "dce should drop $unused");
+});
+
+test("dce drops a signature used only by a dead function", async () => {
+  // $dead has a signature no surviving entity shares, so the type section
+  // must shrink by exactly that one orphaned signature once $dead is pruned.
+  const wat = `(module
+     (func (export "f") (result i32) (i32.const 1))
+     (func $dead (param i64 f64) (result f64)
+       (local.get 0) (drop) (local.get 1)))`;
+  const plain = ours(wat);
+  const dced = oursDce(wat);
+  assert.equal(typeCount(dced), typeCount(plain) - 1, "orphaned signature kept");
+  assert.equal((await instantiate(dced)).f(), 1);
+});
+
+test("dce keeps a signature still shared with a live function", async () => {
+  // Both functions share one interned signature; dropping $dead must not drop
+  // the signature, and the live function's type index must still resolve.
+  const wat = `(module
+     (func (export "f") (param i64 f64) (result f64) (local.get 1))
+     (func $dead (param i64 f64) (result f64) (local.get 1)))`;
+  const dced = oursDce(wat);
+  assert.equal((await instantiate(dced)).f(7n, 2.5), 2.5);
+});
+
+test("dce keeps a block-type signature inside a live function", async () => {
+  // The multi-value block signature is reachable only through live code; it
+  // must survive sig-DCE and the block's type index must still be valid.
+  const wat = `(module
+     (func (export "f") (result i32)
+       (i32.const 2) (i32.const 3)
+       (block (param i32 i32) (result i32) (i32.add))))`;
+  assert.equal((await instantiate(oursDce(wat))).f(), 5);
 });

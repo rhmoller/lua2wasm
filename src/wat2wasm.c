@@ -212,6 +212,10 @@ typedef struct {
      * emitted (calls, ref.func, global.get/set, exports, elem). */
     const uint32_t *func_remap;
     const uint32_t *global_remap;
+    /* DCE over the synthesized signature table: maps an old synthesized-sig
+     * slot to its index among the survivors (0xffffffff for dropped sigs,
+     * which live code never references). NULL when DCE is off. */
+    const uint32_t *sig_remap;
 } Ctx;
 
 /* Apply the DCE remaps to a function / global index, if active. */
@@ -220,6 +224,13 @@ static uint32_t map_func(Ctx *c, uint32_t old) {
 }
 static uint32_t map_global(Ctx *c, uint32_t old) {
     return c->global_remap ? c->global_remap[old] : old;
+}
+/* Apply the synthesized-signature remap to a *type* index. Declared types keep
+ * their slots (indices below n_decl_types); only the appended func signatures
+ * are compacted, so they shift by the remap. */
+static uint32_t map_typeidx(Ctx *c, uint32_t t) {
+    if (!c->sig_remap || t < c->n_decl_types) return t;
+    return (uint32_t)c->n_decl_types + c->sig_remap[t - c->n_decl_types];
 }
 
 static void fail(Ctx *c, const char *fmt, ...) {
@@ -996,7 +1007,7 @@ static void emit_blocktype(Ctx *c, const BlockType *bt, Buf *out) {
     } else {
         uint32_t idx = sig_intern(c->sigs, bt->params, bt->params_len, bt->np, bt->results,
                                   bt->results_len, bt->nr);
-        buf_sleb(out, (int64_t)(c->n_decl_types + idx));
+        buf_sleb(out, (int64_t)map_typeidx(c, (uint32_t)(c->n_decl_types + idx)));
     }
 }
 
@@ -1803,12 +1814,13 @@ static void parse_data(Ctx *c, const SExpr *dn, DataSeg *out) {
 }
 
 /* --- block-type prewalk ------------------------------------------------ *
- * Block/loop/if signatures that need a type index must be interned before
- * the type section is written, so walk every body once up front. */
+ * Block/loop/if/try_table signatures that need a type index must be interned
+ * before the type section is written, so walk every body once up front. */
 static void prewalk_instr(Ctx *c, const SExpr *n) {
     if (!n || !n->is_list) return;
     const char *op = head(n);
-    if (op && (strcmp(op, "block") == 0 || strcmp(op, "loop") == 0 || strcmp(op, "if") == 0)) {
+    if (op && (strcmp(op, "block") == 0 || strcmp(op, "loop") == 0 || strcmp(op, "if") == 0 ||
+               strcmp(op, "try_table") == 0)) {
         const SExpr *k = n->first->next;
         if (k && is_atom(k) && k->atom[0] == '$') k = k->next;
         BlockType bt;
@@ -1869,6 +1881,33 @@ static void dce_scan(Ctx *c, const SExpr *seq, uint8_t *reach, uint32_t *stack, 
                          gbase +
                              resolve_index(c, c->global_names, c->n_global_names, k->next, "global"));
         }
+    }
+}
+
+/* Mark the synthesized signatures a live function's body reaches through its
+ * block types (block/loop/if/try_table with a multi-value signature). Every
+ * such sig was already interned by the prewalk over all functions, so the
+ * sig_intern call here only re-finds the existing slot — it never grows the
+ * table. Mirrors prewalk_instr/emit_blocktype so we never under-mark a sig
+ * that surviving code will reference. */
+static void sig_mark_blocks(Ctx *c, const SExpr *seq, uint8_t *sig_live) {
+    for (const SExpr *n = seq; n; n = n->next) {
+        if (!n->is_list) continue;
+        const char *op = head(n);
+        if (op && (strcmp(op, "block") == 0 || strcmp(op, "loop") == 0 ||
+                   strcmp(op, "if") == 0 || strcmp(op, "try_table") == 0)) {
+            const SExpr *k = n->first->next;
+            if (k && is_atom(k) && k->atom[0] == '$') k = k->next;
+            BlockType bt;
+            parse_blocktype(c, k, &bt);
+            if (!bt.has_type && (bt.np > 0 || bt.nr > 1)) {
+                uint32_t idx = sig_intern(c->sigs, bt.params, bt.params_len, bt.np, bt.results,
+                                          bt.results_len, bt.nr);
+                sig_live[idx] = 1;
+            }
+        }
+        for (const SExpr *k = n->first ? n->first->next : NULL; k; k = k->next)
+            sig_mark_blocks(c, k, sig_live);
     }
 }
 
@@ -2232,10 +2271,38 @@ static int assemble(Ctx *c, const SExpr *module, int dce, uint8_t **out_bytes, s
     for (size_t i = 0; i < n_funcs; i++)
         for (const SExpr *k = funcs[i].body_first; k; k = k->next) prewalk_instr(c, k);
 
-    /* Type section (id 1): declared rectypes, then synthesized func types. */
+    /* DCE over the synthesized signature table. A signature survives only if a
+     * live entity uses it: an import or tag (both always kept), a live function
+     * (as its type), or a block type inside a live function's body. Signatures
+     * interned solely for now-dropped functions become dead weight in the type
+     * section otherwise. Declared types keep their slots, so only the appended
+     * signatures are compacted via sig_remap. */
+    uint32_t *sig_remap = NULL;
+    size_t n_live_sigs = sigs.n;
+    if (dce && sigs.n) {
+        uint8_t *sig_live = xreserve(sigs.n);
+        memset(sig_live, 0, sigs.n);
+        for (size_t i = 0; i < n_imports; i++)
+            if (imports[i].type_index >= n_decls) sig_live[imports[i].type_index - n_decls] = 1;
+        for (size_t i = 0; i < n_tags; i++)
+            if (tags[i].type_index >= n_decls) sig_live[tags[i].type_index - n_decls] = 1;
+        for (size_t i = 0; i < n_funcs; i++) {
+            if (!FUNC_LIVE(i)) continue;
+            if (funcs[i].type_index >= n_decls) sig_live[funcs[i].type_index - n_decls] = 1;
+            sig_mark_blocks(c, funcs[i].body_first, sig_live);
+        }
+        sig_remap = xreserve(sigs.n * sizeof *sig_remap);
+        uint32_t sidx = 0;
+        for (size_t i = 0; i < sigs.n; i++) sig_remap[i] = sig_live[i] ? sidx++ : 0xffffffffu;
+        n_live_sigs = sidx;
+        c->sig_remap = sig_remap;
+        free(sig_live);
+    }
+
+    /* Type section (id 1): declared rectypes, then live synthesized func types. */
     Buf types;
     buf_init(&types);
-    buf_uleb(&types, n_groups + sigs.n);
+    buf_uleb(&types, n_groups + n_live_sigs);
     for (size_t g = 0; g < n_groups; g++) {
         if (groups[g].is_rec) {
             buf_byte(&types, 0x4e);
@@ -2247,7 +2314,8 @@ static int assemble(Ctx *c, const SExpr *module, int dce, uint8_t **out_bytes, s
         }
     }
     for (size_t i = 0; i < sigs.n; i++) {
-        buf_byte(&types, 0x60); /* func (final, no supertype) */
+        if (sig_remap && sig_remap[i] == 0xffffffffu) continue; /* dead signature */
+        buf_byte(&types, 0x60);                                 /* func (final, no supertype) */
         buf_uleb(&types, sigs.sigs[i].n_params);
         buf_bytes(&types, sigs.sigs[i].params, sigs.sigs[i].params_len);
         buf_uleb(&types, sigs.sigs[i].n_results);
@@ -2264,7 +2332,7 @@ static int assemble(Ctx *c, const SExpr *module, int dce, uint8_t **out_bytes, s
         buf_uleb(&importsec, imports[i].name_len);
         buf_bytes(&importsec, imports[i].name, imports[i].name_len);
         buf_byte(&importsec, 0x00); /* func */
-        buf_uleb(&importsec, imports[i].type_index);
+        buf_uleb(&importsec, map_typeidx(c, imports[i].type_index));
     }
 
     /* Function section (id 3) — live defined functions only. */
@@ -2275,7 +2343,7 @@ static int assemble(Ctx *c, const SExpr *module, int dce, uint8_t **out_bytes, s
     buf_init(&funcsec);
     buf_uleb(&funcsec, n_live_funcs);
     for (size_t i = 0; i < n_funcs; i++)
-        if (FUNC_LIVE(i)) buf_uleb(&funcsec, funcs[i].type_index);
+        if (FUNC_LIVE(i)) buf_uleb(&funcsec, map_typeidx(c, funcs[i].type_index));
 
     /* Tag section (id 13). */
     Buf tagsec;
@@ -2283,7 +2351,7 @@ static int assemble(Ctx *c, const SExpr *module, int dce, uint8_t **out_bytes, s
     buf_uleb(&tagsec, n_tags);
     for (size_t i = 0; i < n_tags; i++) {
         buf_byte(&tagsec, 0x00); /* attribute: exception */
-        buf_uleb(&tagsec, tags[i].type_index);
+        buf_uleb(&tagsec, map_typeidx(c, tags[i].type_index));
     }
 
     /* Global section (id 6) — live globals only. */
@@ -2448,6 +2516,7 @@ static int assemble(Ctx *c, const SExpr *module, int dce, uint8_t **out_bytes, s
     free(reach);
     free(func_remap);
     free(global_remap);
+    free(sig_remap);
     sig_table_free(&sigs);
     return 0;
 #undef PUSH

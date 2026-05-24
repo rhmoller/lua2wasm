@@ -250,8 +250,9 @@ Requirements (required vs optional):
 ```
 
 `-o .wasm` output runs **dead-code elimination** by default — prelude functions
-and globals the program can't reach are dropped (behavior-preserving). Add
-`--tree-shake` to also prune builtins the program never names literally, which
+and globals the program can't reach are dropped, along with the function-type
+signatures left orphaned once those functions are gone (all behavior-preserving).
+Add `--tree-shake` to also prune builtins the program never names literally, which
 shrinks modules dramatically (e.g. `print("hi")`: 42 KB → ~9 KB) at the cost of
 dynamic `_G["name"]` lookups of un-named builtins returning nil. `--no-dce`
 disables the DCE pass.
@@ -339,7 +340,7 @@ anything large.
 4. Dynamic error messages with the offending value embedded (e.g. `"invalid format option 'r'"` instead of just `"invalid format"`).
 5. Coroutines — blocked on the WASM stack-switching proposal landing in browsers.
 6. Source maps so DevTools can step from compiled WASM back into Lua.
-7. A more aggressive size optimizer. `-o .wasm` already runs dead-code elimination (functions + globals), and `--tree-shake` prunes unused builtins, but there's no instruction-level optimization or inlining like Binaryen's `wasm-opt -Oz`. A built-in native pass would close the remaining gap without any external dependency — the project (CLI and playground alike) no longer pulls in Binaryen at all.
+7. A more aggressive size optimizer. `-o .wasm` already runs dead-code elimination (functions, globals, and orphaned signatures), and `--tree-shake` prunes unused builtins, but there's no instruction-level optimization or inlining like Binaryen's `wasm-opt -Oz`. A built-in native pass would close the remaining gap without any external dependency — the project (CLI and playground alike) no longer pulls in Binaryen at all.
 
 ## Contributing
 

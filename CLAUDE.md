@@ -41,8 +41,9 @@ node --experimental-wasm-exnref runtime/host.mjs out.wasm
 Multi-file: `-m util.lua` makes `require("util")` work (baked in at compile time).
 Compatibility scorecard over the official Lua suite: `scripts/smoke-official-tests.sh`.
 
-`.wasm` output runs dead-code elimination (unreachable functions + globals)
-by default — `--no-dce` disables it. `--tree-shake` additionally drops
+`.wasm` output runs dead-code elimination (unreachable functions + globals,
+plus the function-type signatures they leave orphaned) by default — `--no-dce`
+disables it. `--tree-shake` additionally drops
 builtins the program never names (big size win; breaks dynamic `_G` lookups
 of un-named builtins). The DCE pass lives in `wat2wasm` (assembler), so the
 `wat2wasm` CLI takes `--dce` to opt in.
