@@ -399,7 +399,7 @@ import { InMemoryFs }             from "https://esm.sh/just-bash@latest";
 import { MATH_FNS, MATH2_FNS,
          makeHelpers, BufferedFile,
          parseFileMode }          from "./host-bindings.mjs";
-import { formatFloat, formatScalar, cFormatG } from "./format.mjs";
+import { formatFloat, formatScalar, cFormatG, cFormatF, cFormatE } from "./format.mjs";
 
 /* ----- fixture presets ----- */
 const PRESETS = {
@@ -893,7 +893,7 @@ function watToWasm(wat) {
 
 /* ----- runtime host ----- */
 let curInstance;
-const helpers = makeHelpers({ getInstance: () => curInstance, formatFloat, cFormatG });
+const helpers = makeHelpers({ getInstance: () => curInstance, formatFloat, cFormatG, cFormatF, cFormatE });
 const { luaToString, formatSpec, parseLuaNumber, osDate, osGetenv, objId } = helpers;
 /* Lua's os.clock spec asks for "an approximation of CPU time"; in the
  * browser the closest cheap monotonic reading is performance.now() since

@@ -5,7 +5,7 @@ import { readFileSync, writeFileSync, existsSync,
          unlinkSync, renameSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { formatFloat, formatScalar, cFormatG } from "./format.mjs";
+import { formatFloat, formatScalar, cFormatG, cFormatF, cFormatE } from "./format.mjs";
 import { MATH_FNS, MATH2_FNS, makeHelpers,
          BufferedFile, parseFileMode,
          latin1Bytes, writeBytesToFmtBuf } from "./host-bindings.mjs";
@@ -17,7 +17,7 @@ if (!wasmPath) {
 }
 
 let instance;
-const helpers = makeHelpers({ getInstance: () => instance, formatFloat, cFormatG });
+const helpers = makeHelpers({ getInstance: () => instance, formatFloat, cFormatG, cFormatF, cFormatE });
 const { luaToString, formatSpec, parseLuaNumber, osDate, osGetenv, objId } = helpers;
 
 // Optional override for deterministic tests: if LUA2WASM_TEST_TIME is set

@@ -172,7 +172,7 @@ export class BufferedFile {
 // `tostring`-like rendering for the host; needed by formatSpec's `%s` /
 // `%q` and the playground's print. Caller passes in formatFloat to keep
 // dependency direction clean.
-export function makeHelpers({ getInstance, formatFloat, cFormatG }) {
+export function makeHelpers({ getInstance, formatFloat, cFormatG, cFormatF, cFormatE }) {
     const exp = () => getInstance().exports;
 
     function readLuaString(v) {
@@ -276,10 +276,9 @@ export function makeHelpers({ getInstance, formatFloat, cFormatG }) {
         if (prec < 0) prec = 6;
         let body;
         if (conv === "f" || conv === "F") {
-            body = v.toFixed(prec);
+            body = cFormatF(v, prec);
         } else if (conv === "e" || conv === "E") {
-            body = v.toExponential(prec);
-            body = body.replace(/e([+-]?)(\d)$/, "e$10$2");
+            body = cFormatE(v, prec);
         } else {
             // %g: faithful C printf semantics (exponent form below 1e-4 or at/
             // above `prec` significant digits), not JS toPrecision's thresholds.
@@ -426,21 +425,24 @@ export function makeHelpers({ getInstance, formatFloat, cFormatG }) {
                 return writeFmtBuf(applyPadNumeric(body, flags, width));
             }
             case "o": {
-                const iv = asIntOrNull(); if (iv === null) return -1;
+                let iv = asIntOrNull(); if (iv === null) return -1;
+                if (iv < 0n) iv += 1n << 64n;        // o/x/X are unsigned (two's complement)
                 body = formatIntSpec(iv, 8, false, flags, prec);
                 if (flags.includes("#") && !body.replace(/^[-+ ]/, "").startsWith("0"))
                     body = body.replace(/^([-+ ]?)/, "$10");
                 return writeFmtBuf(applyPadNumeric(body, flags, width));
             }
             case "x": {
-                const iv = asIntOrNull(); if (iv === null) return -1;
+                let iv = asIntOrNull(); if (iv === null) return -1;
+                if (iv < 0n) iv += 1n << 64n;
                 body = formatIntSpec(iv, 16, false, flags, prec);
                 if (flags.includes("#") && iv !== 0n)
                     body = body.replace(/^([-+ ]?)/, "$10x");
                 return writeFmtBuf(applyPadNumeric(body, flags, width));
             }
             case "X": {
-                const iv = asIntOrNull(); if (iv === null) return -1;
+                let iv = asIntOrNull(); if (iv === null) return -1;
+                if (iv < 0n) iv += 1n << 64n;
                 body = formatIntSpec(iv, 16, true, flags, prec);
                 if (flags.includes("#") && iv !== 0n)
                     body = body.replace(/^([-+ ]?)/, "$10X");

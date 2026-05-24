@@ -1,0 +1,12 @@
+ffffffffffffffff FFFFFFFFFFFFFFFF 1777777777777777777777
+ffffffffffffff01 18446744073709551361
+7fffffffffffffff
+0xff 010
+0 2 2 4 4
+0.2 0.3 0.5
+2.67
+2e+00 4e+00 2e+00
+9.99e+00
+1.235e+04
+-2.5  2.5 +2.5
+[hé][    ab]
