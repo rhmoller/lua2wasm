@@ -109,7 +109,7 @@ pass	math_minmax_ult	min/max use the full < operator; ult coerces int strings, r
 # return/break/goto crossing a close scope PLUS try_table error-path unwinding
 # — invasive changes to control-flow and exception lowering. Niche feature;
 # natural-block-exit close already works. Kept captured.
-xfail	close_early_exit	<close> runs __close on return/break/goto/error exits, reverse order
+pass	close_early_exit	<close> runs __close on return/break/goto/error exits, reverse order
 #
 # -- blocked by hard constraints / missing metadata (kept captured) --
 xfail	nan_sign	tostring(0/0) sign is platform-dependent (WASM canonicalises NaN positive)

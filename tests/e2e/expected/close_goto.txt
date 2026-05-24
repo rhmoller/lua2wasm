@@ -1,0 +1,13 @@
+-- forward goto out of a do-block --
+before goto
+close x
+after label
+-- backward goto loop re-enters the close scope --
+close r0
+close r1
+close r2
+loop done, i=3
+-- goto staying inside the scope does NOT close early --
+at skip, y still open
+close y
+end

@@ -283,6 +283,9 @@ struct Stmt {
             int segment_idx;        /* (STMT_LABEL) 1..N, position in block's label list */
             int block_dispatch_id;  /* (STMT_LABEL or STMT_GOTO) id of the enclosing dispatch block */
             int target_segment_idx; /* (STMT_GOTO)  segment number to land at */
+            int close_base;         /* count of to-be-closed vars in scope here:
+                                     * (STMT_LABEL) at the label; (STMT_GOTO) at the
+                                     * target label. A goto closes down to this. */
         } label;
     } as;
 };

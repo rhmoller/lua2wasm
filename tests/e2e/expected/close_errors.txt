@@ -1,0 +1,3 @@
+close b err=close_errors:16: body-boom | close a err=close_errors:16: body-boom | -> ok=false err=close_errors:16: body-boom
+close c err=nil | close b (raises) | close a err=close_errors:9: b-fail | -> ok=false err=close_errors:9: b-fail
+close b (raises) | close a err=close_errors:9: b-fail | -> ok=false err=close_errors:9: b-fail

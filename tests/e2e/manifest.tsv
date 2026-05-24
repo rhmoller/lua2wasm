@@ -128,3 +128,5 @@ close_exits	tests/fixtures/close_exits.lua
 gsub_repl_number	tests/fixtures/gsub_repl_number.lua
 gmatch_number	tests/fixtures/gmatch_number.lua
 close_decl_validate	tests/fixtures/close_decl_validate.lua
+close_goto	tests/fixtures/close_goto.lua
+close_errors	tests/fixtures/close_errors.lua

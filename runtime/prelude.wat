@@ -9,6 +9,9 @@
   (type $Box       (sub (struct (field $v (mut anyref)))))
   (type $ArgArr    (array (mut anyref)))
   (type $UpvalArr  (array (mut (ref $Box))))
+  ;; Per-activation to-be-closed stack: $items holds the values bound to
+  ;; <close> variables in declaration order; $len is the live count.
+  (type $Tbc       (struct (field $items (mut (ref $ArgArr))) (field $len (mut i32))))
   ;; Capture buffer for Lua patterns. Two i32 cells per capture:
   ;;   [2*i]   = subject byte offset where capture i starts
   ;;   [2*i+1] = length sentinel:
@@ -1945,10 +1948,9 @@
                               (call $as_int (local.get $i))))))
     (i64.gt_s (call $as_int (local.get $next)) (call $as_int (local.get $i))))
 
-  ;; Close a <close> local at end of scope (milestone 23, minimal).
-  ;; Skips nil/false; otherwise looks up __close on the value and
-  ;; calls it with (value, err). err is currently always nil — the
-  ;; error path is not yet plumbed through.
+  ;; __close metamethod key. To-be-closed (<close>) variables are tracked on a
+  ;; per-activation $Tbc stack: $tbc_push validates+records at the declaration,
+  ;; $close_upto runs __close on every scope exit (see those functions below).
   (global $g_mkey_close (mut (ref null $LuaString)) (ref.null $LuaString))
 
   ;; Validate a value bound to a <close> variable, at the declaration site.
@@ -1962,18 +1964,60 @@
                        (ref.as_non_null (global.get $g_mkey_close))))
       (then (call $throw_lit (i32.const 1082) (i32.const 33)))))
 
-  (func $do_close (param $v anyref) (param $err anyref)
-    (local $mm anyref)
-    ;; Skip nil/false.
-    (if (ref.is_null (local.get $v)) (then (return)))
-    (if (i32.eqz (call $lua_truthy (local.get $v))) (then (return)))
-    (local.set $mm (call $get_metamethod (local.get $v)
-                     (ref.as_non_null (global.get $g_mkey_close))))
-    (if (ref.is_null (local.get $mm))
-      (then (throw $LuaError (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 583) (i32.const 37))))))
-    (drop (call $lua_call_any (local.get $mm)
-            (array.new_fixed $ArgArr 2 (local.get $v) (local.get $err))
-            (i32.const 0))))
+  ;; Append a value to the to-be-closed stack after validating it at the
+  ;; declaration (nil/false accepted and stored, but never closed).
+  (func $tbc_push (param $tbc (ref $Tbc)) (param $v anyref)
+    (local $n i32)
+    (call $check_closable (local.get $v))
+    (local.set $n (struct.get $Tbc $len (local.get $tbc)))
+    (array.set $ArgArr (struct.get $Tbc $items (local.get $tbc))
+      (local.get $n) (local.get $v))
+    (struct.set $Tbc $len (local.get $tbc) (i32.add (local.get $n) (i32.const 1))))
+
+  ;; Close every to-be-closed value above $target, innermost first. The stack
+  ;; pops as it goes, so any later pass over an already-closed entry is a no-op
+  ;; (this is what makes a return/break/goto close and the function-level error
+  ;; catch idempotent — whichever runs first does the work). $errobj is the
+  ;; in-flight error (null on a normal exit); it is passed as __close's 2nd
+  ;; argument and replaced if a __close itself raises, so a later close sees the
+  ;; newest error and the newest error is what finally (re)propagates. Remaining
+  ;; closes still run after one raises. call_depth is re-pinned to the entry
+  ;; depth around each __close so an error unwind doesn't run them at an inflated
+  ;; depth (which would trip the stack-overflow guard).
+  (func $close_upto (param $tbc (ref $Tbc)) (param $target i32) (param $errobj anyref)
+    (local $items (ref $ArgArr))
+    (local $i i32)
+    (local $v anyref)
+    (local $pending anyref)
+    (local $depth i32)
+    (local.set $items (struct.get $Tbc $items (local.get $tbc)))
+    (local.set $pending (local.get $errobj))
+    (local.set $depth (global.get $call_depth))
+    (block $done
+      (loop $L
+        (local.set $i (struct.get $Tbc $len (local.get $tbc)))
+        (br_if $done (i32.le_s (local.get $i) (local.get $target)))
+        (local.set $i (i32.sub (local.get $i) (i32.const 1)))
+        (local.set $v (array.get $ArgArr (local.get $items) (local.get $i)))
+        (struct.set $Tbc $len (local.get $tbc) (local.get $i))   ;; pop before close
+        (if (call $lua_truthy (local.get $v))
+          (then
+            (global.set $call_depth (local.get $depth))
+            (block $eldone
+              (block $elcatch (result anyref)
+                (try_table (catch $LuaError $elcatch)
+                  (drop (call $lua_call_any
+                    (call $get_metamethod (local.get $v)
+                      (ref.as_non_null (global.get $g_mkey_close)))
+                    (array.new_fixed $ArgArr 2 (local.get $v) (local.get $pending))
+                    (i32.const 0))))
+                (br $eldone))   ;; success: skip the catch handler
+              ;; reached only via catch: pending = the raised error
+              (local.set $pending))))
+        (br $L)))
+    (global.set $call_depth (local.get $depth))
+    (if (i32.eqz (ref.is_null (local.get $pending)))
+      (then (throw $LuaError (local.get $pending)))))
 
   ;; Frame-stack helpers (milestone 22).
   ;;
