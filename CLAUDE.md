@@ -85,12 +85,17 @@ normalization): enumerate or generate inputs and diff the batch against
 wrap mod 2^64" hold; `tonumber(tostring(x))` is *not* a float identity (Lua
 prints lossy `%.14g`).
 
-There is no generative framework (no random generator / shrinker) in-tree:
-"PBT" here means curated differential corpora plus the official suite. To add
-generative coverage, emit random Lua and pipe it through both `lua2wasm` and
-`lua5.5` — reuse the existing oracle, don't invent a bespoke checker — and only
-when a module's bug rate justifies it (YAGNI). When a generated counterexample
-appears, **shrink it and check it in as a `tests/diff` case** before fixing.
+Generative coverage lives in `scripts/diff-fuzz.mjs`: it emits random Lua in
+the supported subset, runs each program through both `lua2wasm`→node and
+`lua5.5`, and reports/shrinks any divergence (seeded — a seed reproduces a
+program). It needs `lua5.5` live (like `--regen`) so it is a local/nightly
+discovery tool, **not** part of `ctest`; its findings are the durable net.
+Expressions are pcall-wrapped (`print(ok, ...)`) so error *text* is never
+diffed (semantic-not-textual). It deliberately skips non-portable ops
+(transcendentals, `^` with fractional exponent, NaN sign). When it finds a
+counterexample, **shrink it and check it in as a `tests/diff` case** (the
+`--emit NAME` flag scaffolds one as `xfail`) before fixing, then promote to
+`pass`. Run: `node scripts/diff-fuzz.mjs --count 5000 [--phase numeric|format]`.
 
 ## Conventions
 
