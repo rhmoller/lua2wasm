@@ -131,4 +131,4 @@ pass	find_coerce	code-review #7: string.find coerces numeric subject/pattern arg
 pass	format_flag_validity	code-review #12: string.format rejects invalid flag/conversion combos
 pass	format_s_zeros	fuzzer-found: %s with a modifier rejects an embedded NUL (string contains zeros)
 xfail	sort_badcmp_gap	code-review #9: inconsistent-comparator detection not implemented (needs Hoare-partition port; cmp(x,x) is wrong)
-xfail	format_validation_gaps	code-review #12 (partial): %q modifiers, per-conv width/precision (%c), %p, %%, %F, length modifiers not validated
+pass	format_validation_extra	code-review #12: string.format rejects %q-modifier/%c-precision/%%-modifier/%F/length-mod/oversized width

@@ -1,6 +1,0 @@
-%-q=reject
-%.3c=reject
-%+p=reject
-%5%=reject
-%F=reject
-%ld=reject

@@ -1,0 +1,14 @@
+%-q=reject
+%5q=reject
+%.3c=reject
+%5%=reject
+%-%=reject
+%F=reject
+%ld=reject
+%n=reject
+%100d=reject
+%.100f=reject
+%+p=reject
+%0p=reject
+%.3p=reject
+%+d=accept	%#x=accept	%-8.3f=accept	%5c=accept	%.3s=accept	%q=accept	p-ok

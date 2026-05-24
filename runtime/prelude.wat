@@ -6809,9 +6809,15 @@
           (local.set $arg_idx (i32.add (local.get $arg_idx) (i32.const 1)))
           (local.set $b (array.get_u $LuaArr (local.get $fmt) (local.get $j)))
           ;; %p is value-type dependent, so format it here rather than in the
-          ;; host (which sees no Lua type). Width/flags on %p are not applied.
+          ;; host (which sees no Lua type). Width/flags on %p are not applied,
+          ;; but still validate the directive via the host scanformat check (%p
+          ;; allows only '-' and a width) so e.g. %+p / %.3p raise like Lua.
           (if (i32.eq (local.get $b) (i32.const 112))           ;; 'p'
             (then
+              (if (i32.lt_s (call $host_fmt_spec
+                    (struct.new $LuaString (local.get $spec)) (local.get $arg))
+                  (i32.const 0))
+                (then (call $throw_lit (i32.const 416) (i32.const 14))))   ;; "invalid format"
               (local.set $acc (call $lua_concat (local.get $acc)
                 (call $fmt_ptr (local.get $arg))))
               (local.set $i (i32.add (local.get $j) (i32.const 1)))

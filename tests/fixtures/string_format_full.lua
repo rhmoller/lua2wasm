@@ -39,9 +39,9 @@ print(string.format("%X", 255))                      -- FF
 print(string.format("%c", 65))                       -- A
 print(string.format("%c%c%c", 72, 105, 33))          -- Hi!
 
--- Uppercase float conversions.
+-- Uppercase float conversions (Lua has %E and %G but no %F).
 print(string.format("%E", 12345.0))                  -- 1.234500E+04
-print(string.format("%F", 3.14))                     -- 3.140000
+print(string.format("%G", 0.0001))                   -- 0.0001
 print(string.format("%G", 1.5))                      -- 1.5
 
 -- %q (Lua-readable quoted form).
