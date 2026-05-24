@@ -1,0 +1,7 @@
+visited	4
+after	nil
+seen	10
+remain/sum	5	30
+reuse	1	99
+resume	3
+false	true
