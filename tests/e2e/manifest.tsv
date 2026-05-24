@@ -116,3 +116,4 @@ int_arg_coercion	tests/fixtures/int_arg_coercion.lua
 table_key_normalize	tests/fixtures/table_key_normalize.lua
 bad_arg_catchable	tests/fixtures/bad_arg_catchable.lua
 string_mt_capture	tests/fixtures/string_mt_capture.lua
+next_invalid_key	tests/fixtures/next_invalid_key.lua

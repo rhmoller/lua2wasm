@@ -3171,8 +3171,13 @@
                                (i32.wrap_i64 (local.get $val)))))))
           (local.set $idx (i32.const 0))
           (br $hash_phase)))
-      ;; $k is a hash-part key
-      (local.set $idx (i32.add (call $tab_find (local.get $t) (local.get $k)) (i32.const 1))))
+      ;; $k is a hash-part key. A key that was never inserted is invalid for
+      ;; next() — raise rather than silently restarting iteration from the
+      ;; first hash entry (reference luaH_next).
+      (local.set $idx (call $tab_find (local.get $t) (local.get $k)))
+      (if (i32.lt_s (local.get $idx) (i32.const 0))
+        (then (call $throw_lit (i32.const 1021) (i32.const 21))))   ;; "invalid key to 'next'"
+      (local.set $idx (i32.add (local.get $idx) (i32.const 1))))
     (local.set $n (struct.get $LuaTable $n (local.get $t)))
     ;; Exhausted: return an explicit nil (so `next({})` yields nil, not no
     ;; value). The generic-for loop stops on a nil first result either way.
