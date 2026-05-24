@@ -1,0 +1,12 @@
+d: +=ok  =ok #=ER 0=ok -=ok
+i: +=ok  =ok #=ER 0=ok -=ok
+u: +=ER  =ER #=ER 0=ok -=ok
+o: +=ER  =ER #=ok 0=ok -=ok
+x: +=ER  =ER #=ok 0=ok -=ok
+X: +=ER  =ER #=ok 0=ok -=ok
+c: +=ER  =ER #=ER 0=ER -=ok
+f: +=ok  =ok #=ok 0=ok -=ok
+e: +=ok  =ok #=ok 0=ok -=ok
+g: +=ok  =ok #=ok 0=ok -=ok
+s: +=ER  =ER #=ER 0=ER -=ok
++5| 5|0xff|7    |00007|8.

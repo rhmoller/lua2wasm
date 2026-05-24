@@ -354,6 +354,18 @@ export function makeHelpers({ getInstance, formatFloat, cFormatG, cFormatF, cFor
         const width = m[2] ? parseInt(m[2], 10) : 0;
         const prec  = m[3] !== undefined ? parseInt(m[3], 10) : -1;
         const conv  = m[4];
+        // Per-conversion flag validity (Lua's scanformat): '-' is always ok;
+        // '0' only for numeric; '+'/' ' only for signed numeric; '#' for
+        // o/x/X and floats. Anything else (incl. the unsupported "'") raises a
+        // catchable "invalid conversion specification".
+        const VALID_FLAGS = {
+            d: "-+ 0", i: "-+ 0", u: "-0", o: "-0#", x: "-0#", X: "-0#",
+            c: "-", s: "-", q: "-",
+            f: "-+ #0", F: "-+ #0", e: "-+ #0", E: "-+ #0",
+            g: "-+ #0", G: "-+ #0", a: "-+ #0", A: "-+ #0",
+        };
+        if (conv in VALID_FLAGS)
+            for (const ch of flags) if (!VALID_FLAGS[conv].includes(ch)) return -1;
         const tag = valRef === null || valRef === undefined ? 0
                   : exp().lua_tag(valRef);
         // Integer argument for %d/%i/%u/%o/%x/%X/%c. Returns null when the
