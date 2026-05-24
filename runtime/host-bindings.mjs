@@ -374,10 +374,20 @@ export function makeHelpers({ getInstance, formatFloat, cFormatG, cFormatF, cFor
             }
             return null;
         };
-        const asFloat = () => {
+        // Float argument for %f/%e/%g/%a. Returns null for a non-numeric /
+        // nil / wrong-type value (caller raises) and coerces a numeric string,
+        // matching Lua — never silently 0.
+        const asFloatOrNull = () => {
             if (tag === 3) return exp().lua_get_float(valRef);
             if (tag === 2) return Number(exp().lua_get_int(valRef));
-            return 0;
+            if (tag === 4) {
+                const p = parseLuaNumber(valRef, 0);
+                if (p === null || p === undefined) return null;
+                const pt = exp().lua_tag(p);
+                if (pt === 2) return Number(exp().lua_get_int(p));
+                if (pt === 3) return exp().lua_get_float(p);
+            }
+            return null;
         };
         let body;
         switch (conv) {
@@ -450,12 +460,16 @@ export function makeHelpers({ getInstance, formatFloat, cFormatG, cFormatF, cFor
                     body = body.replace(/^([-+ ]?)/, "$10X");
                 return writeFmtBuf(applyPadNumeric(body, flags, width));
             }
-            case "f": case "F": case "e": case "E": case "g": case "G":
-                body = formatFloatSpec(asFloat(), conv, prec, flags);
+            case "f": case "F": case "e": case "E": case "g": case "G": {
+                const fv = asFloatOrNull(); if (fv === null) return -1;
+                body = formatFloatSpec(fv, conv, prec, flags);
                 return writeFmtBuf(applyPadNumeric(body, flags, width));
-            case "a": case "A":
-                body = formatHexFloat(asFloat(), conv === "A");
+            }
+            case "a": case "A": {
+                const fv = asFloatOrNull(); if (fv === null) return -1;
+                body = formatHexFloat(fv, conv === "A");
                 return writeFmtBuf(applyPadNumeric(body, flags, width));
+            }
             default:
                 return writeFmtBuf(spec);
         }
