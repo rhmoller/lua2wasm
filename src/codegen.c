@@ -16,6 +16,7 @@
 #define MAX_BREAK_DEPTH  64  /* nested loop break targets */
 #define MAX_BLOCK_LABELS 64  /* ::labels:: declared in one block */
 #define MAX_CLOSE_SLOTS  32  /* <close> locals declared in one block */
+#define MAX_CLOSE_DEPTH  64  /* nested blocks with <close> locals */
 #define MAX_DISPATCH_IDS 128 /* label-bearing blocks per function */
 
 /* ============================================================
@@ -229,10 +230,21 @@ typedef struct {
     int in_main;                       /* 1 while emitting $main body, 0 inside user fn */
     int break_labels[MAX_BREAK_DEPTH]; /* break targets for nested while/for/repeat */
     int break_depth;
-    int for_depth; /* nesting depth of numeric/generic for-loops;
-                    * indexes per-level $for_* scratch locals so a
-                    * nested loop can't clobber the enclosing loop's
-                    * stop/step or iterator state */
+    /* Active <close> scopes (innermost last) for the function being emitted.
+     * Each holds one block's close slots in declaration order. `return`
+     * closes every scope; `break` closes the scopes inside the loop (those
+     * pushed after break_close_sp recorded the depth at loop entry); an error
+     * closes them via a per-block try_table. */
+    struct {
+        int slots[MAX_CLOSE_SLOTS];
+        int n;
+    } close_scopes[MAX_CLOSE_DEPTH];
+    int close_sp;
+    int break_close_sp[MAX_BREAK_DEPTH]; /* close_sp at each loop entry */
+    int for_depth;                       /* nesting depth of numeric/generic for-loops;
+                                          * indexes per-level $for_* scratch locals so a
+                                          * nested loop can't clobber the enclosing loop's
+                                          * stop/step or iterator state */
     /* Escape-analysis context for the currently-emitted body: cur_captured[s]
      * != 0 means slot s must be heap-boxed (some descendant function captures
      * it); cur_captured[s] == 0 lets the slot be a plain wasm anyref. Set
@@ -298,6 +310,9 @@ static int push_break_label(CG *c, int label) {
         cg_error(c, "loop nesting too deep");
         return 0;
     }
+    /* Record the close-scope depth at loop entry so `break` closes only the
+     * <close> locals declared inside this loop. */
+    c->break_close_sp[c->break_depth] = c->close_sp;
     c->break_labels[c->break_depth++] = label;
     return 1;
 }
@@ -426,6 +441,8 @@ static int i31_fits(int64_t v) {
 static void emit_expr(CG *c, const Expr *e, int depth);
 static void emit_block(CG *c, const Block *b, int depth);
 static void emit_stmt(CG *c, const Stmt *s, int depth);
+static void emit_close_for_return(CG *c, int depth);
+static void emit_close_for_break(CG *c, int floor, int depth);
 static int expr_is_int(CG *c, const Expr *e);
 static void emit_int_expr(CG *c, const Expr *e, int depth);
 static int expr_is_float(CG *c, const Expr *e);
@@ -2366,6 +2383,50 @@ static void emit_assign(CG *c, const Stmt *s, int depth) {
 
 static void emit_return(CG *c, const Stmt *s, int depth) {
     int n_values = s->as.return_stmt.n_values;
+    /* Close-aware return: any to-be-closed local in scope must be closed
+     * before the function returns. Evaluate the result onto the stack first
+     * (do_close is stack-neutral, so it stays beneath), then close every
+     * active scope, then return. A `return f()` here is NOT a tail call —
+     * the locals must close after f() returns. */
+    if (c->close_sp > 0) {
+        if (c->in_main) {
+            for (int i = 0; i < n_values; i++) {
+                emit_expr(c, s->as.return_stmt.values[i], depth);
+                emit_indent(c, depth);
+                wat_append(c->w, "drop\n");
+            }
+            emit_close_for_return(c, depth);
+            emit_indent(c, depth);
+            wat_append(c->w, "return\n");
+            return;
+        }
+        if (c->ret_single) {
+            if ((c->cur_ret_ty == NT_INT || c->cur_ret_ty == NT_FLOAT) && n_values == 1) {
+                if (c->cur_ret_ty == NT_INT)
+                    emit_int_expr(c, s->as.return_stmt.values[0], depth);
+                else
+                    emit_num_as_f64(c, s->as.return_stmt.values[0], depth);
+            } else if (n_values == 0) {
+                emit_indent(c, depth);
+                wat_append(c->w, "(ref.null any)\n");
+            } else {
+                emit_expr(c, s->as.return_stmt.values[0], depth);
+                for (int i = 1; i < n_values; i++) {
+                    emit_expr(c, s->as.return_stmt.values[i], depth);
+                    emit_indent(c, depth);
+                    wat_append(c->w, "drop\n");
+                }
+            }
+        } else if (n_values == 1 && is_multival_tail(s->as.return_stmt.values[0])) {
+            emit_multival_array(c, s->as.return_stmt.values[0], depth);
+        } else {
+            emit_args_array(c, s->as.return_stmt.values, n_values, depth);
+        }
+        emit_close_for_return(c, depth);
+        emit_indent(c, depth);
+        wat_append(c->w, "return\n");
+        return;
+    }
     if (c->in_main) {
         /* $main is exported with no result, so the chunk's return
          * value can't be surfaced to the host — but we still have
@@ -2920,6 +2981,8 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
             break;
         }
         int label = c->break_labels[c->break_depth - 1];
+        /* Close to-be-closed locals declared inside this loop before leaving. */
+        emit_close_for_break(c, c->break_close_sp[c->break_depth - 1], depth);
         emit_indent(c, depth);
         wat_appendf(c->w, "br $brk_%d\n", label);
         break;
@@ -3078,23 +3141,56 @@ static int collect_close_slots(const Block *b, int *out_slots, int cap) {
     return n;
 }
 
-/* Emit close calls in REVERSE declaration order. Milestone-23 minimal:
- * called only on natural block exit. Return/break/error in the block
- * skip the close — a documented limitation. */
-static void emit_close_calls(CG *c, const int *slots, int n, int depth) {
-    for (int i = n - 1; i >= 0; i--) {
-        int slot = slots[i];
-        emit_indent(c, depth);
-        if (slot_is_boxed(c, slot)) {
-            wat_appendf(c->w,
-                        "(call $do_close (struct.get $Box $v (local.get $L%d)) "
-                        "(ref.null any))\n",
-                        slot);
-        } else {
-            wat_appendf(c->w,
-                        "(call $do_close (local.get $L%d) (ref.null any))\n", slot);
-        }
+/* Close one <close> slot: run __close(value, err). `err_wat` is the WAT for
+ * the second __close argument — "(ref.null any)" on a normal/return/break
+ * exit, or the caught error value on an error unwind. The slot's value is left
+ * intact (reference Lua doesn't clear it — an escaping closure may still read
+ * the now-closed value); each exit path closes a given var at most once, and a
+ * block re-entry (loop) resets the slot first via emit_close_slots_reset. */
+static void emit_close_one(CG *c, int slot, const char *err_wat, int depth) {
+    emit_indent(c, depth);
+    if (slot_is_boxed(c, slot)) {
+        wat_appendf(c->w,
+                    "(call $do_close (struct.get $Box $v (local.get $L%d)) %s)\n",
+                    slot, err_wat);
+    } else {
+        wat_appendf(c->w, "(call $do_close (local.get $L%d) %s)\n", slot, err_wat);
     }
+}
+
+/* Reset a block's <close> slots to an empty value on block entry, so that an
+ * exit before the variable is activated (or a loop re-entry, before the
+ * declaration reassigns it) closes nothing rather than re-closing a stale
+ * value from a previous pass. */
+static void emit_close_slots_reset(CG *c, const int *slots, int n, int depth) {
+    for (int i = 0; i < n; i++) {
+        emit_indent(c, depth);
+        if (slot_is_boxed(c, slots[i]))
+            wat_appendf(c->w,
+                        "(local.set $L%d (struct.new $Box (ref.null any)))\n",
+                        slots[i]);
+        else
+            wat_appendf(c->w, "(local.set $L%d (ref.null any))\n", slots[i]);
+    }
+}
+
+/* Emit close calls for one block's slots in REVERSE declaration order. */
+static void emit_close_calls(CG *c, const int *slots, int n, int depth) {
+    for (int i = n - 1; i >= 0; i--)
+        emit_close_one(c, slots[i], "(ref.null any)", depth);
+}
+
+/* Close every active <close> scope (innermost first), for a `return`. */
+static void emit_close_for_return(CG *c, int depth) {
+    for (int s = c->close_sp - 1; s >= 0; s--)
+        emit_close_calls(c, c->close_scopes[s].slots, c->close_scopes[s].n, depth);
+}
+
+/* Close the <close> scopes declared inside the innermost loop, for a `break`
+ * (those pushed after the loop recorded its close-scope depth). */
+static void emit_close_for_break(CG *c, int floor, int depth) {
+    for (int s = c->close_sp - 1; s >= floor; s--)
+        emit_close_calls(c, c->close_scopes[s].slots, c->close_scopes[s].n, depth);
 }
 
 /* Emit a goto-able block as a dispatch table:
@@ -3132,7 +3228,9 @@ static void emit_close_calls(CG *c, const int *slots, int n, int depth) {
  * This handles every label graph including interleaved forward+backward
  * scopes (the original cross-label-overlap case the old nested-blocks
  * lowering had to bail out on). */
-static void emit_block(CG *c, const Block *b, int depth) {
+/* Emit a block's statements (label dispatch and all), WITHOUT any <close>
+ * handling — emit_block wraps this with the scope push/close calls. */
+static void emit_block_stmts(CG *c, const Block *b, int depth) {
     /* Fast path: no labels in this block, no wrappers needed. */
     int has_labels = 0;
     for (size_t i = 0; i < b->count; i++) {
@@ -3141,11 +3239,8 @@ static void emit_block(CG *c, const Block *b, int depth) {
             break;
         }
     }
-    int close_slots[MAX_CLOSE_SLOTS];
-    int n_close = collect_close_slots(b, close_slots, MAX_CLOSE_SLOTS);
     if (!has_labels) {
         for (size_t i = 0; i < b->count; i++) emit_stmt(c, b->items[i], depth);
-        emit_close_calls(c, close_slots, n_close, depth);
         return;
     }
 
@@ -3231,7 +3326,60 @@ static void emit_block(CG *c, const Block *b, int depth) {
     wat_append(c->w, ")\n");
     emit_indent(c, depth);
     wat_append(c->w, ")\n");
-    emit_close_calls(c, close_slots, n_close, depth);
+}
+
+/* Emit a block, applying <close> semantics. A block with no to-be-closed
+ * locals is just its statements. Otherwise its scope is pushed (so a nested
+ * `return`/`break` closes it), its body runs inside a try_table that on an
+ * error unwind closes the locals with the error value and re-raises, and on
+ * normal completion the locals are closed with nil — matching reference Lua's
+ * close on every exit path (fall-through, return, break, error). */
+static void emit_block(CG *c, const Block *b, int depth) {
+    int close_slots[MAX_CLOSE_SLOTS];
+    int n_close = collect_close_slots(b, close_slots, MAX_CLOSE_SLOTS);
+    if (n_close == 0) {
+        emit_block_stmts(c, b, depth);
+        return;
+    }
+    if (c->close_sp >= MAX_CLOSE_DEPTH) {
+        cg_error(c, "to-be-closed nesting too deep");
+        return;
+    }
+    int sp = c->close_sp;
+    c->close_scopes[sp].n = n_close;
+    for (int i = 0; i < n_close; i++) c->close_scopes[sp].slots[i] = close_slots[i];
+    c->close_sp++;
+
+    /* Clear the slots up front so a pre-activation exit (or loop re-entry)
+     * closes nothing instead of a stale value. */
+    emit_close_slots_reset(c, close_slots, n_close, depth);
+
+    int L = c->next_label++;
+    emit_indent(c, depth);
+    wat_appendf(c->w, "(block $cldone_%d\n", L);
+    emit_indent(c, depth + 1);
+    wat_appendf(c->w, "(block $clcatch_%d (result anyref)\n", L);
+    emit_indent(c, depth + 2);
+    wat_appendf(c->w, "(try_table (catch $LuaError $clcatch_%d)\n", L);
+    emit_block_stmts(c, b, depth + 3);
+    emit_indent(c, depth + 2);
+    wat_append(c->w, ")\n"); /* try_table */
+    /* Normal completion: close in reverse order with nil. */
+    emit_close_calls(c, close_slots, n_close, depth + 2);
+    emit_indent(c, depth + 2);
+    wat_appendf(c->w, "(br $cldone_%d)\n", L);
+    emit_indent(c, depth + 1);
+    wat_append(c->w, ")\n"); /* clcatch block: caught error value on stack */
+    emit_indent(c, depth + 1);
+    wat_append(c->w, "(local.set $tmp_any)\n");
+    for (int i = n_close - 1; i >= 0; i--)
+        emit_close_one(c, close_slots[i], "(local.get $tmp_any)", depth + 1);
+    emit_indent(c, depth + 1);
+    wat_append(c->w, "(throw $LuaError (local.get $tmp_any))\n");
+    emit_indent(c, depth);
+    wat_append(c->w, ")\n"); /* cldone */
+
+    c->close_sp--;
 }
 
 /* Walk a block body collecting dispatch ids of every block-with-labels.
@@ -3590,6 +3738,7 @@ static void emit_user_function(CG *c, const LuaFunc *fn, int direct, int ret_sin
     c->in_main = 0;
     c->ret_single = ret_single;
     c->cur_ret_ty = ret_ty;
+    c->close_sp = 0; /* fresh close-scope stack per function body */
     if (c->ok) emit_block(c, &fn->body, 2);
     c->next_label_id = saved_next_id_pre;
     c->in_main = was_in_main;
@@ -4209,6 +4358,7 @@ static void emit_main_chunk(CG *c) {
         }
     }
 
+    c->close_sp = 0;
     if (c->ok) emit_block(c, &pr->main_body, 2);
 
     wat_append(out, "  )\n");

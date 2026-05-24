@@ -1,8 +1,8 @@
 -- Milestone 23: <const> and <close> local attributes.
 -- <const>: compile-time rejection of reassignment.
--- <close>: __close called at natural block exit, reverse declaration
--- order, nil/false skipped. Error/break/return inside the block do NOT
--- trigger close yet — documented limitation.
+-- <close>: __close called at every block exit (fall-through, return, break,
+-- error), reverse declaration order, nil/false skipped. The early-exit and
+-- error close paths are covered in detail by close_exits.lua.
 
 -- Basic <const> read.
 local pi <const> = 3.14

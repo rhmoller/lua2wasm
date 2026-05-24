@@ -1,0 +1,16 @@
+in-do
+close	b	ok
+close	a	ok
+close	ret	ok
+f=	1	2	3
+close	loop1	ok
+close	loop2	ok
+close	y	err
+close	x	err
+pcall-ok	false
+close	g	ok
+close	inner	ok
+close	outer	ok
+nested=	done
+close	cap	ok
+cap=	cap
