@@ -62,6 +62,36 @@ New language features land behind an end-to-end fixture **before** parser syntax
 
 Bug fixes follow the same shape: failing test first, fix second, same commit.
 
+## Property-based & differential testing
+
+The phase-rule goldens above pin one output per case. For logic-heavy code —
+lexer, parser, pattern matcher, number formatter/parser, table-key
+normalization — also assert *properties* that hold across many inputs.
+
+The property oracle is **reference Lua 5.5**; the master invariant is
+`run(compile(p)) == lua5.5(p)` for any program `p`. It lives in
+`scripts/diff-test.sh` (CTest `test_diff_reference`): a curated corpus under
+`tests/diff/cases/*.lua` diffed against goldens captured from `lua5.5`
+(`scripts/diff-test.sh --regen`; `lua5.5` needed only at regen time).
+`tests/diff/manifest.tsv` tags each case `pass` (must match) or `xfail` (a
+captured bug — the harness goes red if it *starts* matching, so you promote it
+to `pass`). `scripts/smoke-official-tests.sh` scores the upstream Lua suite.
+
+Reach for a property instead of a single golden when the input space is large
+and the rule is declarative (matcher, formatter, arithmetic, key
+normalization): enumerate or generate inputs and diff the batch against
+`lua5.5`. Stick to invariants reference Lua actually obeys — e.g.
+`string.char(string.byte(s, 1, #s)) == s` for any byte string and "integer ops
+wrap mod 2^64" hold; `tonumber(tostring(x))` is *not* a float identity (Lua
+prints lossy `%.14g`).
+
+There is no generative framework (no random generator / shrinker) in-tree:
+"PBT" here means curated differential corpora plus the official suite. To add
+generative coverage, emit random Lua and pipe it through both `lua2wasm` and
+`lua5.5` — reuse the existing oracle, don't invent a bespoke checker — and only
+when a module's bug rate justifies it (YAGNI). When a generated counterexample
+appears, **shrink it and check it in as a `tests/diff` case** before fixing.
+
 ## Conventions
 
 - C23, four-space indents, enforced by clang-format (`.clang-format`). Run
