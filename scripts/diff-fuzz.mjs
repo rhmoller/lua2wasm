@@ -14,7 +14,7 @@
 //   node scripts/diff-fuzz.mjs                  # 1000 programs, random base seed
 //   node scripts/diff-fuzz.mjs --count 5000
 //   node scripts/diff-fuzz.mjs --seed 12345     # reproduce one program (prints it, runs it)
-//   node scripts/diff-fuzz.mjs --phase numeric  # numeric|format|all (default all)
+//   node scripts/diff-fuzz.mjs --phase patterns # numeric|format|patterns|all (default all)
 //   node scripts/diff-fuzz.mjs --emit NAME      # on first divergence, write a tests/diff case
 //   LUA_REF=lua5.4 node scripts/diff-fuzz.mjs   # override the reference interpreter
 
@@ -141,17 +141,117 @@ function genStr(rng, depth) {
     return `${fn}(${genStr(rng, depth - 1)}, ${n})`;
 }
 
+// ---- pattern generator (P3): string.find/match/gmatch/gsub ---------------
+// A Lua string literal from a JS string, escaping ", \, and non-printables.
+function luaStrLit(s) {
+    let out = '"';
+    for (let i = 0; i < s.length; i++) {
+        const c = s.charCodeAt(i);
+        if (c === 34) out += '\\"';
+        else if (c === 92) out += "\\\\";
+        else if (c === 10) out += "\\n";
+        else if (c === 9) out += "\\t";
+        else if (c < 32 || c > 126) out += "\\" + c;
+        else out += s[i];
+    }
+    return out + '"';
+}
+const SUBJ_CODES = [..."aAbB12 ,.()xyz".split("").map((c) => c.charCodeAt(0)), 9, 0, 255, 1];
+function genSubject(rng) {
+    let s = "";
+    const n = rng.int(10);
+    for (let i = 0; i < n; i++) s += String.fromCharCode(rng.pick(SUBJ_CODES));
+    return luaStrLit(s);
+}
+const PAT_CLASSES = ["%a", "%d", "%s", "%w", "%l", "%u", "%p", "%x", "%c",
+    "%A", "%D", "%S", "%W", "%L", "%U", "%P", "%X", "."];
+const PAT_QUANT = ["", "", "", "*", "+", "-", "?"];
+const PAT_LITS = "abAB12 ,xyz".split("");
+const escMagic = (ch) => ("()[].%+-*?^$".includes(ch) ? "%" + ch : ch);
+const escSet = (ch) => ("%]^-".includes(ch) ? "%" + ch : ch);
+function genSet(rng) {
+    let s = "[" + (rng.chance(0.3) ? "^" : "");
+    const k = 1 + rng.int(2);
+    for (let i = 0; i < k; i++) {
+        const t = rng.int(3);
+        if (t === 0) s += rng.pick(["a-z", "0-9", "A-Z"]);
+        else if (t === 1) s += rng.pick(["%d", "%a", "%s", "%w"]);
+        else s += escSet(rng.pick(PAT_LITS));
+    }
+    return s + "]";
+}
+function genPatItem(rng) {
+    const r = rng.int(12);
+    if (r === 10) return "%b()";   // balanced, no quantifier
+    if (r === 11) return "%f[%a]"; // frontier, no quantifier
+    let item;
+    if (r < 4) item = escMagic(rng.pick(PAT_LITS));
+    else if (r < 8) item = rng.pick(PAT_CLASSES);
+    else item = genSet(rng);
+    return item + rng.pick(PAT_QUANT);
+}
+// Build a (mostly) well-formed pattern, tracking captures so back-refs are
+// valid. Malformed patterns that both engines reject are harmless (filtered).
+function genPattern(rng) {
+    let pat = rng.chance(0.25) ? "^" : "";
+    let ncap = 0, open = false;
+    const items = 1 + rng.int(4);
+    for (let i = 0; i < items; i++) {
+        if (!open && ncap < 3 && rng.chance(0.25)) {
+            pat += "(";
+            if (rng.chance(0.15)) { pat += ")"; ncap++; continue; } // position capture ()
+            open = true;
+        }
+        pat += genPatItem(rng);
+        if (open && rng.chance(0.6)) { pat += ")"; open = false; ncap++; }
+        if (ncap >= 1 && rng.chance(0.1)) pat += "%" + (1 + rng.int(ncap));
+    }
+    if (open) { pat += ")"; ncap++; }
+    if (rng.chance(0.2)) pat += "$";
+    return { pat, ncap };
+}
+function genPatternExpr(rng) {
+    const subj = genSubject(rng);
+    const { pat, ncap } = genPattern(rng);
+    const p = luaStrLit(pat);
+    switch (rng.int(4)) {
+        case 0: return `tup(string.find(${subj}, ${p}))`;
+        case 1: return `tup(string.match(${subj}, ${p}))`;
+        case 2: {
+            const repls = ['"X"', '"%0"', '"[%0]"', '"%%"'];
+            if (ncap >= 1) repls.push('"%1"');
+            return `tup(string.gsub(${subj}, ${p}, ${rng.pick(repls)}))`;
+        }
+        default: // gmatch: join the first value of each match
+            return `(function() local o = {} for m in string.gmatch(${subj}, ${p})`
+                + ` do o[#o + 1] = tostring(m) end return table.concat(o, ",") end)()`;
+    }
+}
+
 function genExpr(rng) {
     const depth = 2 + rng.int(3);
-    const useStr = PHASE === "format" || (PHASE === "all" && rng.chance(0.5));
-    return useStr ? genStr(rng, depth) : genNum(rng, depth);
+    if (PHASE === "patterns") return genPatternExpr(rng);
+    if (PHASE === "numeric") return genNum(rng, depth);
+    if (PHASE === "format") return genStr(rng, depth);
+    switch (rng.int(3)) { // all
+        case 0: return genNum(rng, depth);
+        case 1: return genStr(rng, depth);
+        default: return genPatternExpr(rng);
+    }
 }
 
 // Wrap an expression so output is fully engine-agnostic: success prints the
 // value, any error prints just `false <type>` (no chunk-name / interpreter
 // prefix to normalize). Explicit `if ok` so a legit false/nil result is exact.
+// `tup` collapses multi-return (find/match/gsub) into one comparable string and
+// is unused by the numeric/format phases.
 function wrap(exprSrc) {
-    return `local ok, v = pcall(function() return ${exprSrc} end)\n`
+    return `local function tup(...)\n`
+        + `  local t = {}\n`
+        + `  for i = 1, select("#", ...) do t[i] = tostring((select(i, ...))) end\n`
+        + `  return select("#", ...) .. "|" .. table.concat(t, ",")\n`
+        + `end\n`
+        + `local ok, v = pcall(function() return ${exprSrc} end)\n`
         + `if ok then print(true, v) else print(false, type(v)) end\n`;
 }
 
