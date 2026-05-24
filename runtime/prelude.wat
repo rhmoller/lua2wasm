@@ -4567,46 +4567,107 @@
           (call $lua_call (ref.as_non_null (local.get $cmp))
             (array.new_fixed $ArgArr 2 (local.get $a) (local.get $b))))))))
 
-  ;; In-place quicksort over the array part [lo, hi]. Uses Lomuto
-  ;; partitioning with the last element as pivot, then "recurse on the
-  ;; smaller side, iterate on the larger" to keep stack depth O(log n).
+  ;; Hoare partition of a[lo..up] around the pivot at a[up-1] (placed there by
+  ;; $qsort's median-of-3). Returns the pivot's final index. Faithful to
+  ;; reference Lua's `partition`: the ++i / --j scans rely on a[lo] <= pivot <=
+  ;; a[up] as sentinels, and the in-bounds checks (i hits up-1 still < pivot, or
+  ;; j crosses i still > pivot) are exactly how Lua detects an inconsistent order
+  ;; function — it raises "invalid order function for sorting".
+  (func $partition (param $t (ref $LuaTable)) (param $lo i32) (param $up i32)
+                   (param $cmp (ref null $LuaClosure)) (result i32)
+    (local $i i32) (local $j i32) (local $upm1 i32)
+    (local $pivot anyref) (local $ai anyref) (local $aj anyref)
+    (local.set $upm1 (i32.sub (local.get $up) (i32.const 1)))
+    (local.set $pivot (call $tab_get_arr_idx (local.get $t) (local.get $upm1)))
+    (local.set $i (local.get $lo))
+    (local.set $j (local.get $upm1))
+    (block $done (loop $main
+      ;; ++i while a[i] < pivot
+      (block $iscan (loop $iloop
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (local.set $ai (call $tab_get_arr_idx (local.get $t) (local.get $i)))
+        (br_if $iscan (i32.eqz
+          (call $cmp_lt (local.get $cmp) (local.get $ai) (local.get $pivot))))
+        (if (i32.eq (local.get $i) (local.get $upm1))
+          (then (call $throw_lit (i32.const 1115) (i32.const 34))))
+        (br $iloop)))
+      ;; --j while pivot < a[j]
+      (block $jscan (loop $jloop
+        (local.set $j (i32.sub (local.get $j) (i32.const 1)))
+        (local.set $aj (call $tab_get_arr_idx (local.get $t) (local.get $j)))
+        (br_if $jscan (i32.eqz
+          (call $cmp_lt (local.get $cmp) (local.get $pivot) (local.get $aj))))
+        (if (i32.lt_s (local.get $j) (local.get $i))
+          (then (call $throw_lit (i32.const 1115) (i32.const 34))))
+        (br $jloop)))
+      ;; i < j ? swap a[i],a[j] and continue : stop
+      (br_if $done (i32.ge_s (local.get $i) (local.get $j)))
+      (call $tab_set_arr_idx (local.get $t) (local.get $i) (local.get $aj))
+      (call $tab_set_arr_idx (local.get $t) (local.get $j) (local.get $ai))
+      (br $main)))
+    ;; move the pivot into place: swap a[i] and a[up-1]
+    (call $tab_set_arr_idx (local.get $t) (local.get $upm1)
+      (call $tab_get_arr_idx (local.get $t) (local.get $i)))
+    (call $tab_set_arr_idx (local.get $t) (local.get $i) (local.get $pivot))
+    (local.get $i))
+
+  ;; In-place quicksort of a[lo..hi] (reference Lua's `auxsort`): median-of-3 of
+  ;; (lo, mid, up) — which also sorts the 2- and 3-element base cases directly —
+  ;; then partition and "recurse the smaller side, iterate the larger" for
+  ;; O(log n) stack depth. No randomized pivot (Lua only randomizes intervals
+  ;; >= 100, where its order is non-deterministic anyway).
   (func $qsort (param $t (ref $LuaTable))
                (param $lo i32) (param $hi i32)
                (param $cmp (ref null $LuaClosure))
-    (local $i i32) (local $j i32)
-    (local $pivot anyref) (local $tmp anyref) (local $a anyref)
+    (local $up i32) (local $p i32) (local $pi i32)
+    (local $alo anyref) (local $aup anyref) (local $ap anyref)
+    (local.set $up (local.get $hi))
     (block $exit (loop $top
-      (br_if $exit (i32.ge_s (local.get $lo) (local.get $hi)))
-      (local.set $pivot (call $tab_get_arr_idx (local.get $t) (local.get $hi)))
-      (local.set $i (i32.sub (local.get $lo) (i32.const 1)))
-      (local.set $j (local.get $lo))
-      (block $pdone (loop $ploop
-        (br_if $pdone (i32.ge_s (local.get $j) (local.get $hi)))
-        (local.set $a (call $tab_get_arr_idx (local.get $t) (local.get $j)))
-        (if (call $cmp_lt (local.get $cmp) (local.get $a) (local.get $pivot))
-          (then
-            (local.set $i (i32.add (local.get $i) (i32.const 1)))
-            (local.set $tmp (call $tab_get_arr_idx (local.get $t) (local.get $i)))
-            (call $tab_set_arr_idx (local.get $t) (local.get $i) (local.get $a))
-            (call $tab_set_arr_idx (local.get $t) (local.get $j) (local.get $tmp))))
-        (local.set $j (i32.add (local.get $j) (i32.const 1)))
-        (br $ploop)))
-      ;; place pivot at index $i+1
-      (local.set $i (i32.add (local.get $i) (i32.const 1)))
-      (local.set $tmp (call $tab_get_arr_idx (local.get $t) (local.get $i)))
-      (call $tab_set_arr_idx (local.get $t) (local.get $i) (local.get $pivot))
-      (call $tab_set_arr_idx (local.get $t) (local.get $hi) (local.get $tmp))
-      ;; recurse smaller, iterate larger
-      (if (i32.lt_s (i32.sub (local.get $i) (local.get $lo))
-                    (i32.sub (local.get $hi) (local.get $i)))
+      (br_if $exit (i32.ge_s (local.get $lo) (local.get $up)))
+      ;; sort a[lo], a[up]
+      (local.set $alo (call $tab_get_arr_idx (local.get $t) (local.get $lo)))
+      (local.set $aup (call $tab_get_arr_idx (local.get $t) (local.get $up)))
+      (if (call $cmp_lt (local.get $cmp) (local.get $aup) (local.get $alo))
+        (then
+          (call $tab_set_arr_idx (local.get $t) (local.get $lo) (local.get $aup))
+          (call $tab_set_arr_idx (local.get $t) (local.get $up) (local.get $alo))))
+      ;; 2 elements: sorted
+      (br_if $exit (i32.eq (i32.sub (local.get $up) (local.get $lo)) (i32.const 1)))
+      ;; p = floor((lo+up)/2); sort a[p] into [a[lo], a[up]]
+      (local.set $p (i32.shr_s (i32.add (local.get $lo) (local.get $up)) (i32.const 1)))
+      (local.set $ap (call $tab_get_arr_idx (local.get $t) (local.get $p)))
+      (local.set $alo (call $tab_get_arr_idx (local.get $t) (local.get $lo)))
+      (if (call $cmp_lt (local.get $cmp) (local.get $ap) (local.get $alo))
+        (then
+          (call $tab_set_arr_idx (local.get $t) (local.get $p) (local.get $alo))
+          (call $tab_set_arr_idx (local.get $t) (local.get $lo) (local.get $ap)))
+        (else
+          (local.set $aup (call $tab_get_arr_idx (local.get $t) (local.get $up)))
+          (if (call $cmp_lt (local.get $cmp) (local.get $aup) (local.get $ap))
+            (then
+              (call $tab_set_arr_idx (local.get $t) (local.get $p) (local.get $aup))
+              (call $tab_set_arr_idx (local.get $t) (local.get $up) (local.get $ap))))))
+      ;; 3 elements: sorted
+      (br_if $exit (i32.eq (i32.sub (local.get $up) (local.get $lo)) (i32.const 2)))
+      ;; move pivot a[p] to a[up-1]
+      (local.set $ap (call $tab_get_arr_idx (local.get $t) (local.get $p)))
+      (call $tab_set_arr_idx (local.get $t) (local.get $p)
+        (call $tab_get_arr_idx (local.get $t) (i32.sub (local.get $up) (i32.const 1))))
+      (call $tab_set_arr_idx (local.get $t) (i32.sub (local.get $up) (i32.const 1))
+        (local.get $ap))
+      (local.set $pi (call $partition (local.get $t) (local.get $lo)
+                       (local.get $up) (local.get $cmp)))
+      ;; recurse the smaller side, iterate the larger
+      (if (i32.lt_s (i32.sub (local.get $pi) (local.get $lo))
+                    (i32.sub (local.get $up) (local.get $pi)))
         (then
           (call $qsort (local.get $t) (local.get $lo)
-                       (i32.sub (local.get $i) (i32.const 1)) (local.get $cmp))
-          (local.set $lo (i32.add (local.get $i) (i32.const 1))))
+                       (i32.sub (local.get $pi) (i32.const 1)) (local.get $cmp))
+          (local.set $lo (i32.add (local.get $pi) (i32.const 1))))
         (else
-          (call $qsort (local.get $t) (i32.add (local.get $i) (i32.const 1))
-                       (local.get $hi) (local.get $cmp))
-          (local.set $hi (i32.sub (local.get $i) (i32.const 1)))))
+          (call $qsort (local.get $t) (i32.add (local.get $pi) (i32.const 1))
+                       (local.get $up) (local.get $cmp))
+          (local.set $up (i32.sub (local.get $pi) (i32.const 1)))))
       (br $top))))
 
   ;; table.sort(t [, cmp]) — in-place sort of t[1..#t].
