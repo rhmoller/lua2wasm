@@ -3928,6 +3928,18 @@
       (then (call $throw_lit (i32.const 985) (i32.const 36)) (unreachable)))   ;; "number has no integer representation"
     (i64.trunc_f64_s (local.get $f)))
 
+  ;; Convert an already-floored/ceiled float to a Lua integer when it lands
+  ;; in [-2^63, 2^63) (mirrors lua_numbertointeger); otherwise leave it a
+  ;; float. The range test also covers ±inf and NaN (both fail it), so they
+  ;; pass through as floats instead of trapping i64.trunc_f64_s — reference
+  ;; Lua returns math.floor(1e30)==1e30, math.floor(math.huge)==inf, etc.
+  (func $f64_to_int_result (param $f f64) (result anyref)
+    (if (result anyref)
+      (i32.and (f64.ge (local.get $f) (f64.const -9.2233720368547758e+18))
+               (f64.lt (local.get $f) (f64.const  9.2233720368547758e+18)))
+      (then (call $make_int (i64.trunc_f64_s (local.get $f))))
+      (else (call $make_float (local.get $f)))))
+
   (func $builtin_math_floor (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
     (local $v anyref)
@@ -3935,7 +3947,7 @@
     (if (call $is_int (local.get $v))
       (then (return (array.new_fixed $ArgArr 1 (local.get $v)))))
     (array.new_fixed $ArgArr 1
-      (call $make_int (i64.trunc_f64_s (f64.floor (call $as_float_co (local.get $v)))))))
+      (call $f64_to_int_result (f64.floor (call $as_float_co (local.get $v))))))
 
   (func $builtin_math_abs (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
@@ -4250,7 +4262,7 @@
     (if (call $is_int (local.get $v))
       (then (return (array.new_fixed $ArgArr 1 (local.get $v)))))
     (array.new_fixed $ArgArr 1
-      (call $make_int (i64.trunc_f64_s (f64.ceil (call $as_float_co (local.get $v)))))))
+      (call $f64_to_int_result (f64.ceil (call $as_float_co (local.get $v))))))
 
   ;; math.min/max: pick the smaller/larger of args[0..n-1] using $num_lt.
   (func $builtin_math_min (type $LuaFn)

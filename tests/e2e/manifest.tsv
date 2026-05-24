@@ -119,3 +119,4 @@ string_mt_capture	tests/fixtures/string_mt_capture.lua
 next_invalid_key	tests/fixtures/next_invalid_key.lua
 multivalue_assign	tests/fixtures/multivalue_assign.lua
 pairs_delete	tests/fixtures/pairs_delete.lua
+math_floor_ceil	tests/fixtures/math_floor_ceil.lua

@@ -1,0 +1,9 @@
+1e+30
+1e+30
+3	-4
+4	-3
+integer	float
+inf	-inf
+9.2233720368547758e+18
+float
+true	1e+30
