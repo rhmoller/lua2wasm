@@ -7,6 +7,7 @@
     { "key": "tables",     "file": "runtime/presets/tables.lua" },
     { "key": "oo",         "file": "runtime/presets/oo.lua" },
     { "key": "pcall",      "file": "runtime/presets/pcall.lua" },
+    { "key": "close",      "file": "runtime/presets/close.lua" },
     { "key": "iter",       "file": "tests/fixtures/iterator.lua" },
     { "key": "stdin",      "file": "tests/fixtures/io_read.lua" },
     { "key": "files",      "file": "runtime/presets/files.lua" },
