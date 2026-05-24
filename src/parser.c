@@ -217,6 +217,24 @@ static int frame_local_attrib_by_slot(const FuncFrame *f, int slot) {
     return -1;
 }
 
+/* True if a VAR_UPVAL target (an upvalue of the innermost frame) ultimately
+ * captures a <const> local. Walks the upvalue chain up through enclosing
+ * frames (UPVAL_FROM_UPVAL) to the originating UPVAL_FROM_LOCAL and checks
+ * that local's attribute — so writing a captured const is rejected at any
+ * nesting depth, matching reference Lua. */
+static int upval_is_const(const Parser *p, int upval_idx) {
+    int fi = p->frame_depth;
+    int uv = upval_idx;
+    while (fi > 0 && uv >= 0 && uv < p->frames[fi].n_upvalues) {
+        UpvalueRef ref = p->frames[fi].upvalues[uv];
+        if (ref.src == UPVAL_FROM_LOCAL)
+            return frame_local_attrib_by_slot(&p->frames[fi - 1], ref.idx) == 1;
+        fi--;
+        uv = ref.idx;
+    }
+    return 0;
+}
+
 static int frame_lookup_local(const FuncFrame *f, const char *name, size_t name_len) {
     for (int i = f->local_count - 1; i >= 0; i--) {
         if (f->locals[i].name_len == name_len &&
@@ -1072,20 +1090,21 @@ static Stmt *parse_ident_stmt(Parser *p) {
         ib_free(&targets);
         return NULL;
     }
-    /* <const> enforcement: reject assignment to const locals.
-     * Only checks the current frame; reassignment via upvalue is rare
-     * and we don't track attribs through the upvalue table yet. */
+    /* <const> enforcement: reject assignment to a const variable, whether
+     * it's a local of this frame or captured from an enclosing one. */
     AssignTarget *tgt = targets.data;
     for (size_t i = 0; i < targets.count; i++) {
-        if (tgt[i].kind == TGT_VAR &&
-            tgt[i].as.var.kind == VAR_LOCAL) {
-            int a = frame_local_attrib_by_slot(cur_frame(p),
-                                               tgt[i].as.var.idx);
-            if (a == 1) {
-                set_error(p, "attempt to assign to const variable");
-                ib_free(&targets);
-                return NULL;
-            }
+        if (tgt[i].kind != TGT_VAR) continue;
+        int is_const = 0;
+        if (tgt[i].as.var.kind == VAR_LOCAL)
+            is_const = frame_local_attrib_by_slot(cur_frame(p),
+                                                  tgt[i].as.var.idx) == 1;
+        else if (tgt[i].as.var.kind == VAR_UPVAL)
+            is_const = upval_is_const(p, tgt[i].as.var.idx);
+        if (is_const) {
+            set_error(p, "attempt to assign to const variable");
+            ib_free(&targets);
+            return NULL;
         }
     }
     ItemBuf vals;
