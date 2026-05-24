@@ -124,3 +124,4 @@ pass	float_mod_sign	fuzzer-found: float % zero-sign follows dividend, not always
 pass	format_str_coerce	fuzzer-found: string.format coerces numeric-string args, errors otherwise
 pass	math_tointeger_coerce	fuzzer-found: math.tointeger coerces numeric strings
 pass	format_int_range	fuzzer-found: %d on out-of-i64-range float raises (was a giant int)
+pass	format_hash_dot	fuzzer-found (review #11): %#.0f/%#.0e force a decimal point

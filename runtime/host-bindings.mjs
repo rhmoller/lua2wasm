@@ -277,10 +277,14 @@ export function makeHelpers({ getInstance, formatFloat, cFormatG, cFormatF, cFor
         }
         if (prec < 0) prec = 6;
         let body;
+        const hash = flags.includes("#");
         if (conv === "f" || conv === "F") {
             body = cFormatF(v, prec);
+            // '#' forces a decimal point even when precision 0 leaves none.
+            if (hash && !body.includes(".")) body += ".";
         } else if (conv === "e" || conv === "E") {
             body = cFormatE(v, prec);
+            if (hash && !body.includes(".")) body = body.replace("e", ".e");
         } else {
             // %g: faithful C printf semantics (exponent form below 1e-4 or at/
             // above `prec` significant digits), not JS toPrecision's thresholds.

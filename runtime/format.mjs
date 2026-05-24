@@ -105,6 +105,7 @@ export function cFormatG(x, prec, strip = true) {
     if (exp < -4 || exp >= prec) {               // exponent form
         let mant = m[2] + (m[3] ? "." + m[3] : "");
         if (strip) mant = mant.replace(/\.?0+$/, "");
+        else if (mant.indexOf(".") < 0) mant += ".";   // '#' forces a point
         const e = (exp < 0 ? "-" : "+") + String(Math.abs(exp)).padStart(2, "0");
         return sign + mant + "e" + e;
     }
@@ -119,6 +120,7 @@ export function cFormatG(x, prec, strip = true) {
         body = "0." + "0".repeat(-exp - 1) + digits;
     }
     if (strip && body.indexOf(".") >= 0) body = body.replace(/\.?0+$/, "");
+    else if (!strip && body.indexOf(".") < 0) body += ".";   // '#' forces a point
     return sign + body;
 }
 
