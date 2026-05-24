@@ -2902,7 +2902,7 @@
               (else (if (i32.eq (array.get_u $LuaArr (local.get $wbytes) (i32.const 0)) (i32.const 101))
                 (then (local.set $whence (i32.const 2))))))))))
     (if (i32.gt_s (array.len (local.get $args)) (i32.const 2))
-      (then (local.set $offset (call $as_int (call $args_at (local.get $args) (i32.const 2))))))
+      (then (local.set $offset (call $as_int_co (call $args_at (local.get $args) (i32.const 2))))))
     (local.set $r (call $host_fs_seek (local.get $fd) (local.get $whence) (local.get $offset)))
     (if (i64.lt_s (local.get $r) (i64.const 0))
       (then (return (array.new_fixed $ArgArr 2 (ref.null any)
@@ -4125,12 +4125,12 @@
           (f64.const 0x1p-53)))
         (return (array.new_fixed $ArgArr 1 (call $make_float (local.get $f))))))
     ;; integer modes
-    (local.set $hi (call $as_int (call $args_at (local.get $args) (i32.const 0))))
+    (local.set $hi (call $as_int_co (call $args_at (local.get $args) (i32.const 0))))
     (local.set $lo (i64.const 1))
     (if (i32.gt_u (local.get $n) (i32.const 1))
       (then
         (local.set $lo (local.get $hi))
-        (local.set $hi (call $as_int (call $args_at (local.get $args) (i32.const 1))))))
+        (local.set $hi (call $as_int_co (call $args_at (local.get $args) (i32.const 1))))))
     ;; full-range mode: math.random(0)
     (if (i32.and (i32.eq (local.get $n) (i32.const 1))
                  (i64.eqz (local.get $hi)))
@@ -4160,9 +4160,9 @@
         (local.set $x (i64.const 0x243F6A8885A308D3))
         (local.set $y (i64.const 0x13198A2E03707344)))
       (else
-        (local.set $x (call $as_int (call $args_at (local.get $args) (i32.const 0))))
+        (local.set $x (call $as_int_co (call $args_at (local.get $args) (i32.const 0))))
         (if (i32.gt_u (local.get $n) (i32.const 1))
-          (then (local.set $y (call $as_int (call $args_at (local.get $args) (i32.const 1)))))
+          (then (local.set $y (call $as_int_co (call $args_at (local.get $args) (i32.const 1)))))
           (else (local.set $y (i64.const 0))))))
     (global.set $g_rng0 (call $rng_splitmix64 (local.get $x)))
     (global.set $g_rng1 (call $rng_splitmix64
@@ -4250,7 +4250,7 @@
     (if (i32.ne (array.len (local.get $args)) (i32.const 3))
       (then (call $throw_lit (i32.const 925) (i32.const 25))))   ;; "wrong number of arguments"
     ;; 3-arg form: position must be in [1, #t+1].
-    (local.set $pos (i32.wrap_i64 (call $as_int (call $args_at (local.get $args) (i32.const 1)))))
+    (local.set $pos (i32.wrap_i64 (call $as_int_co (call $args_at (local.get $args) (i32.const 1)))))
     (if (i32.or (i32.lt_s (local.get $pos) (i32.const 1))
                 (i32.gt_s (local.get $pos) (i32.add (local.get $n) (i32.const 1))))
       (then (call $throw_lit (i32.const 837) (i32.const 22))))   ;; "position out of bounds"
@@ -4297,7 +4297,7 @@
     (local.set $n (call $tab_len (local.get $t)))
     (if (i32.gt_u (array.len (local.get $args)) (i32.const 1))
       (then (local.set $pos
-        (i32.wrap_i64 (call $as_int (call $args_at (local.get $args) (i32.const 1))))))
+        (i32.wrap_i64 (call $as_int_co (call $args_at (local.get $args) (i32.const 1))))))
       (else (local.set $pos (local.get $n))))
     ;; When an explicit pos differs from #t, it must be in [1, #t+1]. (pos==#t
     ;; — including the empty-table default 0 — is always allowed.)
@@ -4356,11 +4356,11 @@
     (local.set $i (i32.const 1))
     (if (i32.gt_u (local.get $nargs) (i32.const 2))
       (then (local.set $i (i32.wrap_i64
-              (call $as_int (call $args_at (local.get $args) (i32.const 2)))))))
+              (call $as_int_co (call $args_at (local.get $args) (i32.const 2)))))))
     (local.set $j (call $tab_len (local.get $t)))
     (if (i32.gt_u (local.get $nargs) (i32.const 3))
       (then (local.set $j (i32.wrap_i64
-              (call $as_int (call $args_at (local.get $args) (i32.const 3)))))))
+              (call $as_int_co (call $args_at (local.get $args) (i32.const 3)))))))
     (if (i32.gt_s (local.get $i) (local.get $j))
       (then (return (array.new_fixed $ArgArr 1 (ref.as_non_null (global.get $g_empty_str))))))
     ;; Reference table.concat accepts only strings and numbers per element
@@ -4479,10 +4479,10 @@
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
     (local $t (ref $LuaTable)) (local $nseq i32) (local $nrec i32) (local $cap i32)
     (local.set $t (call $tab_new))
-    (local.set $nseq (i32.wrap_i64 (call $as_int (call $args_at (local.get $args) (i32.const 0)))))
+    (local.set $nseq (i32.wrap_i64 (call $as_int_co (call $args_at (local.get $args) (i32.const 0)))))
     (if (i32.gt_u (array.len (local.get $args)) (i32.const 1))
       (then (local.set $nrec
-              (i32.wrap_i64 (call $as_int (call $args_at (local.get $args) (i32.const 1)))))))
+              (i32.wrap_i64 (call $as_int_co (call $args_at (local.get $args) (i32.const 1)))))))
     (local.set $cap (i32.add (local.get $nseq) (local.get $nrec)))
     (if (i32.gt_s (local.get $cap) (i32.const 0))
       (then (call $tab_grow (local.get $t) (local.get $cap))))
@@ -4499,9 +4499,9 @@
     (local $n i32) (local $i i32) (local $v anyref)
     (local $alen1 i32) (local $alen2 i32)
     (local.set $a1 (ref.cast (ref $LuaTable) (call $args_at (local.get $args) (i32.const 0))))
-    (local.set $f  (i32.wrap_i64 (call $as_int (call $args_at (local.get $args) (i32.const 1)))))
-    (local.set $e  (i32.wrap_i64 (call $as_int (call $args_at (local.get $args) (i32.const 2)))))
-    (local.set $t  (i32.wrap_i64 (call $as_int (call $args_at (local.get $args) (i32.const 3)))))
+    (local.set $f  (i32.wrap_i64 (call $as_int_co (call $args_at (local.get $args) (i32.const 1)))))
+    (local.set $e  (i32.wrap_i64 (call $as_int_co (call $args_at (local.get $args) (i32.const 2)))))
+    (local.set $t  (i32.wrap_i64 (call $as_int_co (call $args_at (local.get $args) (i32.const 3)))))
     ;; optional 5th arg: destination table; defaults to a1.
     (local.set $a2 (local.get $a1))
     (if (i32.gt_u (array.len (local.get $args)) (i32.const 4))
@@ -4594,10 +4594,10 @@
     (local.set $i (i32.const 1))
     (if (i32.gt_u (local.get $nargs) (i32.const 1))
       (then (local.set $i (i32.wrap_i64
-              (call $as_int (call $args_at (local.get $args) (i32.const 1)))))))
+              (call $as_int_co (call $args_at (local.get $args) (i32.const 1)))))))
     (if (i32.gt_u (local.get $nargs) (i32.const 2))
       (then (local.set $j (i32.wrap_i64
-              (call $as_int (call $args_at (local.get $args) (i32.const 2))))))
+              (call $as_int_co (call $args_at (local.get $args) (i32.const 2))))))
       (else (local.set $j (call $tab_len (local.get $t)))))
     (if (i32.lt_s (local.get $j) (local.get $i))
       (then (return (global.get $g_empty_args))))
@@ -4792,12 +4792,12 @@
     (local.set $nargs (array.len (local.get $args)))
     (local.set $posi (i64.const 1))
     (if (i32.gt_u (local.get $nargs) (i32.const 1))
-      (then (local.set $posi (call $as_int (call $args_at (local.get $args) (i32.const 1))))))
+      (then (local.set $posi (call $as_int_co (call $args_at (local.get $args) (i32.const 1))))))
     (local.set $posi (call $u_posrelat (local.get $posi) (local.get $n)))
     (local.set $posj (local.get $posi))   ;; j defaults to i
     (if (i32.gt_u (local.get $nargs) (i32.const 2))
       (then (local.set $posj (call $u_posrelat
-              (call $as_int (call $args_at (local.get $args) (i32.const 2)))
+              (call $as_int_co (call $args_at (local.get $args) (i32.const 2)))
               (local.get $n)))))
     (if (i32.gt_u (local.get $nargs) (i32.const 3))
       (then (local.set $lax (call $lua_truthy
@@ -4858,7 +4858,7 @@
     (local.set $bytes (struct.get $LuaString $bytes
       (ref.cast (ref $LuaString) (call $args_at (local.get $args) (i32.const 0)))))
     (local.set $n_bytes (array.len (local.get $bytes)))
-    (local.set $ctrl (call $as_int (call $args_at (local.get $args) (i32.const 1))))
+    (local.set $ctrl (call $as_int_co (call $args_at (local.get $args) (i32.const 1))))
     ;; n = (unsigned)ctrl; n >= #s ends iteration. A negative ctrl is a huge
     ;; unsigned, so it ends too — no out-of-bounds access.
     (if (i32.or (i64.lt_s (local.get $ctrl) (i64.const 0))
@@ -4970,7 +4970,7 @@
       (ref.cast (ref $LuaString) (call $args_at (local.get $args) (i32.const 0)))))
     (local.set $len (array.len (local.get $bytes)))
     (local.set $nargs (array.len (local.get $args)))
-    (local.set $n (call $as_int (call $args_at (local.get $args) (i32.const 1))))
+    (local.set $n (call $as_int_co (call $args_at (local.get $args) (i32.const 1))))
     ;; default 1-based posi: 1 if n >= 0, else #s+1
     (if (i64.ge_s (local.get $n) (i64.const 0))
       (then (local.set $posi (i64.const 1)))
@@ -4978,7 +4978,7 @@
         (i64.add (i64.extend_i32_s (local.get $len)) (i64.const 1)))))
     (if (i32.gt_u (local.get $nargs) (i32.const 2))
       (then (local.set $posi (call $u_posrelat
-              (call $as_int (call $args_at (local.get $args) (i32.const 2)))
+              (call $as_int_co (call $args_at (local.get $args) (i32.const 2)))
               (local.get $len)))))
     ;; posi must be in [1, #s+1]
     (if (i32.eqz (i32.and
@@ -5057,11 +5057,11 @@
     (local.set $nargs (array.len (local.get $args)))
     (local.set $posi (i64.const 1))
     (if (i32.gt_u (local.get $nargs) (i32.const 1))
-      (then (local.set $posi (call $as_int (call $args_at (local.get $args) (i32.const 1))))))
+      (then (local.set $posi (call $as_int_co (call $args_at (local.get $args) (i32.const 1))))))
     (local.set $posi (call $u_posrelat (local.get $posi) (local.get $n)))
     (local.set $posj (i64.const -1))
     (if (i32.gt_u (local.get $nargs) (i32.const 2))
-      (then (local.set $posj (call $as_int (call $args_at (local.get $args) (i32.const 2))))))
+      (then (local.set $posj (call $as_int_co (call $args_at (local.get $args) (i32.const 2))))))
     (local.set $posj (call $u_posrelat (local.get $posj) (local.get $n)))
     (if (i32.gt_u (local.get $nargs) (i32.const 3))
       (then (local.set $lax (call $lua_truthy
@@ -5108,7 +5108,7 @@
                       (i32.mul (local.get $n) (i32.const 6))))
     (block $done (loop $lp
       (br_if $done (i32.ge_s (local.get $i) (local.get $n)))
-      (local.set $cp (call $as_int (call $args_at (local.get $args) (local.get $i))))
+      (local.set $cp (call $as_int_co (call $args_at (local.get $args) (local.get $i))))
       ;; reference accepts 0..MAXUTF (0x7FFFFFFF), encoding >U+10FFFF as
       ;; extended (5/6-byte) UTF-8; reject out of range before truncating.
       (if (i32.or (i64.lt_s (local.get $cp) (i64.const 0))
@@ -5779,7 +5779,7 @@
     (local.set $init (i32.const 1))
     (if (i32.gt_u (local.get $nargs) (i32.const 2))
       (then (local.set $init (i32.wrap_i64
-              (call $as_int (call $args_at (local.get $args) (i32.const 2)))))))
+              (call $as_int_co (call $args_at (local.get $args) (i32.const 2)))))))
     (if (i32.gt_u (local.get $nargs) (i32.const 3))
       (then (local.set $plain (call $lua_truthy
               (call $args_at (local.get $args) (i32.const 3))))))
@@ -5855,7 +5855,7 @@
     (local.set $init (i32.const 1))
     (if (i32.gt_u (local.get $nargs) (i32.const 2))
       (then (local.set $init (i32.wrap_i64
-              (call $as_int (call $args_at (local.get $args) (i32.const 2)))))))
+              (call $as_int_co (call $args_at (local.get $args) (i32.const 2)))))))
     (local.set $init (call $norm_str_init (local.get $init) (local.get $n_sub)))
     (if (i32.gt_s (local.get $init) (i32.add (local.get $n_sub) (i32.const 1)))
       (then (return (array.new_fixed $ArgArr 1 (ref.null any)))))
@@ -5983,7 +5983,7 @@
     (local.set $init (i32.const 1))
     (if (i32.gt_u (local.get $nargs) (i32.const 2))
       (then (local.set $init (i32.wrap_i64
-              (call $as_int (call $args_at (local.get $args) (i32.const 2)))))))
+              (call $as_int_co (call $args_at (local.get $args) (i32.const 2)))))))
     (if (i32.lt_s (local.get $init) (i32.const 1))
       (then (local.set $init (i32.const 1))))
     (array.new_fixed $ArgArr 1
@@ -6257,7 +6257,7 @@
     (local.set $limit (i32.const 2147483647))
     (if (i32.gt_u (local.get $nargs) (i32.const 3))
       (then (local.set $limit (i32.wrap_i64
-              (call $as_int (call $args_at (local.get $args) (i32.const 3)))))))
+              (call $as_int_co (call $args_at (local.get $args) (i32.const 3)))))))
     ;; Classify repl. Reject unsupported types early.
     (if (ref.test (ref $LuaString) (local.get $repl_v))
       (then (local.set $repl_kind (i32.const 0))
@@ -6369,7 +6369,7 @@
     (local.set $out (array.new $LuaArr (i32.const 0) (local.get $n)))
     (block $done (loop $lp
       (br_if $done (i32.ge_s (local.get $i) (local.get $n)))
-      (local.set $b (call $as_int (call $args_at (local.get $args) (local.get $i))))
+      (local.set $b (call $as_int_co (call $args_at (local.get $args) (local.get $i))))
       (if (i32.or (i64.lt_s (local.get $b) (i64.const 0))
                   (i64.gt_s (local.get $b) (i64.const 255)))
         (then (call $throw_lit (i32.const 155) (i32.const 18))))   ;; "value out of range"
@@ -6394,11 +6394,11 @@
     (local.set $i (i32.const 1))
     (if (i32.gt_u (local.get $nargs) (i32.const 1))
       (then (local.set $i (i32.wrap_i64
-              (call $as_int (call $args_at (local.get $args) (i32.const 1)))))))
+              (call $as_int_co (call $args_at (local.get $args) (i32.const 1)))))))
     (local.set $j (local.get $i))
     (if (i32.gt_u (local.get $nargs) (i32.const 2))
       (then (local.set $j (i32.wrap_i64
-              (call $as_int (call $args_at (local.get $args) (i32.const 2)))))))
+              (call $as_int_co (call $args_at (local.get $args) (i32.const 2)))))))
     ;; negative index normalisation (relative to end of string)
     (if (i32.lt_s (local.get $i) (i32.const 0))
       (then (local.set $i (i32.add (local.get $n) (i32.add (local.get $i) (i32.const 1))))))
@@ -6432,7 +6432,7 @@
     (local $out (ref $LuaArr))
     (local.set $sb (struct.get $LuaString $bytes
       (ref.cast (ref $LuaString) (call $args_at (local.get $args) (i32.const 0)))))
-    (local.set $n (i32.wrap_i64 (call $as_int (call $args_at (local.get $args) (i32.const 1)))))
+    (local.set $n (i32.wrap_i64 (call $as_int_co (call $args_at (local.get $args) (i32.const 1)))))
     ;; optional sep (default empty)
     (local.set $pb (array.new $LuaArr (i32.const 0) (i32.const 0)))
     (if (i32.gt_u (array.len (local.get $args)) (i32.const 2))
@@ -6444,7 +6444,7 @@
     ;; math.maxinteger or other huge value would silently arrive as a
     ;; negative or low-bit count. Catch the original i64 BEFORE wrapping.
     (if (i64.gt_s
-          (call $as_int (call $args_at (local.get $args) (i32.const 1)))
+          (call $as_int_co (call $args_at (local.get $args) (i32.const 1)))
           (i64.const 0x7fffffff))
       (then (call $throw_lit (i32.const 297) (i32.const 9))))   ;; "too large"
     (if (i32.le_s (local.get $n) (i32.const 0))
@@ -6527,12 +6527,12 @@
     (local.set $s (ref.cast (ref $LuaString) (call $args_at (local.get $args) (i32.const 0))))
     (local.set $bytes (struct.get $LuaString $bytes (local.get $s)))
     (local.set $n (array.len (local.get $bytes)))
-    (local.set $i (i32.wrap_i64 (call $as_int (call $args_at (local.get $args) (i32.const 1)))))
+    (local.set $i (i32.wrap_i64 (call $as_int_co (call $args_at (local.get $args) (i32.const 1)))))
     (local.set $j (local.get $n))
     (if (i32.gt_u (array.len (local.get $args)) (i32.const 2))
       (then
         (local.set $j (i32.wrap_i64
-          (call $as_int (call $args_at (local.get $args) (i32.const 2)))))))
+          (call $as_int_co (call $args_at (local.get $args) (i32.const 2)))))))
     (if (i32.lt_s (local.get $i) (i32.const 0))
       (then (local.set $i (i32.add (local.get $n) (i32.add (local.get $i) (i32.const 1))))))
     (if (i32.lt_s (local.get $j) (i32.const 0))
@@ -7245,7 +7245,7 @@
         (local.set $pad (i32.sub (local.get $pad) (i32.const 1)))
         (br $pad_lp)))
       ;; Fetch arg and validate fit (signed vs unsigned per letter).
-      (local.set $val (call $as_int (call $args_at (local.get $args)
+      (local.set $val (call $as_int_co (call $args_at (local.get $args)
                                                     (local.get $arg_idx))))
       (local.set $arg_idx (i32.add (local.get $arg_idx) (i32.const 1)))
       (if (call $pack_opt_is_signed (local.get $c))
@@ -7296,7 +7296,7 @@
       (then (local.set $offset
         (i32.sub
           (i32.wrap_i64
-            (call $as_int (call $args_at (local.get $args) (i32.const 2))))
+            (call $as_int_co (call $args_at (local.get $args) (i32.const 2))))
           (i32.const 1)))))
     ;; Pre-count value-producing options to size the output ArgArr.
     (local.set $nval (call $pack_count_values (local.get $bytes)))

@@ -112,3 +112,4 @@ table_array_part	tests/fixtures/table_array_part.lua
 table_newindex_arraypart	tests/fixtures/table_newindex_arraypart.lua
 table_sort_raw	tests/fixtures/table_sort_raw.lua
 str_word_read	tests/fixtures/str_word_read.lua
+int_arg_coercion	tests/fixtures/int_arg_coercion.lua
