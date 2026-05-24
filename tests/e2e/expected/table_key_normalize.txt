@@ -1,0 +1,5 @@
+k1	integer	3	a
+count	1	t[3.0]=	b
+k2	float
+k3	float
+k4	integer

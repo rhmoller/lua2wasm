@@ -1556,9 +1556,17 @@
     (call $as_arr_key (local.get $k))
     (local.set $ok)
     (local.set $val)
+    ;; A key with an exact integer value — an integer, or an integral float in
+    ;; i64 range — is normalized to an integer key (Lua §3.4.3): t[3.0] and t[3]
+    ;; address the same entry, and iteration must report the key as an integer.
+    ;; The array part is integer-indexed already; for the hash part re-box the
+    ;; value with $make_int so a stored integral-float key isn't kept as a float.
     (if (local.get $ok)
-      (then (if (call $tab_set_arr (local.get $t) (local.get $val) (local.get $v))
-              (then (return)))))
+      (then
+        (if (call $tab_set_arr (local.get $t) (local.get $val) (local.get $v))
+          (then (return)))
+        (call $tab_set_hash (local.get $t) (call $make_int (local.get $val)) (local.get $v))
+        (return)))
     (call $tab_set_hash (local.get $t) (local.get $k) (local.get $v)))
 
   ;; Raw set with an already-unboxed integer key (skips $as_arr_key, and the key
