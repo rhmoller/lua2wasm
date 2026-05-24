@@ -431,6 +431,8 @@ static void la_block(CG *c, const Block *b, LabelAnalysisScope *parent) {
     }
 }
 
+static int for_gen_has_closing(const Stmt *s);
+
 /* Stamp every STMT_LABEL with the count of to-be-closed variables in scope at
  * that label (`running`), walking statements in source order. Runs before
  * la_block, which copies each label's base onto the gotos that target it.
@@ -451,7 +453,10 @@ static void la_close_bases(const Block *b, int running) {
         case STMT_WHILE: la_close_bases(&s->as.while_stmt.body, running); break;
         case STMT_REPEAT: la_close_bases(&s->as.repeat.body, running); break;
         case STMT_FOR_NUM: la_close_bases(&s->as.for_num.body, running); break;
-        case STMT_FOR_GEN: la_close_bases(&s->as.for_gen.body, running); break;
+        case STMT_FOR_GEN:
+            /* The generic-for closing value is in scope for the loop body. */
+            la_close_bases(&s->as.for_gen.body, running + for_gen_has_closing(s));
+            break;
         case STMT_IF:
             for (size_t a = 0; a < s->as.if_stmt.narms; a++)
                 la_close_bases(&s->as.if_stmt.arms[a].body, running);
@@ -2776,6 +2781,19 @@ static void emit_for_gen(CG *c, const Stmt *s, int depth) {
                 "(local.set %s "
                 "(call $args_at (ref.as_non_null (local.get $tmp_args)) (i32.const 2)))\n",
                 f_k);
+    /* The explist's 4th value is a to-be-closed "closing" value (Lua §3.3.5):
+     * validate+push it now (after push_break_label recorded the pre-closing
+     * depth, so `break` closes it too); close it when the loop exits. nil/false
+     * (e.g. the common pairs/ipairs case) are accepted and never closed. */
+    int for_close = for_gen_has_closing(s);
+    int pre_close_base = c->close_count;
+    if (for_close) {
+        emit_indent(c, depth);
+        wat_append(c->w, "(call $tbc_push (ref.as_non_null (local.get $tbc)) "
+                         "(call $args_at (ref.as_non_null (local.get $tmp_args)) "
+                         "(i32.const 3)))\n");
+        c->close_count++;
+    }
 
     /* Pre-allocate boxes (or just nil-init the local) per loop var. */
     for (int i = 0; i < s->as.for_gen.n_names; i++) {
@@ -2853,6 +2871,13 @@ static void emit_for_gen(CG *c, const Stmt *s, int depth) {
     wat_append(c->w, ")\n");
     emit_indent(c, depth);
     wat_append(c->w, ")\n");
+    /* Loop exited normally (iterator returned nil) — close the closing value.
+     * break already closed it (down to pre_close_base) before branching here,
+     * so this is a no-op on that path; an error/goto exit closed it via $tbc. */
+    if (for_close) {
+        emit_close_upto(c, pre_close_base, "(ref.null any)", depth);
+        c->close_count = pre_close_base;
+    }
     c->break_depth--;
 }
 
@@ -3207,9 +3232,20 @@ static int count_block_close(const Block *b) {
     return n;
 }
 
-/* Count every <close> declaration reachable in this function's body, NOT
- * descending into nested function bodies. An upper bound on the simultaneously
- * live count, used to pre-size the $tbc backing array. */
+/* A generic-for's iterator explist yields a 4th "closing" value that is
+ * to-be-closed (Lua §3.3.5). It is present only when the explist can produce a
+ * 4th value: an explicit 4th expression, or a trailing call/vararg that might
+ * expand to one. */
+static int for_gen_has_closing(const Stmt *s) {
+    int n = s->as.for_gen.n_exprs;
+    if (n >= 4) return 1;
+    return n >= 1 && is_multival_tail(s->as.for_gen.exprs[n - 1]);
+}
+
+/* Count every to-be-closed slot reachable in this function's body (each <close>
+ * declaration, plus each generic-for closing value), NOT descending into nested
+ * function bodies. An upper bound on the simultaneously live count, used to
+ * pre-size the $tbc backing array. */
 static int count_fn_close(const Block *b) {
     int n = count_block_close(b);
     for (size_t i = 0; i < b->count; i++) {
@@ -3219,7 +3255,9 @@ static int count_fn_close(const Block *b) {
         case STMT_WHILE: n += count_fn_close(&s->as.while_stmt.body); break;
         case STMT_REPEAT: n += count_fn_close(&s->as.repeat.body); break;
         case STMT_FOR_NUM: n += count_fn_close(&s->as.for_num.body); break;
-        case STMT_FOR_GEN: n += count_fn_close(&s->as.for_gen.body); break;
+        case STMT_FOR_GEN:
+            n += for_gen_has_closing(s) + count_fn_close(&s->as.for_gen.body);
+            break;
         case STMT_IF:
             for (size_t a = 0; a < s->as.if_stmt.narms; a++)
                 n += count_fn_close(&s->as.if_stmt.arms[a].body);

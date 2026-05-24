@@ -1,0 +1,19 @@
+-- normal completion --
+x=1
+x=2
+close a err=nil
+-- break closes the closing value --
+x=1
+close b err=nil
+-- error in body: closing runs with the error, then it propagates --
+close c err=close_for_iter:22: body boom
+ok=false is_string=true
+-- nil closing value (pairs): nothing to close --
+k=1
+k=2
+-- non-closable closing value is a catchable error --
+false	close_for_iter:30: variable got a non-closable value
+-- nested for-loops close inner then outer --
+a=1 b=1
+close inner err=nil
+close outer err=nil
