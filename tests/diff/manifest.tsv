@@ -130,3 +130,4 @@ pass	builtin_arity	audit-found: builtins requiring an arg raise on zero args (lu
 pass	find_coerce	code-review #7: string.find coerces numeric subject/pattern args
 pass	sort_badcmp_detect	code-review #9: table.sort detects a reflexive (inconsistent) comparator
 pass	format_flag_validity	code-review #12: string.format rejects invalid flag/conversion combos
+pass	format_s_zeros	fuzzer-found: %s with a modifier rejects an embedded NUL (string contains zeros)

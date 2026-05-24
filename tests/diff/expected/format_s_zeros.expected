@@ -1,0 +1,8 @@
+plain   	true
+len     	3
+.3s     	false	string
+5s      	false	string
+-5s     	false	string
+.10s    	false	string
+clean   	true
+.3sclean	abc

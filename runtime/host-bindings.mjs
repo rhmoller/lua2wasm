@@ -411,6 +411,11 @@ export function makeHelpers({ getInstance, formatFloat, cFormatG, cFormatF, cFor
             case "s": {
                 let s = valRef === null || valRef === undefined ? "nil"
                       : tag === 4 ? readLuaString(valRef) : luaToString(valRef);
+                // Plain %s keeps the whole string (embedded NULs ok); %s with
+                // any modifier (flags/width/precision) requires a NUL-free
+                // string, like Lua ("string contains zeros").
+                const hasModifier = m[1] !== "" || m[2] !== "" || m[3] !== undefined;
+                if (hasModifier && s.indexOf("\0") >= 0) return -1;
                 if (prec >= 0 && s.length > prec) s = s.slice(0, prec);
                 return writeFmtBuf(applyPad(s, flags, width));
             }
