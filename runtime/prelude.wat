@@ -1951,6 +1951,17 @@
   ;; error path is not yet plumbed through.
   (global $g_mkey_close (mut (ref null $LuaString)) (ref.null $LuaString))
 
+  ;; Validate a value bound to a <close> variable, at the declaration site.
+  ;; nil and false are accepted (and never closed); any other value must have
+  ;; a __close metamethod, else raise "variable got a non-closable value" —
+  ;; matching reference Lua, which rejects at the declaration, not at scope exit.
+  (func $check_closable (param $v anyref)
+    (if (ref.is_null (local.get $v)) (then (return)))
+    (if (i32.eqz (call $lua_truthy (local.get $v))) (then (return)))
+    (if (ref.is_null (call $get_metamethod (local.get $v)
+                       (ref.as_non_null (global.get $g_mkey_close))))
+      (then (call $throw_lit (i32.const 1082) (i32.const 33)))))
+
   (func $do_close (param $v anyref) (param $err anyref)
     (local $mm anyref)
     ;; Skip nil/false.

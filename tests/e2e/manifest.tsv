@@ -127,3 +127,4 @@ int_overflow_float	tests/fixtures/int_overflow_float.lua
 close_exits	tests/fixtures/close_exits.lua
 gsub_repl_number	tests/fixtures/gsub_repl_number.lua
 gmatch_number	tests/fixtures/gmatch_number.lua
+close_decl_validate	tests/fixtures/close_decl_validate.lua
