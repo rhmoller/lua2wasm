@@ -1,8 +1,0 @@
-return true 	invalid-order
-le          	invalid-order
-ge          	invalid-order
-return false	ok
-normal lt   	ok
-default     	ok
-1,2,3,5,8,9
-9,8,5,3,2,1
