@@ -1,6 +1,7 @@
 #include "lexer.h"
 #include "xalloc.h"
 #include <ctype.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -474,8 +475,15 @@ TokenList lex(const char *source) {
                 memcpy(num, s, t.len);
                 num[t.len] = '\0';
                 /* Lua has no octal integer syntax — a leading zero is just
-                 * a decimal digit. */
+                 * a decimal digit. A decimal literal too big for a Lua
+                 * integer is promoted to a float (unlike hex, which wraps);
+                 * strtoll flags that with ERANGE. */
+                errno = 0;
                 t.i_val = strtoll(num, NULL, 10);
+                if (errno == ERANGE) {
+                    t.kind = TOK_FLOAT;
+                    t.f_val = strtod(num, NULL);
+                }
                 if (num != stackbuf) free(num);
             }
             push_tok(&v, t);

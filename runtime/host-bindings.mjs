@@ -499,7 +499,12 @@ export function makeHelpers({ getInstance, formatFloat, cFormatG, cFormatF, cFor
         const dec = /^([+-]?)([0-9]+)$/.exec(s);
         if (dec) {
             const sign = dec[1] === "-" ? -1n : 1n;
-            return exp().lua_make_int(sign * BigInt(dec[2]));
+            const v = sign * BigInt(dec[2]);
+            // A decimal integer too big for a Lua integer becomes a float
+            // (the explicit-base and hex forms above wrap instead).
+            if (v < -(2n ** 63n) || v > 2n ** 63n - 1n)
+                return exp().lua_make_float(Number(s));
+            return exp().lua_make_int(v);
         }
         if (/^[+-]?([0-9]+\.?[0-9]*|\.[0-9]+)([eE][+-]?[0-9]+)?$/.test(s)) {
             const f = Number(s);
@@ -626,7 +631,10 @@ export function makeHelpers({ getInstance, formatFloat, cFormatG, cFormatF, cFor
             const dec = /^([+-]?)([0-9]+)$/.exec(s);
             if (dec) {
                 const sign = dec[1] === "-" ? -1n : 1n;
-                return exp().lua_make_int(sign * BigInt(dec[2]));
+                const v = sign * BigInt(dec[2]);
+                if (v < -(2n ** 63n) || v > 2n ** 63n - 1n)
+                    return exp().lua_make_float(Number(s));
+                return exp().lua_make_int(v);
             }
             const f = Number(s);
             return Number.isNaN(f) ? null : exp().lua_make_float(f);
