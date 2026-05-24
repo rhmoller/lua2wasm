@@ -152,6 +152,13 @@ add_test(
             ${CMAKE_BINARY_DIR}
 )
 add_test(
+    NAME test_e2e_binary_string
+    COMMAND bash ${CMAKE_SOURCE_DIR}/tests/test_e2e_binary_string.sh
+            $<TARGET_FILE:lua2wasm>
+            ${CMAKE_SOURCE_DIR}
+            ${CMAKE_BINARY_DIR}
+)
+add_test(
     NAME test_e2e_samples
     COMMAND bash ${CMAKE_SOURCE_DIR}/tests/test_e2e_samples.sh
             $<TARGET_FILE:lua2wasm>

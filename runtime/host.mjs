@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { formatFloat, formatScalar, cFormatG } from "./format.mjs";
 import { MATH_FNS, MATH2_FNS, makeHelpers,
          BufferedFile, parseFileMode,
-         UTF8_ENCODER, writeBytesToFmtBuf } from "./host-bindings.mjs";
+         latin1Bytes, writeBytesToFmtBuf } from "./host-bindings.mjs";
 
 const wasmPath = process.argv[2];
 if (!wasmPath) {
@@ -36,7 +36,9 @@ let stdinFile = null;
 function ensureStdin() {
     if (stdinFile !== null) return stdinFile;
     let bytes;
-    try { bytes = UTF8_ENCODER.encode(readFileSync(0, "utf8")); }
+    // Read stdin as raw bytes (Lua strings are byte arrays); a "utf8" read
+    // would mangle binary input.
+    try { bytes = new Uint8Array(readFileSync(0)); }
     catch { bytes = new Uint8Array(0); }
     stdinFile = new BufferedFile(bytes);
     return stdinFile;
@@ -64,7 +66,7 @@ function fmtBufBytes(bytes) {
     return writeBytesToFmtBuf(instance.exports, bytes);
 }
 function fmtBufErr(msg) {
-    return -(fmtBufBytes(UTF8_ENCODER.encode(msg)) + 1);
+    return -(fmtBufBytes(latin1Bytes(msg)) + 1);
 }
 function errnoText(e) {
     switch (e && e.code) {
@@ -112,7 +114,7 @@ function fsReadNum(fd) {
 function fsWrite(fd, valRef) {
     const e = openFiles.get(fd);
     if (!e) return -1;
-    e.file.write(UTF8_ENCODER.encode(luaToString(valRef)));
+    e.file.write(latin1Bytes(luaToString(valRef)));
     return 0;
 }
 function fsSeek(fd, whence, offset) {
@@ -148,23 +150,24 @@ function osRename(oldRef, newRef) {
 function osTmpname() {
     const name = join(tmpdir(),
         "lua_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2));
-    return fmtBufBytes(UTF8_ENCODER.encode(name));
+    return fmtBufBytes(latin1Bytes(name));
 }
 
 ({ instance } = await WebAssembly.instantiate(bytes, {
     host: {
-        print:     (v) => { process.stdout.write(luaToString(v) + "\n"); },
-        write_raw: (v) => { process.stdout.write(luaToString(v)); },
+        // luaToString yields a latin1 string (one char per Lua byte); write
+        // the raw bytes via Buffer so the stream isn't re-encoded as UTF-8,
+        // which would corrupt any non-UTF-8 byte (e.g. string.char(255)).
+        print:     (v) => { process.stdout.write(Buffer.from(luaToString(v) + "\n", "latin1")); },
+        write_raw: (v) => { process.stdout.write(Buffer.from(luaToString(v), "latin1")); },
         obj_id:    (v) => objId(v),
-        write_err: (v) => { process.stderr.write(luaToString(v)); },
-        warn:      (v) => { process.stderr.write("Lua warning: " + luaToString(v) + "\n"); },
+        write_err: (v) => { process.stderr.write(Buffer.from(luaToString(v), "latin1")); },
+        warn:      (v) => { process.stderr.write(Buffer.from("Lua warning: " + luaToString(v) + "\n", "latin1")); },
         fmt:       (kind, i, f, prec) => {
-            // Encode to bytes (not per-UTF-16-unit charCodeAt, which would
-            // truncate non-ASCII) and return the byte length the WAT side
-            // reads back. Only numbers flow through today, so this is ASCII
-            // in practice, but the byte path keeps it correct regardless.
+            // Numbers only flow through here, so the output is ASCII; latin1
+            // keeps it byte-exact and consistent with the other fmt_buf paths.
             return writeBytesToFmtBuf(instance.exports,
-                UTF8_ENCODER.encode(formatScalar(kind, i, f, prec)));
+                latin1Bytes(formatScalar(kind, i, f, prec)));
         },
         math:      (kind, x)      => MATH_FNS[kind](x),
         math2:     (kind, x, y)   => MATH2_FNS[kind](x, y),
@@ -219,7 +222,7 @@ try {
         } else {
             msg = luaToString(payload);
         }
-        process.stderr.write("lua: " + msg + "\n");
+        process.stderr.write(Buffer.from("lua: " + msg + "\n", "latin1"));
         process.exit(1);
     }
     throw e;

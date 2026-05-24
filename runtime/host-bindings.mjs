@@ -35,6 +35,20 @@ export const FMT_BUF_CAP = 16384;
 export const UTF8_ENCODER = new TextEncoder();
 export const UTF8_DECODER = new TextDecoder();
 
+// Lua strings are arbitrary byte arrays, not UTF-8 text, so they must
+// round-trip byte-for-byte through JS. We use latin1 (ISO-8859-1), the
+// only encoding where each byte maps to exactly one code point (0x00..0xFF)
+// and back — UTF-8 would mangle any non-UTF-8 byte into U+FFFD. ASCII (the
+// only thing host-generated text ever contains) is a subset, so numbers,
+// format output and error messages survive unchanged. TextDecoder has a
+// latin1 mode; TextEncoder is UTF-8-only, so latin1Bytes() does the encode.
+export const LATIN1_DECODER = new TextDecoder("latin1");
+export function latin1Bytes(s) {
+    const b = new Uint8Array(s.length);
+    for (let i = 0; i < s.length; i++) b[i] = s.charCodeAt(i) & 0xff;
+    return b;
+}
+
 // Anchored match for one Lua numeric token (decimal/hex int or float, with
 // optional sign and exponent). Shared by every "read a number from a byte
 // stream" path (BufferedFile.readNumStr here, stdin's read_num in host.mjs)
@@ -122,10 +136,11 @@ export class BufferedFile {
             else break;
         }
         if (this.pos >= this.buf.length) return null;
-        const tail = UTF8_DECODER.decode(this.buf.subarray(this.pos));
+        const tail = LATIN1_DECODER.decode(this.buf.subarray(this.pos));
         const m = LUA_NUM_RE.exec(tail);
         if (!m) return null;
-        this.pos += UTF8_ENCODER.encode(m[0]).length;
+        // latin1: one matched char == one source byte, so advance by length.
+        this.pos += m[0].length;
         return m[0];
     }
 
@@ -173,7 +188,7 @@ export function makeHelpers({ getInstance, formatFloat, cFormatG }) {
             out[i + 2] = w >>> 16;
             out[i + 3] = w >>> 24;
         }
-        return UTF8_DECODER.decode(out);
+        return LATIN1_DECODER.decode(out);
     }
 
     // Stable, distinct per-object identity for the "type: 0xADDR" forms of
@@ -212,8 +227,10 @@ export function makeHelpers({ getInstance, formatFloat, cFormatG }) {
     }
 
     // Encode a string and stream it into $fmt_buf via the shared byte writer.
+    // latin1 so a Lua string's bytes (e.g. spliced in by string.format %s)
+    // round-trip exactly rather than being re-encoded as UTF-8.
     function writeFmtBuf(s) {
-        return writeBytesToFmtBuf(exp(), UTF8_ENCODER.encode(s));
+        return writeBytesToFmtBuf(exp(), latin1Bytes(s));
     }
 
     function applyPad(body, flags, width) {
