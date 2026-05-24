@@ -121,3 +121,4 @@ multivalue_assign	tests/fixtures/multivalue_assign.lua
 pairs_delete	tests/fixtures/pairs_delete.lua
 math_floor_ceil	tests/fixtures/math_floor_ceil.lua
 table_sort_badcmp	tests/fixtures/table_sort_badcmp.lua
+os_time_field	tests/fixtures/os_time_field.lua

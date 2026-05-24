@@ -3648,9 +3648,11 @@
       (then
         (if (local.get $has_def) (then (return (local.get $def))))
         (call $throw_lit (i32.const 898) (i32.const 27))))   ;; "field missing in date table"
-    (if (i32.eqz (i32.or (call $is_int (local.get $v))
-                         (call $is_float (local.get $v))))
-      (then (call $throw_lit (i32.const 898) (i32.const 27))))
+    ;; Present field must be an integer (or an integral float in i64 range).
+    ;; A fractional/out-of-range float or non-number is a catchable error,
+    ;; not an uncatchable i64.trunc_f64_s trap (os.time{year=1e20} crashed).
+    (if (i32.eqz (call $try_to_int (local.get $v)))
+      (then (call $throw_lit (i32.const 1059) (i32.const 23))))   ;; "field is not an integer"
     (call $as_int_unchecked (local.get $v)))
 
   (func $builtin_os_time (type $LuaFn)
