@@ -1,0 +1,7 @@
+g A=5
+g t.x=5
+f g p=1
+idx q=1
+xyz	10	20	30
+ab	10	20
+f g gg=1

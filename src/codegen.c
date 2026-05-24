@@ -2235,40 +2235,6 @@ static void emit_args_at(CG *c, int idx, int depth) {
                 idx);
 }
 
-/* Helper: emit code that pushes the i-th distributed value of a multi-value
- * binding/assignment.
- *
- *   n_values  = number of source expressions
- *   values    = those expressions
- *   last_call = nonzero iff values[n_values-1] is a CALL whose array result
- *               we want to splice in. The array is already in $tmp_args.
- *   i         = which target index we're filling (0-based)
- */
-static void emit_distributed_value(CG *c, int i, int n_values, Expr **values,
-                                   int last_call, int depth) {
-    if (i < n_values - 1) {
-        /* Plain expression at position i (single value). */
-        emit_expr(c, values[i], depth);
-        return;
-    }
-    if (i == n_values - 1) {
-        if (last_call) {
-            /* The trailing call. Take its first result. */
-            emit_args_at(c, 0, depth);
-        } else {
-            emit_expr(c, values[i], depth);
-        }
-        return;
-    }
-    /* i > n_values - 1: only reachable if last_call (extra values from call) */
-    if (last_call) {
-        emit_args_at(c, i - (n_values - 1), depth);
-    } else {
-        emit_indent(c, depth);
-        wat_append(c->w, "(ref.null any)\n");
-    }
-}
-
 /* ----- statement arms (split out of emit_stmt) ----- */
 
 static void emit_assign(CG *c, const Stmt *s, int depth) {
@@ -2276,7 +2242,14 @@ static void emit_assign(CG *c, const Stmt *s, int depth) {
     int n_values = s->as.assign.n_values;
     int last_call = (n_values > 0 &&
                      is_multival_tail(s->as.assign.values[n_values - 1]));
-    if (n_targets == 1) {
+    /* Fast path only for exactly one target and one value. With a longer
+     * value list (`a = 5, g()`) the extra values must still be evaluated
+     * left-to-right for their side effects; fall through to the general
+     * path, which builds the full value array and stores target[0] from
+     * it. (Routing such a case here previously fed values[0] to
+     * emit_multival_array under a `last_call` flag computed over the *last*
+     * value, crashing on the wrong union member.) */
+    if (n_targets == 1 && n_values == 1) {
         AssignTarget *t = &s->as.assign.targets[0];
         if (t->kind == TGT_VAR && t->as.var.kind == VAR_LOCAL && slot_is_int(c, t->as.var.idx)) {
             emit_indent(c, depth);
@@ -2797,14 +2770,20 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
         int n_values = s->as.local.n_values;
         int last_call = (n_values > 0 &&
                          is_multival_tail(s->as.local.values[n_values - 1]));
-        if (last_call) {
-            emit_indent(c, depth);
-            wat_append(c->w, "(local.set $tmp_args\n");
-            emit_multival_array(c, s->as.local.values[n_values - 1], depth + 1);
-            emit_indent(c, depth);
-            wat_append(c->w, ")\n");
-        }
-        for (int i = 0; i < n_names; i++) {
+        /* Count of leading single-valued source expressions: everything but
+         * a trailing multivalue tail. Lua evaluates the value list strictly
+         * left-to-right, so these are emitted *before* the trailing tail. */
+        int n_lead = last_call ? n_values - 1 : n_values;
+        /* 1. Leading single values, in source order. A value with a matching
+         *    name is assigned to its slot; an excess value is still evaluated
+         *    for its side effects (e.g. an __index trigger) and dropped. */
+        for (int i = 0; i < n_lead; i++) {
+            if (i >= n_names) {
+                emit_expr(c, s->as.local.values[i], depth);
+                emit_indent(c, depth);
+                wat_append(c->w, "drop\n");
+                continue;
+            }
             int slot = s->as.local.local_idxs[i];
             if (slot_is_int(c, slot)) {
                 /* i64 slot: analysis guarantees a matching single int value. */
@@ -2825,20 +2804,49 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
             }
             int boxed = slot_is_boxed(c, slot);
             emit_indent(c, depth);
-            if (boxed) {
-                wat_appendf(c->w, "(local.set $L%d (struct.new $Box\n", slot);
-            } else {
-                wat_appendf(c->w, "(local.set $L%d\n", slot);
-            }
-            if (n_values == 0) {
-                emit_indent(c, depth + 1);
-                wat_append(c->w, "(ref.null any)\n");
-            } else {
-                emit_distributed_value(c, i, n_values, s->as.local.values,
-                                       last_call, depth + 1);
-            }
+            wat_appendf(c->w,
+                        boxed ? "(local.set $L%d (struct.new $Box\n"
+                              : "(local.set $L%d\n",
+                        slot);
+            emit_expr(c, s->as.local.values[i], depth + 1);
             emit_indent(c, depth);
             wat_append(c->w, boxed ? "))\n" : ")\n");
+        }
+        /* 2. Trailing multivalue tail, evaluated *after* the leading values
+         *    and spread across the remaining names (and evaluated even when
+         *    no name consumes it). Spread slots are never int/float-
+         *    specialized (the analysis only specializes single literal/int
+         *    initializers), so the boxed/anyref path covers them. */
+        if (last_call) {
+            emit_indent(c, depth);
+            wat_append(c->w, "(local.set $tmp_args\n");
+            emit_multival_array(c, s->as.local.values[n_values - 1], depth + 1);
+            emit_indent(c, depth);
+            wat_append(c->w, ")\n");
+            for (int i = n_lead; i < n_names; i++) {
+                int slot = s->as.local.local_idxs[i];
+                int boxed = slot_is_boxed(c, slot);
+                emit_indent(c, depth);
+                wat_appendf(c->w,
+                            boxed ? "(local.set $L%d (struct.new $Box\n"
+                                  : "(local.set $L%d\n",
+                            slot);
+                emit_args_at(c, i - n_lead, depth + 1);
+                emit_indent(c, depth);
+                wat_append(c->w, boxed ? "))\n" : ")\n");
+            }
+        } else {
+            /* 3. No trailing tail: names past the value list get nil. */
+            for (int i = n_lead; i < n_names; i++) {
+                int slot = s->as.local.local_idxs[i];
+                int boxed = slot_is_boxed(c, slot);
+                emit_indent(c, depth);
+                wat_appendf(c->w,
+                            boxed ? "(local.set $L%d (struct.new $Box (ref.null "
+                                    "any)))\n"
+                                  : "(local.set $L%d (ref.null any))\n",
+                            slot);
+            }
         }
         break;
     }
@@ -2948,6 +2956,29 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
         if (n_values == 0) break;
         int last_call = (n_values > 0 &&
                          is_multival_tail(s->as.global_decl.values[n_values - 1]));
+        int n_lead = last_call ? n_values - 1 : n_values;
+        /* Same left-to-right evaluation contract as STMT_LOCAL: leading
+         * single values first, then the trailing multivalue tail. The store
+         * keys are constant strings (no side effects), so only the value
+         * order matters. */
+        for (int i = 0; i < n_lead; i++) {
+            if (i >= n_names) {
+                emit_expr(c, s->as.global_decl.values[i], depth);
+                emit_indent(c, depth);
+                wat_append(c->w, "drop\n");
+                continue;
+            }
+            int gi = s->as.global_decl.global_idxs[i];
+            emit_indent(c, depth);
+            wat_append(c->w,
+                       "(call $tab_set (ref.as_non_null (global.get $g_globals))\n");
+            emit_indent(c, depth + 1);
+            emit_global_key(c, c->pr->globals.items[gi].name,
+                            c->pr->globals.items[gi].name_len);
+            emit_expr(c, s->as.global_decl.values[i], depth + 1);
+            emit_indent(c, depth);
+            wat_append(c->w, ")\n");
+        }
         if (last_call) {
             emit_indent(c, depth);
             wat_append(c->w, "(local.set $tmp_args\n");
@@ -2955,20 +2986,19 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
             emit_indent(c, depth);
             wat_append(c->w, ")\n");
         }
-        for (int i = 0; i < n_names; i++) {
+        for (int i = n_lead; i < n_names; i++) {
             int gi = s->as.global_decl.global_idxs[i];
-            const char *gname = c->pr->globals.items[gi].name;
-            size_t gnl = c->pr->globals.items[gi].name_len;
             emit_indent(c, depth);
-            wat_append(c->w, "(call $tab_set (ref.as_non_null (global.get $g_globals))\n");
+            wat_append(c->w,
+                       "(call $tab_set (ref.as_non_null (global.get $g_globals))\n");
             emit_indent(c, depth + 1);
-            emit_global_key(c, gname, gnl);
-            if (n_values == 0) {
+            emit_global_key(c, c->pr->globals.items[gi].name,
+                            c->pr->globals.items[gi].name_len);
+            if (last_call) {
+                emit_args_at(c, i - n_lead, depth + 1);
+            } else {
                 emit_indent(c, depth + 1);
                 wat_append(c->w, "(ref.null any)\n");
-            } else {
-                emit_distributed_value(c, i, n_values, s->as.global_decl.values,
-                                       last_call, depth + 1);
             }
             emit_indent(c, depth);
             wat_append(c->w, ")\n");
