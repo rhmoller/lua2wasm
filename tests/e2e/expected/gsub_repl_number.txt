@@ -1,0 +1,8 @@
+5bc	1
+a0b0	2
+1.5	1
+he77o	2
+false	true
+false	true
+a[1]b[2]	2
+XYc	3

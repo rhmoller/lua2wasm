@@ -125,3 +125,4 @@ os_time_field	tests/fixtures/os_time_field.lua
 format_fixes	tests/fixtures/format_fixes.lua
 int_overflow_float	tests/fixtures/int_overflow_float.lua
 close_exits	tests/fixtures/close_exits.lua
+gsub_repl_number	tests/fixtures/gsub_repl_number.lua

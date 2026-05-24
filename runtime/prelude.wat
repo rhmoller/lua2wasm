@@ -6332,7 +6332,11 @@
     (if (i32.gt_u (local.get $nargs) (i32.const 3))
       (then (local.set $limit (i32.wrap_i64
               (call $as_int_co (call $args_at (local.get $args) (i32.const 3)))))))
-    ;; Classify repl. Reject unsupported types early.
+    ;; Classify repl. A number coerces to its string form (reference Lua);
+    ;; string/table/function as below; anything else errors.
+    (if (i32.or (call $is_int (local.get $repl_v))
+                (call $is_float (local.get $repl_v)))
+      (then (local.set $repl_v (call $lua_tostring (local.get $repl_v)))))
     (if (ref.test (ref $LuaString) (local.get $repl_v))
       (then (local.set $repl_kind (i32.const 0))
             (local.set $repl_bytes (struct.get $LuaString $bytes
