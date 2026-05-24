@@ -14,7 +14,7 @@
 //   node scripts/diff-fuzz.mjs                  # 1000 programs, random base seed
 //   node scripts/diff-fuzz.mjs --count 5000
 //   node scripts/diff-fuzz.mjs --seed 12345     # reproduce one program (prints it, runs it)
-//   node scripts/diff-fuzz.mjs --phase patterns # numeric|format|patterns|all (default all)
+//   node scripts/diff-fuzz.mjs --phase tables   # numeric|format|patterns|tables|all (default all)
 //   node scripts/diff-fuzz.mjs --emit NAME      # on first divergence, write a tests/diff case
 //   LUA_REF=lua5.4 node scripts/diff-fuzz.mjs   # override the reference interpreter
 
@@ -228,15 +228,87 @@ function genPatternExpr(rng) {
     }
 }
 
+// ---- tables / control-flow generator (P4) --------------------------------
+// Each returns an IIFE expression that runs statements and yields one
+// comparable string. Determinism rules: never iterate with `pairs` (order
+// unspecified), never rely on `#t` with holes (border unspecified — so the
+// table-lib kind stays contiguous and key-norm probes fixed keys instead), and
+// never print a table/function (address). The whole thing is pcall-wrapped, so
+// an op that errors in both engines is filtered.
+function genTableLib(rng) {
+    const elem = ["0", "1", "2", "3", "-1", "5", "10", "1.5", "2.5"];
+    const arr = [];
+    for (let i = rng.int(6); i > 0; i--) arr.push(rng.pick(elem));
+    let s = `local t = {${arr.join(", ")}}\n`;
+    for (let i = rng.int(6); i > 0; i--) {
+        const pos = rng.pick(["1", "2", "3", "#t", "#t + 1"]);
+        const v = rng.pick(elem);
+        switch (rng.int(6)) { // contiguity-preserving ops only (#t stays well-defined)
+            case 0: s += `table.insert(t, ${v})\n`; break;
+            case 1: s += `table.insert(t, ${pos}, ${v})\n`; break;
+            case 2: s += `table.remove(t)\n`; break;
+            case 3: s += `table.remove(t, ${pos})\n`; break;
+            case 4: s += `table.sort(t)\n`; break;        // homogeneous numbers => deterministic
+            default: s += `t[#t + 1] = ${v}\n`; break;    // append
+        }
+    }
+    return `(function()\n${s}local o = {} for i = 1, #t do o[i] = tostring(t[i]) end\n`
+        + `return #t .. "|" .. table.concat(o, ",") end)()`;
+}
+function genKeyNorm(rng) {
+    // Integral-float keys normalize to integers; 2.5/-0.0/"1" are distinct;
+    // nil/NaN keys must raise. Probe fixed keys (no #t — holes are likely).
+    const keys = ["1", "2", "1.0", "2.0", "3", "2.5", "-0.0", '"1"', '"k"', "nil", "0/0"];
+    const vals = ["10", "20", '"x"', "true", "30"];
+    let s = "local t = {}\n";
+    for (let i = 2 + rng.int(4); i > 0; i--)
+        s += `t[${rng.pick(keys)}] = ${rng.pick(vals)}\n`;
+    return `(function()\n${s}return tostring(t[1]) .. "," .. tostring(t[2]) .. ","`
+        + ` .. tostring(t[3]) .. "," .. tostring(t[2.5]) .. "," .. tostring(t["1"])`
+        + ` .. "," .. tostring(rawget(t, 2)) end)()`;
+}
+function genControlFlow(rng) {
+    let s = "local acc = 0\n";
+    for (let i = 1 + rng.int(3); i > 0; i--) {
+        switch (rng.int(3)) {
+            case 0: { // numeric for (float step makes the var a float)
+                const a = rng.pick(["1", "0", "-2", "3"]);
+                const b = rng.pick(["5", "10", "3", "0"]);
+                const st = rng.pick(["1", "2", "-1", "1.5"]);
+                s += `for i = ${a}, ${b}, ${st} do acc = acc + i end\n`;
+                break;
+            }
+            case 1:
+                s += `do local n = 0 while n < ${rng.pick(["3", "5", "0"])} do `
+                    + `n = n + 1 acc = acc + n end end\n`;
+                break;
+            default:
+                s += `if acc ${rng.pick(["<", ">", "=="])} ${rng.pick(["0", "5", "10"])} `
+                    + `then acc = acc + 1 else acc = acc - 1 end\n`;
+                break;
+        }
+    }
+    return `(function()\n${s}return tostring(acc) end)()`;
+}
+function genTableProgram(rng) {
+    switch (rng.int(3)) {
+        case 0: return genTableLib(rng);
+        case 1: return genKeyNorm(rng);
+        default: return genControlFlow(rng);
+    }
+}
+
 function genExpr(rng) {
     const depth = 2 + rng.int(3);
     if (PHASE === "patterns") return genPatternExpr(rng);
+    if (PHASE === "tables") return genTableProgram(rng);
     if (PHASE === "numeric") return genNum(rng, depth);
     if (PHASE === "format") return genStr(rng, depth);
-    switch (rng.int(3)) { // all
+    switch (rng.int(4)) { // all
         case 0: return genNum(rng, depth);
         case 1: return genStr(rng, depth);
-        default: return genPatternExpr(rng);
+        case 2: return genPatternExpr(rng);
+        default: return genTableProgram(rng);
     }
 }
 
