@@ -16,6 +16,7 @@
 //   node scripts/diff-fuzz.mjs --seed 12345     # reproduce one program (prints it, runs it)
 //   node scripts/diff-fuzz.mjs --phase tables   # numeric|format|patterns|tables|all (default all)
 //   node scripts/diff-fuzz.mjs --emit NAME      # on first divergence, write a tests/diff case
+//   node scripts/diff-fuzz.mjs --progress 10    # status line to stderr every 10s (default 5; 0 off)
 //   LUA_REF=lua5.4 node scripts/diff-fuzz.mjs   # override the reference interpreter
 
 import { execFileSync } from "node:child_process";
@@ -42,6 +43,7 @@ const COUNT = parseInt(flag("--count", "1000"), 10);
 const ONE_SEED = args.includes("--seed") ? parseInt(flag("--seed"), 10) >>> 0 : null;
 const PHASE = flag("--phase", "all"); // numeric | format | all
 const EMIT = flag("--emit", null);
+const PROGRESS_S = parseFloat(flag("--progress", "5")); // status-line cadence in seconds; 0 disables
 const BASE = ONE_SEED ?? (Math.random() * 0x100000000) >>> 0;
 
 // ---- seeded PRNG (mulberry32) -------------------------------------------
@@ -428,6 +430,11 @@ function emitCase(name, src) {
 }
 
 // ---- driver --------------------------------------------------------------
+function fmtDur(ms) {
+    const s = Math.round(ms / 1000);
+    return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m${String(s % 60).padStart(2, "0")}s`;
+}
+
 function report(seed, src, r) {
     console.log(`\n=== DIVERGENCE  seed=${seed}  (${r.reason}) ===`);
     console.log(src.trimEnd());
@@ -450,12 +457,25 @@ if (ONE_SEED !== null) {
 
 console.log(`fuzzing ${COUNT} programs, phase=${PHASE}, base seed=${BASE}, ref=${LUA}`);
 let found = 0, bothFail = 0;
+const t0 = Date.now();
+let lastTick = t0;
 for (let i = 0; i < COUNT; i++) {
     const seed = (BASE + i) >>> 0;
     const rng = mulberry32(seed);
     const expr = genExpr(rng);
     const r = runBoth(wrap(expr));
     if (r.ours.cls !== "ok" && r.ref.cls !== "ok") bothFail++;
+    // Heartbeat to stderr (stdout stays just divergences + the final summary),
+    // so a long sweep shows it's alive, how far along, and an ETA.
+    const now = Date.now();
+    if (PROGRESS_S > 0 && now - lastTick >= PROGRESS_S * 1000) {
+        const done = i + 1;
+        const rate = (now - t0) / done; // ms/prog
+        console.error(`  [${PHASE}] ${done}/${COUNT} (${Math.round((100 * done) / COUNT)}%)`
+            + `  ${fmtDur(now - t0)} elapsed, ~${fmtDur(rate * (COUNT - done))} left`
+            + `  ${rate.toFixed(0)} ms/prog | ${found} diverged, ${bothFail} both-rejected`);
+        lastTick = now;
+    }
     if (!r.reason) continue;
     found++;
     report(seed, wrap(expr), r);
