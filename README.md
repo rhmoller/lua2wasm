@@ -111,19 +111,19 @@ is *representation overhead*, not the execution substrate: boxed floats,
 per-call argument/result arrays, and generic `anyref` dispatch through runtime
 helpers. So it's recoverable by generating better code.
 
-An opt-in specialization pass (set `LUA2WASM_OPT_INT=1` when compiling) closes
-it for monomorphic code. **Default output is unchanged** — byte-identical with
-the flag off — so the optimization is purely additive. Measured under Node/V8,
-timed inside the script with `os.clock()` so process startup is excluded
-(numbers vary by machine; compare the columns, not the absolutes):
+A numeric/call specialization pass closes it for monomorphic code, and it is
+**on by default** — `-O0` selects the boxed fallback, which is behaviour-
+identical, just slower. Measured under Node/V8, timed inside the script with
+`os.clock()` so process startup is excluded (numbers vary by machine; compare
+the columns, not the absolutes):
 
-| tight-loop workload      | reference `lua5.5` | lua2wasm (default) | lua2wasm (`LUA2WASM_OPT_INT`) |
-|--------------------------|-------------------:|-------------------:|------------------------------:|
-| 20M integer ops          | 0.07 s             | 0.36 s             | **0.05 s** |
-| 20M float ops            | 0.05 s             | 0.38 s             | **0.05 s** |
-| 20M function calls       | 0.22 s             | 0.55 s             | **0.04 s** |
-| recursive `fib(34)`      | 0.18 s             | 0.31 s             | **0.05 s** |
-| 5M `t[i]=i` then sum     | 0.06 s             | 0.24 s             | **0.14 s** |
+| tight-loop workload      | reference `lua5.5` | lua2wasm (`-O0`, boxed) | lua2wasm (default) |
+|--------------------------|-------------------:|------------------------:|-------------------:|
+| 20M integer ops          | 0.07 s             | 0.36 s                  | **0.05 s** |
+| 20M float ops            | 0.05 s             | 0.38 s                  | **0.05 s** |
+| 20M function calls       | 0.22 s             | 0.55 s                  | **0.04 s** |
+| recursive `fib(34)`      | 0.18 s             | 0.31 s                  | **0.05 s** |
+| 5M `t[i]=i` then sum     | 0.06 s             | 0.24 s                  | **0.14 s** |
 
 What the pass does, all within the WasmGC model (no linear memory, no deopt):
 
@@ -257,12 +257,12 @@ sans `.lua`. `require("util")` in any source (entry or module) walks
 `package.preload`, calls the loader on first hit, and caches the result
 in `package.loaded` — the standard Lua semantics, statically wired.
 
-To enable the experimental numeric/call specialization pass (see
-[Performance](#performance)), set the environment variable when compiling;
-it only changes the emitted code, not the CLI invocation:
+The numeric/call specialization pass (see [Performance](#performance)) is on by
+default. To emit the boxed fallback instead — every value a host-GC object, no
+unboxed `i64`/`f64` — compile with `-O0`:
 
 ```sh
-LUA2WASM_OPT_INT=1 ./build/lua2wasm input.lua -o output.wat
+./build/lua2wasm input.lua -O0 -o output.wat
 ```
 
 ## Packaging

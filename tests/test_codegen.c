@@ -14,20 +14,53 @@ static MunitResult test_emits_expected(const MunitParameter params[], void *fixt
 
     WatBuilder w; wat_init(&w);
     char err[256] = {0};
-    int ok = codegen_module(&r, "test", 0, &w, err, sizeof(err));
+    int ok = codegen_module(&r, "test", 0, 1, &w, err, sizeof(err)); /* opt=1 (default) */
     if (!ok) munit_logf(MUNIT_LOG_ERROR, "codegen: %s", err);
     munit_assert_true(ok);
 
     const char *s = wat_cstr(&w);
     munit_assert_not_null(strstr(s, "(import \"host\" \"print\""));
-    munit_assert_not_null(strstr(s, "(ref.i31 (i32.const 1))"));
-    munit_assert_not_null(strstr(s, "(ref.i31 (i32.const 2))"));
-    munit_assert_not_null(strstr(s, "(call $lua_add)"));
-    /* No more direct $host_print call from user code; goes through $lua_call. */
+    /* With numeric specialization on by default, the constant int add `1+2` is
+     * lowered to unboxed i64 arithmetic, so the boxed forms ($lua_add and the
+     * `ref.i31` operands) are ABSENT from the emitted code. They don't occur in
+     * the prelude either, so checking for their absence is a clean signal that
+     * the default really specialized. The boxed shape is pinned separately by
+     * test_emits_boxed_fallback_o0. */
+    munit_assert_null(strstr(s, "(ref.i31 (i32.const 1))"));
+    munit_assert_null(strstr(s, "(call $lua_add)"));
+    /* No direct $host_print call from user code; goes through $lua_call. */
     munit_assert_not_null(strstr(s, "(call $lua_call"));
     munit_assert_not_null(strstr(s, "(global.get $g_builtin_print)"));
     munit_assert_not_null(strstr(s, "(func $main (export \"main\")"));
     munit_assert_not_null(strstr(s, "(type $LuaClosure"));
+
+    wat_free(&w);
+    parse_result_free(&r);
+    node_pool_free(&pool);
+    tokenlist_free(&t);
+    return MUNIT_OK;
+}
+
+/* -O0 is the proven boxed fallback: every Lua value is a host-GC object and
+ * arithmetic goes through generic $lua_add dispatch. Pin that lowering so the
+ * fallback can't silently rot now that specialization is the default. */
+static MunitResult test_emits_boxed_fallback_o0(const MunitParameter params[], void *fixture) {
+    (void)params; (void)fixture;
+    TokenList t = lex("print(1+2)");
+    NodePool pool; node_pool_init(&pool);
+    ParseResult r = parse(&t, &pool);
+    munit_assert_true(r.ok);
+
+    WatBuilder w; wat_init(&w);
+    char err[256] = {0};
+    int ok = codegen_module(&r, "test", 0, 0, &w, err, sizeof(err)); /* opt=0 */
+    if (!ok) munit_logf(MUNIT_LOG_ERROR, "codegen: %s", err);
+    munit_assert_true(ok);
+
+    const char *s = wat_cstr(&w);
+    munit_assert_not_null(strstr(s, "(ref.i31 (i32.const 1))"));
+    munit_assert_not_null(strstr(s, "(ref.i31 (i32.const 2))"));
+    munit_assert_not_null(strstr(s, "(call $lua_add)"));
 
     wat_free(&w);
     parse_result_free(&r);
@@ -45,7 +78,7 @@ static MunitResult test_string_in_data_segment(const MunitParameter params[], vo
 
     WatBuilder w; wat_init(&w);
     char err[256] = {0};
-    int ok = codegen_module(&r, "test", 0, &w, err, sizeof(err));
+    int ok = codegen_module(&r, "test", 0, 1, &w, err, sizeof(err));
     munit_assert_true(ok);
     const char *s = wat_cstr(&w);
     /* Built-in literal prefix is 51 bytes; "hello" lands somewhere after that. */
@@ -72,7 +105,7 @@ static MunitResult test_data_segment_dedups(const MunitParameter params[], void 
 
     WatBuilder w; wat_init(&w);
     char err[256] = {0};
-    int ok = codegen_module(&r, "test", 0, &w, err, sizeof(err));
+    int ok = codegen_module(&r, "test", 0, 1, &w, err, sizeof(err));
     if (!ok) munit_logf(MUNIT_LOG_ERROR, "codegen: %s", err);
     munit_assert_true(ok);
     const char *s = wat_cstr(&w);
@@ -96,7 +129,7 @@ static MunitResult test_user_function_emitted(const MunitParameter params[], voi
 
     WatBuilder w; wat_init(&w);
     char err[256] = {0};
-    int ok = codegen_module(&r, "test", 0, &w, err, sizeof(err));
+    int ok = codegen_module(&r, "test", 0, 1, &w, err, sizeof(err));
     if (!ok) munit_logf(MUNIT_LOG_ERROR, "codegen: %s", err);
     munit_assert_true(ok);
     const char *s = wat_cstr(&w);
@@ -136,6 +169,7 @@ static MunitResult test_pool_pointer_stability(const MunitParameter params[], vo
 
 static MunitTest tests[] = {
     { "/emits_expected",       test_emits_expected,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+    { "/boxed_fallback_o0",    test_emits_boxed_fallback_o0, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
     { "/string_data",          test_string_in_data_segment, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
     { "/data_segment_dedups",  test_data_segment_dedups,    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
     { "/user_function",        test_user_function_emitted,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },

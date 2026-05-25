@@ -48,6 +48,12 @@ builtins the program never names (big size win; breaks dynamic `_G` lookups
 of un-named builtins). The DCE pass lives in `wat2wasm` (assembler), so the
 `wat2wasm` CLI takes `--dce` to opt in.
 
+Numeric/call specialization (int/float unboxing, typed direct-call entries,
+comparison specialization) is **on by default**; `-O0` selects the boxed
+fallback. The two are behaviour-identical (goldens are shared), so the e2e
+suite runs each fixture both ways: the default loop exercises the specialized
+path, a `-O0` loop (`test_e2e_o0_*`) guards the fallback.
+
 ## The phase rule — *if you can't print it, you didn't build it*
 
 New language features land behind an end-to-end fixture **before** parser syntax:

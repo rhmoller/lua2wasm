@@ -77,7 +77,9 @@ static void strip_shebang(char *s) {
 static void usage(const char *prog) {
     fprintf(stderr,
             "usage: %s <main.lua> [-m <module.lua>]... -o <output.wat>\n"
-            "  -m FILE  load FILE as a require()-able module, keyed by basename\n",
+            "  -m FILE  load FILE as a require()-able module, keyed by basename\n"
+            "  -O0      disable numeric/call specialization (boxed fallback)\n"
+            "  -O1      enable numeric/call specialization (default)\n",
             prog);
 }
 
@@ -103,6 +105,7 @@ int main(int argc, char **argv) {
     int n_modules = 0;
     int tree_shake = 0;
     int no_dce = 0;
+    int opt = 1; /* numeric/call specialization on by default; -O0 disables */
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) {
             out = argv[++i];
@@ -110,6 +113,11 @@ int main(int argc, char **argv) {
             tree_shake = 1;
         } else if (strcmp(argv[i], "--no-dce") == 0) {
             no_dce = 1;
+        } else if (argv[i][0] == '-' && argv[i][1] == 'O') {
+            /* -O0 selects the boxed fallback; -O / -O<n>=1.. enable
+             * specialization (the default). Only the on/off distinction
+             * matters today — there is a single optimization level. */
+            opt = strcmp(argv[i], "-O0") == 0 ? 0 : 1;
         } else if (strcmp(argv[i], "-m") == 0 && i + 1 < argc) {
             if (n_modules >= MAX_MODULES) {
                 fprintf(stderr, "too many -m modules (max %d)\n", MAX_MODULES);
@@ -212,7 +220,7 @@ int main(int argc, char **argv) {
     WatBuilder w;
     wat_init(&w);
     char err[256] = {0};
-    if (!codegen_module(&pr, src_name, tree_shake, &w, err, sizeof(err))) {
+    if (!codegen_module(&pr, src_name, tree_shake, opt, &w, err, sizeof(err))) {
         fprintf(stderr, "%s\n", err);
         return 1;
     }

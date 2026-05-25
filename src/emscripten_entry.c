@@ -66,8 +66,9 @@ char *lua2wasm_compile_ex(const char *source, int tree_shake) {
     have_wat = 1;
     char errbuf[256] = {0};
     /* Playground compiles the inline buffer with no filename; use "input".
-     * Tree-shake is opt-in via the UI toggle (passed in tree_shake). */
-    if (!codegen_module(&pr, "input", tree_shake, &w, errbuf, sizeof(errbuf))) {
+     * Tree-shake is opt-in via the UI toggle (passed in tree_shake).
+     * Numeric/call specialization is always on (opt=1, the CLI default). */
+    if (!codegen_module(&pr, "input", tree_shake, 1, &w, errbuf, sizeof(errbuf))) {
         result = make_err("ERROR(codegen): ", errbuf);
         goto cleanup;
     }

@@ -92,13 +92,13 @@ foreach(_row ${_e2e_rows})
                 ${_e2e_name} ${_e2e_fixture})
 endforeach()
 
-# Flag-on pass: re-run every e2e fixture with the numeric/call specialization
-# enabled (LUA2WASM_OPT_INT=1), diffing against the *same* default golden — the
-# optimized codegen must be behaviour-identical. This guards an otherwise
-# 0%-covered code path (a CRAP analysis flagged it). _e2e_opt_skip lists cases
-# whose flag-on output legitimately differs (e.g. error-message text the project
-# matches only semantically); currently empty.
-set(_e2e_opt_skip)
+# Fallback pass: numeric/call specialization is on by default, so the default
+# e2e loop above already exercises the optimized codegen. This loop re-runs
+# every fixture with -O0 (the boxed fallback) against the *same* golden — the
+# fallback must stay behaviour-identical. _e2e_o0_skip lists cases whose -O0
+# output legitimately differs (e.g. error-message text matched only
+# semantically); currently empty.
+set(_e2e_o0_skip)
 foreach(_row ${_e2e_rows})
     if(_row MATCHES "^#" OR _row STREQUAL "")
         continue()
@@ -106,16 +106,14 @@ foreach(_row ${_e2e_rows})
     string(REPLACE "\t" ";" _parts "${_row}")
     list(GET _parts 0 _e2e_name)
     list(GET _parts 1 _e2e_fixture)
-    if(_e2e_name IN_LIST _e2e_opt_skip)
+    if(_e2e_name IN_LIST _e2e_o0_skip)
         continue()
     endif()
     add_test(
-        NAME test_e2e_opt_${_e2e_name}
+        NAME test_e2e_o0_${_e2e_name}
         COMMAND bash ${CMAKE_SOURCE_DIR}/tests/e2e/run.sh
                 $<TARGET_FILE:lua2wasm> ${CMAKE_SOURCE_DIR} ${CMAKE_BINARY_DIR}
-                opt_${_e2e_name} ${_e2e_fixture} ${_e2e_name})
-    set_tests_properties(test_e2e_opt_${_e2e_name} PROPERTIES
-                         ENVIRONMENT "LUA2WASM_OPT_INT=1")
+                o0_${_e2e_name} ${_e2e_fixture} ${_e2e_name} -O0)
 endforeach()
 
 # E2E tests that need custom drivers (stdin, stderr capture, -m modules,

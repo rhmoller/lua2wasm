@@ -197,7 +197,7 @@ typedef struct LabelScope {
     struct LabelScope *parent;
 } LabelScope;
 
-/* ----- whole-program numeric signatures (LUA2WASM_OPT_INT) -----
+/* ----- whole-program numeric signatures (opt >= 1) -----
  * Parameter + return unboxing. In Lua 5.5 integer and float are distinct types
  * (3*3 == 9 but 3.0*3.0 == 9.0), so they are *incomparable*: a value seen as
  * both must stay boxed (NT_ANY) — unboxing it to one machine type would change
@@ -250,7 +250,7 @@ typedef struct {
      * before emitting either a user function body or the main chunk. */
     const unsigned char *cur_captured;
     int cur_n_locals;
-    /* Integer-specialization PoC (opt-in via LUA2WASM_OPT_INT). When on,
+    /* Integer/float specialization (on by default; -O0 disables). When on,
      * cur_is_int[s] != 0 marks a local slot proven to hold only integers; it
      * is declared as an unboxed i64 and integer arithmetic on it is emitted as
      * inline i64 ops, boxed to a Lua value only at use-site boundaries. */
@@ -1333,7 +1333,7 @@ static void emit_table_ctor(CG *c, const Expr *e, int depth) {
     wat_append(c->w, ")\n");
 }
 
-/* ----- integer-specialization PoC (LUA2WASM_OPT_INT) ----- */
+/* ----- integer specialization (opt >= 1) ----- */
 
 /* Is this slot a local proven to hold only integers (declared as i64)? */
 static int slot_is_int(const CG *c, int slot) {
@@ -4517,7 +4517,7 @@ static void emit_data_segment(CG *c) {
 }
 
 int codegen_module(const ParseResult *pr, const char *src_name,
-                   int tree_shake, WatBuilder *out,
+                   int tree_shake, int opt, WatBuilder *out,
                    char *err, size_t errlen) {
     const char *slab_err = verify_literal_slab();
     if (slab_err) {
@@ -4529,9 +4529,10 @@ int codegen_module(const ParseResult *pr, const char *src_name,
     }
 
     CG c = {.w = out, .pr = pr, .ok = 1, .in_main = 1};
-    /* Integer-specialization PoC: opt-in via env so the default pipeline and
-     * golden output are byte-for-byte unchanged. */
-    c.opt_int = getenv("LUA2WASM_OPT_INT") != NULL;
+    /* Numeric/call specialization is on by default (opt >= 1); -O0 selects the
+     * boxed fallback. Behaviour is identical either way — only code shape and
+     * speed differ — so goldens are shared across levels. */
+    c.opt_int = opt >= 1;
     /* Whole-program pre-passes (opt_int): resolve direct-call targets (incl.
      * self-recursive/captured local functions), then infer per-function
      * param/return numeric types used to unbox the typed direct-call entries. */

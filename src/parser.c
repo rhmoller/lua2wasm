@@ -177,7 +177,7 @@ static int frame_mark(FuncFrame *f) { return f->local_count; }
  * scope (name visibility is reset). Their wasm slot numbers are deliberately
  * NOT reclaimed for sibling blocks. Reclaiming them (a high-water-mark scheme)
  * would shrink n_locals and the parallel codegen bitmaps, but it is unsound
- * under the LUA2WASM_OPT_INT direct-call optimization: codegen's
+ * under the direct-call optimization (opt >= 1): codegen's
  * compute_func_bindings builds a slot -> bound-LuaFunc map that assumes each
  * slot maps to at most one function across the whole body. Two sibling
  * `local f = function...` blocks reusing one slot would collide in that map and
