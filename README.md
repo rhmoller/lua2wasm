@@ -2,67 +2,27 @@
 
 **An ahead-of-time compiler that turns Lua 5.5 source into standalone WebAssembly modules — no interpreter, no bytecode VM, no bundled garbage collector.**
 
-`lua2wasm` is written in C23 and emits WebAssembly that leans on the modern WASM
-type system (the GC, typed-references, and exception-handling proposals). The
-runtime *is* the host: Lua tables are real WASM structs, Lua closures are
-typed function references, and the browser's V8/SpiderMonkey collector owns
-every Lua value. Compile once, ship a `.wasm`, run anywhere with a recent
-browser.
+`lua2wasm` leans on the modern WebAssembly type system (the garbage collector, typed-reference,
+and exception-handling) instead of treating WASM as a portable
+assembler with a hand-rolled allocator on top — there is no linear memory, no
+bundled collector, and no bytecode interpreter.
 
-> This is a research / educational project. The long-form mission, non-goals,
-> and roadmap live in [`GOAL.md`](GOAL.md).
+Lua tables become real WebAssembly structs, closures become typed function
+references, and the host's garbage collector (V8 / SpiderMonkey) owns every
+value.
 
-## Try it now
+## Try it now — no install required
 
-**Live playground:** <https://rhmoller.github.io/lua2wasm/> — opens an
-in-browser editor that compiles and runs your Lua right on the page. No
-install needed.
+**Live playground:** <https://rhmoller.github.io/lua2wasm/>
 
-For local development the default flow needs **no Emscripten** and **no
-Binaryen** — just `clang`, `cmake`, and Node ≥ 22. The WAT→wasm assembler
-is built into the compiler.
+Type Lua on the left and see the result on the right — the page compiles and
+runs your program entirely in the browser, with nothing to download. Flip the
+output to **Show WAT** to read the generated WebAssembly text. Works in any
+recent Chrome, Edge, Firefox, or Safari (see [Targets](#targets)).
 
-```sh
-# 1. Build the compiler (a native binary)
-CC=clang cmake -S . -B build -G Ninja
-cmake --build build
+It integrates with just-bash so even the `os` and `io` packages can be used on the web.
 
-# 2. Compile a Lua program straight to a .wasm module
-echo 'print("hello from " .. "lua2wasm")' > /tmp/hello.lua
-./build/lua2wasm /tmp/hello.lua -o /tmp/hello.wasm
-
-# 3. Run it
-node --experimental-wasm-exnref runtime/host.mjs /tmp/hello.wasm
-#   → hello from lua2wasm
-```
-
-(Use `-o /tmp/hello.wat` to emit human-readable text instead; the standalone
-`wat2wasm` binary assembles `.wat` → `.wasm` if you want the two-step flow.)
-
-Or wrap that module up as a self-contained HTML page (no server needed) with
-[`scripts/package-html.sh`](scripts/package-html.sh) — see the
-[Packaging](#packaging) section below.
-
-### Optional: the live playground
-
-If you also have [Emscripten](https://emscripten.org/) on hand, there's a
-richer demo that cross-compiles **the compiler itself** to WASM and ships it
-to the browser. CodeMirror editor on one side, output on the other, with
-a draggable splitter between them. **Run** compiles + runs your Lua entirely
-client-side; **Show WAT** flips the output to a syntax-highlighted view of the
-generated WebAssembly text, with foldable sections separating prelude /
-stdlib / user code / data segments. Catppuccin theming throughout, with a
-sun/moon toggle to flip between Mocha (dark) and Latte (light).
-
-```sh
-. ~/path/to/emsdk/emsdk_env.sh
-./scripts/build-wasm.sh                  # produces build-em/lua2wasm.{js,wasm}
-python3 -m http.server 8000
-# open http://localhost:8000/runtime/playground.html
-```
-
-Emscripten is *only* needed for this playground page — every other path in
-this README works without it.
+Prefer the command line? See [Build & run locally](#build--run-locally).
 
 ## A tiny example
 
@@ -89,7 +49,12 @@ the same outer scope mutate the same slot — exactly as Lua specifies.
 
 `lua2wasm` is an AOT compiler. There's no Lua interpreter sitting around at
 runtime; what you write is what the compiler *statically* lowers to WASM
-instructions. Anything not in this table is a compile-time error.
+instructions.
+
+Most Lua code will compile and run on `lua2wasm`. The two primary limitations are:
+
+- no runtime compilation or interpreter, so `load` and `load-file` are not supported.
+- no coroutines (waiting for stack switching support in WebAssembly standard)
 
 | Area              | Supported                                                                                                                                                                                                                                                                       | Not yet                                                          |
 |-------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|------------------------------------------------------------------|
@@ -104,7 +69,7 @@ instructions. Anything not in this table is a compile-time error.
 | **Functions**     | N-ary arguments, multiple return values (`return a, b, c`), upvalue capture (mutable shared boxes), transitive captures, **method-call sugar `obj:m(args)`**, **paren-less single-arg call `f"x"` / `f{k=1}`**, **varargs `function f(...)` / `function f(a, ...)` with `...` spliced into call args, returns, table constructors, and multi-assign**, proper tail calls (`return f(...)` → `return_call_ref`, doesn't grow the stack)                  | —                                                                |
 | **Errors**        | `error(v)` / `pcall(f, …)` / `assert(v[, msg])` lowered to WASM exception handling (`throw $LuaError` + `try_table`). Internal builtins raise spec-shaped messages with the standard `<src>:<line>:` position prefix — `attempt to perform arithmetic`, `attempt to index a value`, `invalid UTF-8 code`, `data does not fit`, `out of limits`, `variable-length format`, `not power of 2`, `table overflow` (raised before WASM array-size traps so `pcall` can catch runaway allocations), `stack overflow` (a `$call_depth` guard raises it catchably before deep non-tail recursion exhausts the host call stack), etc. | full traceback (`debug.traceback` returns the current frame only) |
 | **Metatables**    | `setmetatable` / `getmetatable`, `__index` (table chain *and* function form, with cycle limit), `__newindex` (table chain *and* function form), `__add` `__sub` `__mul` `__div` `__mod` `__pow` `__unm` `__idiv` `__band` `__bor` `__bxor` `__shl` `__shr` `__bnot`, `__concat`, `__len`, `__eq` `__lt` `__le`, `__call`, `__tostring`, `__name` (renames the type in `tostring` and type-aware error messages), `__metatable` (protect)                                                                                                                                              | `__close` on early exits (`return`/`break`/`goto`/error; natural block exit works), `__gc` (no finalizers in WasmGC), `__mode` (no weak refs in WasmGC) |
-| **Standard lib**  | `print`, `error` (full position prefix `<src>:<line>: ` via the level arg; level 0 disables it), `pcall`, `xpcall`, `warn`, `assert` (auto-prefixes too), `select`, `type`, `tostring`, `tonumber`, `ipairs`, `pairs`, `next`, `setmetatable`, `getmetatable`, `rawequal`, `rawlen`, `rawget`, `rawset`, `collectgarbage` (stub — no real Lua GC, but `"incremental"`/`"generational"` round-trip the previous mode), `_G`, `_VERSION`; `debug.{traceback, getmetatable, setmetatable, gethook}`; **`require` + `package.{loaded, preload}`** (static `-m FILE` modules at compile time — see CLI section); `io.{write, read, output, input}` (`io.output([f])` / `io.input([f])` query or set the default file; bare `io.write` / `io.read` route through it) plus **`io.stdout` / `io.stderr` / `io.stdin` file handles** with `:write` / `:read` / `:close` / `:flush` methods (`close`/`flush` are no-ops on the standard streams; stderr writes route to the host's stderr); **real files via `io.open` / `io.lines` / `io.type`** returning handles with `:read` (`l`/`L`/`a`/`n`/N-byte) / `:write` / `:seek` (`set`/`cur`/`end`) / `:flush` / `:close` / `:lines` — backed by `node:fs` under Node and by [just-bash](https://github.com/vercel-labs/just-bash)'s in-memory FS in the playground (bridged through JSPI, persists for the page session); `os.{time, clock, date, difftime, getenv, exit, execute, remove, rename, tmpname, setlocale}` — light shims over the host. `os.difftime(t2,t1)` returns the second difference as a float; `os.setlocale` supports the portable `"C"` locale (other locale names → nil). `os.time`/`os.clock` are real, `os.date` covers a strftime subset (`%Y %m %d %H %M %S %j %p %w %y %c %x %X %%`) plus the `*t` / `!*t` table form, `os.execute()` reports "shell available" and `os.execute(cmd)` returns `(nil, "exit", 1)`, `os.{remove, rename}` act on the host filesystem and return `(nil, msg)` on failure; `math.{floor, ceil, abs, sqrt, min, max, sin, cos, tan, asin, acos, atan, exp, log, pi, huge, deg, rad, fmod, modf, tointeger, type, ult, maxinteger, mininteger, random, randomseed}` (`atan`/`log` accept a second arg; numeric-string args coerce like the operators, and a non-number raises a catchable `number expected`); `string.{len, sub, format, upper, lower, reverse, rep, byte, char, find, match, gmatch, gsub, pack, unpack, packsize}` (`format` covers all of `%s %d %i %u %o %x %X %c %q %e %E %f %F %g %G %a %A %%` with flags `- + space # 0`, width, precision; pattern subsystem covers every documented class, set, quantifier, anchor, capture, back-ref, `%bxy` balanced match, `%f[set]` frontier; gsub accepts string/table/function repl; pack/unpack/packsize cover every option in §6.5.2 — `< > = ! [n] b B h H l L j J T i[N] I[N] f d n c[N] z s[N] x Xop` — and round-trip byte-for-byte with reference Lua, including `data does not fit` overflow detection on `>8`-byte ints in either direction); `table.{insert, remove, concat, unpack, pack, move, create, sort}`; `utf8.{char, len, codepoint, offset, codes, charpattern}` (codes raises `invalid UTF-8 code` with file:line on bad bytes); `load` returns `(nil, "no load")` since lua2wasm is AOT — no runtime compiler ships with the module; `loadfile` is not implemented | real coroutines |
+| **Standard lib**  | `print`, `error` (full position prefix `<src>:<line>:` via the level arg; level 0 disables it), `pcall`, `xpcall`, `warn`, `assert` (auto-prefixes too), `select`, `type`, `tostring`, `tonumber`, `ipairs`, `pairs`, `next`, `setmetatable`, `getmetatable`, `rawequal`, `rawlen`, `rawget`, `rawset`, `collectgarbage` (stub — no real Lua GC, but `"incremental"`/`"generational"` round-trip the previous mode), `_G`, `_VERSION`; `debug.{traceback, getmetatable, setmetatable, gethook}`; **`require` + `package.{loaded, preload}`** (static `-m FILE` modules at compile time — see CLI section); `io.{write, read, output, input}` (`io.output([f])` / `io.input([f])` query or set the default file; bare `io.write` / `io.read` route through it) plus **`io.stdout` / `io.stderr` / `io.stdin` file handles** with `:write` / `:read` / `:close` / `:flush` methods (`close`/`flush` are no-ops on the standard streams; stderr writes route to the host's stderr); **real files via `io.open` / `io.lines` / `io.type`** returning handles with `:read` (`l`/`L`/`a`/`n`/N-byte) / `:write` / `:seek` (`set`/`cur`/`end`) / `:flush` / `:close` / `:lines` — backed by `node:fs` under Node and by [just-bash](https://github.com/vercel-labs/just-bash)'s in-memory FS in the playground (bridged through JSPI, persists for the page session); `os.{time, clock, date, difftime, getenv, exit, execute, remove, rename, tmpname, setlocale}` — light shims over the host. `os.difftime(t2,t1)` returns the second difference as a float; `os.setlocale` supports the portable `"C"` locale (other locale names → nil). `os.time`/`os.clock` are real, `os.date` covers a strftime subset (`%Y %m %d %H %M %S %j %p %w %y %c %x %X %%`) plus the `*t` / `!*t` table form, `os.execute()` reports "shell available" and `os.execute(cmd)` returns `(nil, "exit", 1)`, `os.{remove, rename}` act on the host filesystem and return `(nil, msg)` on failure; `math.{floor, ceil, abs, sqrt, min, max, sin, cos, tan, asin, acos, atan, exp, log, pi, huge, deg, rad, fmod, modf, tointeger, type, ult, maxinteger, mininteger, random, randomseed}` (`atan`/`log` accept a second arg; numeric-string args coerce like the operators, and a non-number raises a catchable `number expected`); `string.{len, sub, format, upper, lower, reverse, rep, byte, char, find, match, gmatch, gsub, pack, unpack, packsize}` (`format` covers all of `%s %d %i %u %o %x %X %c %q %e %E %f %F %g %G %a %A %%` with flags `- + space # 0`, width, precision; pattern subsystem covers every documented class, set, quantifier, anchor, capture, back-ref, `%bxy` balanced match, `%f[set]` frontier; gsub accepts string/table/function repl; pack/unpack/packsize cover every option in §6.5.2 — `< > = ! [n] b B h H l L j J T i[N] I[N] f d n c[N] z s[N] x Xop` — and round-trip byte-for-byte with reference Lua, including `data does not fit` overflow detection on `>8`-byte ints in either direction); `table.{insert, remove, concat, unpack, pack, move, create, sort}`; `utf8.{char, len, codepoint, offset, codes, charpattern}` (codes raises `invalid UTF-8 code` with file:line on bad bytes); `load` returns `(nil, "no load")` since lua2wasm is AOT — no runtime compiler ships with the module; `loadfile` is not implemented | real coroutines |
 | **Coroutines**    | —                                                                                                                                                                                                                                                                                                               | blocked on the WASM stack-switching proposal shipping in browsers |
 
 Browse [`tests/fixtures/`](tests/fixtures/) to see what valid programs look
@@ -225,13 +190,28 @@ Compiled modules need no other runtime files. They `import "host"` for `print`
 only — and even that can be replaced with whatever host imports your
 embedding cares about.
 
-## Building from source
+## Build & run locally
+
+The command-line flow needs **no Emscripten** and **no Binaryen** — just
+`clang`, `cmake`, and Node ≥ 22. The WAT→wasm assembler is built into the
+compiler.
 
 ```sh
+# 1. Build the compiler (a native binary)
 CC=clang cmake -S . -B build -G Ninja
 cmake --build build
-ctest --test-dir build --output-on-failure
+
+# 2. Compile a Lua program straight to a .wasm module
+echo 'print("hello from " .. "lua2wasm")' > /tmp/hello.lua
+./build/lua2wasm /tmp/hello.lua -o /tmp/hello.wasm
+
+# 3. Run it
+node --experimental-wasm-exnref runtime/host.mjs /tmp/hello.wasm
+#   → hello from lua2wasm
 ```
+
+Use `-o /tmp/hello.wat` to emit human-readable text instead. Run the full test
+suite with `ctest --test-dir build --output-on-failure`.
 
 Requirements (required vs optional):
 
@@ -296,6 +276,26 @@ files.
 ./scripts/package-html.sh output.wasm -o output.html
 # open output.html — runs in any GC-capable browser
 ```
+
+### Building the playground (optional)
+
+The [live playground](https://rhmoller.github.io/lua2wasm/) above is prebuilt,
+but you can build it yourself if you have [Emscripten](https://emscripten.org/).
+It cross-compiles **the compiler itself** to WASM so the page compiles Lua
+entirely client-side: a CodeMirror editor on one side, output on the other,
+with **Run** to execute and **Show WAT** to inspect the generated WebAssembly
+(foldable prelude / stdlib / user code / data sections). Catppuccin theming
+with a sun/moon toggle between Mocha (dark) and Latte (light).
+
+```sh
+. ~/path/to/emsdk/emsdk_env.sh
+./scripts/build-wasm.sh                  # produces build-em/lua2wasm.{js,wasm}
+python3 -m http.server 8000
+# open http://localhost:8000/runtime/playground.html
+```
+
+Emscripten is needed *only* for this page — every other path in this README
+works without it.
 
 ## Architecture (in 30 seconds)
 
