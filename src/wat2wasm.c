@@ -1435,6 +1435,23 @@ static void encode_instr(Ctx *c, FuncCtx *f, const SExpr *n, Buf *out) {
         return;
     }
 
+    /* Typed select: (select (result T) v1 v2 cond) -> 0x1c, vec(valtype).
+     * The untyped form (no leading (result ...)) falls through to the opcode
+     * table below as 0x1b. Reference types require the typed form, which the
+     * numeric-specialization codegen emits to pick a boxed value by an i32
+     * condition. */
+    if (strcmp(op, "select") == 0 && arg1 && head(arg1) &&
+        strcmp(head(arg1), "result") == 0) {
+        const SExpr *ty = arg1->first->next;
+        if (!ty || ty->next) fail(c, "line %zu: select (result ...) takes one value type",
+                                  line_of(c, n->src_pos));
+        encode_operands(c, f, arg1->next, out);
+        buf_byte(out, 0x1c);
+        buf_uleb(out, 1);
+        emit_valtype(c, ty, out);
+        return;
+    }
+
     /* Zero-immediate ops: encode folded operands, then the opcode. */
     const OpEntry *e = find_op(op);
     if (e) {

@@ -144,6 +144,24 @@ test("select and drop", async () => {
   );
 });
 
+test("typed select picks a reference value", async () => {
+  // Reference-typed operands require the typed form (select (result T) ...).
+  // The numeric-specialization codegen emits exactly this to choose a boxed
+  // value (e.g. $g_true/$g_false) by an i32 comparison result.
+  await check(
+    `(module (func (export "pick") (param i32) (result i32)
+       (i31.get_s (ref.cast (ref i31)
+         (select (result anyref)
+           (ref.i31 (i32.const 10))
+           (ref.i31 (i32.const 20))
+           (local.get 0))))))`,
+    (e, who) => {
+      assert.equal(e.pick(1), 10, who);
+      assert.equal(e.pick(0), 20, who);
+    },
+  );
+});
+
 test("explicit return", async () => {
   await check(
     `(module (func (export "f") (result i32) (return (i32.const 5)) (i32.const 9)))`,
