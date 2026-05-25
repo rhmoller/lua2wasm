@@ -92,6 +92,32 @@ foreach(_row ${_e2e_rows})
                 ${_e2e_name} ${_e2e_fixture})
 endforeach()
 
+# Flag-on pass: re-run every e2e fixture with the numeric/call specialization
+# enabled (LUA2WASM_OPT_INT=1), diffing against the *same* default golden — the
+# optimized codegen must be behaviour-identical. This guards an otherwise
+# 0%-covered code path (a CRAP analysis flagged it). Skipped cases differ only
+# in error-message text/position, which the project matches semantically, not
+# 1:1 (see runtime/ error-position policy): for_step_zero.
+set(_e2e_opt_skip for_step_zero)
+foreach(_row ${_e2e_rows})
+    if(_row MATCHES "^#" OR _row STREQUAL "")
+        continue()
+    endif()
+    string(REPLACE "\t" ";" _parts "${_row}")
+    list(GET _parts 0 _e2e_name)
+    list(GET _parts 1 _e2e_fixture)
+    if(_e2e_name IN_LIST _e2e_opt_skip)
+        continue()
+    endif()
+    add_test(
+        NAME test_e2e_opt_${_e2e_name}
+        COMMAND bash ${CMAKE_SOURCE_DIR}/tests/e2e/run.sh
+                $<TARGET_FILE:lua2wasm> ${CMAKE_SOURCE_DIR} ${CMAKE_BINARY_DIR}
+                opt_${_e2e_name} ${_e2e_fixture} ${_e2e_name})
+    set_tests_properties(test_e2e_opt_${_e2e_name} PROPERTIES
+                         ENVIRONMENT "LUA2WASM_OPT_INT=1")
+endforeach()
+
 # E2E tests that need custom drivers (stdin, stderr capture, -m modules,
 # multiple compiler invocations, or multi-fixture sweeps) keep their own
 # scripts under tests/.

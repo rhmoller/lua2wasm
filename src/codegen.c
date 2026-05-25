@@ -1558,6 +1558,13 @@ static void int_kill_stmt(CG *c, const Stmt *s, unsigned char *out, int *changed
         int nn = s->as.local.n_names, nv = s->as.local.n_values;
         for (int j = 0; j < nn; j++) {
             int slot = s->as.local.local_idxs[j];
+            /* A <close> variable's value flows into the to-be-closed machinery
+             * ($tbc_push/$close_upto) as an anyref, so it must stay boxed —
+             * never i64-specialize it even when its initializer is integer. */
+            if (s->as.local.attribs && s->as.local.attribs[j] == 2) {
+                KILL(slot);
+                continue;
+            }
             if (nv == nn && expr_is_int(c, s->as.local.values[j])) continue;
             KILL(slot);
         }
@@ -1655,6 +1662,11 @@ static void float_kill_stmt(CG *c, const Stmt *s, unsigned char *out, int *chang
     case STMT_LOCAL: {
         int nn = s->as.local.n_names, nv = s->as.local.n_values;
         for (int j = 0; j < nn; j++) {
+            /* <close> vars stay boxed (anyref) — see int_kill_stmt. */
+            if (s->as.local.attribs && s->as.local.attribs[j] == 2) {
+                KILLF(s->as.local.local_idxs[j]);
+                continue;
+            }
             if (nv == nn && expr_is_float(c, s->as.local.values[j])) continue;
             KILLF(s->as.local.local_idxs[j]);
         }
