@@ -2594,7 +2594,9 @@ static void emit_for_num(CG *c, const Stmt *s, int depth) {
             emit_indent(c, depth);
             wat_append(c->w, ")\n");
             emit_indent(c, depth);
-            wat_appendf(c->w, "(if (i64.eqz %s) (then (call $throw_lit (i32.const 75) (i32.const 18))))\n", step_s);
+            wat_appendf(c->w,
+                        "(if (i64.eqz %s) (then (call $throw_lit_at (i32.const 75) (i32.const 18) (i32.const %d))))\n",
+                        step_s, s->line);
         }
         emit_indent(c, depth);
         wat_appendf(c->w, "(block $brk_%d\n", label);
@@ -2675,7 +2677,7 @@ static void emit_for_num(CG *c, const Stmt *s, int depth) {
     emit_indent(c, depth);
     wat_append(c->w, ")\n");
     emit_indent(c, depth);
-    wat_appendf(c->w, "(call $for_check_step (local.get %s))\n", f_step);
+    wat_appendf(c->w, "(call $for_check_step (local.get %s) (i32.const %d))\n", f_step, s->line);
     /* Settle the control variable's type up front: if init or step is
      * a float the whole loop is float (Lua 5.4+). counter_loc is the
      * local that holds the running value. */

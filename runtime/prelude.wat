@@ -1938,16 +1938,17 @@
       (else (local.get $v))))
 
   ;; Real Lua errors at runtime when a numeric-for step is zero.
-  (func $for_check_step (param $s anyref)
+  ;; $line is the `for` statement's own source line, so the "'for' step is
+  ;; zero" error is attributed to the loop (matching reference Lua) rather than
+  ;; the enclosing call frame.
+  (func $for_check_step (param $s anyref) (param $line i32)
     (if (call $is_int (local.get $s))
       (then
         (if (i64.eqz (call $as_int (local.get $s)))
-          (then (throw $LuaError (struct.new $LuaString
-            (array.new_data $LuaArr $str_data (i32.const 75) (i32.const 18)))))))
+          (then (call $throw_lit_at (i32.const 75) (i32.const 18) (local.get $line)))))
       (else
         (if (f64.eq (call $as_float (local.get $s)) (f64.const 0))
-          (then (throw $LuaError (struct.new $LuaString
-            (array.new_data $LuaArr $str_data (i32.const 75) (i32.const 18)))))))))
+          (then (call $throw_lit_at (i32.const 75) (i32.const 18) (local.get $line)))))))
 
   ;; True iff advancing a numeric-for index wrapped the i64 range: only
   ;; possible when index and step are both integers. step>0 wraps iff
@@ -2297,6 +2298,15 @@
     (call $throw_at_top
       (struct.new $LuaString
         (array.new_data $LuaArr $str_data (local.get $off) (local.get $len)))))
+
+  ;; Positioned variant of $throw_lit: prefix the literal with "<src>:<line>: "
+  ;; using the error's own source line rather than the topmost call frame's.
+  (func $throw_lit_at (param $off i32) (param $len i32) (param $line i32)
+    (throw $LuaError (call $prefix_error_msg
+      (ref.as_non_null (global.get $g_src_name))
+      (local.get $line)
+      (struct.new $LuaString
+        (array.new_data $LuaArr $str_data (local.get $off) (local.get $len))))))
 
   ;; Argument validators: turn the bare ref.cast a builtin would otherwise do on
   ;; a user argument into a catchable Lua error, so pcall recovers instead of

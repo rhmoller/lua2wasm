@@ -95,10 +95,10 @@ endforeach()
 # Flag-on pass: re-run every e2e fixture with the numeric/call specialization
 # enabled (LUA2WASM_OPT_INT=1), diffing against the *same* default golden — the
 # optimized codegen must be behaviour-identical. This guards an otherwise
-# 0%-covered code path (a CRAP analysis flagged it). Skipped cases differ only
-# in error-message text/position, which the project matches semantically, not
-# 1:1 (see runtime/ error-position policy): for_step_zero.
-set(_e2e_opt_skip for_step_zero)
+# 0%-covered code path (a CRAP analysis flagged it). _e2e_opt_skip lists cases
+# whose flag-on output legitimately differs (e.g. error-message text the project
+# matches only semantically); currently empty.
+set(_e2e_opt_skip)
 foreach(_row ${_e2e_rows})
     if(_row MATCHES "^#" OR _row STREQUAL "")
         continue()
