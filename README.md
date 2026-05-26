@@ -3,9 +3,7 @@
 **An ahead-of-time compiler that turns Lua 5.5 source into standalone WebAssembly modules — no interpreter, no bytecode VM, no bundled garbage collector.**
 
 `lua2wasm` leans on the modern WebAssembly type system (the garbage collector, typed-reference,
-and exception-handling) instead of treating WASM as a portable
-assembler with a hand-rolled allocator on top — there is no linear memory, no
-bundled collector, and no bytecode interpreter.
+and exception-handling). There is no linear memory, no bundled collector, and no bytecode interpreter.
 
 Lua tables become real WebAssembly structs, closures become typed function
 references, and the host's garbage collector (V8 / SpiderMonkey) owns every
@@ -27,23 +25,56 @@ Prefer the command line? See [Build & run locally](#build--run-locally).
 ## A tiny example
 
 ```lua
-local function counter()
-  local n = 0
-  return function() n = n + 1; return n end
+-- A "Stack" class — exercises tables, metatables, OO sugar, closures,
+-- errors, and pcall in one short program.
+
+local Stack = {}                        -- a Lua table → a `$LuaTable` struct:
+Stack.__index = Stack                   --   array part + open-addressed hash + `meta` slot
+
+function Stack.new()
+  return setmetatable({n = 0}, Stack)   -- writes Stack into the struct's `meta` field
+end                                     -- `Stack.new` itself is a `(ref $LuaClosure)` =
+                                        --   struct (funcref code, upvalue array)
+
+function Stack:push(v)                  -- `:` desugars to `self` as the first parameter
+  self.n = self.n + 1                   -- small ints unbox to `i31ref` — zero allocation
+  self[self.n] = v                      -- integer keys land in the dense array part
 end
 
-local tick = counter()
-print(tick())   -- 1
-print(tick())   -- 2
-print(tick())   -- 3
+function Stack:pop()
+  if self.n == 0 then
+    error("stack underflow")            -- compiles to `throw $LuaError` (anyref payload)
+  end
+  local v, n = self[self.n], self.n
+  self[n], self.n = nil, n - 1
+  return v
+end
+
+local s = Stack.new()
+s:push("hi"); s:push("from"); s:push("lua2wasm")
+-- each string literal materialises once via `array.new_data` from a shared data segment
+
+for i = 1, s.n do print(s[i]) end       -- numeric `for` keeps `i` as a raw `i64`;
+                                        -- the call to `print` dispatches via `call_ref`
+
+local ok, err = pcall(function()        -- `pcall` → `try_table (catch $LuaError ...)`
+  for _ = 1, 4 do s:pop() end           -- the 4th `pop` underflows and throws
+end)
+print(ok, err)                          --> false   <src>:19: stack underflow
 ```
 
-That compiles to a ~5 KB `.wasm` module. The closure becomes a real
-`(ref $LuaClosure)` — a WASM struct holding a typed `funcref` plus an array
-of captured upvalue boxes — and is *called* through `call_ref`, the WASM
-indirect-call instruction for typed function references. The captured `n` is
-shared by reference (a struct cell), not copied, so multiple closures over
-the same outer scope mutate the same slot — exactly as Lua specifies.
+That compiles to a ~13 KB `.wasm` with `--tree-shake` (~42 KB out of the box).
+Every value is a host-GC object — the host's garbage collector owns lifetimes,
+there is no linear memory and no bundled allocator. The Stack instance is a
+real `$LuaTable` struct (array + hash + `meta` slot, all GC fields); the
+`:push` / `:pop` methods are `(ref $LuaClosure)` values carrying a typed
+`funcref` plus an upvalue array; every call dispatches through `call_ref`,
+the WASM indirect-call instruction for typed function references; and
+`error` / `pcall` ride directly on the exception-handling proposal — a real
+`throw $LuaError` thrown across frames and caught by a `try_table`, with no
+setjmp/longjmp emulation. The full mapping from each Lua construct to the
+WASM feature it lowers to is in
+[How we use modern WebAssembly](#how-we-use-modern-webassembly).
 
 ## What works today
 

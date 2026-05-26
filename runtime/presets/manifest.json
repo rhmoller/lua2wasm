@@ -1,6 +1,7 @@
 {
   "_comment": "Source-of-truth for runtime/playground.html's PRESETS list. Edit a referenced .lua file (or this manifest), then run `node scripts/bundle-presets.mjs --write` to regenerate the inlined PRESETS block in playground.html. CI runs the same script in --check mode.",
   "presets": [
+    { "key": "stack",      "file": "runtime/presets/stack.lua" },
     { "key": "hello",      "file": "runtime/presets/hello.lua" },
     { "key": "fact",       "file": "runtime/presets/fact.lua" },
     { "key": "counter",    "file": "runtime/presets/counter.lua" },
