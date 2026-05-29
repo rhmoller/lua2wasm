@@ -43,10 +43,16 @@ Compatibility scorecard over the official Lua suite: `scripts/smoke-official-tes
 
 `.wasm` output runs dead-code elimination (unreachable functions + globals,
 plus the function-type signatures they leave orphaned) by default — `--no-dce`
-disables it. `--tree-shake` additionally drops
-builtins the program never names (big size win; breaks dynamic `_G` lookups
-of un-named builtins). The DCE pass lives in `wat2wasm` (assembler), so the
-`wat2wasm` CLI takes `--dce` to opt in.
+disables it. Tree-shaking (dropping builtins/libraries the program never
+references) is **automatic** for *globally closed* programs — those that never
+mention `_G`/`_ENV` and never call `load`/`require`, so the referenced set is
+statically complete (`program_needs_runtime`'s sibling: the `escaped` flag in
+`compute_live_set`). String method/field access keeps the `string` library
+(string metatable `__index`). `--tree-shake` *forces* it even when not closed
+(can break dynamic `_G` lookups of un-named builtins). The whole-program skip of
+`$stdlib_init` (when the program observes no runtime state) is the degenerate
+case. The DCE pass lives in `wat2wasm` (assembler), so the `wat2wasm` CLI takes
+`--dce` to opt in.
 
 Numeric/call specialization (int/float unboxing, typed direct-call entries,
 comparison specialization) is **on by default**; `-O0` selects the boxed

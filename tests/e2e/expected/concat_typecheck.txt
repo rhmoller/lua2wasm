@@ -11,4 +11,4 @@ false	concat_typecheck:16: attempt to perform arithmetic
 false	concat_typecheck:17: attempt to perform arithmetic
 nil
 true	nil	false
-table: 0x11	nil
+table: 0x3	nil

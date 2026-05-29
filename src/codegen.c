@@ -3910,6 +3910,21 @@ typedef struct {
     unsigned char *gref; /* pr->globals idx -> 1 if referenced */
     int n_builtins;
     int n_globals;
+    /* Set when the program can reach a builtin/global the static walk can't
+     * enumerate, so the live/gref sets are NOT a complete picture: any mention
+     * of _G/_ENV (the whole env table, indexable by a computed name) or of the
+     * load/require builtins (they resolve names / whole modules at runtime).
+     * When it stays clear the program is "globally closed" and dropping
+     * un-referenced builtins is sound — codegen_module tree-shakes by default
+     * in that case (see its effective_tree_shake). */
+    int escaped;
+    /* Set when the program method-calls or field-indexes a value that could be
+     * a string (`s:upper()`, `s.len`): Lua strings carry an implicit metatable
+     * whose __index is the `string` library, so that library must stay live
+     * even when the program never writes the name `string`. Method-call and
+     * index syntax are the only ways to reach it; both are conservatively
+     * treated as possibly-on-a-string. */
+    int uses_string_meta;
 } LiveSet;
 
 static void ts_mark_expr(LiveSet *L, const Expr *e);
@@ -3924,10 +3939,26 @@ static void ts_mark_var(LiveSet *L, VarKind k, int idx) {
     else if (k == VAR_GLOBAL && idx >= 0 && idx < L->n_globals) L->gref[idx] = 1;
 }
 
+/* Does this variable reference open an escape hatch the static walk can't
+ * follow? _G/_ENV expose the whole environment to computed-name indexing;
+ * load/require pull in code/modules that can name anything. */
+static int var_escapes(VarKind kind, const char *name, size_t len) {
+    if (kind == VAR_GLOBAL)
+        return (len == 2 && memcmp(name, "_G", 2) == 0) ||
+               (len == 4 && memcmp(name, "_ENV", 4) == 0);
+    if (kind == VAR_BUILTIN)
+        return (len == 4 && memcmp(name, "load", 4) == 0) ||
+               (len == 7 && memcmp(name, "require", 7) == 0);
+    return 0;
+}
+
 static void ts_mark_expr(LiveSet *L, const Expr *e) {
     if (!e) return;
     switch (e->kind) {
-    case EXPR_VAR: ts_mark_var(L, e->as.var.kind, e->as.var.idx); break;
+    case EXPR_VAR:
+        if (var_escapes(e->as.var.kind, e->as.var.name, e->as.var.name_len)) L->escaped = 1;
+        ts_mark_var(L, e->as.var.kind, e->as.var.idx);
+        break;
     case EXPR_CALL:
         ts_mark_expr(L, e->as.call.callee);
         for (size_t i = 0; i < e->as.call.nargs; i++)
@@ -3942,6 +3973,7 @@ static void ts_mark_expr(LiveSet *L, const Expr *e) {
         ts_mark_block(L, &e->as.func_expr.func->body);
         break;
     case EXPR_INDEX:
+        L->uses_string_meta = 1; /* could be a field access on a string */
         ts_mark_expr(L, e->as.index.table);
         ts_mark_expr(L, e->as.index.key);
         break;
@@ -3952,6 +3984,7 @@ static void ts_mark_expr(LiveSet *L, const Expr *e) {
         }
         break;
     case EXPR_METHOD_CALL:
+        L->uses_string_meta = 1; /* receiver could be a string */
         ts_mark_expr(L, e->as.method_call.recv);
         for (size_t i = 0; i < e->as.method_call.nargs; i++)
             ts_mark_expr(L, e->as.method_call.args[i]);
@@ -4038,11 +4071,27 @@ static int class_for_global(const char *name, size_t name_len) {
 }
 
 static void compute_live_set(const ParseResult *pr, int n_builtins,
-                             unsigned char *live, unsigned char *gref) {
-    LiveSet L = {live, gref, n_builtins, (int)pr->globals.count};
+                             unsigned char *live, unsigned char *gref, int *out_escaped) {
+    LiveSet L = {.live = live,
+                 .gref = gref,
+                 .n_builtins = n_builtins,
+                 .n_globals = (int)pr->globals.count};
     ts_mark_block(&L, &pr->main_body);
     for (size_t i = 0; i < pr->funcs.count; i++)
         ts_mark_block(&L, &pr->funcs.items[i]->body);
+    if (out_escaped) *out_escaped = L.escaped;
+
+    /* Strings carry an implicit metatable whose __index is the `string`
+     * library, so any method-call / field-index that could land on a string
+     * keeps that library live even if the name `string` never appears. Mark
+     * the library global referenced so its table is installed, then the
+     * class-expansion below pulls in its members. */
+    if (L.uses_string_meta) {
+        for (size_t gi = 0; gi < pr->globals.count; gi++)
+            if (pr->globals.items[gi].name_len == 6 &&
+                memcmp(pr->globals.items[gi].name, "string", 6) == 0)
+                gref[gi] = 1;
+    }
 
     /* If a library global was referenced, mark every member of that
      * class live (the whole table gets installed). */
@@ -4663,9 +4712,16 @@ int codegen_module(const ParseResult *pr, const char *src_name,
         free(gref);
         return 0;
     }
-    if (tree_shake) {
-        compute_live_set(pr, nb, live, gref);
-    } else {
+    /* Always compute the referenced set — it also tells us whether the program
+     * is "globally closed" (no _G/_ENV/load/require escape). When closed, the
+     * set is complete, so dropping un-referenced builtins is behaviour-
+     * preserving and we tree-shake by default. `--tree-shake` forces it even
+     * when not closed (the historical opt-in, which can break dynamic _G
+     * lookups). When neither applies, keep the whole runtime. */
+    int escaped = 0;
+    compute_live_set(pr, nb, live, gref, &escaped);
+    int effective_tree_shake = tree_shake || !escaped;
+    if (!effective_tree_shake) {
         for (int i = 0; i < nb; i++) live[i] = 1;
         for (size_t i = 0; i < pr->globals.count; i++) gref[i] = 1;
     }
@@ -4676,7 +4732,7 @@ int codegen_module(const ParseResult *pr, const char *src_name,
      * (otherwise every builtin — table.insert and friends — is kept, which
      * keeps the write path live too). See program_writes_table. */
     c.tab_set_fn =
-        (tree_shake && !program_writes_table(pr)) ? "$tab_bootstrap_set" : "$tab_set";
+        (effective_tree_shake && !program_writes_table(pr)) ? "$tab_bootstrap_set" : "$tab_set";
 
     /* elem declare for every live builtin func, so ref.func works in const init. */
     wat_append(out, "\n  (elem declare func");

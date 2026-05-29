@@ -63,7 +63,9 @@ end)
 print(ok, err)                          --> false   <src>:19: stack underflow
 ```
 
-That compiles to a ~13 KB `.wasm` with `--tree-shake` (~42 KB out of the box).
+That compiles to a ~13 KB `.wasm` — tree-shaking is automatic here, since the
+program is *globally closed* (no `_G`/`load`); programs that aren't keep the full
+~42 KB runtime.
 Every value is a host-GC object — the host's garbage collector owns lifetimes,
 there is no linear memory and no bundled allocator. The Stack instance is a
 real `$LuaTable` struct (array + hash + `meta` slot, all GC fields); the
@@ -263,13 +265,21 @@ Requirements (required vs optional):
 `-o .wasm` output runs **dead-code elimination** by default — prelude functions
 and globals the program can't reach are dropped, along with the function-type
 signatures left orphaned once those functions are gone (all behavior-preserving).
-Add `--tree-shake` to also prune builtins the program never names literally, which
-shrinks modules dramatically (e.g. `print("hi")`: 42 KB → ~7.6 KB) at the cost of
-dynamic `_G["name"]` lookups of un-named builtins returning nil. As a further
-`--tree-shake` win, a program that writes no tables of its own has `_G` and the
-library tables populated by an append-only bootstrap insert, so the table
-grow/rehash write path is dead-code eliminated entirely. `--no-dce` disables the
-DCE pass.
+
+On top of that, **tree-shaking is automatic** for any program that is *globally
+closed* — one whose set of named builtins/globals is statically complete because
+it never mentions `_G`/`_ENV` and never calls `load`/`require`. For such programs
+the builtins and libraries the source never reaches are pruned (e.g.
+`print("hi")`: ~40 KB → ~8 KB), with no behavior change, since nothing can fetch
+an un-named builtin at runtime. When the program *does* open one of those escape
+hatches the full runtime is kept, so dynamic `_G["name"]` lookups still work.
+Strings are special-cased: any method call or field index keeps the `string`
+library live (it's the string metatable's `__index`). Pass `--tree-shake` to
+*force* pruning even when the program isn't closed (the historical opt-in; it can
+make dynamic `_G` lookups of un-named builtins return nil). As a further win, a
+program that writes no tables of its own has `_G` and the library tables populated
+by an append-only bootstrap insert, so the table grow/rehash write path is
+dead-code eliminated entirely. `--no-dce` disables the DCE pass.
 
 Run under Node:
 
