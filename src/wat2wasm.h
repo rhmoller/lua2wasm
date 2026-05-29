@@ -30,4 +30,16 @@
 int wat_assemble(const char *wat, size_t wat_len, int dce, uint8_t **out_bytes,
                  size_t *out_len, char *err, size_t errcap);
 
+/* Run the DCE reachability pass over `wat` and report which named functions and
+ * globals it proves dead (unreachable from exports / global initializers), as a
+ * newline-separated, NUL-terminated list — functions first, then globals;
+ * anonymous entities are omitted. This is the same analysis `wat_assemble` uses
+ * with dce=1; the binary it would produce is discarded.
+ *
+ * On success: returns 0 and sets *out_names to a heap buffer (caller frees with
+ * free()); the buffer is empty ("") when nothing is dead.
+ * On failure: returns non-zero, sets *out_names to NULL, and writes a
+ * diagnostic into `err` (NUL-terminated, truncated to errcap). */
+int wat_dead_names(const char *wat, size_t wat_len, char **out_names, char *err, size_t errcap);
+
 #endif

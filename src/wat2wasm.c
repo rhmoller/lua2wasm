@@ -2115,9 +2115,11 @@ typedef struct {
     size_t start, count;
 } TypeGroup;
 
-static int assemble(Ctx *c, const SExpr *module, int dce, uint8_t **out_bytes, size_t *out_len) {
+static int assemble(Ctx *c, const SExpr *module, int dce, uint8_t **out_bytes, size_t *out_len,
+                    char **out_dead_names) {
     if (!module || !atom_eq(module->first, "module"))
         fail(c, "expected a top-level (module ...)");
+    if (out_dead_names) *out_dead_names = NULL;
 
     Func *funcs = NULL;
     size_t n_funcs = 0, cap_funcs = 0;
@@ -2280,6 +2282,28 @@ static int assemble(Ctx *c, const SExpr *module, int dce, uint8_t **out_bytes, s
             global_remap[i] = reach[n_all_funcs + i] ? gidx++ : 0xffffffffu;
         c->func_remap = func_remap;
         c->global_remap = global_remap;
+
+        /* Optional side output: the $names of the entities the worklist just
+         * proved dead (one per line, functions then globals; anonymous ones
+         * are skipped since a caller can't address them). The playground uses
+         * this to dim the regions DCE would drop, on the same WAT text it
+         * shows. The buffer is malloc-backed and outlives the arena. */
+        if (out_dead_names) {
+            Buf db;
+            buf_init(&db);
+            for (size_t i = 0; i < n_funcs; i++)
+                if (!reach[n_imports + i] && funcs[i].name) {
+                    buf_bytes(&db, funcs[i].name, strlen(funcs[i].name));
+                    buf_byte(&db, '\n');
+                }
+            for (size_t i = 0; i < n_globals; i++)
+                if (!reach[n_all_funcs + i] && globals[i].name) {
+                    buf_bytes(&db, globals[i].name, strlen(globals[i].name));
+                    buf_byte(&db, '\n');
+                }
+            buf_byte(&db, '\0');
+            *out_dead_names = (char *)db.data;
+        }
     }
 #define FUNC_LIVE(i)   (!dce || reach[n_imports + (i)])
 #define GLOBAL_LIVE(i) (!dce || reach[n_all_funcs + (i)])
@@ -2563,7 +2587,36 @@ int wat_assemble(const char *wat, size_t wat_len, int dce, uint8_t **out_bytes, 
     skip_trivia(&c);
     if (c.pos < c.len) fail(&c, "unexpected content after top-level form");
 
-    int rc = assemble(&c, module, dce, out_bytes, out_len);
+    int rc = assemble(&c, module, dce, out_bytes, out_len, NULL);
+    arena_free(&c.arena);
+    return rc;
+}
+
+int wat_dead_names(const char *wat, size_t wat_len, char **out_names, char *err, size_t errcap) {
+    Ctx c;
+    memset(&c, 0, sizeof c);
+    c.err = err;
+    c.errcap = errcap;
+    c.src = wat;
+    c.len = wat_len;
+    if (err && errcap) err[0] = '\0';
+    if (out_names) *out_names = NULL;
+
+    if (setjmp(c.jb)) {
+        arena_free(&c.arena);
+        return 1;
+    }
+
+    SExpr *module = read_sexpr(&c);
+    skip_trivia(&c);
+    if (c.pos < c.len) fail(&c, "unexpected content after top-level form");
+
+    /* Run the full DCE pass to reuse its exact reachability, then discard the
+     * binary — we only want the dead-name list it produces as a side output. */
+    uint8_t *bytes = NULL;
+    size_t len = 0;
+    int rc = assemble(&c, module, 1 /* dce */, &bytes, &len, out_names);
+    free(bytes);
     arena_free(&c.arena);
     return rc;
 }

@@ -230,6 +230,13 @@
   .wat-type     { color: var(--ctp-yellow); }         /* i32, f64, anyref, … */
   .wat-ident    { color: var(--ctp-rosewater); }      /* $name */
   .wat-paren    { color: var(--ctp-overlay2); }
+  /* A line belonging to a function/global that DCE drops from the final
+     .wasm. Dimmed + struck through so the surviving module reads clearly;
+     hover shows why. The opacity also fades the nested syntax spans. */
+  .wat-dead { opacity: .4; text-decoration: line-through;
+              text-decoration-color: var(--ctp-overlay0); }
+  .wat-note { margin: 0 0 .5em 0; color: var(--ctp-overlay1);
+              font: 12px/1.45 "JetBrains Mono", ui-monospace, monospace; }
   .err  { color: var(--ctp-red); }
   .info { color: var(--ctp-overlay1); }
   .stdin-prompt { color: var(--ctp-sapphire); }
@@ -937,6 +944,7 @@ const Mod = await createLua2WasmModule({});
 const compileFn   = Mod.cwrap("lua2wasm_compile",    "number", ["string"]);
 const compileExFn = Mod.cwrap("lua2wasm_compile_ex", "number", ["string", "number"]);
 const assembleFn  = Mod.cwrap("lua2wasm_assemble",   "number", ["string", "number", "number", "number"]);
+const deadNamesFn = Mod.cwrap("lua2wasm_dce_dead_names", "number", ["string"]);
 const freeFn      = Mod.cwrap("lua2wasm_free",       null,     ["number"]);
 const treeShakeCB = document.getElementById("treeshake");
 function luaToWat(source) {
@@ -946,6 +954,16 @@ function luaToWat(source) {
   const text = Mod.UTF8ToString(ptr);
   freeFn(ptr);
   return text;
+}
+
+/* The $names of functions/globals DCE proves dead in this WAT, as a Set.
+ * Returns an empty Set if the analysis fails (caller just skips dimming). */
+function dceDeadNames(wat) {
+  const ptr = deadNamesFn(wat);
+  if (ptr === 0) return new Set();
+  const text = Mod.UTF8ToString(ptr);
+  freeFn(ptr);
+  return new Set(text.split("\n").filter(Boolean));
 }
 
 /* ----- wat -> wasm (built-in assembler, no Binaryen) ----- */
@@ -1344,7 +1362,9 @@ const WAT_SECTIONS = {
 };
 const SECTION_RE = /^\s*;; @@SECTION:([\w-]+)@@\s*$/;
 
-/* Split a WAT string into [{ name, body }] segments, in document order.
+/* Split a WAT string into [{ name, body, start }] segments, in document order.
+ * `start` is the segment's first line index in the original `wat` (markers are
+ * dropped), so dead-line indices computed over the whole module line up.
  * Anything before the first marker is the "prelude" segment. */
 function splitWatSections(wat) {
   const out = [];
@@ -1354,12 +1374,82 @@ function splitWatSections(wat) {
   for (let i = 0; i < lines.length; i++) {
     const m = SECTION_RE.exec(lines[i]);
     if (!m) continue;
-    out.push({ name: curName, body: lines.slice(curStart, i).join("\n") });
+    out.push({ name: curName, body: lines.slice(curStart, i).join("\n"), start: curStart });
     curName = m[1];
     curStart = i + 1;        /* drop the marker line itself */
   }
-  out.push({ name: curName, body: lines.slice(curStart).join("\n") });
+  out.push({ name: curName, body: lines.slice(curStart).join("\n"), start: curStart });
   return out;
+}
+
+/* Which lines of `wat` fall inside a `(func $name …)` / `(global $name …)`
+ * form whose name DCE proved dead. A char scanner tracks paren depth (skipping
+ * strings and `;;` / `(; … ;)` comments); once a dead form opens, every line
+ * until its matching close is marked. Operates on the whole module so the
+ * indices match splitWatSections (section-marker comment lines are never
+ * inside a form, so they're never marked). */
+function computeDeadLines(wat, dead) {
+  const deadLines = new Set();
+  if (!dead || dead.size === 0) return deadLines;
+  const n = wat.length;
+  let line = 0, depth = 0, deadDepth = Infinity, i = 0;
+  const isWs = (ch) => ch === " " || ch === "\t" || ch === "\r" || ch === "\n";
+  const isName = (ch) => /[\w.$\-]/.test(ch);
+  const mark = () => { if (depth >= deadDepth) deadLines.add(line); };
+  while (i < n) {
+    const ch = wat[i];
+    if (ch === "\n") { mark(); line++; i++; continue; }
+    if (ch === ";" && wat[i + 1] === ";") {        // line comment
+      while (i < n && wat[i] !== "\n") i++;
+      continue;
+    }
+    if (ch === "(" && wat[i + 1] === ";") {        // (; nestable block comment ;)
+      let d = 1; i += 2;
+      while (i < n && d > 0) {
+        if (wat[i] === "(" && wat[i + 1] === ";") { d++; i += 2; }
+        else if (wat[i] === ";" && wat[i + 1] === ")") { d--; i += 2; }
+        else { if (wat[i] === "\n") { mark(); line++; } i++; }
+      }
+      continue;
+    }
+    if (ch === '"') {                              // string literal
+      mark(); i++;
+      while (i < n && wat[i] !== '"') {
+        if (wat[i] === "\\") i++;
+        else if (wat[i] === "\n") { mark(); line++; }
+        i++;
+      }
+      i++;
+      continue;
+    }
+    if (ch === "(") {
+      depth++; mark();
+      if (depth < deadDepth) {                     // not already inside a dead form
+        let j = i + 1;
+        while (j < n && isWs(wat[j])) j++;
+        let head = "";
+        while (j < n && /[\w.]/.test(wat[j])) head += wat[j++];
+        if (head === "func" || head === "global") {
+          while (j < n && isWs(wat[j])) j++;
+          if (wat[j] === "$") {
+            let name = "";
+            while (j < n && isName(wat[j])) name += wat[j++];
+            if (dead.has(name)) deadDepth = depth;
+          }
+        }
+      }
+      i++;
+      continue;
+    }
+    if (ch === ")") {
+      mark(); depth--;
+      if (depth < deadDepth) deadDepth = Infinity;
+      i++;
+      continue;
+    }
+    mark(); i++;
+  }
+  return deadLines;
 }
 
 async function showWat() {
@@ -1372,9 +1462,24 @@ async function showWat() {
     return;
   }
   if (wat.startsWith("ERROR")) { logLine(wat, "err"); return; }
+
+  /* Mark the functions/globals DCE would drop from the final .wasm so the
+   * surviving module reads clearly. `.wasm` output is DCE'd by default, so
+   * this is what actually ships. */
+  const deadLines = computeDeadLines(wat, dceDeadNames(wat));
+  if (deadLines.size > 0) {
+    const note = document.createElement("p");
+    note.className = "wat-note";
+    note.textContent =
+      `struck-through lines are dropped by dead-code elimination (the default for .wasm) — ${
+        deadLines.size.toLocaleString()} line${deadLines.size === 1 ? "" : "s"}.`;
+    out.appendChild(note);
+  }
+
   for (const seg of splitWatSections(wat)) {
     const cfg = WAT_SECTIONS[seg.name] ?? { label: seg.name, collapsed: true };
-    const lineCount = seg.body ? seg.body.split("\n").length : 0;
+    const bodyLines = seg.body ? seg.body.split("\n") : [];
+    const liveCount = bodyLines.filter((_, j) => !deadLines.has(seg.start + j)).length;
     const det = document.createElement("details");
     det.className = "wat-section";
     det.dataset.section = seg.name;
@@ -1382,11 +1487,21 @@ async function showWat() {
     const sum = document.createElement("summary");
     sum.innerHTML = `<span class="wat-name"></span><span class="wat-meta"></span>`;
     sum.querySelector(".wat-name").textContent = cfg.label;
+    const dropped = bodyLines.length - liveCount;
     sum.querySelector(".wat-meta").textContent =
-      `${lineCount.toLocaleString()} line${lineCount === 1 ? "" : "s"}`;
+      `${bodyLines.length.toLocaleString()} line${bodyLines.length === 1 ? "" : "s"}` +
+      (dropped ? ` · ${dropped.toLocaleString()} dropped` : "");
     det.appendChild(sum);
     const pre = document.createElement("pre");
-    pre.innerHTML = highlightWat(seg.body);
+    /* Highlight line-by-line so a dead form's lines can be wrapped; codegen
+     * WAT keeps strings and comments within a single line, so per-line
+     * tokenizing is safe. */
+    pre.innerHTML = bodyLines.map((ln, j) => {
+      const html = highlightWat(ln);
+      return deadLines.has(seg.start + j)
+        ? `<span class="wat-dead" title="removed by dead-code elimination">${html}</span>`
+        : html;
+    }).join("\n");
     det.appendChild(pre);
     out.appendChild(det);
   }

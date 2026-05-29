@@ -35,6 +35,14 @@ function assembleWith(bin, args, wat) {
 
 const ours = (wat) => assembleWith(WAT2WASM, [], wat);
 const oursDce = (wat) => assembleWith(WAT2WASM, ["--dce"], wat);
+
+// Run `--dead-names` and return the reported dead $names as a sorted array.
+function deadNames(wat) {
+  const watPath = join(dir, `m${seq++}.wat`);
+  writeFileSync(watPath, wat);
+  const stdout = execFileSync(WAT2WASM, ["--dead-names", watPath], { encoding: "utf8" });
+  return stdout.split("\n").filter(Boolean).sort();
+}
 const reference = (wat) =>
   assembleWith(WASM_AS, ["--all-features", "--disable-custom-descriptors"], wat);
 
@@ -562,4 +570,26 @@ test("dce keeps a block-type signature inside a live function", async () => {
        (i32.const 2) (i32.const 3)
        (block (param i32 i32) (result i32) (i32.add))))`;
   assert.equal((await instantiate(oursDce(wat))).f(), 5);
+});
+
+// --- dead-name reporting (--dead-names) --------------------------------
+
+test("dead-names reports an unreachable function and global", () => {
+  // $live is exported; $dead and $g_dead are reachable from nothing. The
+  // worklist must keep $helper (called by $live) and drop the rest.
+  const wat = `(module
+     (func $live (export "f") (result i32) (call $helper))
+     (func $helper (result i32) (i32.const 1))
+     (func $dead (result i32) (i32.const 2))
+     (global $g_live i32 (i32.const 3))
+     (global $g_dead i32 (i32.const 4))
+     (func $reads_live (export "g") (result i32) (global.get $g_live)))`;
+  assert.deepEqual(deadNames(wat), ["$dead", "$g_dead"]);
+});
+
+test("dead-names is empty when everything is reachable", () => {
+  const wat = `(module
+     (func (export "f") (result i32) (call $helper))
+     (func $helper (result i32) (i32.const 1)))`;
+  assert.deepEqual(deadNames(wat), []);
 });

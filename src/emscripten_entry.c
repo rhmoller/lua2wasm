@@ -105,4 +105,17 @@ uint8_t *lua2wasm_assemble(const char *wat, int *out_len, char *err, int errcap)
     return bytes;
 }
 
+/* Report which named functions/globals the DCE pass proves dead in `wat`, as a
+ * newline-separated, NUL-terminated string (functions first, then globals).
+ * The playground uses this to dim the regions DCE would drop in the WAT view.
+ * Returns an empty string when nothing is dead, or NULL if `wat` can't be
+ * assembled (caller skips dimming). Free the result with lua2wasm_free. */
+EMSCRIPTEN_KEEPALIVE
+char *lua2wasm_dce_dead_names(const char *wat) {
+    char *names = NULL;
+    char err[256];
+    if (wat_dead_names(wat, strlen(wat), &names, err, sizeof err) != 0) return NULL;
+    return names;
+}
+
 #endif /* __EMSCRIPTEN__ */

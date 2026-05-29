@@ -59,17 +59,21 @@ static char *read_file(const char *path, size_t *out_len) {
 
 static void usage(const char *prog) {
     fprintf(stderr, "usage: %s [flags...] -o <out.wasm> <in.wat>\n", prog);
+    fprintf(stderr, "       %s --dead-names <in.wat>   (list DCE-dead $names)\n", prog);
 }
 
 int main(int argc, char **argv) {
     const char *in = NULL;
     const char *out = NULL;
     int dce = 0;
+    int dead_names = 0;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) {
             out = argv[++i];
         } else if (strcmp(argv[i], "--dce") == 0) {
             dce = 1; /* drop functions unreachable from exports/globals */
+        } else if (strcmp(argv[i], "--dead-names") == 0) {
+            dead_names = 1; /* report DCE-dead $names on stdout, emit no binary */
         } else if (argv[i][0] == '-') {
             /* Ignore wasm-as-style flags (--all-features, etc.). */
             continue;
@@ -80,7 +84,7 @@ int main(int argc, char **argv) {
             return 2;
         }
     }
-    if (!in || !out) {
+    if (!in || (!out && !dead_names)) {
         usage(argv[0]);
         return 2;
     }
@@ -88,6 +92,20 @@ int main(int argc, char **argv) {
     size_t wat_len = 0;
     char *wat = read_file(in, &wat_len);
     if (!wat) return 1;
+
+    if (dead_names) {
+        char *names = NULL;
+        char err[512] = {0};
+        if (wat_dead_names(wat, wat_len, &names, err, sizeof err) != 0) {
+            fprintf(stderr, "%s: %s\n", in, err);
+            free(wat);
+            return 1;
+        }
+        free(wat);
+        fputs(names, stdout);
+        free(names);
+        return 0;
+    }
 
     uint8_t *bytes = NULL;
     size_t len = 0;
