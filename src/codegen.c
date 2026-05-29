@@ -285,7 +285,7 @@ typedef struct {
     LabelScope *label_scope; /* innermost first */
     /* When set, the program observes no runtime state ($stdlib_init builds
      * nothing it can reach), so $main omits the `(call $stdlib_init)` and DCE
-     * cascade-drops the runtime. See program_needs_runtime. */
+     * cascade-drops the runtime. Set from compute_live_set's needs_runtime. */
     int skip_runtime_init;
     char err[256];
     int ok;
@@ -3925,6 +3925,15 @@ typedef struct {
      * index syntax are the only ways to reach it; both are conservatively
      * treated as possibly-on-a-string. */
     int uses_string_meta;
+    /* Set when the program touches anything $stdlib_init builds — a builtin or
+     * global (read or written via _G), a call/method-call (callee dispatch /
+     * __call), an index (__index/__newindex), any operator (boxed helpers read
+     * metamethod-key globals), a table constructor, or either for-loop form
+     * (iterator protocol / bad-bound error path). When it stays clear the
+     * program observes no runtime state, so $main skips the `(call $stdlib_init)`
+     * and DCE drops the runtime wholesale. Conservative: it only keeps a call an
+     * exact reachability analysis would drop, never drops one it would keep. */
+    int needs_runtime;
 } LiveSet;
 
 static void ts_mark_expr(LiveSet *L, const Expr *e);
@@ -3936,6 +3945,7 @@ static void ts_mark_block(LiveSet *L, const Block *b) {
 }
 
 static void ts_mark_var(LiveSet *L, VarKind k, int idx) {
+    if (k == VAR_BUILTIN || k == VAR_GLOBAL) L->needs_runtime = 1; /* reaches _G / a builtin */
     if (k == VAR_BUILTIN && idx >= 0 && idx < L->n_builtins) L->live[idx] = 1;
     else if (k == VAR_GLOBAL && idx >= 0 && idx < L->n_globals) L->gref[idx] = 1;
 }
@@ -3980,31 +3990,39 @@ static void ts_mark_expr(LiveSet *L, const Expr *e) {
         ts_mark_var(L, e->as.var.kind, e->as.var.idx);
         break;
     case EXPR_CALL:
+        L->needs_runtime = 1; /* callee dispatch / __call */
         ts_mark_expr(L, e->as.call.callee);
         for (size_t i = 0; i < e->as.call.nargs; i++)
             ts_mark_expr(L, e->as.call.args[i]);
         break;
     case EXPR_BINOP:
+        L->needs_runtime = 1; /* boxed helpers read metamethod-key globals */
         ts_mark_expr(L, e->as.binop.lhs);
         ts_mark_expr(L, e->as.binop.rhs);
         break;
-    case EXPR_UNOP: ts_mark_expr(L, e->as.unop.operand); break;
+    case EXPR_UNOP:
+        L->needs_runtime = 1;
+        ts_mark_expr(L, e->as.unop.operand);
+        break;
     case EXPR_FUNCTION:
         ts_mark_block(L, &e->as.func_expr.func->body);
         break;
     case EXPR_INDEX:
+        L->needs_runtime = 1; /* __index */
         if (!index_base_is_nonstring(e->as.index.table))
             L->uses_string_meta = 1; /* could be a field access on a string */
         ts_mark_expr(L, e->as.index.table);
         ts_mark_expr(L, e->as.index.key);
         break;
     case EXPR_TABLE:
+        L->needs_runtime = 1; /* allocates + __newindex on field set */
         for (int i = 0; i < e->as.table_ctor.n_entries; i++) {
             ts_mark_expr(L, e->as.table_ctor.entries[i].key);
             ts_mark_expr(L, e->as.table_ctor.entries[i].value);
         }
         break;
     case EXPR_METHOD_CALL:
+        L->needs_runtime = 1; /* index + call */
         if (!index_base_is_nonstring(e->as.method_call.recv))
             L->uses_string_meta = 1; /* receiver could be a string */
         ts_mark_expr(L, e->as.method_call.recv);
@@ -4026,6 +4044,7 @@ static void ts_mark_stmt(LiveSet *L, const Stmt *s) {
         for (int i = 0; i < s->as.assign.n_targets; i++) {
             const AssignTarget *t = &s->as.assign.targets[i];
             if (t->kind == TGT_INDEX) {
+                L->needs_runtime = 1; /* t[k] = v -> __newindex */
                 ts_mark_expr(L, t->as.index.table);
                 ts_mark_expr(L, t->as.index.key);
             } else {
@@ -4057,12 +4076,14 @@ static void ts_mark_stmt(LiveSet *L, const Stmt *s) {
         ts_mark_block(L, &s->as.local_func.func->body);
         break;
     case STMT_FOR_NUM:
+        L->needs_runtime = 1; /* numeric-for bad-bound error path reads $g_src_name */
         ts_mark_expr(L, s->as.for_num.start);
         ts_mark_expr(L, s->as.for_num.stop);
         ts_mark_expr(L, s->as.for_num.step);
         ts_mark_block(L, &s->as.for_num.body);
         break;
     case STMT_FOR_GEN:
+        L->needs_runtime = 1; /* generic-for iterator protocol */
         for (int i = 0; i < s->as.for_gen.n_exprs; i++)
             ts_mark_expr(L, s->as.for_gen.exprs[i]);
         ts_mark_block(L, &s->as.for_gen.body);
@@ -4072,6 +4093,7 @@ static void ts_mark_stmt(LiveSet *L, const Stmt *s) {
         ts_mark_expr(L, s->as.repeat.cond);
         break;
     case STMT_GLOBAL:
+        L->needs_runtime = 1; /* declares / writes a module global via _G */
         for (int i = 0; i < s->as.global_decl.n_values; i++)
             ts_mark_expr(L, s->as.global_decl.values[i]);
         break;
@@ -4092,8 +4114,8 @@ static int class_for_global(const char *name, size_t name_len) {
     return -1;
 }
 
-static void compute_live_set(const ParseResult *pr, int n_builtins,
-                             unsigned char *live, unsigned char *gref, int *out_escaped) {
+static void compute_live_set(const ParseResult *pr, int n_builtins, unsigned char *live,
+                             unsigned char *gref, int *out_escaped, int *out_needs_runtime) {
     LiveSet L = {.live = live,
                  .gref = gref,
                  .n_builtins = n_builtins,
@@ -4102,6 +4124,7 @@ static void compute_live_set(const ParseResult *pr, int n_builtins,
     for (size_t i = 0; i < pr->funcs.count; i++)
         ts_mark_block(&L, &pr->funcs.items[i]->body);
     if (out_escaped) *out_escaped = L.escaped;
+    if (out_needs_runtime) *out_needs_runtime = L.needs_runtime;
 
     /* Strings carry an implicit metatable whose __index is the `string`
      * library, so any method-call / field-index that could land on a string
@@ -4110,8 +4133,8 @@ static void compute_live_set(const ParseResult *pr, int n_builtins,
      * class-expansion below pulls in its members. */
     if (L.uses_string_meta) {
         for (size_t gi = 0; gi < pr->globals.count; gi++)
-            if (pr->globals.items[gi].name_len == 6 &&
-                memcmp(pr->globals.items[gi].name, "string", 6) == 0)
+            if (class_for_global(pr->globals.items[gi].name,
+                                 pr->globals.items[gi].name_len) == BLT_LIB_STRING)
                 gref[gi] = 1;
     }
 
@@ -4484,100 +4507,6 @@ static int program_writes_table(const ParseResult *pr) {
     return 0;
 }
 
-/* needs_runtime — does the program touch anything $stdlib_init sets up (the
- * library tables, builtin closures, _G, the metamethod-key globals, the
- * source-name global)? If not, $main can skip the init call and DCE removes the
- * runtime wholesale.
- *
- * The stdlib-built globals are written *only* by $stdlib_init, so skipping is
- * sound exactly when no code reachable from $main reads one. We over-approximate
- * that conservatively from the AST: a construct counts as needing the runtime if
- * it could, in *any* lowering, reach a builtin or a `global.get` of a stdlib
- * global. That means globals/builtins (read or written via _G), calls and method
- * calls (callee dispatch / __call), indexing (__index / __newindex), every
- * binary and unary operator (the boxed helpers consult metamethod-key globals),
- * table constructors, and both for-loop forms (the generic-for iterator
- * protocol; the numeric-for bad-bound error path reads $g_src_name). What's left
- * — literals, local/upvalue reads and writes, and control flow over them — is
- * the safe set. Nested function bodies are visited via pr->funcs, matching
- * program_writes_table; EXPR_FUNCTION/STMT_LOCAL_FUNC therefore don't recurse
- * here. Conservative, so it can only keep the call that an exact reachability
- * analysis would drop, never drop one it would keep. */
-static int expr_needs_runtime(const Expr *e) {
-    if (!e) return 0;
-    switch (e->kind) {
-    case EXPR_NIL:
-    case EXPR_TRUE:
-    case EXPR_FALSE:
-    case EXPR_INT:
-    case EXPR_FLOAT:
-    case EXPR_STRING:
-    case EXPR_VARARG:
-        return 0;
-    case EXPR_VAR:
-        return e->as.var.kind == VAR_GLOBAL || e->as.var.kind == VAR_BUILTIN;
-    case EXPR_FUNCTION:
-        return 0; /* body visited via pr->funcs */
-    default:
-        return 1; /* CALL, METHOD_CALL, INDEX, BINOP, UNOP, TABLE */
-    }
-}
-static int exprs_need_runtime(Expr **es, size_t n) {
-    for (size_t i = 0; i < n; i++)
-        if (expr_needs_runtime(es[i])) return 1;
-    return 0;
-}
-static int block_needs_runtime(const Block *b);
-static int stmt_needs_runtime(const Stmt *s) {
-    if (!s) return 0;
-    switch (s->kind) {
-    case STMT_LOCAL:
-        return exprs_need_runtime(s->as.local.values, (size_t)s->as.local.n_values);
-    case STMT_ASSIGN:
-        for (int i = 0; i < s->as.assign.n_targets; i++) {
-            const AssignTarget *t = &s->as.assign.targets[i];
-            if (t->kind == TGT_INDEX) return 1; /* t[k] = v -> __newindex */
-            if (t->kind == TGT_VAR &&
-                (t->as.var.kind == VAR_GLOBAL || t->as.var.kind == VAR_BUILTIN))
-                return 1; /* global write goes through _G */
-        }
-        return exprs_need_runtime(s->as.assign.values, (size_t)s->as.assign.n_values);
-    case STMT_GLOBAL: return 1; /* declares / writes a module global via _G */
-    case STMT_EXPR: return expr_needs_runtime(s->as.expr_stmt.expr);
-    case STMT_RETURN:
-        return exprs_need_runtime(s->as.return_stmt.values, (size_t)s->as.return_stmt.n_values);
-    case STMT_IF:
-        for (size_t i = 0; i < s->as.if_stmt.narms; i++)
-            if (expr_needs_runtime(s->as.if_stmt.arms[i].cond) ||
-                block_needs_runtime(&s->as.if_stmt.arms[i].body))
-                return 1;
-        return s->as.if_stmt.has_else && block_needs_runtime(&s->as.if_stmt.else_body);
-    case STMT_WHILE:
-        return expr_needs_runtime(s->as.while_stmt.cond) ||
-               block_needs_runtime(&s->as.while_stmt.body);
-    case STMT_DO: return block_needs_runtime(&s->as.do_stmt.body);
-    case STMT_REPEAT:
-        return block_needs_runtime(&s->as.repeat.body) ||
-               expr_needs_runtime(s->as.repeat.cond);
-    case STMT_FOR_NUM:
-    case STMT_FOR_GEN:
-        return 1; /* iterator protocol / bad-bound error path touch the runtime */
-    default:
-        return 0; /* LOCAL_FUNC body via pr->funcs; BREAK/GOTO/LABEL touch nothing */
-    }
-}
-static int block_needs_runtime(const Block *b) {
-    for (size_t i = 0; i < b->count; i++)
-        if (stmt_needs_runtime(b->items[i])) return 1;
-    return 0;
-}
-static int program_needs_runtime(const ParseResult *pr) {
-    if (block_needs_runtime(&pr->main_body)) return 1;
-    for (size_t i = 0; i < pr->funcs.count; i++)
-        if (block_needs_runtime(&pr->funcs.items[i]->body)) return 1;
-    return 0;
-}
-
 /* Emit `$main`, the top-level chunk: locals (boxed/unboxed per escape
  * analysis), goto dispatch-id locals, the $stdlib_init call, eager boxing
  * of captured slots, then the body. */
@@ -4702,9 +4631,6 @@ int codegen_module(const ParseResult *pr, const char *src_name,
      * boxed fallback. Behaviour is identical either way — only code shape and
      * speed differ — so goldens are shared across levels. */
     c.opt_int = opt >= 1;
-    /* Skip the eager $stdlib_init call when the program can't observe any of
-     * the state it builds; DCE then drops the runtime. Independent of opt. */
-    c.skip_runtime_init = !program_needs_runtime(pr);
     /* Whole-program pre-passes (opt_int): resolve direct-call targets (incl.
      * self-recursive/captured local functions), then infer per-function
      * param/return numeric types used to unbox the typed direct-call entries. */
@@ -4734,14 +4660,16 @@ int codegen_module(const ParseResult *pr, const char *src_name,
         free(gref);
         return 0;
     }
-    /* Always compute the referenced set — it also tells us whether the program
-     * is "globally closed" (no _G/_ENV/load/require escape). When closed, the
-     * set is complete, so dropping un-referenced builtins is behaviour-
-     * preserving and we tree-shake by default. `--force-tree-shake` forces it
-     * even when not closed (which can break dynamic _G lookups). When neither
-     * applies, keep the whole runtime. */
-    int escaped = 0;
-    compute_live_set(pr, nb, live, gref, &escaped);
+    /* Always compute the referenced set — one walk also reports whether the
+     * program is "globally closed" (no _G/_ENV/load/require escape) and whether
+     * it observes any runtime state at all. When closed, the set is complete, so
+     * dropping un-referenced builtins is behaviour-preserving and we tree-shake
+     * by default; `--force-tree-shake` forces it even when not closed (which can
+     * break dynamic _G lookups). When it observes no runtime state, $main skips
+     * the eager $stdlib_init call (independent of opt; DCE then drops it). */
+    int escaped = 0, needs_runtime = 0;
+    compute_live_set(pr, nb, live, gref, &escaped, &needs_runtime);
+    c.skip_runtime_init = !needs_runtime;
     int effective_tree_shake = tree_shake || !escaped;
     if (!effective_tree_shake) {
         for (int i = 0; i < nb; i++) live[i] = 1;
