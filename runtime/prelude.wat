@@ -1511,31 +1511,10 @@
     (if (ref.is_null (local.get $mt)) (then (return (ref.null any))))
     (call $tab_get_raw (ref.as_non_null (local.get $mt)) (local.get $key)))
 
-  (global $g_mkey_index     (mut (ref null $LuaString)) (ref.null $LuaString))
-  (global $g_mkey_newindex  (mut (ref null $LuaString)) (ref.null $LuaString))
-  (global $g_mkey_add       (mut (ref null $LuaString)) (ref.null $LuaString))
-  (global $g_mkey_sub       (mut (ref null $LuaString)) (ref.null $LuaString))
-  (global $g_mkey_mul       (mut (ref null $LuaString)) (ref.null $LuaString))
-  (global $g_mkey_div       (mut (ref null $LuaString)) (ref.null $LuaString))
-  (global $g_mkey_mod       (mut (ref null $LuaString)) (ref.null $LuaString))
-  (global $g_mkey_pow       (mut (ref null $LuaString)) (ref.null $LuaString))
-  (global $g_mkey_unm       (mut (ref null $LuaString)) (ref.null $LuaString))
-  (global $g_mkey_idiv      (mut (ref null $LuaString)) (ref.null $LuaString))
-  (global $g_mkey_band      (mut (ref null $LuaString)) (ref.null $LuaString))
-  (global $g_mkey_bor       (mut (ref null $LuaString)) (ref.null $LuaString))
-  (global $g_mkey_bxor      (mut (ref null $LuaString)) (ref.null $LuaString))
-  (global $g_mkey_shl       (mut (ref null $LuaString)) (ref.null $LuaString))
-  (global $g_mkey_shr       (mut (ref null $LuaString)) (ref.null $LuaString))
-  (global $g_mkey_bnot      (mut (ref null $LuaString)) (ref.null $LuaString))
-  (global $g_mkey_concat    (mut (ref null $LuaString)) (ref.null $LuaString))
-  (global $g_mkey_len       (mut (ref null $LuaString)) (ref.null $LuaString))
-  (global $g_mkey_eq        (mut (ref null $LuaString)) (ref.null $LuaString))
-  (global $g_mkey_lt        (mut (ref null $LuaString)) (ref.null $LuaString))
-  (global $g_mkey_le        (mut (ref null $LuaString)) (ref.null $LuaString))
-  (global $g_mkey_call      (mut (ref null $LuaString)) (ref.null $LuaString))
-  (global $g_mkey_tostring  (mut (ref null $LuaString)) (ref.null $LuaString))
-  (global $g_mkey_metatable (mut (ref null $LuaString)) (ref.null $LuaString))
-  (global $g_mkey_name      (mut (ref null $LuaString)) (ref.null $LuaString))
+  ;; Metamethod-name keys ($g_mkey_*) are immutable, const-initialized globals
+  ;; emitted by codegen (see emit_global_const_str) rather than declared here:
+  ;; that lets DCE drop the ones whose reader-helpers (e.g. $lua_add) are
+  ;; themselves dead. $g_mkey_close is emitted in the same place.
 
   ;; --- _G: the global-environment table ---
   ;; Every Lua global (user-declared, library, builtin) is an entry in
@@ -1966,7 +1945,7 @@
   ;; __close metamethod key. To-be-closed (<close>) variables are tracked on a
   ;; per-activation $Tbc stack: $tbc_push validates+records at the declaration,
   ;; $close_upto runs __close on every scope exit (see those functions below).
-  (global $g_mkey_close (mut (ref null $LuaString)) (ref.null $LuaString))
+  ;; $g_mkey_close is emitted by codegen alongside the other $g_mkey_* keys.
 
   ;; Validate a value bound to a <close> variable, at the declaration site.
   ;; nil and false are accepted (and never closed); any other value must have

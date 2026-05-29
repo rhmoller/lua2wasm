@@ -552,6 +552,20 @@ static void emit_tab_set_global(CG *c, const char *tgt,
                 c->tab_set_fn, tgt, key.offset, key.len, glob);
 }
 
+/* `(global <glob> (ref $LuaString) "<s>")` — an immutable module-level global
+ * holding a Lua string whose bytes are inlined via array.new_fixed (a constant
+ * expression, unlike array.new_data, so it's valid in a global initializer).
+ * Declaring a constant string this way instead of assigning it in $stdlib_init
+ * lets DCE drop it when no reachable code reads it. */
+static void emit_global_const_str(CG *c, const char *glob, const char *s, size_t len) {
+    wat_appendf(c->w,
+                "  (global %s (ref $LuaString)\n"
+                "    (struct.new $LuaString (array.new_fixed $LuaArr %zu",
+                glob, len);
+    for (size_t i = 0; i < len; i++) wat_appendf(c->w, " (i32.const %u)", (unsigned char)s[i]);
+    wat_append(c->w, ")))\n");
+}
+
 /* `(global.set <glob> "<s>")` — set a wasm global to an interned string. */
 static void emit_global_set_str(CG *c, const char *glob, const char *s, size_t len) {
     StrRef sr = strpool_add(&c->strs, s, len);
@@ -4710,13 +4724,10 @@ int codegen_module(const ParseResult *pr, const char *src_name,
      * still tracks the global list for name resolution, but no wasm
      * globals are emitted for them. */
 
-    /* $stdlib_init: builds math/string tables from the library builtins
-     * and assigns them to the corresponding $g_user_N slots. */
-    wat_append(out, "\n  (func $stdlib_init"
-                    " (local $tab (ref $LuaTable))"
-                    " (local $h (ref $LuaTable))\n");
-    /* Initialize the metamethod-name globals from the strpool. Keys are
-     * deduplicated by strpool_add. */
+    /* Metamethod-name key globals: immutable, const-initialized at module level
+     * (not assigned in $stdlib_init) so DCE drops the ones whose reader-helpers
+     * are dead — e.g. a fully-specialized integer program never reaches $lua_add
+     * and so doesn't need $g_mkey_add. */
     static const struct {
         const char *name;
         const char *key;
@@ -4749,7 +4760,13 @@ int codegen_module(const ParseResult *pr, const char *src_name,
         {"$g_mkey_name", "__name"},
     };
     for (size_t k = 0; k < sizeof(MKEYS) / sizeof(MKEYS[0]); k++)
-        emit_global_set_str(&c, MKEYS[k].name, MKEYS[k].key, strlen(MKEYS[k].key));
+        emit_global_const_str(&c, MKEYS[k].name, MKEYS[k].key, strlen(MKEYS[k].key));
+
+    /* $stdlib_init: builds math/string tables from the library builtins
+     * and assigns them to the corresponding $g_user_N slots. */
+    wat_append(out, "\n  (func $stdlib_init"
+                    " (local $tab (ref $LuaTable))"
+                    " (local $h (ref $LuaTable))\n");
     /* "\t" used by print when joining args. */
     emit_global_set_str(&c, "$g_tab_str", "\t", 1);
     wat_appendf(out,
