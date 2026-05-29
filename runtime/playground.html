@@ -237,6 +237,11 @@
               text-decoration-color: var(--ctp-overlay0); }
   .wat-note { margin: 0 0 .5em 0; color: var(--ctp-overlay1);
               font: 12px/1.45 "JetBrains Mono", ui-monospace, monospace; }
+  /* "hide dead code" toggle next to the Show WAT button. */
+  #hidedead-label { color: var(--ctp-subtext0); font-size: 13px;
+                    user-select: none; cursor: pointer;
+                    display: inline-flex; align-items: center; gap: .3em; }
+  #hidedead-label input { vertical-align: middle; cursor: pointer; }
   .err  { color: var(--ctp-red); }
   .info { color: var(--ctp-overlay1); }
   .stdin-prompt { color: var(--ctp-sapphire); }
@@ -292,6 +297,10 @@
   </select>
   <button id="run" disabled>Run ▶</button>
   <button id="showwat">Show WAT</button>
+  <label id="hidedead-label"
+         title="Show WAT: strike through dead code, or omit it entirely">
+    <input type="checkbox" id="hidedead"> hide dead code
+  </label>
   <span id="status" style="color:#888"></span>
   <button id="theme-toggle" style="margin-left:auto"
           title="Toggle Catppuccin Mocha (dark) / Latte (light)">
@@ -1458,21 +1467,28 @@ async function showWat() {
 
   /* Mark the functions/globals DCE would drop from the final .wasm so the
    * surviving module reads clearly. `.wasm` output is DCE'd by default, so
-   * this is what actually ships. */
+   * this is what actually ships. The "hide dead code" toggle picks how those
+   * lines are presented: struck through in place (default), or omitted so the
+   * view matches the shipped module byte-for-byte. */
+  const hide = hideDeadCB.checked;
   const deadLines = computeDeadLines(wat, dceDeadNames(wat));
   if (deadLines.size > 0) {
     const note = document.createElement("p");
     note.className = "wat-note";
-    note.textContent =
-      `struck-through lines are dropped by dead-code elimination (the default for .wasm) — ${
-        deadLines.size.toLocaleString()} line${deadLines.size === 1 ? "" : "s"}.`;
+    const n = `${deadLines.size.toLocaleString()} line${deadLines.size === 1 ? "" : "s"}`;
+    note.textContent = hide
+      ? `dead-code elimination (the default for .wasm) drops ${n}, hidden here.`
+      : `struck-through lines are dropped by dead-code elimination (the default for .wasm) — ${n}.`;
     out.appendChild(note);
   }
 
   for (const seg of splitWatSections(wat)) {
     const cfg = WAT_SECTIONS[seg.name] ?? { label: seg.name, collapsed: true };
     const bodyLines = seg.body ? seg.body.split("\n") : [];
-    const liveCount = bodyLines.filter((_, j) => !deadLines.has(seg.start + j)).length;
+    const isDead = (j) => deadLines.has(seg.start + j);
+    const liveCount = bodyLines.filter((_, j) => !isDead(j)).length;
+    const dropped = bodyLines.length - liveCount;
+    const shownCount = hide ? liveCount : bodyLines.length;
     const det = document.createElement("details");
     det.className = "wat-section";
     det.dataset.section = seg.name;
@@ -1480,21 +1496,24 @@ async function showWat() {
     const sum = document.createElement("summary");
     sum.innerHTML = `<span class="wat-name"></span><span class="wat-meta"></span>`;
     sum.querySelector(".wat-name").textContent = cfg.label;
-    const dropped = bodyLines.length - liveCount;
     sum.querySelector(".wat-meta").textContent =
-      `${bodyLines.length.toLocaleString()} line${bodyLines.length === 1 ? "" : "s"}` +
-      (dropped ? ` · ${dropped.toLocaleString()} dropped` : "");
+      `${shownCount.toLocaleString()} line${shownCount === 1 ? "" : "s"}` +
+      (dropped ? ` · ${dropped.toLocaleString()} ${hide ? "hidden" : "dropped"}` : "");
     det.appendChild(sum);
     const pre = document.createElement("pre");
-    /* Highlight line-by-line so a dead form's lines can be wrapped; codegen
-     * WAT keeps strings and comments within a single line, so per-line
-     * tokenizing is safe. */
-    pre.innerHTML = bodyLines.map((ln, j) => {
-      const html = highlightWat(ln);
-      return deadLines.has(seg.start + j)
-        ? `<span class="wat-dead" title="removed by dead-code elimination">${html}</span>`
-        : html;
-    }).join("\n");
+    /* Highlight line-by-line so a dead form's lines can be wrapped (or
+     * dropped); codegen WAT keeps strings and comments within a single line,
+     * so per-line tokenizing is safe. */
+    pre.innerHTML = bodyLines
+      .map((ln, j) => {
+        if (isDead(j)) {
+          if (hide) return null;
+          return `<span class="wat-dead" title="removed by dead-code elimination">${highlightWat(ln)}</span>`;
+        }
+        return highlightWat(ln);
+      })
+      .filter(s => s !== null)
+      .join("\n");
     det.appendChild(pre);
     out.appendChild(det);
   }
@@ -1511,6 +1530,16 @@ const triggerRun = async () => {
 const runBtn = document.getElementById("run");
 runBtn.onclick = triggerRun;
 document.getElementById("showwat").onclick = showWat;
+
+/* "hide dead code" toggle: persisted, and live — re-render in place when the
+ * WAT view is already on screen so flipping it is instant. */
+const HIDE_DEAD_KEY = "lua2wasm.hideDead";
+const hideDeadCB = document.getElementById("hidedead");
+hideDeadCB.checked = localStorage.getItem(HIDE_DEAD_KEY) === "1";
+hideDeadCB.addEventListener("change", () => {
+  localStorage.setItem(HIDE_DEAD_KEY, hideDeadCB.checked ? "1" : "0");
+  if (out.querySelector(".wat-section")) showWat();
+});
 /* ----- light/dark theme toggle -----
  * First-load preference order: localStorage > prefers-color-scheme > dark.
  * Toggling flips html[data-theme]; the rest of the UI (and the editor,
