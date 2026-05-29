@@ -7,6 +7,7 @@ Testing/
 # The embedded runtime prelude is checked-in source, not a build artifact.
 !runtime/prelude.wat
 .botface/
+.claude/worktrees/
 .playwright-mcp/
 notes/
 official-tests/
