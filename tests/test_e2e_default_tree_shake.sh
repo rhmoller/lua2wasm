@@ -42,7 +42,36 @@ fi
 OPEN_OUT="$(node --experimental-wasm-exnref "$HOST" "$OPEN_WASM")"
 [[ "$OPEN_OUT" == "hi" ]] || { echo "FAIL: _G.print output: want hi, got: $OPEN_OUT" >&2; exit 1; }
 
-# 3. Size: dropping the runtime the closed program can't reach makes it smaller.
+# 3. Library-only access (math.sqrt) must NOT drag in the string library: the
+#    index base is a known library, never a string, so the string metatable
+#    can't apply. A string-only builtin must be gone.
+LIBONLY="$BUILD_DIR/dts_libonly.lua"
+printf 'print(math.sqrt(4))\n' >"$LIBONLY"
+LIBONLY_WAT="$BUILD_DIR/dts_libonly.wat"
+LIBONLY_WASM="$BUILD_DIR/dts_libonly.wasm"
+# Check the codegen-conditional closure *global* ($g_builtin_*), not the func
+# body — the prelude defines every builtin body unconditionally (DCE drops the
+# unused ones later); only the global + install are tree-shaken in codegen.
+"$BIN" "$LIBONLY" -o "$LIBONLY_WAT"
+if grep -q 'global \$g_builtin_string_format' "$LIBONLY_WAT"; then
+    echo "FAIL: math.sqrt program kept the string library (over-conservative)" >&2
+    exit 1
+fi
+"$BIN" "$LIBONLY" -o "$LIBONLY_WASM"
+LO_OUT="$(node --experimental-wasm-exnref "$HOST" "$LIBONLY_WASM")"
+[[ "$LO_OUT" == "2.0" ]] || { echo "FAIL: math.sqrt output: want 2.0, got: $LO_OUT" >&2; exit 1; }
+
+# A string method, by contrast, must keep the string library live.
+SMETH="$BUILD_DIR/dts_smeth.lua"
+printf 'print(("ab"):upper())\n' >"$SMETH"
+SMETH_WAT="$BUILD_DIR/dts_smeth.wat"
+"$BIN" "$SMETH" -o "$SMETH_WAT"
+if ! grep -q 'global \$g_builtin_string_upper' "$SMETH_WAT"; then
+    echo "FAIL: string method dropped the string library (unsound)" >&2
+    exit 1
+fi
+
+# 4. Size: dropping the runtime the closed program can't reach makes it smaller.
 C_SZ=$(wc -c <"$CLOSED_WASM"); O_SZ=$(wc -c <"$OPEN_WASM")
 if [[ "$C_SZ" -ge "$O_SZ" ]]; then
     echo "FAIL: closed build ($C_SZ B) not smaller than _G build ($O_SZ B)" >&2

@@ -3929,6 +3929,7 @@ typedef struct {
 
 static void ts_mark_expr(LiveSet *L, const Expr *e);
 static void ts_mark_stmt(LiveSet *L, const Stmt *s);
+static int class_for_global(const char *name, size_t name_len); /* defined below */
 static void ts_mark_block(LiveSet *L, const Block *b) {
     if (!b) return;
     for (size_t i = 0; i < b->count; i++) ts_mark_stmt(L, b->items[i]);
@@ -3952,6 +3953,25 @@ static int var_escapes(VarKind kind, const char *name, size_t len) {
     return 0;
 }
 
+/* Is the value indexed / method-called here statically guaranteed NOT to be a
+ * string? Then the string metatable can't apply and the `string` library
+ * needn't be kept on its account. Only bases the compiler fully resolves to a
+ * non-string qualify: a known library global (math.sin, table.insert), a
+ * builtin (a function), or a table constructor. A local/upvalue, a user global,
+ * or any computed result could hold a string, so those keep the library. */
+static int index_base_is_nonstring(const Expr *e) {
+    if (!e) return 0;
+    switch (e->kind) {
+    case EXPR_VAR:
+        if (e->as.var.kind == VAR_BUILTIN) return 1;
+        if (e->as.var.kind == VAR_GLOBAL)
+            return class_for_global(e->as.var.name, e->as.var.name_len) >= 0;
+        return 0;
+    case EXPR_TABLE: return 1;
+    default: return 0;
+    }
+}
+
 static void ts_mark_expr(LiveSet *L, const Expr *e) {
     if (!e) return;
     switch (e->kind) {
@@ -3973,7 +3993,8 @@ static void ts_mark_expr(LiveSet *L, const Expr *e) {
         ts_mark_block(L, &e->as.func_expr.func->body);
         break;
     case EXPR_INDEX:
-        L->uses_string_meta = 1; /* could be a field access on a string */
+        if (!index_base_is_nonstring(e->as.index.table))
+            L->uses_string_meta = 1; /* could be a field access on a string */
         ts_mark_expr(L, e->as.index.table);
         ts_mark_expr(L, e->as.index.key);
         break;
@@ -3984,7 +4005,8 @@ static void ts_mark_expr(LiveSet *L, const Expr *e) {
         }
         break;
     case EXPR_METHOD_CALL:
-        L->uses_string_meta = 1; /* receiver could be a string */
+        if (!index_base_is_nonstring(e->as.method_call.recv))
+            L->uses_string_meta = 1; /* receiver could be a string */
         ts_mark_expr(L, e->as.method_call.recv);
         for (size_t i = 0; i < e->as.method_call.nargs; i++)
             ts_mark_expr(L, e->as.method_call.args[i]);
