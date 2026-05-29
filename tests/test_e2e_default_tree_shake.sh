@@ -28,7 +28,7 @@ OUT="$(node --experimental-wasm-exnref "$HOST" "$CLOSED_WASM")"
 [[ "$OUT" == "hi" ]] || { echo "FAIL: closed output: want hi, got: $OUT" >&2; exit 1; }
 
 # 2. Not-closed program: _G makes the static set incomplete, so the runtime is
-#    kept and _G.print still resolves (this is the regression --tree-shake had).
+#    kept and _G.print still resolves (the regression forced shaking would have).
 OPEN="$BUILD_DIR/dts_open.lua"
 printf 'local p = _G.print\np("hi")\n' >"$OPEN"
 OPEN_WAT="$BUILD_DIR/dts_open.wat"

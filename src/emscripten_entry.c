@@ -35,10 +35,12 @@ char *lua2wasm_compile(const char *source) {
 }
 
 /* As above, with explicit options:
- *   tree_shake — when nonzero, prune unused builtin closures + _G entries
- *   so wasm-opt can DCE the function bodies. Off by default for the
- *   playground because `_G.foo` introspection breaks for builtins the
- *   program doesn't name. */
+ *   tree_shake — when nonzero, *force* pruning of un-named builtin closures +
+ *   _G entries even for programs that aren't globally closed (the CLI's
+ *   --force-tree-shake). Codegen already tree-shakes closed programs
+ *   automatically, so lua2wasm_compile (tree_shake = 0) is the right default;
+ *   this entry exists for callers that want the unsafe force (it can make
+ *   `_G.foo` lookups of un-named builtins return nil). */
 EMSCRIPTEN_KEEPALIVE
 char *lua2wasm_compile_ex(const char *source, int tree_shake) {
     char *result = NULL;

@@ -3365,7 +3365,7 @@
     ;; Build the metatable with the append-only bootstrap insert (one fresh,
     ;; absent key) rather than $tab_set, so wiring string indexing through here
     ;; doesn't pull the table write path back in for a program that writes no
-    ;; tables of its own (keeps the --tree-shake write-path DCE win).
+    ;; tables of its own (keeps the tree-shake write-path DCE win).
     (call $tab_bootstrap_set (local.get $mt)
       (ref.as_non_null (global.get $g_mkey_index))
       (call $tab_get (ref.as_non_null (global.get $g_globals))

@@ -274,9 +274,9 @@ the builtins and libraries the source never reaches are pruned (e.g.
 an un-named builtin at runtime. When the program *does* open one of those escape
 hatches the full runtime is kept, so dynamic `_G["name"]` lookups still work.
 Strings are special-cased: any method call or field index keeps the `string`
-library live (it's the string metatable's `__index`). Pass `--tree-shake` to
-*force* pruning even when the program isn't closed (the historical opt-in; it can
-make dynamic `_G` lookups of un-named builtins return nil). As a further win, a
+library live (it's the string metatable's `__index`). Pass `--force-tree-shake`
+to *force* pruning even when the program isn't closed (it can make dynamic `_G`
+lookups of un-named builtins return nil). As a further win, a
 program that writes no tables of its own has `_G` and the library tables populated
 by an append-only bootstrap insert, so the table grow/rehash write path is
 dead-code eliminated entirely. `--no-dce` disables the DCE pass.
@@ -384,7 +384,7 @@ anything large.
 4. Dynamic error messages with the offending value embedded (e.g. `"invalid format option 'r'"` instead of just `"invalid format"`).
 5. Coroutines — blocked on the WASM stack-switching proposal landing in browsers.
 6. Source maps so DevTools can step from compiled WASM back into Lua.
-7. A more aggressive size optimizer. `-o .wasm` already runs dead-code elimination (functions, globals, and orphaned signatures), and `--tree-shake` prunes unused builtins, but there's no instruction-level optimization or inlining like Binaryen's `wasm-opt -Oz`. A built-in native pass would close the remaining gap without any external dependency — the project (CLI and playground alike) no longer pulls in Binaryen at all.
+7. A more aggressive size optimizer. `-o .wasm` already runs dead-code elimination (functions, globals, and orphaned signatures) and automatically tree-shakes unused builtins, but there's no instruction-level optimization or inlining like Binaryen's `wasm-opt -Oz`. A built-in native pass would close the remaining gap without any external dependency — the project (CLI and playground alike) no longer pulls in Binaryen at all.
 
 ## Contributing
 

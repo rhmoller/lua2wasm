@@ -77,9 +77,12 @@ static void strip_shebang(char *s) {
 static void usage(const char *prog) {
     fprintf(stderr,
             "usage: %s <main.lua> [-m <module.lua>]... -o <output.wat>\n"
-            "  -m FILE  load FILE as a require()-able module, keyed by basename\n"
-            "  -O0      disable numeric/call specialization (boxed fallback)\n"
-            "  -O1      enable numeric/call specialization (default)\n",
+            "  -m FILE             load FILE as a require()-able module, keyed by basename\n"
+            "  -O0                 disable numeric/call specialization (boxed fallback)\n"
+            "  -O1                 enable numeric/call specialization (default)\n"
+            "  --no-dce            keep unreachable functions/globals (no dead-code elimination)\n"
+            "  --force-tree-shake  prune un-named builtins even when the program uses\n"
+            "                      _G/load (unsafe: dynamic _G lookups may return nil)\n",
             prog);
 }
 
@@ -109,7 +112,7 @@ int main(int argc, char **argv) {
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) {
             out = argv[++i];
-        } else if (strcmp(argv[i], "--tree-shake") == 0) {
+        } else if (strcmp(argv[i], "--force-tree-shake") == 0) {
             tree_shake = 1;
         } else if (strcmp(argv[i], "--no-dce") == 0) {
             no_dce = 1;

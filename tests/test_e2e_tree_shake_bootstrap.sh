@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Covers the $tab_bootstrap_set path: under --tree-shake a table-free program's
+# Covers the $tab_bootstrap_set path: under --force-tree-shake a table-free program's
 # _G / library tables are installed with the append-only bootstrap helper, which
 # lets DCE drop the whole table write path. Checks both that it still runs
 # correctly and that dropping the write path actually shrinks the module.
@@ -9,7 +9,7 @@ FIX="$SRC_DIR/tests/fixtures/tree_shake_bootstrap.lua"
 WASM="$BUILD_DIR/tree_shake_bootstrap.wasm"
 
 # 1. Behaviour — the bootstrap-built tables must read back correctly.
-"$BIN" "$FIX" --tree-shake -o "$WASM"
+"$BIN" "$FIX" --force-tree-shake -o "$WASM"
 OUT="$(node --experimental-wasm-exnref "$SRC_DIR/runtime/host.mjs" "$WASM")"
 EXPECTED=$'7\nABC\txxx\nfunction\t42\t3'
 if [[ "$OUT" != "$EXPECTED" ]]; then
@@ -24,7 +24,7 @@ fi
 VAR="$BUILD_DIR/tree_shake_bootstrap_write.lua"
 { cat "$FIX"; printf 'local _w = {}\n_w[1] = 1\nprint(_w[1])\n'; } >"$VAR"
 WASM_W="$BUILD_DIR/tree_shake_bootstrap_write.wasm"
-"$BIN" "$VAR" --tree-shake -o "$WASM_W"
+"$BIN" "$VAR" --force-tree-shake -o "$WASM_W"
 FREE=$(wc -c <"$WASM"); WRITE=$(wc -c <"$WASM_W")
 if [[ "$FREE" -ge "$WRITE" ]]; then
     echo "FAIL: table-free build ($FREE B) not smaller than table-writing build ($WRITE B)" >&2

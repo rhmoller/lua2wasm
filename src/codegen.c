@@ -4400,7 +4400,7 @@ static void emit_require_bridge(CG *c, const unsigned char *gref) {
  * append-only $tab_bootstrap_set. The latter never references the table grow/
  * rehash/array-spill machinery, so for a program that performs no table writes
  * of its own the whole write path goes unreferenced and the DCE pass drops it
- * (~1KB on a minimal --tree-shake module). When the program *does* write a
+ * (~1KB on a minimal tree-shaken module). When the program *does* write a
  * table the write path stays live regardless and the extra helper would be
  * pure overhead, so we fall back to $tab_set.
  *
@@ -4737,9 +4737,9 @@ int codegen_module(const ParseResult *pr, const char *src_name,
     /* Always compute the referenced set — it also tells us whether the program
      * is "globally closed" (no _G/_ENV/load/require escape). When closed, the
      * set is complete, so dropping un-referenced builtins is behaviour-
-     * preserving and we tree-shake by default. `--tree-shake` forces it even
-     * when not closed (the historical opt-in, which can break dynamic _G
-     * lookups). When neither applies, keep the whole runtime. */
+     * preserving and we tree-shake by default. `--force-tree-shake` forces it
+     * even when not closed (which can break dynamic _G lookups). When neither
+     * applies, keep the whole runtime. */
     int escaped = 0;
     compute_live_set(pr, nb, live, gref, &escaped);
     int effective_tree_shake = tree_shake || !escaped;

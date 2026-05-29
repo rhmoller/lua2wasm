@@ -48,8 +48,8 @@ references) is **automatic** for *globally closed* programs — those that never
 mention `_G`/`_ENV` and never call `load`/`require`, so the referenced set is
 statically complete (`program_needs_runtime`'s sibling: the `escaped` flag in
 `compute_live_set`). String method/field access keeps the `string` library
-(string metatable `__index`). `--tree-shake` *forces* it even when not closed
-(can break dynamic `_G` lookups of un-named builtins). The whole-program skip of
+(string metatable `__index`). `--force-tree-shake` *forces* it even when not
+closed (can break dynamic `_G` lookups of un-named builtins). The whole-program skip of
 `$stdlib_init` (when the program observes no runtime state) is the degenerate
 case. The DCE pass lives in `wat2wasm` (assembler), so the `wat2wasm` CLI takes
 `--dce` to opt in.
