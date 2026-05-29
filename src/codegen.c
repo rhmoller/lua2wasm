@@ -566,16 +566,6 @@ static void emit_global_const_str(CG *c, const char *glob, const char *s, size_t
     wat_append(c->w, ")))\n");
 }
 
-/* `(global.set <glob> "<s>")` — set a wasm global to an interned string. */
-static void emit_global_set_str(CG *c, const char *glob, const char *s, size_t len) {
-    StrRef sr = strpool_add(&c->strs, s, len);
-    wat_appendf(c->w,
-                "    (global.set %s\n"
-                "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
-                "        (i32.const %zu) (i32.const %zu))))\n",
-                glob, sr.offset, sr.len);
-}
-
 /* `(call <c->tab_set_fn> <target> "<key>" <value>)` where <target> and <value>
  * are complete WAT expressions. The general form behind every stdlib_init table
  * install whose value isn't itself a plain string. */
@@ -4761,30 +4751,22 @@ int codegen_module(const ParseResult *pr, const char *src_name,
     };
     for (size_t k = 0; k < sizeof(MKEYS) / sizeof(MKEYS[0]); k++)
         emit_global_const_str(&c, MKEYS[k].name, MKEYS[k].key, strlen(MKEYS[k].key));
+    /* The empty string and the source name (used by error()/traceback) are also
+     * constants — const-init them so DCE can drop them when unreferenced. */
+    emit_global_const_str(&c, "$g_empty_str", "", 0);
+    emit_global_const_str(&c, "$g_src_name", src_name ? src_name : "", src_name ? strlen(src_name) : 0);
 
     /* $stdlib_init: builds math/string tables from the library builtins
      * and assigns them to the corresponding $g_user_N slots. */
     wat_append(out, "\n  (func $stdlib_init"
                     " (local $tab (ref $LuaTable))"
                     " (local $h (ref $LuaTable))\n");
-    /* "\t" used by print when joining args. */
-    emit_global_set_str(&c, "$g_tab_str", "\t", 1);
     wat_appendf(out,
-                "    (global.set $g_empty_str\n"
-                "      (struct.new $LuaString (array.new $LuaArr (i32.const 0) (i32.const 0))))\n"
                 "    (global.set $fmt_buf\n"
                 "      (array.new $LuaArr (i32.const 0) (i32.const %d)))\n"
                 "    (global.set $call_lines\n"
                 "      (array.new $LineArr (i32.const 0) (i32.const 256)))\n",
                 LUA_FMT_BUF_CAP);
-    /* Source name used by error() and debug.traceback. */
-    if (src_name) {
-        emit_global_set_str(&c, "$g_src_name", src_name, strlen(src_name));
-    } else {
-        wat_append(out,
-                   "    (global.set $g_src_name\n"
-                   "      (struct.new $LuaString (array.new $LuaArr (i32.const 0) (i32.const 0))))\n");
-    }
     /* Create the global-environment table $g_globals. Every Lua global
      * (user-declared, library, builtin) is installed as an entry below;
      * codegen emits $tab_get / $tab_set against this table for every

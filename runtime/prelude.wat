@@ -196,8 +196,8 @@
   ;; keys fall into the hash part, so a pathological sequence can't grow a single
   ;; array past the engine's array-size limit (an uncatchable trap).
   (global $arr_max i32 (i32.const 16777216))
-  ;; Lua-style source name ("main" for main.lua). Set in $stdlib_init.
-  (global $g_src_name (mut (ref null $LuaString)) (ref.null $LuaString))
+  ;; Lua-style source name ("main" for main.lua). Immutable const-init global
+  ;; emitted by codegen (its bytes are the compile-time chunk name).
 
   ;; xoshiro256** state. Initial seed is fixed; user can call
   ;; math.randomseed(x [, y]) to override. Non-zero by construction.
@@ -1525,8 +1525,8 @@
   ;; and stdin handles in $stdlib_init; io.output(f) / io.input(f) reassign them.
   (global $g_io_output (mut (ref null $LuaTable)) (ref.null $LuaTable))
   (global $g_io_input  (mut (ref null $LuaTable)) (ref.null $LuaTable))
-  (global $g_tab_str    (mut (ref null $LuaString)) (ref.null $LuaString))
-  (global $g_empty_str  (mut (ref null $LuaString)) (ref.null $LuaString))
+  ;; $g_empty_str is an immutable const-init global emitted by codegen
+  ;; (emit_global_const_str), like the $g_mkey_* keys.
   ;; Shared metatable for all strings: {__index = string}. Built lazily by
   ;; $get_string_mt the first time getmetatable() sees a string.
   (global $g_string_mt  (mut (ref null $LuaTable)) (ref.null $LuaTable))
