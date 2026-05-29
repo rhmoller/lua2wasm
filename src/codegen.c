@@ -283,6 +283,10 @@ typedef struct {
     /* goto/label state */
     int next_label_id;       /* fresh per function body */
     LabelScope *label_scope; /* innermost first */
+    /* When set, the program observes no runtime state ($stdlib_init builds
+     * nothing it can reach), so $main omits the `(call $stdlib_init)` and DCE
+     * cascade-drops the runtime. See program_needs_runtime. */
+    int skip_runtime_init;
     char err[256];
     int ok;
 } CG;
@@ -4409,6 +4413,100 @@ static int program_writes_table(const ParseResult *pr) {
     return 0;
 }
 
+/* needs_runtime — does the program touch anything $stdlib_init sets up (the
+ * library tables, builtin closures, _G, the metamethod-key globals, the
+ * source-name global)? If not, $main can skip the init call and DCE removes the
+ * runtime wholesale.
+ *
+ * The stdlib-built globals are written *only* by $stdlib_init, so skipping is
+ * sound exactly when no code reachable from $main reads one. We over-approximate
+ * that conservatively from the AST: a construct counts as needing the runtime if
+ * it could, in *any* lowering, reach a builtin or a `global.get` of a stdlib
+ * global. That means globals/builtins (read or written via _G), calls and method
+ * calls (callee dispatch / __call), indexing (__index / __newindex), every
+ * binary and unary operator (the boxed helpers consult metamethod-key globals),
+ * table constructors, and both for-loop forms (the generic-for iterator
+ * protocol; the numeric-for bad-bound error path reads $g_src_name). What's left
+ * — literals, local/upvalue reads and writes, and control flow over them — is
+ * the safe set. Nested function bodies are visited via pr->funcs, matching
+ * program_writes_table; EXPR_FUNCTION/STMT_LOCAL_FUNC therefore don't recurse
+ * here. Conservative, so it can only keep the call that an exact reachability
+ * analysis would drop, never drop one it would keep. */
+static int expr_needs_runtime(const Expr *e) {
+    if (!e) return 0;
+    switch (e->kind) {
+    case EXPR_NIL:
+    case EXPR_TRUE:
+    case EXPR_FALSE:
+    case EXPR_INT:
+    case EXPR_FLOAT:
+    case EXPR_STRING:
+    case EXPR_VARARG:
+        return 0;
+    case EXPR_VAR:
+        return e->as.var.kind == VAR_GLOBAL || e->as.var.kind == VAR_BUILTIN;
+    case EXPR_FUNCTION:
+        return 0; /* body visited via pr->funcs */
+    default:
+        return 1; /* CALL, METHOD_CALL, INDEX, BINOP, UNOP, TABLE */
+    }
+}
+static int exprs_need_runtime(Expr **es, size_t n) {
+    for (size_t i = 0; i < n; i++)
+        if (expr_needs_runtime(es[i])) return 1;
+    return 0;
+}
+static int block_needs_runtime(const Block *b);
+static int stmt_needs_runtime(const Stmt *s) {
+    if (!s) return 0;
+    switch (s->kind) {
+    case STMT_LOCAL:
+        return exprs_need_runtime(s->as.local.values, (size_t)s->as.local.n_values);
+    case STMT_ASSIGN:
+        for (int i = 0; i < s->as.assign.n_targets; i++) {
+            const AssignTarget *t = &s->as.assign.targets[i];
+            if (t->kind == TGT_INDEX) return 1; /* t[k] = v -> __newindex */
+            if (t->kind == TGT_VAR &&
+                (t->as.var.kind == VAR_GLOBAL || t->as.var.kind == VAR_BUILTIN))
+                return 1; /* global write goes through _G */
+        }
+        return exprs_need_runtime(s->as.assign.values, (size_t)s->as.assign.n_values);
+    case STMT_GLOBAL: return 1; /* declares / writes a module global via _G */
+    case STMT_EXPR: return expr_needs_runtime(s->as.expr_stmt.expr);
+    case STMT_RETURN:
+        return exprs_need_runtime(s->as.return_stmt.values, (size_t)s->as.return_stmt.n_values);
+    case STMT_IF:
+        for (size_t i = 0; i < s->as.if_stmt.narms; i++)
+            if (expr_needs_runtime(s->as.if_stmt.arms[i].cond) ||
+                block_needs_runtime(&s->as.if_stmt.arms[i].body))
+                return 1;
+        return s->as.if_stmt.has_else && block_needs_runtime(&s->as.if_stmt.else_body);
+    case STMT_WHILE:
+        return expr_needs_runtime(s->as.while_stmt.cond) ||
+               block_needs_runtime(&s->as.while_stmt.body);
+    case STMT_DO: return block_needs_runtime(&s->as.do_stmt.body);
+    case STMT_REPEAT:
+        return block_needs_runtime(&s->as.repeat.body) ||
+               expr_needs_runtime(s->as.repeat.cond);
+    case STMT_FOR_NUM:
+    case STMT_FOR_GEN:
+        return 1; /* iterator protocol / bad-bound error path touch the runtime */
+    default:
+        return 0; /* LOCAL_FUNC body via pr->funcs; BREAK/GOTO/LABEL touch nothing */
+    }
+}
+static int block_needs_runtime(const Block *b) {
+    for (size_t i = 0; i < b->count; i++)
+        if (stmt_needs_runtime(b->items[i])) return 1;
+    return 0;
+}
+static int program_needs_runtime(const ParseResult *pr) {
+    if (block_needs_runtime(&pr->main_body)) return 1;
+    for (size_t i = 0; i < pr->funcs.count; i++)
+        if (block_needs_runtime(&pr->funcs.items[i]->body)) return 1;
+    return 0;
+}
+
 /* Emit `$main`, the top-level chunk: locals (boxed/unboxed per escape
  * analysis), goto dispatch-id locals, the $stdlib_init call, eager boxing
  * of captured slots, then the body. */
@@ -4475,7 +4573,7 @@ static void emit_main_chunk(CG *c) {
             wat_appendf(out, "    (local $next_%d i32)\n", bids[i]);
         }
     }
-    wat_append(out, "    (call $stdlib_init)\n");
+    if (!c->skip_runtime_init) wat_append(out, "    (call $stdlib_init)\n");
     /* Eager-init captured locals — see emit_user_function for the
      * rationale; main has no params, so every captured slot needs it. */
     for (int i = 0; i < pr->main_n_locals; i++) {
@@ -4533,6 +4631,9 @@ int codegen_module(const ParseResult *pr, const char *src_name,
      * boxed fallback. Behaviour is identical either way — only code shape and
      * speed differ — so goldens are shared across levels. */
     c.opt_int = opt >= 1;
+    /* Skip the eager $stdlib_init call when the program can't observe any of
+     * the state it builds; DCE then drops the runtime. Independent of opt. */
+    c.skip_runtime_init = !program_needs_runtime(pr);
     /* Whole-program pre-passes (opt_int): resolve direct-call targets (incl.
      * self-recursive/captured local functions), then infer per-function
      * param/return numeric types used to unbox the typed direct-call entries. */
