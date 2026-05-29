@@ -292,11 +292,6 @@
   </select>
   <button id="run" disabled>Run ▶</button>
   <button id="showwat">Show WAT</button>
-  <label style="margin-left:.5em;font-size:.85em;color:#888;cursor:pointer"
-         title="Drop builtin closures the program doesn't reference. Smaller .wasm; breaks _G introspection for un-named names.">
-    <input type="checkbox" id="treeshake" style="vertical-align:middle">
-    tree-shake
-  </label>
   <span id="status" style="color:#888"></span>
   <button id="theme-toggle" style="margin-left:auto"
           title="Toggle Catppuccin Mocha (dark) / Latte (light)">
@@ -942,15 +937,13 @@ function logLine(s, cls) {
 status.textContent = "loading compiler…";
 const Mod = await createLua2WasmModule({});
 const compileFn   = Mod.cwrap("lua2wasm_compile",    "number", ["string"]);
-const compileExFn = Mod.cwrap("lua2wasm_compile_ex", "number", ["string", "number"]);
 const assembleFn  = Mod.cwrap("lua2wasm_assemble",   "number", ["string", "number", "number", "number"]);
 const deadNamesFn = Mod.cwrap("lua2wasm_dce_dead_names", "number", ["string"]);
 const freeFn      = Mod.cwrap("lua2wasm_free",       null,     ["number"]);
-const treeShakeCB = document.getElementById("treeshake");
+/* Tree-shaking is automatic for programs that don't touch _G/_ENV/load/require,
+ * so a plain compile already prunes everything it safely can. */
 function luaToWat(source) {
-  const ptr = treeShakeCB && treeShakeCB.checked
-    ? compileExFn(source, 1)
-    : compileFn(source);
+  const ptr = compileFn(source);
   const text = Mod.UTF8ToString(ptr);
   freeFn(ptr);
   return text;
