@@ -27,3 +27,17 @@ end
 function boom()
     error("kaboom")
 end
+
+-- takes a table from the host (array part), returns its sum
+function sum_table(t)
+    local s = 0
+    for _, v in ipairs(t) do
+        s = s + v
+    end
+    return s
+end
+
+-- returns a table to the host
+function make_point(x, y)
+    return { x = x, y = y, label = "p" }
+end

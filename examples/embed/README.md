@@ -76,10 +76,17 @@ It's enabled by compiling with **`--embed-api`** (here `engine_build` passes
 | Export | Use |
 |--------|-----|
 | `lua_str_new(n)` / `lua_str_setb(s,i,b)` | build a Lua string (a name or a string arg) |
+| `lua_make_int` / `lua_make_float` | build a Lua number |
 | `lua_get_global(name)` | fetch a global (your function) by name |
 | `lua_args_new(n)` / `lua_args_set(a,i,v)` | build an argument list |
 | `lua_call(fn, args)` | invoke; returns a results array (Lua errors throw the `LuaError` tag) |
+| `lua_pcall(fn, args)` | protected invoke; returns `[ok, ...results-or-error]` — no host-side try/catch needed |
 | `lua_args_len(r)` / `lua_args_get(r,i)` | read the results (handles multiple returns) |
+| `lua_table_new()` / `lua_table_get/set(t,k[,v])` / `lua_table_len(t)` | build/read/write Lua tables |
+
+`lua_call`/`lua_pcall` accept any callable and set up the call frame `error()`
+needs; `lua_pcall` also restores call depth on a caught error, so it's safe to
+keep calling after a script throws.
 
 `broker.mjs` wraps these as `callLua(S, name, ...args)`. Because the ABI can
 reach any global and call anything, `--embed-api` keeps the whole stdlib live

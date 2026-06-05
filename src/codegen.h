@@ -18,8 +18,9 @@
  *
  * embed_api: when nonzero, emit the host-call ABI — a block of exported thunks
  * (lua_str_new/lua_str_setb, lua_get_global, lua_args_new/set/get/len,
- * lua_call) that let an embedder build Lua values, look up globals by name, and
- * invoke Lua functions from outside the module. Because that ABI can reach any
+ * lua_call, lua_pcall, lua_table_new/get/set/len) that let an embedder build
+ * Lua values and tables, look up globals by name, and invoke Lua functions
+ * (raw or protected) from outside the module. Because that ABI can reach any
  * global and call anything, it forces the whole stdlib live and keeps
  * $g_globals populated (i.e. it disables tree-shaking and the skip-runtime-init
  * optimization for this module). Off by default; opt-in via the CLI's

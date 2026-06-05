@@ -4622,14 +4622,18 @@ static void emit_data_segment(CG *c) {
 }
 
 /* The host-call ABI (codegen_module's embed_api): a small block of exported
- * thunks over the prelude's $lua_call / $tab_get and the value constructors, so
- * an embedder can build Lua values, look up globals by name, and invoke Lua
- * functions from outside the module. $LuaString has no cached hash (just
- * $bytes), so lua_str_new + per-byte lua_str_setb writes are safe; lua_call
- * requires its target be an actual Lua function (a $LuaClosure) and propagates
- * Lua errors via the exported $LuaError tag, like $main. Emitted only on
- * request — it forces the whole stdlib live (see codegen_module), which would
- * otherwise defeat tree-shaking. See examples/embed and tests/test_embed_api. */
+ * thunks over the prelude's $lua_call / $tab_* and the value constructors, so
+ * an embedder can build Lua values and tables, look up globals by name, and
+ * invoke Lua functions from outside the module. $LuaString has no cached hash
+ * (just $bytes), so lua_str_new + per-byte lua_str_setb writes are safe.
+ * lua_call / lua_pcall go through $lua_call_any, so they accept any callable
+ * (closure or a __call table) and set up the call frame error() reads; a
+ * non-callable raises a normal Lua error. lua_call propagates Lua errors via
+ * the exported $LuaError tag (like $main); lua_pcall catches them and returns
+ * the Lua pcall convention [ok, ...]. Emitted only on request — it forces the
+ * whole stdlib live (see codegen_module), which would otherwise defeat
+ * live (see codegen_module), which would otherwise defeat tree-shaking. See
+ * examples/embed and tests/test_embed_api. */
 static void emit_embed_api(CG *c) {
     wat_append(
         c->w,
@@ -4652,8 +4656,40 @@ static void emit_embed_api(CG *c) {
         "  (func (export \"lua_args_len\") (param $a anyref) (result i32)\n"
         "    (array.len (ref.cast (ref $ArgArr) (local.get $a))))\n"
         "  (func (export \"lua_call\") (param $fn anyref) (param $args anyref) (result anyref)\n"
-        "    (call $lua_call (ref.cast (ref $LuaClosure) (local.get $fn))\n"
-        "                    (ref.cast (ref $ArgArr) (local.get $args))))\n");
+        "    (call $lua_call_any (local.get $fn)\n"
+        "                        (ref.cast (ref $ArgArr) (local.get $args)) (i32.const 0)))\n"
+        /* Protected call: returns an ArgArr [ok_bool, ...results-or-error], the
+         * Lua pcall convention, so the host never has to catch a wasm
+         * exception. Restores $call_depth on a caught error (the throw leaves
+         * the callee's frames un-popped) so later calls aren't corrupted. */
+        "  (func (export \"lua_pcall\") (param $fn anyref) (param $args anyref) (result anyref)\n"
+        "    (local $results (ref $ArgArr)) (local $r2 (ref $ArgArr))\n"
+        "    (local $err anyref) (local $depth i32)\n"
+        "    (local.set $depth (global.get $call_depth))\n"
+        "    (block $caught (result anyref)\n"
+        "      (local.set $results\n"
+        "        (try_table (result (ref $ArgArr)) (catch $LuaError $caught)\n"
+        "          (call $lua_call_any (local.get $fn)\n"
+        "                              (ref.cast (ref $ArgArr) (local.get $args)) (i32.const 0))))\n"
+        "      (local.set $r2 (array.new $ArgArr (ref.null any)\n"
+        "        (i32.add (array.len (local.get $results)) (i32.const 1))))\n"
+        "      (array.set $ArgArr (local.get $r2) (i32.const 0) (global.get $g_true))\n"
+        "      (array.copy $ArgArr $ArgArr (local.get $r2) (i32.const 1)\n"
+        "        (local.get $results) (i32.const 0) (array.len (local.get $results)))\n"
+        "      (return (local.get $r2)))\n"
+        "    (local.set $err)\n"
+        "    (global.set $call_depth (local.get $depth))\n"
+        "    (array.new_fixed $ArgArr 2 (global.get $g_false)\n"
+        "      (call $err_or_noobj (local.get $err))))\n"
+        /* Table marshaling: build/read/write Lua tables across the boundary.
+         * Keys are ordinary Lua values (lua_make_int / lua_str_new). */
+        "  (func (export \"lua_table_new\") (result anyref) (call $tab_new))\n"
+        "  (func (export \"lua_table_get\") (param $t anyref) (param $k anyref) (result anyref)\n"
+        "    (call $tab_get (ref.cast (ref $LuaTable) (local.get $t)) (local.get $k)))\n"
+        "  (func (export \"lua_table_set\") (param $t anyref) (param $k anyref) (param $v anyref)\n"
+        "    (call $tab_set (ref.cast (ref $LuaTable) (local.get $t)) (local.get $k) (local.get $v)))\n"
+        "  (func (export \"lua_table_len\") (param $t anyref) (result i64)\n"
+        "    (call $as_int (call $lua_len (local.get $t))))\n");
 }
 
 int codegen_module(const ParseResult *pr, const char *src_name,
