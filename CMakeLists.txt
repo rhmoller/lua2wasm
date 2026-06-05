@@ -24,8 +24,8 @@ set(COMPILER_SOURCES
 add_library(lua2wasm_core STATIC ${COMPILER_SOURCES})
 target_include_directories(lua2wasm_core PUBLIC src)
 # `#embed "prelude.wat"` in codegen.c — clang's #embed search uses its own
-# --embed-dir= flag, not -I. Point it at runtime/ so both native and
-# emscripten builds find it.
+# --embed-dir= flag, not -I. Point it at runtime/ so both the native build and
+# the freestanding wasm build (scripts/build-wasm.sh) find it.
 target_compile_options(lua2wasm_core PRIVATE --embed-dir=${CMAKE_SOURCE_DIR}/runtime)
 # Re-link when the embedded prelude changes.
 set_source_files_properties(src/codegen.c PROPERTIES
@@ -64,6 +64,26 @@ endfunction()
 add_unit_test(test_lexer   tests/test_lexer.c)
 add_unit_test(test_parser  tests/test_parser.c)
 add_unit_test(test_codegen tests/test_codegen.c)
+
+# Differential test for the freestanding baselib's number<->string routines
+# (src/freestanding/fmt.c + the vendored dtoa.c). These are the same sources
+# the wasm build uses; here they are compiled natively under symbol aliases so
+# they don't collide with the host libc, and diffed against glibc over a large
+# corpus (see tests/freestanding_fmt_test.c). Catches float-format / strtod
+# rounding drift that would corrupt WAT goldens, without needing a wasm runtime.
+add_executable(test_freestanding_fmt
+    tests/freestanding_fmt_test.c
+    src/freestanding/fmt.c
+    src/freestanding/dtoa_glue.c)
+# fmt.c includes "host.h" (alongside it) but "stdio.h"/"string.h" must resolve
+# to the *system* headers in this native build, so deliberately do NOT add
+# src/freestanding/include to the include path here.
+set_source_files_properties(src/freestanding/fmt.c PROPERTIES
+    COMPILE_OPTIONS "-w;-DL2W_NATIVE_TEST")
+set_source_files_properties(src/freestanding/dtoa_glue.c PROPERTIES
+    COMPILE_OPTIONS "-w;-Dstrtod=dg_strtod")
+target_link_libraries(test_freestanding_fmt PRIVATE m) # test corpus uses pow()
+add_test(NAME test_freestanding_fmt COMMAND test_freestanding_fmt)
 
 # --- End-to-end test ----------------------------------------------------
 add_test(
@@ -254,6 +274,18 @@ add_test(
     NAME test_playground_presets_in_sync
     COMMAND node ${CMAKE_SOURCE_DIR}/scripts/bundle-presets.mjs --check
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+)
+
+# Freestanding (plain-clang, no-Emscripten) wasm build: assert its output is
+# byte-identical to the native compiler across the e2e fixtures. Builds
+# build-wasm/lua2wasm.wasm via scripts/build-wasm.sh, then diffs WAT + assembled
+# wasm for every manifest fixture. Skips itself if wasm-ld is unavailable.
+add_test(
+    NAME test_freestanding
+    COMMAND bash ${CMAKE_SOURCE_DIR}/tests/test_freestanding.sh
+            $<TARGET_FILE:lua2wasm>
+            ${CMAKE_SOURCE_DIR}
+            ${CMAKE_BINARY_DIR}
 )
 
 # Differential check vs reference Lua 5.5 (golden files in tests/diff/expected,

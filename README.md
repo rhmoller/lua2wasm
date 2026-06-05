@@ -254,7 +254,7 @@ Requirements (required vs optional):
 | `cmake`    | ≥ 3.25   | building the native compiler binary                                                                                                  |
 | `node`     | ≥ 22     | running compiled `.wasm` modules from the command line (Browser hosts work equivalently, no Node needed there)                       |
 | `binaryen` | recent   | **optional** — `wasm-as` is used only as a differential oracle by the `wat2wasm` unit tests; the compiler ships its own WAT→wasm assembler |
-| `emcc`     | ≥ 4.0    | **optional** — only for cross-compiling the compiler itself to WASM so the playground page can call it. Skip if you don't need the playground. |
+| `wasm-ld`  | ≥ 19     | **optional** — only for the playground / embeddable build (`scripts/build-wasm.sh` cross-compiles the compiler to freestanding wasm with plain clang). Ships with LLVM/clang. Skip if you don't need it. |
 
 ## Using the CLI
 
@@ -321,22 +321,25 @@ files.
 ### Building the playground (optional)
 
 The [live playground](https://rhmoller.github.io/lua2wasm/) above is prebuilt,
-but you can build it yourself if you have [Emscripten](https://emscripten.org/).
-It cross-compiles **the compiler itself** to WASM so the page compiles Lua
-entirely client-side: a CodeMirror editor on one side, output on the other,
-with **Run** to execute and **Show WAT** to inspect the generated WebAssembly
-(foldable prelude / stdlib / user code / data sections). Catppuccin theming
-with a sun/moon toggle between Mocha (dark) and Latte (light).
+but you can build it yourself with **plain clang + wasm-ld** — no Emscripten.
+`scripts/build-wasm.sh` cross-compiles **the compiler itself** to a freestanding
+wasm module (its own linear memory, its own minimal libc from `src/freestanding/`)
+so the page compiles Lua entirely client-side: a CodeMirror editor on one side,
+output on the other, with **Run** to execute and **Show WAT** to inspect the
+generated WebAssembly (foldable prelude / stdlib / user code / data sections).
+Catppuccin theming with a sun/moon toggle between Mocha (dark) and Latte (light).
 
 ```sh
-. ~/path/to/emsdk/emsdk_env.sh
-./scripts/build-wasm.sh                  # produces build-em/lua2wasm.{js,wasm}
+./scripts/build-wasm.sh                  # produces build-wasm/lua2wasm.wasm
 python3 -m http.server 8000
 # open http://localhost:8000/runtime/playground.html
 ```
 
-Emscripten is needed *only* for this page — every other path in this README
-works without it.
+The compiled module imports only `env.abort` / `env.log` and exports
+`lua2wasm_compile` / `_assemble` / `_dce_dead_names` / `_free` plus `malloc` /
+`free` / `memory`; `runtime/lua2wasm-wasm.mjs` is the host glue that drives it.
+Nothing in this repo needs Emscripten — the same freestanding module also
+embeds into a C host (e.g. a game engine) that runs wasm the same way.
 
 ## Architecture (in 30 seconds)
 
@@ -368,8 +371,10 @@ flowchart LR
 | `src/builtins.{c,h}`     | Single source of truth for builtin names → wasm function symbols                                 |
 | `src/wat_builder.{c,h}`  | Dynamic string buffer for WAT emission                                                            |
 | `src/wat2wasm.{c,h}`     | Self-contained WAT→wasm binary assembler (library + standalone `wat2wasm` CLI; no Binaryen)      |
-| `src/emscripten_entry.c` | One-function entry point used when the compiler is itself compiled to WASM for the playground   |
+| `src/wasm_entry.c`       | Export shim used when the compiler is itself compiled to freestanding wasm (playground / embed)  |
+| `src/freestanding/`      | Minimal libc (mem/str/ctype, allocator, vsnprintf, vendored dtoa + Wasm-EH setjmp shim) for that wasm build |
 | `runtime/host.mjs`       | Reference host: instantiates a compiled module and renders `print` output                        |
+| `runtime/lua2wasm-wasm.mjs`| Host glue for the freestanding compiler module (string marshaling over its linear memory)       |
 | `runtime/playground.html`| CodeMirror editor + in-browser compile + built-in wat→wasm + execute                            |
 | `tests/`                 | µnit unit tests + bash end-to-end fixtures + the `wat2wasm` assembler harness (currently 131 in CTest, all green); `scripts/smoke-official-tests.sh` runs the AOT pipeline over every file in [`official-tests/lua-5.5.0-tests/`](https://www.lua.org/tests/) for a compatibility scorecard |
 
@@ -399,3 +404,12 @@ syntax in the parser. *If you can't print it, you didn't build it.*
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+Vendored third-party code lives under `third_party/`, each under its own
+upstream license (kept in that subdirectory and/or its source-file header):
+
+- `third_party/munit/` — µnit test framework (MIT)
+- `third_party/dtoa/` — David Gay / Lucent `dtoa.c`, correctly-rounded
+  `strtod`/`%g` for the freestanding wasm build ([LICENSE](third_party/dtoa/LICENSE))
+- `third_party/wasm-sjlj/` — Emscripten Wasm-EH `setjmp`/`longjmp` support
+  runtime (MIT / UIUC-NCSA, [LICENSE](third_party/wasm-sjlj/LICENSE))

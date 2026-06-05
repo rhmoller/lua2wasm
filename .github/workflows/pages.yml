@@ -29,23 +29,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Cache emsdk
-        id: emsdk-cache
-        uses: actions/cache@v4
-        with:
-          path: emsdk
-          key: emsdk-${{ runner.os }}-latest-v2
-
-      - name: Install emsdk
-        if: steps.emsdk-cache.outputs.cache-hit != 'true'
+      # The playground is built with plain clang + wasm-ld (no Emscripten).
+      # Pin LLVM 19 (clang >= 19 needed for C23 #embed; lld ships wasm-ld).
+      - name: Install LLVM 19 (clang + lld/wasm-ld)
         run: |
-          git clone --depth 1 https://github.com/emscripten-core/emsdk.git
-          ./emsdk/emsdk install latest
-          ./emsdk/emsdk activate latest
+          wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 19
+          sudo apt-get install -y lld-19
+          echo "/usr/lib/llvm-19/bin" >> "$GITHUB_PATH"
 
-      - name: Build compiler-as-wasm
+      - name: Build compiler-as-wasm (freestanding)
         run: |
-          source ./emsdk/emsdk_env.sh
+          clang --version && wasm-ld --version
           ./scripts/build-wasm.sh
 
       - name: Refresh inlined presets from manifest
@@ -58,18 +52,18 @@ jobs:
       - name: Stage Pages bundle
         run: |
           mkdir -p dist
-          cp build-em/lua2wasm.js   dist/lua2wasm.js
-          cp build-em/lua2wasm.wasm dist/lua2wasm.wasm
-          # playground.html imports these via relative path; they must
+          cp build-wasm/lua2wasm.wasm  dist/lua2wasm.wasm
+          # playground.html imports/fetches these via relative path; they must
           # sit alongside index.html in the flat dist.
+          cp runtime/lua2wasm-wasm.mjs dist/lua2wasm-wasm.mjs
           cp runtime/host-bindings.mjs dist/host-bindings.mjs
           cp runtime/format.mjs        dist/format.mjs
-          # Rewrite relative import so dist is flat
-          #   ("../build-em/lua2wasm.js" → "./lua2wasm.js"), and stamp the
+          # Rewrite the relative wasm fetch so the flat dist resolves
+          #   ("../build-wasm/lua2wasm.wasm" → "./lua2wasm.wasm"), and stamp the
           # footer's build-hash placeholder with the deployed commit so the
           # live site shows exactly which revision is running.
           SHA='${{ github.sha }}'; SHORT="${SHA:0:7}"; REPO='${{ github.repository }}'
-          sed -e 's#\.\./build-em/lua2wasm\.js#./lua2wasm.js#' \
+          sed -e 's#\.\./build-wasm/lua2wasm\.wasm#./lua2wasm.wasm#' \
               -e "s#<a id=\"build-hash\"[^>]*><code>dev</code></a>#<a id=\"build-hash\" href=\"https://github.com/${REPO}/commit/${SHA}\" target=\"_blank\" rel=\"noopener\"><code>${SHORT}</code></a>#" \
               runtime/playground.html > dist/index.html
           # Disable Jekyll processing on a static site.

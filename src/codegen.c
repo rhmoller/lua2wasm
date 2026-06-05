@@ -81,12 +81,15 @@ typedef struct {
 } StrRef;
 
 static size_t strpool_hash(const char *bytes, size_t len) {
-    size_t h = 1469598103934665603u; /* FNV-1a 64-bit offset basis */
+    /* Compute the full 64-bit FNV-1a regardless of size_t width (size_t is
+     * 32-bit on the wasm32 build) so the hash is target-independent; it only
+     * drives bucket placement, but keeping it identical avoids surprises. */
+    uint64_t h = 1469598103934665603u; /* FNV-1a 64-bit offset basis */
     for (size_t i = 0; i < len; i++) {
         h ^= (unsigned char)bytes[i];
         h *= 1099511628211u; /* FNV prime */
     }
-    return h;
+    return (size_t)h;
 }
 
 /* Brute-force fallback: find an existing run of exactly these bytes anywhere

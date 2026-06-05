@@ -1,4 +1,5 @@
 build/
+build-wasm/
 build-em/
 # Created when ctest is accidentally run from the repo root.
 Testing/

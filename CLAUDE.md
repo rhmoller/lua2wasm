@@ -41,6 +41,25 @@ node --experimental-wasm-exnref runtime/host.mjs out.wasm
 Multi-file: `-m util.lua` makes `require("util")` work (baked in at compile time).
 Compatibility scorecard over the official Lua suite: `scripts/smoke-official-tests.sh`.
 
+## Freestanding wasm build (the compiler, compiled to wasm)
+
+`scripts/build-wasm.sh` cross-compiles the compiler itself to a freestanding
+`wasm32-unknown-unknown` module with **plain clang + wasm-ld — no Emscripten,
+no wasi-sdk**. It's an ordinary linear-memory wasm (separate concern from the
+"no linear memory" rule, which governs the *Lua programs it emits*). The libc
+it needs is hand-rolled in `src/freestanding/` (mem/str/ctype, an explicit
+free-list allocator, a `vsnprintf` whose `%g` matches glibc, the vendored David
+Gay `dtoa.c` for `strtod`/`%.17g`, and the Wasm-EH `setjmp/longjmp` support
+shim for `wat2wasm.c`). It imports only `env.abort`/`env.log` and exports the
+five `lua2wasm_*` entries (see `src/wasm_entry.c`) plus `malloc`/`free`/`memory`.
+`runtime/lua2wasm-wasm.mjs` is the host glue; the playground and a C engine
+embed it the same way. **Correctness guard:** `test_freestanding` (ctest) builds
+the module and asserts its WAT + assembled-wasm output is byte-identical to the
+native build across every e2e fixture; `test_freestanding_fmt` differentially
+checks the freestanding number formatter/parser against glibc. Anything that
+touches codegen/`wat2wasm`/the number paths must keep both green. Vendored code
+lives in `third_party/` (`dtoa/`, `wasm-sjlj/`) with its upstream license.
+
 `.wasm` output runs dead-code elimination (unreachable functions + globals,
 plus the function-type signatures they leave orphaned) by default — `--no-dce`
 disables it. Tree-shaking (dropping builtins/libraries the program never
@@ -135,9 +154,11 @@ counterexample, **shrink it and check it in as a `tests/diff` case** (the
 | `src/wat_builder.{c,h}` | dynamic WAT string buffer |
 | `src/wat2wasm.{c,h}`| self-contained WAT→wasm binary assembler (lib + `wat2wasm` CLI) |
 | `src/xalloc.{c,h}`  | OOM-aborting malloc/realloc wrappers used across the compiler |
-| `src/emscripten_entry.c` | browser entry point (`EMSCRIPTEN_KEEPALIVE` exports); Emscripten only |
+| `src/wasm_entry.c`  | `export_name` shim for the freestanding wasm build (playground / embed) |
+| `src/freestanding/` | minimal libc for that build: mem/str/ctype, allocator, vsnprintf, vendored dtoa + Wasm-EH setjmp shim |
 | `runtime/host.mjs`  | reference host that runs a compiled module |
-| `runtime/playground.html` | in-browser editor + compile + run (Emscripten only) |
+| `runtime/lua2wasm-wasm.mjs` | host glue for the freestanding compiler module |
+| `runtime/playground.html` | in-browser editor + compile + run (plain-clang wasm, no Emscripten) |
 | `tests/e2e/`        | data-driven e2e suite (manifest + goldens) |
 
 Rolling backlog / punch-list: `notes/codereview.md`. Open a discussion before

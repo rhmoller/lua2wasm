@@ -407,7 +407,7 @@ const luaHighlightStyle = HighlightStyle.define([
   { tag: t.self,                          color: CTP.red, fontStyle: "italic" },
   { tag: t.invalid,                       color: CTP.red, textDecoration: "underline" },
 ]);
-import createLua2WasmModule       from "../build-em/lua2wasm.js";
+import { loadCompiler }           from "./lua2wasm-wasm.mjs";
 import { InMemoryFs }             from "https://esm.sh/just-bash@latest";
 import { MATH_FNS, MATH2_FNS,
          makeHelpers, BufferedFile,
@@ -943,49 +943,32 @@ function logLine(s, cls) {
 }
 
 /* ----- lua2wasm compiler (in-browser) ----- */
+/* The compiler is a freestanding wasm module built with plain clang (no
+ * Emscripten); lua2wasm-wasm.mjs is the host glue. It needs only env.abort /
+ * env.log imports, which the glue supplies. */
 status.textContent = "loading compiler…";
-const Mod = await createLua2WasmModule({});
-const compileFn   = Mod.cwrap("lua2wasm_compile",    "number", ["string"]);
-const assembleFn  = Mod.cwrap("lua2wasm_assemble",   "number", ["string", "number", "number", "number"]);
-const deadNamesFn = Mod.cwrap("lua2wasm_dce_dead_names", "number", ["string"]);
-const freeFn      = Mod.cwrap("lua2wasm_free",       null,     ["number"]);
+const compiler = await loadCompiler(
+  await (await fetch("../build-wasm/lua2wasm.wasm")).arrayBuffer(),
+  (line) => logLine(line, "err"),
+);
 /* Tree-shaking is automatic for programs that don't touch _G/_ENV/load/require,
- * so a plain compile already prunes everything it safely can. */
+ * so a plain compile already prunes everything it safely can. compiler.compile
+ * throws on a lex/parse/codegen error; the rest of the UI expects the
+ * "ERROR(...)" text back, so surface the message (it carries that prefix). */
 function luaToWat(source) {
-  const ptr = compileFn(source);
-  const text = Mod.UTF8ToString(ptr);
-  freeFn(ptr);
-  return text;
+  try { return compiler.compile(source); }
+  catch (e) { return e.message; }
 }
 
 /* The $names of functions/globals DCE proves dead in this WAT, as a Set.
  * Returns an empty Set if the analysis fails (caller just skips dimming). */
 function dceDeadNames(wat) {
-  const ptr = deadNamesFn(wat);
-  if (ptr === 0) return new Set();
-  const text = Mod.UTF8ToString(ptr);
-  freeFn(ptr);
-  return new Set(text.split("\n").filter(Boolean));
+  return new Set(compiler.deadNames(wat) || []);
 }
 
 /* ----- wat -> wasm (built-in assembler, no Binaryen) ----- */
 function watToWasm(wat) {
-  const ERR_CAP = 512;
-  const lenPtr = Mod._malloc(4);
-  const errPtr = Mod._malloc(ERR_CAP);
-  try {
-    const ptr = assembleFn(wat, lenPtr, errPtr, ERR_CAP);
-    if (ptr === 0) throw new Error(Mod.UTF8ToString(errPtr) || "assembly failed");
-    /* Re-read HEAPU8 after the call (memory may have grown). */
-    const h = Mod.HEAPU8;
-    const len = h[lenPtr] | (h[lenPtr + 1] << 8) | (h[lenPtr + 2] << 16) | (h[lenPtr + 3] << 24);
-    const bytes = h.slice(ptr, ptr + len); /* copy out before freeing */
-    freeFn(ptr);
-    return bytes;
-  } finally {
-    Mod._free(lenPtr);
-    Mod._free(errPtr);
-  }
+  return compiler.assemble(wat); /* throws with the assembler message on failure */
 }
 
 /* ----- runtime host ----- */
