@@ -250,6 +250,17 @@ add_test(
     COMMAND node --test ${CMAKE_SOURCE_DIR}/tests/test_host_format.mjs
 )
 
+# --embed-api host-call ABI: compile a fixture with the ABI exported, then call
+# named Lua functions from the host (lua_call / lua_get_global / lua_args_*) and
+# check args, multiple returns, persistent state, and error propagation.
+add_test(
+    NAME test_embed_api
+    COMMAND bash ${CMAKE_SOURCE_DIR}/tests/test_embed_api.sh
+            $<TARGET_FILE:lua2wasm>
+            ${CMAKE_SOURCE_DIR}
+            ${CMAKE_BINARY_DIR}
+)
+
 # wat2wasm assembler: TDD harness. Each case assembles a tiny WAT module with
 # our wat2wasm, instantiates it under Node, and asserts behavior; when wasm-as
 # is on PATH it cross-checks against that reference assembler.

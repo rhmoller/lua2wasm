@@ -24,8 +24,10 @@
 #include <stdio.h>  /* snprintf  (freestanding fmt.c) */
 #include <string.h> /* strlen    (freestanding baselib.c) */
 
-/* The embedded compiler (src/wasm_entry.c, linked in). */
-extern char *lua2wasm_compile_ex(const char *src, int tree_shake);
+/* The embedded compiler (src/wasm_entry.c, linked in). embed_api = 1 exports
+ * the host-call ABI (lua_call / lua_get_global / ...) so the engine can invoke
+ * named Lua functions in the compiled script — see demo 3. */
+extern char *lua2wasm_compile_ex(const char *src, int tree_shake, int embed_api);
 extern uint8_t *lua2wasm_assemble(const char *wat, int *out_len, char *err, int errcap);
 extern void lua2wasm_free(void *p);
 
@@ -43,7 +45,7 @@ static long long g_total; /* running sum of the numbers scripts have emitted */
  * and instantiates them. Free the buffer with lua2wasm_free. */
 EXPORT("engine_build")
 uint8_t *engine_build(const char *src, int *out_len) {
-    char *wat = lua2wasm_compile_ex(src, 0);
+    char *wat = lua2wasm_compile_ex(src, 0, 1 /* embed_api: export the host-call ABI */);
     if (!wat) {
         if (out_len) *out_len = 0;
         return NULL;

@@ -89,3 +89,32 @@ export function luaToString(S, v) {
 // Build a Lua number to hand back into a script (e.g. as a host.read_num result).
 export const luaInt = (S, n) => S.lua_make_int(BigInt(n));
 export const luaFloat = (S, x) => S.lua_make_float(x);
+
+// --- host-call ABI (modules compiled with --embed-api) --------------------
+// Build a Lua string the host can pass as an argument or global name.
+export function luaStr(S, s) {
+  const b = enc.encode(s);
+  const v = S.lua_str_new(b.length);
+  for (let i = 0; i < b.length; i++) S.lua_str_setb(v, i, b[i]);
+  return v;
+}
+const toLuaArg = (S, x) =>
+  typeof x === "string" ? luaStr(S, x)
+  : Number.isInteger(x) ? S.lua_make_int(BigInt(x))
+  : S.lua_make_float(x);
+
+// Call a named global Lua function with JS args; returns the results as JS
+// values (numbers/strings). Lua errors surface as a thrown WebAssembly.Exception
+// carrying the module's LuaError tag.
+export function callLua(S, name, ...args) {
+  const fn = S.lua_get_global(luaStr(S, name));
+  const a = S.lua_args_new(args.length);
+  args.forEach((x, i) => S.lua_args_set(a, i, toLuaArg(S, x)));
+  const res = S.lua_call(fn, a);
+  const out = [];
+  for (let i = 0; i < S.lua_args_len(res); i++) {
+    const v = S.lua_args_get(res, i);
+    out.push(S.lua_tag(v) === 4 ? luaToString(S, v) : luaToNumber(S, v));
+  }
+  return out;
+}

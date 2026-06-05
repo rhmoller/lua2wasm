@@ -33,14 +33,14 @@ static char *make_err(const char *prefix, const char *msg) {
 }
 
 WASM_EXPORT("lua2wasm_compile_ex")
-char *lua2wasm_compile_ex(const char *source, int tree_shake);
+char *lua2wasm_compile_ex(const char *source, int tree_shake, int embed_api);
 
 /* Browser compile entry. Called once per keystroke from the playground, so
  * every allocation path must be either freed before return or handed to the
  * caller (the returned WAT string). Single-exit via goto keeps the cleanup
  * obviously paired with the setup, regardless of which stage failed. */
 WASM_EXPORT("lua2wasm_compile")
-char *lua2wasm_compile(const char *source) { return lua2wasm_compile_ex(source, 0); }
+char *lua2wasm_compile(const char *source) { return lua2wasm_compile_ex(source, 0, 0); }
 
 /* As above, with explicit options:
  *   tree_shake — when nonzero, *force* pruning of un-named builtin closures +
@@ -48,9 +48,12 @@ char *lua2wasm_compile(const char *source) { return lua2wasm_compile_ex(source, 
  *   --force-tree-shake). Codegen already tree-shakes closed programs
  *   automatically, so lua2wasm_compile (tree_shake = 0) is the right default;
  *   this entry exists for callers that want the unsafe force (it can make
- *   `_G.foo` lookups of un-named builtins return nil). */
+ *   `_G.foo` lookups of un-named builtins return nil).
+ *   embed_api — when nonzero, also export the host-call ABI (lua_call/
+ *   lua_get_global/...) so an embedder can invoke Lua functions in the produced
+ *   module from outside (forces the whole stdlib live; see codegen.h). */
 WASM_EXPORT("lua2wasm_compile_ex")
-char *lua2wasm_compile_ex(const char *source, int tree_shake) {
+char *lua2wasm_compile_ex(const char *source, int tree_shake, int embed_api) {
     char *result = NULL;
     int have_pool = 0, have_parse = 0, have_wat = 0;
     NodePool pool;
@@ -78,7 +81,7 @@ char *lua2wasm_compile_ex(const char *source, int tree_shake) {
     /* Playground compiles the inline buffer with no filename; use "input".
      * Tree-shake is opt-in via the UI toggle (passed in tree_shake).
      * Numeric/call specialization is always on (opt=1, the CLI default). */
-    if (!codegen_module(&pr, "input", tree_shake, 1, &w, errbuf, sizeof(errbuf))) {
+    if (!codegen_module(&pr, "input", tree_shake, 1, embed_api, &w, errbuf, sizeof(errbuf))) {
         result = make_err("ERROR(codegen): ", errbuf);
         goto cleanup;
     }

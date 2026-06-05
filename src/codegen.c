@@ -4621,8 +4621,43 @@ static void emit_data_segment(CG *c) {
     wat_append(out, "\")\n");
 }
 
+/* The host-call ABI (codegen_module's embed_api): a small block of exported
+ * thunks over the prelude's $lua_call / $tab_get and the value constructors, so
+ * an embedder can build Lua values, look up globals by name, and invoke Lua
+ * functions from outside the module. $LuaString has no cached hash (just
+ * $bytes), so lua_str_new + per-byte lua_str_setb writes are safe; lua_call
+ * requires its target be an actual Lua function (a $LuaClosure) and propagates
+ * Lua errors via the exported $LuaError tag, like $main. Emitted only on
+ * request — it forces the whole stdlib live (see codegen_module), which would
+ * otherwise defeat tree-shaking. See examples/embed and tests/test_embed_api. */
+static void emit_embed_api(CG *c) {
+    wat_append(
+        c->w,
+        "\n  ;; @@SECTION:embed-api@@\n"
+        "  (func (export \"lua_str_new\") (param $n i32) (result anyref)\n"
+        "    (struct.new $LuaString (array.new $LuaArr (i32.const 0) (local.get $n))))\n"
+        "  (func (export \"lua_str_setb\") (param $s anyref) (param $i i32) (param $b i32)\n"
+        "    (array.set $LuaArr\n"
+        "      (struct.get $LuaString $bytes (ref.cast (ref $LuaString) (local.get $s)))\n"
+        "      (local.get $i) (local.get $b)))\n"
+        "  (func (export \"lua_get_global\") (param $name anyref) (result anyref)\n"
+        "    (call $tab_get (ref.as_non_null (global.get $g_globals)) (local.get $name)))\n"
+        "  (func (export \"lua_args_new\") (param $n i32) (result anyref)\n"
+        "    (array.new $ArgArr (ref.null any) (local.get $n)))\n"
+        "  (func (export \"lua_args_set\") (param $a anyref) (param $i i32) (param $v anyref)\n"
+        "    (array.set $ArgArr (ref.cast (ref $ArgArr) (local.get $a)) (local.get $i)\n"
+        "      (local.get $v)))\n"
+        "  (func (export \"lua_args_get\") (param $a anyref) (param $i i32) (result anyref)\n"
+        "    (array.get $ArgArr (ref.cast (ref $ArgArr) (local.get $a)) (local.get $i)))\n"
+        "  (func (export \"lua_args_len\") (param $a anyref) (result i32)\n"
+        "    (array.len (ref.cast (ref $ArgArr) (local.get $a))))\n"
+        "  (func (export \"lua_call\") (param $fn anyref) (param $args anyref) (result anyref)\n"
+        "    (call $lua_call (ref.cast (ref $LuaClosure) (local.get $fn))\n"
+        "                    (ref.cast (ref $ArgArr) (local.get $args))))\n");
+}
+
 int codegen_module(const ParseResult *pr, const char *src_name,
-                   int tree_shake, int opt, WatBuilder *out,
+                   int tree_shake, int opt, int embed_api, WatBuilder *out,
                    char *err, size_t errlen) {
     const char *slab_err = verify_literal_slab();
     if (slab_err) {
@@ -4676,6 +4711,15 @@ int codegen_module(const ParseResult *pr, const char *src_name,
      * the eager $stdlib_init call (independent of opt; DCE then drops it). */
     int escaped = 0, needs_runtime = 0;
     compute_live_set(pr, nb, live, gref, &escaped, &needs_runtime);
+    if (embed_api) {
+        /* The host-call ABI reaches any global by name and invokes arbitrary
+         * Lua functions, so the whole stdlib must stay live and $g_globals must
+         * be populated. Force the program "open" (no tree-shake) and keep the
+         * eager runtime init, regardless of what the chunk itself references. */
+        escaped = 1;
+        needs_runtime = 1;
+        tree_shake = 0;
+    }
     c.skip_runtime_init = !needs_runtime;
     int effective_tree_shake = tree_shake || !escaped;
     if (!effective_tree_shake) {
@@ -4827,6 +4871,8 @@ int codegen_module(const ParseResult *pr, const char *src_name,
     }
 
     if (c.ok) emit_main_chunk(&c);
+
+    if (c.ok && embed_api) emit_embed_api(&c);
 
     emit_data_segment(&c);
 

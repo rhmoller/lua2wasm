@@ -14,9 +14,18 @@
  * is a host-GC object and arithmetic goes through generic dispatch. >=1 (the
  * default) enables numeric/call specialization: int/float slot unboxing,
  * typed direct-call entries, and comparison specialization. Behaviour is
- * identical across levels; only the emitted code shape and speed differ. */
+ * identical across levels; only the emitted code shape and speed differ.
+ *
+ * embed_api: when nonzero, emit the host-call ABI — a block of exported thunks
+ * (lua_str_new/lua_str_setb, lua_get_global, lua_args_new/set/get/len,
+ * lua_call) that let an embedder build Lua values, look up globals by name, and
+ * invoke Lua functions from outside the module. Because that ABI can reach any
+ * global and call anything, it forces the whole stdlib live and keeps
+ * $g_globals populated (i.e. it disables tree-shaking and the skip-runtime-init
+ * optimization for this module). Off by default; opt-in via the CLI's
+ * --embed-api. See examples/embed/. */
 int codegen_module(const ParseResult *pr, const char *src_name,
-                   int tree_shake, int opt, WatBuilder *out,
+                   int tree_shake, int opt, int embed_api, WatBuilder *out,
                    char *errbuf, size_t errbuf_len);
 
 #endif

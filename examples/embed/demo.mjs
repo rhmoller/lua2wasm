@@ -10,7 +10,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { loadEngine, instantiateScript, luaToNumber, luaInt } from "./broker.mjs";
+import { loadEngine, instantiateScript, luaToNumber, luaInt, callLua } from "./broker.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const engine = await loadEngine(readFileSync(join(here, "engine.wasm")));
@@ -64,5 +64,31 @@ console.log("=".repeat(70));
 }
 
 console.log();
-console.log("Both directions crossed the linear-memory <-> WasmGC boundary, with the");
-console.log("JS broker reducing/boxing values via the script's lua_* exports.");
+console.log("=".repeat(70));
+console.log("Demo 3 — engine calls NAMED Lua functions, with persistent state");
+console.log("  The real scripting model: one long-lived script instance whose");
+console.log("  functions the engine invokes by name (lua_call), passing arguments");
+console.log("  and reading results. Enabled by compiling with --embed-api (engine.c");
+console.log("  passes embed_api=1).");
+console.log("=".repeat(70));
+
+{
+  const src = [
+    `function add(a, b) return a + b end`,
+    `hp = 100`,
+    `function damage(n) hp = hp - n; return hp end`,
+  ].join("\n");
+  console.log("  lua: " + src.replace(/\n/g, "  "));
+  const bytes = engine.compileScript(src);
+  const S = instantiateScript(bytes, {}); // these functions call no host imports
+  S.main(); // define add / damage / hp
+
+  console.log("  engine: add(40, 2)   ->", callLua(S, "add", 40, 2)); // [42]
+  console.log("  engine: damage(30)   ->", callLua(S, "damage", 30)); // [70]
+  console.log("  engine: damage(25)   ->", callLua(S, "damage", 25)); // [45]  (hp persisted!)
+}
+
+console.log();
+console.log("Data crossed the linear-memory <-> WasmGC boundary in both directions,");
+console.log("with the JS broker marshaling via the script's lua_* exports — and the");
+console.log("engine drove named Lua functions on a persistent instance via lua_call.");

@@ -81,15 +81,18 @@ export async function loadCompiler(source, onLog = (line) => console.error(line)
     /**
      * Compile Lua source to WAT text.
      * @param {string} source
-     * @param {{treeShake?: boolean}} [opts]
+     * @param {{treeShake?: boolean, embedApi?: boolean}} [opts]
+     *   embedApi exports the host-call ABI (lua_call/lua_get_global/...) so an
+     *   embedder can invoke Lua functions in the produced module; it keeps the
+     *   whole stdlib live (no tree-shaking). See examples/embed/.
      * @returns {string} WAT
      * @throws if the compiler reports a lex/parse/codegen error.
      */
-    compile(source, { treeShake = false } = {}) {
+    compile(source, { treeShake = false, embedApi = false } = {}) {
       const srcPtr = stageString(source);
       let outPtr;
       try {
-        outPtr = exports.lua2wasm_compile_ex(srcPtr, treeShake ? 1 : 0);
+        outPtr = exports.lua2wasm_compile_ex(srcPtr, treeShake ? 1 : 0, embedApi ? 1 : 0);
       } finally {
         exports.free(srcPtr);
       }

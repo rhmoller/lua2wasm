@@ -82,7 +82,9 @@ static void usage(const char *prog) {
             "  -O1                 enable numeric/call specialization (default)\n"
             "  --no-dce            keep unreachable functions/globals (no dead-code elimination)\n"
             "  --force-tree-shake  prune un-named builtins even when the program uses\n"
-            "                      _G/load (unsafe: dynamic _G lookups may return nil)\n",
+            "                      _G/load (unsafe: dynamic _G lookups may return nil)\n"
+            "  --embed-api         export the host-call ABI (lua_call/lua_get_global/...)\n"
+            "                      for embedders; keeps the whole stdlib live (no tree-shake)\n",
             prog);
 }
 
@@ -108,12 +110,15 @@ int main(int argc, char **argv) {
     int n_modules = 0;
     int tree_shake = 0;
     int no_dce = 0;
+    int embed_api = 0;
     int opt = 1; /* numeric/call specialization on by default; -O0 disables */
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) {
             out = argv[++i];
         } else if (strcmp(argv[i], "--force-tree-shake") == 0) {
             tree_shake = 1;
+        } else if (strcmp(argv[i], "--embed-api") == 0) {
+            embed_api = 1;
         } else if (strcmp(argv[i], "--no-dce") == 0) {
             no_dce = 1;
         } else if (argv[i][0] == '-' && argv[i][1] == 'O') {
@@ -223,7 +228,7 @@ int main(int argc, char **argv) {
     WatBuilder w;
     wat_init(&w);
     char err[256] = {0};
-    if (!codegen_module(&pr, src_name, tree_shake, opt, &w, err, sizeof(err))) {
+    if (!codegen_module(&pr, src_name, tree_shake, opt, embed_api, &w, err, sizeof(err))) {
         fprintf(stderr, "%s\n", err);
         return 1;
     }
