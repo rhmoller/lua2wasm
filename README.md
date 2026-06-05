@@ -279,7 +279,10 @@ to *force* pruning even when the program isn't closed (it can make dynamic `_G`
 lookups of un-named builtins return nil). As a further win, a
 program that writes no tables of its own has `_G` and the library tables populated
 by an append-only bootstrap insert, so the table grow/rehash write path is
-dead-code eliminated entirely. `--no-dce` disables the DCE pass.
+dead-code eliminated entirely. `--no-dce` disables the DCE pass. `--embed-api`
+exports the host-call ABI for embedders (see [Embedding for
+scripting](#embedding-for-scripting-the-host-call-abi)); it keeps the whole
+stdlib live, so it's the opposite of tree-shaking.
 
 Run under Node:
 
@@ -341,6 +344,30 @@ The compiled module imports only `env.abort` / `env.log` and exports
 Nothing in this repo needs Emscripten — the same freestanding module also
 embeds into a C host (e.g. a game engine) that runs wasm the same way.
 
+### Embedding for scripting (the host-call ABI)
+
+To use compiled scripts as a scripting layer — call named Lua functions from
+your host, pass and receive values, keep state across calls — compile with
+**`--embed-api`** (or `embedApi: true` through the JS glue / `embed_api = 1`
+through `lua2wasm_compile_ex`). It exports a small host-call ABI on the produced
+module:
+
+| Export | Use |
+|--------|-----|
+| `lua_str_new` / `lua_str_setb`, `lua_make_int` / `lua_make_float` | build Lua values to pass in |
+| `lua_get_global(name)` | look up a global (e.g. your function) by name |
+| `lua_args_new` / `lua_args_set`, then `lua_args_len` / `lua_args_get` | build arguments, read results (incl. multiple returns) |
+| `lua_call(fn, args)` | invoke (Lua errors throw the exported `LuaError` tag) |
+| `lua_pcall(fn, args)` | protected invoke → `[ok, ...results-or-error]`, safe to keep calling after a script errors |
+| `lua_table_new` / `lua_table_get` / `lua_table_set` / `lua_table_len` | build/read/write Lua tables across the boundary |
+
+A compiled script runs WasmGC + exception-handling, so the runtime side needs a
+GC-capable engine (any browser, Node, or Wasmtime). Because `--embed-api` keeps
+the whole stdlib reachable, it disables tree-shaking for that module — the trade
+for a callable script. A worked end-to-end example (a C "engine" with the
+compiler linked in, a JS broker, and the host calling Lua) lives in
+[`examples/embed/`](examples/embed/).
+
 ## Architecture (in 30 seconds)
 
 ```mermaid
@@ -376,6 +403,7 @@ flowchart LR
 | `runtime/host.mjs`       | Reference host: instantiates a compiled module and renders `print` output                        |
 | `runtime/lua2wasm-wasm.mjs`| Host glue for the freestanding compiler module (string marshaling over its linear memory)       |
 | `runtime/playground.html`| CodeMirror editor + in-browser compile + built-in wat→wasm + execute                            |
+| `examples/embed/`        | Worked embedding example: a C "engine" (compiler linked in) + JS broker driving Lua scripts via the `--embed-api` host-call ABI |
 | `tests/`                 | µnit unit tests + bash end-to-end fixtures + the `wat2wasm` assembler harness (currently 131 in CTest, all green); `scripts/smoke-official-tests.sh` runs the AOT pipeline over every file in [`official-tests/lua-5.5.0-tests/`](https://www.lua.org/tests/) for a compatibility scorecard |
 
 ## Deferred / planned
