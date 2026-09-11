@@ -1923,8 +1923,10 @@ static void sig_mark_blocks(Ctx *c, const SExpr *seq, uint8_t *sig_live) {
                 sig_live[idx] = 1;
             }
         }
-        for (const SExpr *k = n->first ? n->first->next : NULL; k; k = k->next)
-            sig_mark_blocks(c, k, sig_live);
+        /* Walk the operand list once: the callee iterates siblings itself, so
+         * calling it per child would re-walk each subtree once per preceding
+         * sibling — exponential in nesting depth (it hung on ~30 nested ifs). */
+        if (n->first) sig_mark_blocks(c, n->first->next, sig_live);
     }
 }
 

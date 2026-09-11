@@ -512,6 +512,23 @@ test("dce removes an unreachable function", async () => {
   assert.equal((await instantiate(plain)).f(), 1);
 });
 
+test("dce block-signature walk is linear in nesting depth", async () => {
+  // Each level is an `if (result f64)` nested in the else arm of the one
+  // above. The signature walk used to re-visit every subtree once per
+  // preceding sibling, which is exponential in depth and hung on ~30 levels
+  // (the maybe-typed arithmetic lowering emits exactly this shape).
+  let body = "(f64.const 1)";
+  for (let i = 0; i < 40; i++)
+    body = `(if (result f64) (i32.eq (local.get $t) (i32.const ${i})) (then (f64.const ${i})) (else ${body}))`;
+  const wat = `(module
+     (func (export "f") (param $t i32) (result f64) ${body}))`;
+  const t0 = Date.now();
+  const inst = await instantiate(oursDce(wat));
+  assert.ok(Date.now() - t0 < 5000, "dce should finish in well under a second");
+  assert.equal(inst.f(7), 7);
+  assert.equal(inst.f(99), 1);
+});
+
 test("dce keeps functions reached indirectly via call_ref/ref.func", async () => {
   const wat = `(module
      (type $t (func (result i32)))
