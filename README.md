@@ -166,18 +166,18 @@ prints the ratio to reference. Seconds, best of two, Node 24 on one machine:
 
 | program (`bench/`) | reference `lua5.5` | lua2wasm | ratio |
 |--------------------|-------------------:|---------:|------:|
-| binarytrees        | 0.36 | **0.18** | 0.5× |
-| spectralnorm       | 0.91 | 1.48 | 1.6× |
-| oo                 | 0.47 | 0.77 | 1.6× |
-| hashtab            | 0.11 | 0.19 | 1.8× |
-| closures           | 0.08 | 0.14 | 1.8× |
-| nbody              | 0.44 | 0.94 | 2.1× |
-| fannkuch           | 0.84 | 1.82 | 2.2× |
-| strings            | 0.07 | 0.25 | 3.6× |
+| binarytrees        | 0.38 | **0.18** | 0.5× |
+| spectralnorm       | 0.90 | **0.74** | 0.8× |
+| oo                 | 0.46 | 0.74 | 1.6× |
+| hashtab            | 0.10 | 0.17 | 1.7× |
+| closures           | 0.07 | 0.14 | 1.8× |
+| nbody              | 0.44 | 0.83 | 1.9× |
+| fannkuch           | 0.83 | 1.67 | 2.0× |
+| strings            | 0.07 | 0.23 | 3.5× |
 
-Allocation-heavy code runs faster than reference (the host GC is good); the
-rest sits within about 2× of the C interpreter. What closed the gap from the
-6–10× the table-field and string-heavy programs started at:
+Allocation-heavy and float-array code runs faster than reference (the host GC
+is good); the rest sits within about 2× of the C interpreter. What closed the
+gap from the 6–10× the table-field and string-heavy programs started at:
 
 - **Constant strings are hoisted into module globals** with their hash
   precomputed, so `t.name` never allocates its key and the same literal is
@@ -185,14 +185,21 @@ rest sits within about 2× of the C interpreter. What closed the gap from the
   lookups compare identity, then hashes, then bytes. Constant-key reads,
   writes, constructors and method dispatch go through string-specialized
   entry points that skip the generic key dispatch.
+- **Maybe-typed locals** ([design note](docs/design/22-maybe-typed-locals.md)):
+  a local fed from a table field, a call or `x or 0` and used in arithmetic
+  is speculated int or float — a tag plus unboxed `i64`/`f64` slots with the
+  boxed value as fallback — classified once per store. Arithmetic and
+  comparisons over such locals run inline on the fast tags and fall back to
+  the generic runtime helper (same operands, same errors) otherwise, so
+  `bix - bj.x` in nbody is an `f64.sub`, not a call plus an allocation.
 - **`string.format` parses and renders directives in wasm**; only float
   rendering crosses to the host, and the host takes a native formatting path
   whenever no decimal rounding tie is possible.
 
-What remains is structural: values loaded from table fields are boxed, so
-`bix - bj.x` in nbody's inner loop is a generic call plus a fresh `$LuaFloat`
-per result (about a third of its remaining time). Unboxing across field
-loads needs speculative typing with guards; it is the next lever.
+What remains is mostly the table probe itself: a string-key lookup walks
+the index array, the key array and the value array with a bounds check on
+each, about twice the loads of reference Lua's node array. Anything beyond
+micro-tuning there is a table-layout change.
 
 What the pass does, all within the WasmGC model (no linear memory, no deopt):
 

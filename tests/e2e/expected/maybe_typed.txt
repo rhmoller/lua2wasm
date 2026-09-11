@@ -1,0 +1,24 @@
+8	5.0	17.5	3.5	3	3	-7	integer	float	float	integer
+2.0	0.5	-2.5	49.0	6.25	-4	2	-4.0	1.5
+11	20	13	integer	-10
+add-mm	add-mm	neg-mm	true	false	true
+false	false	false
+inf	-inf	true
+false	false	true	true	false	true
+true	false	true	true
+true	false	false	true	false	true
+true	true	false
+false
+12.0	float
+12.0!	5
+3.5
+-9223372036854775808	true	true
+-9223372036854775808	true	true
+true	false	true
+12	integer
+5.0	5.0	5.0	2.5	2.5	2
+5.0	14	20
+1.150000 0.500000 2.900244 -0.374782
+ge	3
+2	2	true	2	1
+1	2	3	1	3

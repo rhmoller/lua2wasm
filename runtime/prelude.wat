@@ -252,6 +252,33 @@
       (then (ref.i31 (i32.wrap_i64 (local.get $v))))
       (else (struct.new $LuaInt (local.get $v)))))
 
+  ;; Maybe-typed locals (docs/design/22): classify a Lua value into the
+  ;; (tag, i64, f64) triple — tag 1 int, 2 float, 0 anything else (the boxed
+  ;; anyref stays the value). One ref.test chain per store instead of one per
+  ;; use.
+  (func $unbox_num (param $v anyref) (result i32 i64 f64)
+    (if (ref.test (ref i31) (local.get $v))
+      (then (return (i32.const 1)
+                    (i64.extend_i32_s (i31.get_s (ref.cast (ref i31) (local.get $v))))
+                    (f64.const 0))))
+    (if (ref.test (ref $LuaInt) (local.get $v))
+      (then (return (i32.const 1)
+                    (struct.get $LuaInt $v (ref.cast (ref $LuaInt) (local.get $v)))
+                    (f64.const 0))))
+    (if (ref.test (ref $LuaFloat) (local.get $v))
+      (then (return (i32.const 2) (i64.const 0)
+                    (struct.get $LuaFloat $v (ref.cast (ref $LuaFloat) (local.get $v))))))
+    (return (i32.const 0) (i64.const 0) (f64.const 0)))
+
+  ;; The inverse: a maybe-typed triple back to a Lua value (allocates only for
+  ;; a float or a wide int).
+  (func $box_num (param $tag i32) (param $i i64) (param $f f64) (param $b anyref) (result anyref)
+    (if (i32.eq (local.get $tag) (i32.const 1))
+      (then (return (call $make_int (local.get $i)))))
+    (if (i32.eq (local.get $tag) (i32.const 2))
+      (then (return (call $make_float (local.get $f)))))
+    (local.get $b))
+
   (func $make_float (param $v f64) (result anyref)
     (struct.new $LuaFloat (local.get $v)))
 
@@ -1556,7 +1583,10 @@
     (if (ref.test (ref $LuaTable) (local.get $tv))
       (then
         (local.set $t (ref.cast (ref $LuaTable) (local.get $tv)))
-        (local.set $full (call $str_hash (local.get $k)))
+        ;; Callers pass hoisted constants (codegen kstr globals), whose hash is
+        ;; precomputed and never 0, so read the field instead of calling
+        ;; $str_hash.
+        (local.set $full (struct.get $LuaString $hash (local.get $k)))
         (local.set $i (call $tab_find_str (local.get $t) (local.get $k) (local.get $full)))
         (if (i32.ge_s (local.get $i) (i32.const 0))
           (then
@@ -1576,7 +1606,7 @@
     (if (ref.is_null (local.get $mt)) (then (return (ref.null any))))
     (local.set $mk (ref.as_non_null (global.get $g_mkey_index)))
     (local.set $i (call $tab_find_str (ref.as_non_null (local.get $mt)) (local.get $mk)
-                                      (call $str_hash (local.get $mk))))
+                                      (struct.get $LuaString $hash (local.get $mk))))
     (if (i32.lt_s (local.get $i) (i32.const 0)) (then (return (ref.null any))))
     (local.set $idx (array.get $TArr
       (ref.as_non_null (struct.get $LuaTable $vals (ref.as_non_null (local.get $mt)))) (local.get $i)))
@@ -1610,7 +1640,7 @@
     (local.set $t (ref.cast (ref $LuaTable) (local.get $tv)))
     (if (ref.is_null (struct.get $LuaTable $meta (local.get $t)))
       (then (call $tab_set_hash_str (local.get $t) (local.get $k)
-                                    (call $str_hash (local.get $k)) (local.get $v))
+                                    (struct.get $LuaString $hash (local.get $k)) (local.get $v))
             (return)))
     (call $lua_tabset (local.get $tv) (local.get $k) (local.get $v)))
 
