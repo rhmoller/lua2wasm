@@ -1583,17 +1583,20 @@ static void emit_table_ctor(CG *c, const Expr *e, int depth) {
         }
         if (ent->key->kind == EXPR_STRING && ent->key->as.s.len <= KSTR_MAX) {
             /* `{name = v}`: hoisted key global + its precomputed hash, straight
-             * into the hash part (a fresh table has no metatable). */
+             * into the hash part (a fresh table has no metatable). A provably
+             * float value goes into the unboxed float storage. */
             char eb[160];
+            int vfloat = c->opt_int && expr_is_float(c, ent->value);
             emit_indent(c, depth + 1);
             wat_appendf(c->w, "%s\n",
                         kstr_expr(c, ent->key->as.s.bytes, ent->key->as.s.len, eb, sizeof eb));
             emit_indent(c, depth + 1);
             wat_appendf(c->w, "(i32.const %d)\n",
                         (int)kstr_hash(ent->key->as.s.bytes, ent->key->as.s.len));
-            emit_expr(c, ent->value, depth + 1);
+            if (vfloat) emit_float_expr(c, ent->value, depth + 1);
+            else emit_expr(c, ent->value, depth + 1);
             emit_indent(c, depth + 1);
-            wat_append(c->w, "call $tab_set_hash_str\n");
+            wat_append(c->w, vfloat ? "call $tab_set_f_hash_str\n" : "call $tab_set_hash_str\n");
             continue;
         }
         emit_expr(c, ent->key, depth + 1);
@@ -2360,7 +2363,7 @@ static void temp_need_visit(const Expr *e, void *ctx) {
 static int block_temp_need(CG *c, const Block *b) {
     TempNeed t = {.c = c, .m = 0};
     walk_block_exprs(b, temp_need_visit, &t);
-    return t.m;
+    return t.m + 2; /* + the table and value cells of an unboxed store */
 }
 
 /* --- kill rules: a candidate survives only if every store to it is a single
@@ -2860,6 +2863,44 @@ static void emit_maybe_lower(CG *c, const Expr *e, const MCell *d, int depth) {
         if (e->as.call.nargs == 1 && !is_multival_tail(e->as.call.args[0]) &&
             (mk = callee_math_kind(c, e->as.call.callee)) != MB_NONE) {
             emit_maybe_math_call(c, e, mk, d, depth);
+            return;
+        }
+        break;
+    }
+    case EXPR_INDEX: {
+        /* A table read straight into the cell: an unboxed float slot arrives
+         * as tag 2 with no allocation, anything else classified once. */
+        const Expr *key = e->as.index.key;
+        int kstr = key->kind == EXPR_STRING && key->as.s.len <= KSTR_MAX;
+        int kint = !kstr && expr_is_int(c, key);
+        int kmaybe = !kstr && !kint && key->kind == EXPR_VAR && key->as.var.kind == VAR_LOCAL &&
+                     slot_is_maybe(c, key->as.var.idx);
+        if (kstr || kint || kmaybe) {
+            emit_indent(c, depth);
+            wat_append(c->w, kstr ? "(call $lua_index_sk_cell\n" : kint ? "(call $lua_index_ik_cell\n"
+                                                                        : "(call $lua_index_mk_cell\n");
+            emit_expr(c, e->as.index.table, depth + 1);
+            if (kstr) {
+                emit_string_literal(c, key->as.s.bytes, key->as.s.len, depth + 1);
+            } else if (kint) {
+                emit_int_expr(c, key, depth + 1);
+            } else {
+                MCell kc = mcell_slot(key->as.var.idx);
+                emit_indent(c, depth + 1);
+                wat_appendf(c->w, "%s %s %s %s\n", kc.t, kc.i, kc.f, kc.b);
+            }
+            emit_indent(c, depth + 1);
+            wat_appendf(c->w, "(i32.const %d)\n", e->line);
+            emit_indent(c, depth);
+            wat_append(c->w, ")\n");
+            emit_indent(c, depth);
+            wat_appendf(c->w, "local.set %s\n", d->sb);
+            emit_indent(c, depth);
+            wat_appendf(c->w, "local.set %s\n", d->sf);
+            emit_indent(c, depth);
+            wat_appendf(c->w, "local.set %s\n", d->si);
+            emit_indent(c, depth);
+            wat_appendf(c->w, "local.set %s\n", d->st);
             return;
         }
         break;
@@ -3527,6 +3568,68 @@ static void emit_args_at(CG *c, int idx, int depth) {
 
 /* ----- statement arms (split out of emit_stmt) ----- */
 
+/* `t[k] = v` where v is a lowered tree or a provably float expression and k
+ * is a constant string, an int-typed expression or a maybe slot: evaluate
+ * the table (Lua order: table, key, value), lower the value into a cell, and
+ * store an f64 straight into the table's unboxed float storage when the
+ * result is a float — no $LuaFloat allocation — else the boxed store.
+ * Returns 0 (nothing emitted) when the shape doesn't qualify. */
+static int emit_unboxed_index_store(CG *c, const AssignTarget *t, const Expr *v, int depth) {
+    if (!c->opt_int || !c->cur_is_maybe) return 0;
+    const Expr *key = t->as.index.key;
+    int kstr = key->kind == EXPR_STRING && key->as.s.len <= KSTR_MAX;
+    int kint = !kstr && expr_is_int(c, key);
+    int kmaybe = !kstr && !kint && key->kind == EXPR_VAR && key->as.var.kind == VAR_LOCAL &&
+                 slot_is_maybe(c, key->as.var.idx);
+    if (!(kstr || kint || kmaybe)) return 0;
+    int vfloat = expr_is_float(c, v);
+    if (!vfloat && !expr_involves_maybe(c, v)) return 0;
+    int k = mt_alloc(c, 2);
+    MCell tc = mcell_tmp(k), vc = mcell_tmp(k + 1);
+    emit_indent(c, depth);
+    wat_appendf(c->w, "(local.set %s\n", tc.sb);
+    emit_expr(c, t->as.index.table, depth + 1);
+    emit_indent(c, depth);
+    wat_append(c->w, ")\n");
+    if (kint) { /* the key is evaluated once, before the value */
+        emit_indent(c, depth);
+        wat_appendf(c->w, "(local.set %s\n", tc.si);
+        emit_int_expr(c, key, depth + 1);
+        emit_indent(c, depth);
+        wat_append(c->w, ")\n");
+    }
+    if (vfloat) {
+        emit_indent(c, depth);
+        wat_appendf(c->w, "(local.set %s\n", vc.sf);
+        emit_float_expr(c, v, depth + 1);
+        emit_indent(c, depth);
+        wat_append(c->w, ")\n");
+        emit_set_tag(c, &vc, 2, depth);
+    } else {
+        emit_maybe_lower(c, v, &vc, depth);
+    }
+    char kb[160];
+    if (kstr) kstr_expr(c, key->as.s.bytes, key->as.s.len, kb, sizeof kb);
+    MCell kc = kmaybe ? mcell_slot(key->as.var.idx) : tc;
+    emit_indent(c, depth);
+    if (kmaybe)
+        wat_appendf(c->w, "(if (i32.and (i32.eq %s (i32.const 2)) (i32.eq %s (i32.const 1)))\n", vc.t, kc.t);
+    else
+        wat_appendf(c->w, "(if (i32.eq %s (i32.const 2))\n", vc.t);
+    emit_indent(c, depth + 1);
+    if (kstr) wat_appendf(c->w, "(then (call $lua_tabset_sk_f %s %s %s))\n", tc.b, kb, vc.f);
+    else wat_appendf(c->w, "(then (call $lua_tabset_ik_f %s %s %s))\n", tc.b, kc.i, vc.f);
+    emit_indent(c, depth + 1);
+    if (kstr) wat_appendf(c->w, "(else (call $lua_tabset_sk %s %s\n", tc.b, kb);
+    else if (kint) wat_appendf(c->w, "(else (call $lua_tabset_ik %s %s\n", tc.b, kc.i);
+    else wat_appendf(c->w, "(else (call $lua_tabset_mk %s %s %s %s %s\n", tc.b, kc.t, kc.i, kc.f, kc.b);
+    emit_maybe_cell_box(c, &vc, depth + 2);
+    emit_indent(c, depth + 1);
+    wat_append(c->w, ")))\n");
+    c->mt_depth = k;
+    return 1;
+}
+
 static void emit_assign(CG *c, const Stmt *s, int depth) {
     int n_targets = s->as.assign.n_targets;
     int n_values = s->as.assign.n_values;
@@ -3561,6 +3664,8 @@ static void emit_assign(CG *c, const Stmt *s, int depth) {
             emit_maybe_store(c, t->as.var.idx, s->as.assign.values[0], depth);
             return;
         }
+        if (t->kind == TGT_INDEX && !last_call && emit_unboxed_index_store(c, t, s->as.assign.values[0], depth))
+            return;
         emit_target_open(c, t, depth);
         if (last_call) {
             emit_indent(c, depth + 1);

@@ -51,6 +51,12 @@
   ;; chains short).
   (type $TArr (array (mut anyref)))
   (type $IArr (array (mut i32)))
+  ;; Unboxed float storage (docs/design/22, "typed table storage"): a table
+  ;; value slot holding $g_fmark means the real value is the f64 at the same
+  ;; index of the parallel $fvals / $farr array. Readers translate; the
+  ;; unboxed writers and cell readers below never allocate a $LuaFloat.
+  (type $FArr (array (mut f64)))
+  (type $FMark (struct))
   (rec
     (type $LuaTable (sub (struct
       (field $keys (mut (ref null $TArr)))
@@ -66,7 +72,10 @@
       ;; (always non-nil — a hole demotes the whole prefix into the hash part).
       ;; Gives O(1) sequential integer access; everything else lives in the hash.
       (field $arr  (mut (ref null $TArr)))
-      (field $alen (mut i32))))))
+      (field $alen (mut i32))
+      ;; parallel f64 storage for slots marked $g_fmark (lazily allocated)
+      (field $fvals (mut (ref null $FArr)))
+      (field $farr  (mut (ref null $FArr)))))))
 
   (import "host" "print" (func $host_print (param anyref)))
   (import "host" "write_raw" (func $host_write_raw (param anyref)))
@@ -193,6 +202,7 @@
   ;; Call-frame line stack. Doubled on overflow by $push_call_frame.
   ;; $call_depth is the count of active frames; index 0..depth-1 is live.
   (global $call_lines (mut (ref null $LineArr)) (ref.null $LineArr))
+  (global $g_fmark (ref $FMark) (struct.new $FMark))
   (global $call_depth (mut i32) (i32.const 0))
   ;; Stack budget: the sum of the active frames' closure weights (estimated
   ;; wasm frame bytes, see codegen fn_weight). $push_call_frame raises a
@@ -1175,6 +1185,39 @@
     (struct.new $LuaString (local.get $out) (i32.const 0)))
 
   ;; --- tables (open-addressing hash index over dense key/value arrays) ---
+  ;; A value slot as a Lua value: the marker resolves to the parallel f64.
+  (func $tval (param $v anyref) (param $fa (ref null $FArr)) (param $i i32) (result anyref)
+    (if (ref.test (ref $FMark) (local.get $v))
+      (then (return (call $make_float (array.get $FArr (ref.as_non_null (local.get $fa)) (local.get $i))))))
+    (local.get $v))
+  (func $farr_grow (param $old (ref $FArr)) (param $new_cap i32) (param $n i32) (result (ref $FArr))
+    (local $new (ref $FArr))
+    (local.set $new (array.new $FArr (f64.const 0) (local.get $new_cap)))
+    (array.copy $FArr $FArr (local.get $new) (i32.const 0) (local.get $old) (i32.const 0) (local.get $n))
+    (local.get $new))
+  (func $fvals_ensure (param $t (ref $LuaTable)) (result (ref $FArr))
+    (local $fa (ref null $FArr))
+    (local.set $fa (struct.get $LuaTable $fvals (local.get $t)))
+    (if (ref.is_null (local.get $fa))
+      (then
+        (local.set $fa (array.new $FArr (f64.const 0) (struct.get $LuaTable $cap (local.get $t))))
+        (struct.set $LuaTable $fvals (local.get $t) (local.get $fa))))
+    (ref.as_non_null (local.get $fa)))
+  (func $farr_ensure (param $t (ref $LuaTable)) (result (ref $FArr))
+    (local $fa (ref null $FArr)) (local $len i32)
+    (local.set $len (array.len (ref.as_non_null (struct.get $LuaTable $arr (local.get $t)))))
+    (local.set $fa (struct.get $LuaTable $farr (local.get $t)))
+    (if (ref.is_null (local.get $fa))
+      (then
+        (local.set $fa (array.new $FArr (f64.const 0) (local.get $len)))
+        (struct.set $LuaTable $farr (local.get $t) (local.get $fa)))
+      (else (if (i32.lt_s (array.len (ref.as_non_null (local.get $fa))) (local.get $len))
+        (then
+          (local.set $fa (call $farr_grow (ref.as_non_null (local.get $fa)) (local.get $len)
+                                          (array.len (ref.as_non_null (local.get $fa)))))
+          (struct.set $LuaTable $farr (local.get $t) (local.get $fa))))))
+    (ref.as_non_null (local.get $fa)))
+
   (func $tab_new (result (ref $LuaTable))
     (local $id i32)
     (local.set $id (global.get $g_next_table_id))
@@ -1185,7 +1228,8 @@
       (ref.null $IArr) (i32.const 0) (i32.const 0)
       (ref.null $LuaTable)
       (local.get $id)
-      (ref.null $TArr) (i32.const 0)))   ;; $arr, $alen
+      (ref.null $TArr) (i32.const 0)   ;; $arr, $alen
+      (ref.null $FArr) (ref.null $FArr)))
 
   ;; Grow keys/vals arrays to at least new_cap; copies old contents.
   (func $tab_grow (param $t (ref $LuaTable)) (param $new_cap i32)
@@ -1213,7 +1257,11 @@
           (ref.as_non_null (local.get $oldv)) (i32.const 0) (local.get $n))))
     (struct.set $LuaTable $keys (local.get $t) (local.get $nk))
     (struct.set $LuaTable $vals (local.get $t) (local.get $nv))
-    (struct.set $LuaTable $cap  (local.get $t) (local.get $new_cap)))
+    (struct.set $LuaTable $cap  (local.get $t) (local.get $new_cap))
+    (if (i32.eqz (ref.is_null (struct.get $LuaTable $fvals (local.get $t))))
+      (then (struct.set $LuaTable $fvals (local.get $t)
+        (call $farr_grow (ref.as_non_null (struct.get $LuaTable $fvals (local.get $t)))
+                         (local.get $new_cap) (local.get $n))))))
 
   ;; Hash any Lua value to an i32. The only requirement for correctness
   ;; is that values that compare equal (via $lua_eq_raw) hash equally —
@@ -1326,7 +1374,10 @@
                   (array.set $TArr (ref.as_non_null (local.get $keys)) (local.get $j)
                     (array.get $TArr (ref.as_non_null (local.get $keys)) (local.get $i)))
                   (array.set $TArr (ref.as_non_null (local.get $vals)) (local.get $j)
-                    (array.get $TArr (ref.as_non_null (local.get $vals)) (local.get $i)))))
+                    (array.get $TArr (ref.as_non_null (local.get $vals)) (local.get $i)))
+                  (if (i32.eqz (ref.is_null (struct.get $LuaTable $fvals (local.get $t))))
+                    (then (array.set $FArr (ref.as_non_null (struct.get $LuaTable $fvals (local.get $t))) (local.get $j)
+                      (array.get $FArr (ref.as_non_null (struct.get $LuaTable $fvals (local.get $t))) (local.get $i)))))))
               (local.set $kk (array.get $TArr (ref.as_non_null (local.get $keys)) (local.get $j)))
               (local.set $h (i32.and (local.get $mask) (call $lua_hash (local.get $kk))))
               (block $place (loop $probe
@@ -1443,7 +1494,8 @@
     (local.set $i (call $tab_find (local.get $t) (local.get $k)))
     (if (i32.lt_s (local.get $i) (i32.const 0)) (then (return (ref.null any))))
     (local.set $vals (struct.get $LuaTable $vals (local.get $t)))
-    (array.get $TArr (ref.as_non_null (local.get $vals)) (local.get $i)))
+    (call $tval (array.get $TArr (ref.as_non_null (local.get $vals)) (local.get $i))
+                (struct.get $LuaTable $fvals (local.get $t)) (local.get $i)))
 
   ;; If $k is an integer or integral float in i64 range, returns (value, 1);
   ;; otherwise (0, 0). Mirrors the integer-valued-float normalization in
@@ -1481,24 +1533,31 @@
         (array.copy $TArr $TArr (local.get $na) (i32.const 0)
           (ref.as_non_null (local.get $a)) (i32.const 0)
           (array.len (ref.as_non_null (local.get $a))))
-        (struct.set $LuaTable $arr (local.get $t) (local.get $na)))))
+        (struct.set $LuaTable $arr (local.get $t) (local.get $na))
+        (if (i32.eqz (ref.is_null (struct.get $LuaTable $farr (local.get $t))))
+          (then (struct.set $LuaTable $farr (local.get $t)
+            (call $farr_grow (ref.as_non_null (struct.get $LuaTable $farr (local.get $t)))
+                             (local.get $cap)
+                             (array.len (ref.as_non_null (struct.get $LuaTable $farr (local.get $t)))))))))))
 
   ;; Spill the whole array prefix back into the hash part and clear it. Called
   ;; when an operation would punch a hole in the dense prefix.
   (func $tab_demote (param $t (ref $LuaTable))
-    (local $i i32) (local $alen i32) (local $a (ref $TArr))
+    (local $i i32) (local $alen i32) (local $a (ref $TArr)) (local $fa (ref null $FArr))
     (local.set $alen (struct.get $LuaTable $alen (local.get $t)))
     (if (i32.eqz (local.get $alen)) (then (return)))
     (local.set $a (ref.as_non_null (struct.get $LuaTable $arr (local.get $t))))
+    (local.set $fa (struct.get $LuaTable $farr (local.get $t)))
     (struct.set $LuaTable $alen (local.get $t) (i32.const 0))
     (struct.set $LuaTable $arr  (local.get $t) (ref.null $TArr))
+    (struct.set $LuaTable $farr (local.get $t) (ref.null $FArr))
     (local.set $i (i32.const 0))
     (loop $lp
       (if (i32.lt_s (local.get $i) (local.get $alen))
         (then
           (call $tab_set_hash (local.get $t)
             (call $make_int (i64.extend_i32_s (i32.add (local.get $i) (i32.const 1))))
-            (array.get $TArr (local.get $a) (local.get $i)))
+            (call $tval (array.get $TArr (local.get $a) (local.get $i)) (local.get $fa) (local.get $i)))
           (local.set $i (i32.add (local.get $i) (i32.const 1)))
           (br $lp)))))
 
@@ -1509,9 +1568,10 @@
   (func $tab_get_arr_idx (param $t (ref $LuaTable)) (param $idx i32) (result anyref)
     (if (i32.and (i32.ge_s (local.get $idx) (i32.const 1))
                  (i32.le_s (local.get $idx) (struct.get $LuaTable $alen (local.get $t))))
-      (then (return (array.get $TArr
+      (then (return (call $tval (array.get $TArr
         (ref.as_non_null (struct.get $LuaTable $arr (local.get $t)))
-        (i32.sub (local.get $idx) (i32.const 1))))))
+        (i32.sub (local.get $idx) (i32.const 1)))
+        (struct.get $LuaTable $farr (local.get $t)) (i32.sub (local.get $idx) (i32.const 1))))))
     (call $tab_get_hash (local.get $t)
       (call $make_int (i64.extend_i32_s (local.get $idx)))))
 
@@ -1544,8 +1604,10 @@
     (if (i32.and (local.get $ok)
                  (i32.and (i64.ge_s (local.get $val) (i64.const 1))
                           (i64.le_s (local.get $val) (i64.extend_i32_s (local.get $alen)))))
-      (then (return (array.get $TArr
+      (then (return (call $tval (array.get $TArr
         (ref.as_non_null (struct.get $LuaTable $arr (local.get $t)))
+        (i32.wrap_i64 (i64.sub (local.get $val) (i64.const 1))))
+        (struct.get $LuaTable $farr (local.get $t))
         (i32.wrap_i64 (i64.sub (local.get $val) (i64.const 1)))))))
     (call $tab_get_hash (local.get $t) (local.get $k)))
 
@@ -1601,8 +1663,9 @@
         (local.set $i (call $tab_find_str (local.get $t) (local.get $k) (local.get $full)))
         (if (i32.ge_s (local.get $i) (i32.const 0))
           (then
-            (local.set $v (array.get $TArr (ref.as_non_null (struct.get $LuaTable $vals (local.get $t)))
-                                           (local.get $i)))
+            (local.set $v (call $tval (array.get $TArr (ref.as_non_null (struct.get $LuaTable $vals (local.get $t)))
+                                                      (local.get $i))
+                                      (struct.get $LuaTable $fvals (local.get $t)) (local.get $i)))
             (if (i32.eqz (ref.is_null (local.get $v))) (then (return (local.get $v))))))
         (return (call $tab_get_miss_str (local.get $t) (local.get $k) (local.get $full) (i32.const 64)))))
     (call $lua_index (local.get $tv) (local.get $k) (local.get $line)))
@@ -1619,8 +1682,9 @@
     (local.set $i (call $tab_find_str (ref.as_non_null (local.get $mt)) (local.get $mk)
                                       (struct.get $LuaString $hash (local.get $mk))))
     (if (i32.lt_s (local.get $i) (i32.const 0)) (then (return (ref.null any))))
-    (local.set $idx (array.get $TArr
-      (ref.as_non_null (struct.get $LuaTable $vals (ref.as_non_null (local.get $mt)))) (local.get $i)))
+    (local.set $idx (call $tval (array.get $TArr
+      (ref.as_non_null (struct.get $LuaTable $vals (ref.as_non_null (local.get $mt)))) (local.get $i))
+      (struct.get $LuaTable $fvals (ref.as_non_null (local.get $mt))) (local.get $i)))
     (if (ref.is_null (local.get $idx)) (then (return (ref.null any))))
     (if (ref.test (ref $LuaTable) (local.get $idx))
       (then
@@ -1629,8 +1693,9 @@
         (local.set $i (call $tab_find_str (local.get $nt) (local.get $k) (local.get $full)))
         (if (i32.ge_s (local.get $i) (i32.const 0))
           (then
-            (local.set $v (array.get $TArr (ref.as_non_null (struct.get $LuaTable $vals (local.get $nt)))
-                                           (local.get $i)))
+            (local.set $v (call $tval (array.get $TArr (ref.as_non_null (struct.get $LuaTable $vals (local.get $nt)))
+                                                      (local.get $i))
+                                      (struct.get $LuaTable $fvals (local.get $nt)) (local.get $i)))
             (if (i32.eqz (ref.is_null (local.get $v))) (then (return (local.get $v))))))
         (return (call $tab_get_miss_str (local.get $nt) (local.get $k) (local.get $full)
                                         (i32.sub (local.get $depth) (i32.const 1))))))
@@ -1723,7 +1788,8 @@
     (local $i i32)
     (local.set $i (call $tab_find_str (local.get $t) (local.get $k) (call $str_hash (local.get $k))))
     (if (i32.lt_s (local.get $i) (i32.const 0)) (then (return (ref.null any))))
-    (array.get $TArr (ref.as_non_null (struct.get $LuaTable $vals (local.get $t))) (local.get $i)))
+    (call $tval (array.get $TArr (ref.as_non_null (struct.get $LuaTable $vals (local.get $t))) (local.get $i))
+                (struct.get $LuaTable $fvals (local.get $t)) (local.get $i)))
 
   ;; Metamethod-name keys ($g_mkey_*) are immutable, const-initialized globals
   ;; emitted by codegen (see emit_global_const_str) rather than declared here:
@@ -1854,6 +1920,133 @@
       (then (call $tab_set_ik (local.get $t) (local.get $k) (local.get $v)) (return)))
     (call $lua_tabset (local.get $tv) (call $make_int (local.get $k)) (local.get $v)))
 
+  ;; --- unboxed float stores / cell loads (codegen entry points) ---
+  ;; Store f64 under a string key with known hash: present -> mark + fvals;
+  ;; absent -> insert the marker, then fill fvals at the new index.
+  (func $tab_set_f_hash_str (param $t (ref $LuaTable)) (param $k (ref $LuaString)) (param $full i32) (param $f f64)
+    (local $i i32)
+    (local.set $i (call $tab_find_str (local.get $t) (local.get $k) (local.get $full)))
+    (if (i32.lt_s (local.get $i) (i32.const 0))
+      (then
+        (call $tab_insert_new (local.get $t) (local.get $k) (global.get $g_fmark) (local.get $full))
+        (local.set $i (i32.sub (struct.get $LuaTable $n (local.get $t)) (i32.const 1))))
+      (else
+        (array.set $TArr (ref.as_non_null (struct.get $LuaTable $vals (local.get $t))) (local.get $i)
+          (global.get $g_fmark))))
+    (array.set $FArr (call $fvals_ensure (local.get $t)) (local.get $i) (local.get $f)))
+  (func $tab_set_f_hash (param $t (ref $LuaTable)) (param $k anyref) (param $f f64)
+    (local $i i32) (local $full i32)
+    (local.set $full (call $lua_hash (local.get $k)))
+    (local.set $i (if (result i32) (struct.get $LuaTable $n (local.get $t))
+      (then (call $tab_index_lookup_h (local.get $t) (local.get $k) (local.get $full)))
+      (else (i32.const -1))))
+    (if (i32.lt_s (local.get $i) (i32.const 0))
+      (then
+        (call $tab_insert_new (local.get $t) (local.get $k) (global.get $g_fmark) (local.get $full))
+        (local.set $i (i32.sub (struct.get $LuaTable $n (local.get $t)) (i32.const 1))))
+      (else
+        (array.set $TArr (ref.as_non_null (struct.get $LuaTable $vals (local.get $t))) (local.get $i)
+          (global.get $g_fmark))))
+    (array.set $FArr (call $fvals_ensure (local.get $t)) (local.get $i) (local.get $f)))
+  ;; `t.name = <f64>` (constant key). Mirrors $lua_tabset_sk's metatable rules.
+  (func $lua_tabset_sk_f (param $tv anyref) (param $k (ref $LuaString)) (param $f f64)
+    (local $t (ref $LuaTable)) (local $full i32) (local $i i32) (local $mt (ref null $LuaTable))
+    (if (i32.eqz (ref.test (ref $LuaTable) (local.get $tv)))
+      (then (call $throw_lit (i32.const 237) (i32.const 24))))   ;; "attempt to index a value"
+    (local.set $t (ref.cast (ref $LuaTable) (local.get $tv)))
+    (local.set $full (struct.get $LuaString $hash (local.get $k)))
+    (local.set $mt (struct.get $LuaTable $meta (local.get $t)))
+    (if (ref.is_null (local.get $mt))
+      (then (call $tab_set_f_hash_str (local.get $t) (local.get $k) (local.get $full) (local.get $f))
+            (return)))
+    (local.set $i (call $tab_find_str (local.get $t) (local.get $k) (local.get $full)))
+    (if (i32.ge_s (local.get $i) (i32.const 0))
+      (then (if (i32.eqz (ref.is_null (array.get $TArr
+                  (ref.as_non_null (struct.get $LuaTable $vals (local.get $t))) (local.get $i))))
+        (then
+          (array.set $TArr (ref.as_non_null (struct.get $LuaTable $vals (local.get $t))) (local.get $i)
+            (global.get $g_fmark))
+          (array.set $FArr (call $fvals_ensure (local.get $t)) (local.get $i) (local.get $f))
+          (return)))))
+    (if (ref.is_null (call $tab_get_str (ref.as_non_null (local.get $mt))
+                                        (ref.as_non_null (global.get $g_mkey_newindex))))
+      (then (call $tab_set_f_hash_str (local.get $t) (local.get $k) (local.get $full) (local.get $f))
+            (return)))
+    (call $lua_tabset (local.get $tv) (local.get $k) (call $make_float (local.get $f))))
+  ;; `t[<int>] = <f64>`: array part (marker + farr) when it lands there, else
+  ;; the hash part; a metatable defers to the generic setter.
+  (func $lua_tabset_ik_f (param $tv anyref) (param $k i64) (param $f f64)
+    (local $t (ref $LuaTable))
+    (if (i32.eqz (ref.test (ref $LuaTable) (local.get $tv)))
+      (then (call $throw_lit (i32.const 237) (i32.const 24))))   ;; "attempt to index a value"
+    (local.set $t (ref.cast (ref $LuaTable) (local.get $tv)))
+    (if (i32.eqz (ref.is_null (struct.get $LuaTable $meta (local.get $t))))
+      (then (call $lua_tabset (local.get $tv) (call $make_int (local.get $k)) (call $make_float (local.get $f)))
+            (return)))
+    (if (call $tab_set_arr (local.get $t) (local.get $k) (global.get $g_fmark))
+      (then
+        (array.set $FArr (call $farr_ensure (local.get $t))
+          (i32.wrap_i64 (i64.sub (local.get $k) (i64.const 1))) (local.get $f))
+        (return)))
+    (call $tab_set_f_hash (local.get $t) (call $make_int (local.get $k)) (local.get $f)))
+
+  ;; Cell loads: (tag, i64, f64, boxed) for a maybe-typed consumer — an
+  ;; unboxed float slot yields tag 2 with no allocation; anything else is
+  ;; classified by $unbox_num.
+  (func $lua_index_sk_cell (param $tv anyref) (param $k (ref $LuaString)) (param $line i32)
+                           (result i32 i64 f64 anyref)
+    (local $t (ref $LuaTable)) (local $v anyref) (local $i i32) (local $full i32)
+    (if (ref.test (ref $LuaTable) (local.get $tv))
+      (then
+        (local.set $t (ref.cast (ref $LuaTable) (local.get $tv)))
+        (local.set $full (struct.get $LuaString $hash (local.get $k)))
+        (local.set $i (call $tab_find_str (local.get $t) (local.get $k) (local.get $full)))
+        (if (i32.ge_s (local.get $i) (i32.const 0))
+          (then
+            (local.set $v (array.get $TArr (ref.as_non_null (struct.get $LuaTable $vals (local.get $t)))
+                                           (local.get $i)))
+            (if (ref.test (ref $FMark) (local.get $v))
+              (then
+                (i32.const 2) (i64.const 0)
+                (array.get $FArr (ref.as_non_null (struct.get $LuaTable $fvals (local.get $t))) (local.get $i))
+                (ref.null any)
+                (return)))
+            (if (i32.eqz (ref.is_null (local.get $v)))
+              (then (call $unbox_num (local.get $v)) (local.get $v) (return)))))
+        (local.set $v (call $tab_get_miss_str (local.get $t) (local.get $k) (local.get $full) (i32.const 64)))
+        (call $unbox_num (local.get $v)) (local.get $v) (return)))
+    (local.set $v (call $lua_index (local.get $tv) (local.get $k) (local.get $line)))
+    (call $unbox_num (local.get $v)) (local.get $v))
+  (func $lua_index_ik_cell (param $tv anyref) (param $k i64) (param $line i32) (result i32 i64 f64 anyref)
+    (local $t (ref $LuaTable)) (local $v anyref) (local $i i32)
+    (if (ref.test (ref $LuaTable) (local.get $tv))
+      (then
+        (local.set $t (ref.cast (ref $LuaTable) (local.get $tv)))
+        (if (i32.and (i64.ge_s (local.get $k) (i64.const 1))
+                     (i64.le_s (local.get $k) (i64.extend_i32_s (struct.get $LuaTable $alen (local.get $t)))))
+          (then
+            (local.set $i (i32.wrap_i64 (i64.sub (local.get $k) (i64.const 1))))
+            (local.set $v (array.get $TArr (ref.as_non_null (struct.get $LuaTable $arr (local.get $t))) (local.get $i)))
+            (if (ref.test (ref $FMark) (local.get $v))
+              (then
+                (i32.const 2) (i64.const 0)
+                (array.get $FArr (ref.as_non_null (struct.get $LuaTable $farr (local.get $t))) (local.get $i))
+                (ref.null any)
+                (return)))
+            (call $unbox_num (local.get $v)) (local.get $v) (return)))
+        (local.set $v (call $tab_get (local.get $t) (call $make_int (local.get $k))))
+        (call $unbox_num (local.get $v)) (local.get $v) (return)))
+    (local.set $v (call $lua_index (local.get $tv) (call $make_int (local.get $k)) (local.get $line)))
+    (call $unbox_num (local.get $v)) (local.get $v))
+  (func $lua_index_mk_cell (param $tv anyref) (param $tag i32) (param $ki i64) (param $kf f64)
+                           (param $kb anyref) (param $line i32) (result i32 i64 f64 anyref)
+    (local $v anyref)
+    (if (i32.eq (local.get $tag) (i32.const 1))
+      (then (return_call $lua_index_ik_cell (local.get $tv) (local.get $ki) (local.get $line))))
+    (local.set $v (call $lua_index (local.get $tv)
+      (call $box_num (local.get $tag) (local.get $ki) (local.get $kf) (local.get $kb)) (local.get $line)))
+    (call $unbox_num (local.get $v)) (local.get $v))
+
   ;; Maybe-typed key (docs/design/22): the cell's (tag, i64, f64, boxed) —
   ;; an int key takes the raw-i64 fast path, anything else boxes and goes
   ;; generic. Boxing only happens on the slow path.
@@ -1885,8 +2078,10 @@
         (if (i32.and (i64.ge_s (local.get $k) (i64.const 1))
                      (i64.le_s (local.get $k)
                        (i64.extend_i32_s (struct.get $LuaTable $alen (local.get $t)))))
-          (then (return (array.get $TArr
+          (then (return (call $tval (array.get $TArr
             (ref.as_non_null (struct.get $LuaTable $arr (local.get $t)))
+            (i32.wrap_i64 (i64.sub (local.get $k) (i64.const 1))))
+            (struct.get $LuaTable $farr (local.get $t))
             (i32.wrap_i64 (i64.sub (local.get $k) (i64.const 1)))))))
         (return (call $tab_get (local.get $t) (call $make_int (local.get $k))))))
     (call $lua_index (local.get $tv) (call $make_int (local.get $k)) (local.get $line)))
@@ -2026,7 +2221,11 @@
               (ref.as_non_null (local.get $vals)) (i32.const 0) (local.get $n))))
         (struct.set $LuaTable $keys (local.get $t) (local.get $nk))
         (struct.set $LuaTable $vals (local.get $t) (local.get $nv))
-        (struct.set $LuaTable $cap  (local.get $t) (local.get $cap))))
+        (struct.set $LuaTable $cap  (local.get $t) (local.get $cap))
+        (if (i32.eqz (ref.is_null (struct.get $LuaTable $fvals (local.get $t))))
+          (then (struct.set $LuaTable $fvals (local.get $t)
+            (call $farr_grow (ref.as_non_null (struct.get $LuaTable $fvals (local.get $t)))
+                             (local.get $cap) (local.get $n)))))))
     ;; ensure the index keeps the new entry under 50% load; rebuild it bigger
     ;; (power-of-two capacity ≥ 2*(n+1), minimum 8) from scratch when needed.
     (local.set $idx  (struct.get $LuaTable $idx  (local.get $t)))
@@ -3508,8 +3707,9 @@
           (if (i32.gt_s (local.get $alen) (i32.const 0))
             (then (return (array.new_fixed $ArgArr 2
               (call $make_int (i64.const 1))
-              (array.get $TArr (ref.as_non_null (struct.get $LuaTable $arr (local.get $t)))
-                               (i32.const 0))))))
+              (call $tval (array.get $TArr (ref.as_non_null (struct.get $LuaTable $arr (local.get $t)))
+                                           (i32.const 0))
+                          (struct.get $LuaTable $farr (local.get $t)) (i32.const 0))))))
           (local.set $idx (i32.const 0))
           (br $hash_phase)))
       (call $as_arr_key (local.get $k))
@@ -3522,8 +3722,9 @@
           (if (i64.lt_s (local.get $val) (i64.extend_i32_s (local.get $alen)))
             (then (return (array.new_fixed $ArgArr 2
               (call $make_int (i64.add (local.get $val) (i64.const 1)))
-              (array.get $TArr (ref.as_non_null (struct.get $LuaTable $arr (local.get $t)))
-                               (i32.wrap_i64 (local.get $val)))))))
+              (call $tval (array.get $TArr (ref.as_non_null (struct.get $LuaTable $arr (local.get $t)))
+                                           (i32.wrap_i64 (local.get $val)))
+                          (struct.get $LuaTable $farr (local.get $t)) (i32.wrap_i64 (local.get $val)))))))
           (local.set $idx (i32.const 0))
           (br $hash_phase)))
       ;; $k is a hash-part key. A key that was never inserted is invalid for
@@ -3551,8 +3752,8 @@
     (array.new_fixed $ArgArr 2
       (array.get $TArr (ref.as_non_null (struct.get $LuaTable $keys (local.get $t)))
                        (local.get $idx))
-      (array.get $TArr (ref.as_non_null (local.get $vals))
-                       (local.get $idx))))
+      (call $tval (array.get $TArr (ref.as_non_null (local.get $vals)) (local.get $idx))
+                  (struct.get $LuaTable $fvals (local.get $t)) (local.get $idx))))
 
   (func $builtin_pairs (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
@@ -4699,6 +4900,11 @@
           (ref.as_non_null (local.get $arr)) (local.get $pos)
           (ref.as_non_null (local.get $arr)) (i32.sub (local.get $pos) (i32.const 1))
           (i32.add (i32.sub (local.get $n) (local.get $pos)) (i32.const 1)))
+        (if (i32.eqz (ref.is_null (struct.get $LuaTable $farr (local.get $t))))
+          (then (array.copy $FArr $FArr
+            (ref.as_non_null (call $farr_ensure (local.get $t))) (local.get $pos)
+            (ref.as_non_null (struct.get $LuaTable $farr (local.get $t))) (i32.sub (local.get $pos) (i32.const 1))
+            (i32.add (i32.sub (local.get $n) (local.get $pos)) (i32.const 1)))))
         (array.set $TArr (ref.as_non_null (local.get $arr))
           (i32.sub (local.get $pos) (i32.const 1)) (local.get $v))
         (struct.set $LuaTable $alen (local.get $t) (i32.add (local.get $alen) (i32.const 1)))
@@ -4744,12 +4950,18 @@
                      (i32.le_s (local.get $pos) (local.get $n))))
       (then
         (local.set $arr (struct.get $LuaTable $arr (local.get $t)))
-        (local.set $removed (array.get $TArr (ref.as_non_null (local.get $arr))
-          (i32.sub (local.get $pos) (i32.const 1))))
+        (local.set $removed (call $tval (array.get $TArr (ref.as_non_null (local.get $arr))
+          (i32.sub (local.get $pos) (i32.const 1)))
+          (struct.get $LuaTable $farr (local.get $t)) (i32.sub (local.get $pos) (i32.const 1))))
         (array.copy $TArr $TArr
           (ref.as_non_null (local.get $arr)) (i32.sub (local.get $pos) (i32.const 1))
           (ref.as_non_null (local.get $arr)) (local.get $pos)
           (i32.sub (local.get $n) (local.get $pos)))
+        (if (i32.eqz (ref.is_null (struct.get $LuaTable $farr (local.get $t))))
+          (then (array.copy $FArr $FArr
+            (ref.as_non_null (struct.get $LuaTable $farr (local.get $t))) (i32.sub (local.get $pos) (i32.const 1))
+            (ref.as_non_null (struct.get $LuaTable $farr (local.get $t))) (local.get $pos)
+            (i32.sub (local.get $n) (local.get $pos)))))
         (array.set $TArr (ref.as_non_null (local.get $arr))
           (i32.sub (local.get $n) (i32.const 1)) (ref.null any))
         (struct.set $LuaTable $alen (local.get $t) (i32.sub (local.get $alen) (i32.const 1)))
@@ -5021,8 +5233,10 @@
                 (i32.and (i32.ge_s (local.get $t) (i32.const 1))
                          (i32.le_s (i32.add (local.get $t) (i32.sub (local.get $n) (i32.const 1)))
                                    (local.get $alen2))))
-                (i32.eqz (i32.and (ref.eq (local.get $a1) (local.get $a2))
-                                  (i32.eq (local.get $t) (local.get $f)))))
+                (i32.and
+                  (i32.eqz (i32.and (ref.eq (local.get $a1) (local.get $a2))
+                                    (i32.eq (local.get $t) (local.get $f))))
+                  (ref.is_null (struct.get $LuaTable $farr (local.get $a1)))))
           (then
             (array.copy $TArr $TArr
               (ref.as_non_null (struct.get $LuaTable $arr (local.get $a2)))

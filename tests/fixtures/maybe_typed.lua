@@ -130,3 +130,46 @@ print(sqrt(nine), use_sqrt(4))
 local mt2 = setmetatable({}, {__call = function(self, v) return v + 100 end})
 floor = mt2
 print(floor(two_f), math.floor(two_f))
+
+-- unboxed float storage in tables: floats written from lowered trees live in
+-- a parallel f64 array behind a marker; every reader must translate it
+local ft = {a = 1.5, b = 2, c = "s"}
+local src = {x = 0.25}
+ft.d = src.x * 4                 -- lowered tree -> unboxed store
+ft.a = ft.a + src.x              -- overwrite an already-float slot
+ft.b = ft.b * 1.5                -- int slot becomes float
+local keys2 = {}
+for k, v in pairs(ft) do keys2[#keys2 + 1] = k .. "=" .. tostring(v) .. ":" .. tostring(math.type(v)) end
+table.sort(keys2)
+print(table.concat(keys2, " "), rawget(ft, "d"), next({}, nil))
+ft.a = "str"                     -- boxed value overwrites the marker
+ft.d = nil
+print(ft.a, ft.d, ft.b, #ft)
+local arr = {}
+for i = 1, 6 do arr[i] = i * 0.5 end      -- int-keyed unboxed stores (array part)
+arr[3] = arr[3] + 100
+table.insert(arr, 2, 9.75)                -- shifts must carry the floats
+local rem = table.remove(arr, 5)
+print(rem, #arr, table.concat(arr, ","), math.type(arr[1]))
+table.sort(arr, function(p, q) return p > q end)
+print(table.concat(arr, ","))
+local moved = table.move(arr, 1, 3, 2, {})
+print(moved[1], moved[2], moved[3], moved[4], table.unpack(arr, 1, 2))   -- (#moved has two valid borders)
+arr[#arr + 1] = src.x + 1                 -- append path
+arr[2] = nil                              -- hole: demotes the array part to the hash
+local s2 = 0
+for _, v in ipairs(arr) do s2 = s2 + v end
+local cnt = 0
+for k, v in pairs(arr) do cnt = cnt + 1; s2 = s2 + v * 0 end
+print(s2, cnt, arr[1], arr[3], arr[7])                                   -- (#arr has two valid borders)
+local grow = {}
+for i = 1, 40 do grow["k" .. i] = i * 0.5 end   -- hash growth + rebuild carry fvals
+for i = 1, 40, 3 do grow["k" .. i] = nil end     -- deletions then rebuild
+local sum40, n40 = 0, 0
+for k, v in pairs(grow) do sum40 = sum40 + v; n40 = n40 + 1 end
+grow.k2 = grow.k2 * 2
+print(sum40, n40, grow.k2, grow.k1, grow.k40)
+local objm = setmetatable({v = 1.0}, {__newindex = function(t, k, v) rawset(t, k, v * 10) end})
+objm.v = objm.v + 0.5     -- present key: plain overwrite, no __newindex
+objm.w = src.x * 2        -- absent: __newindex must see the float
+print(objm.v, objm.w, rawget(objm, "w"))
