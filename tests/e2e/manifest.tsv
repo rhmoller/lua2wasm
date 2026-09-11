@@ -132,3 +132,4 @@ close_goto	tests/fixtures/close_goto.lua
 close_errors	tests/fixtures/close_errors.lua
 close_repeat_until	tests/fixtures/close_repeat_until.lua
 close_for_iter	tests/fixtures/close_for_iter.lua
+string_keys	tests/fixtures/string_keys.lua

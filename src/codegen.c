@@ -3,6 +3,7 @@
 #include "xalloc.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
 
 /* Size of the shared $fmt_buf scratch array (bytes). The runtime chunks
@@ -222,6 +223,17 @@ typedef struct {
     WatBuilder *w;
     const ParseResult *pr; /* for VAR_GLOBAL name lookup */
     StrPool strs;
+    /* Hoisted constant strings: every compile-time string literal or key of at
+     * most KSTR_MAX bytes becomes one immutable module global
+     * ($kstr_<offset>_<len>) carrying its bytes (array.new_fixed) and its
+     * precomputed hash — allocated once at instantiation, not at every
+     * evaluation, and the same object at every site that spells the same
+     * literal (so table lookups hit on identity). `kstrs` dedups the bytes;
+     * `kstr_list` records each distinct (offset,len) for the declarations
+     * emitted at the module tail. Longer literals stay in $str_data. */
+    StrPool kstrs;
+    StrRef *kstr_list;
+    size_t kstr_n, kstr_cap;
     /* Runtime function the stdlib bootstrap uses to install _G / library
      * entries: "$tab_bootstrap_set" (append-only, lets DCE drop the table
      * write path) when the program writes no tables of its own, else the
@@ -510,63 +522,155 @@ static void emit_float_literal(CG *c, double v, int depth) {
     wat_appendf(c->w, "(struct.new $LuaFloat (f64.const %.17g))\n", v);
 }
 
-/* Emit a complete `(struct.new $LuaString (array.new_data $LuaArr $str_data
- * (i32.const O) (i32.const L)))` for an already-interned run, as a single
- * folded line indented to `depth`. The one canonical spelling for a pooled
- * string in expression position. */
-static void emit_pooled_string(CG *c, StrRef r, int depth) {
-    emit_indent(c, depth);
-    wat_appendf(c->w,
-                "(struct.new $LuaString "
-                "(array.new_data $LuaArr $str_data (i32.const %zu) (i32.const %zu)))\n",
-                r.offset, r.len);
+/* Longest constant string that is hoisted into a module global; longer
+ * literals are allocated from $str_data at each evaluation. Bounded so an
+ * array.new_fixed initializer never approaches engine operand limits. */
+#define KSTR_MAX 256
+
+/* FNV-1a 32-bit — the same function as $str_hash in runtime/prelude.wat
+ * (0 is stored as 1 there, so mirror that). A constant's hash is baked into
+ * its global so the runtime never has to compute it. */
+static int32_t kstr_hash(const char *bytes, size_t len) {
+    uint32_t h = 2166136261u;
+    for (size_t i = 0; i < len; i++) h = (h ^ (unsigned char)bytes[i]) * 16777619u;
+    if (h == 0) h = 1;
+    return (int32_t)h;
 }
 
+/* Metamethod-name key globals: immutable, const-initialized at module level
+ * (not assigned in $stdlib_init) so DCE drops the ones whose reader-helpers
+ * are dead — e.g. a fully-specialized integer program never reaches $lua_add
+ * and so doesn't need $g_mkey_add. A user literal spelling one of these names
+ * (`Vec.__index = Vec`) resolves to the same global (see kstr_name), so the
+ * runtime's probe and the user's key are one object. */
+static const struct {
+    const char *name;
+    const char *key;
+} MKEYS[] = {
+    {"$g_mkey_index", "__index"},
+    {"$g_mkey_newindex", "__newindex"},
+    {"$g_mkey_add", "__add"},
+    {"$g_mkey_sub", "__sub"},
+    {"$g_mkey_mul", "__mul"},
+    {"$g_mkey_div", "__div"},
+    {"$g_mkey_mod", "__mod"},
+    {"$g_mkey_pow", "__pow"},
+    {"$g_mkey_unm", "__unm"},
+    {"$g_mkey_idiv", "__idiv"},
+    {"$g_mkey_band", "__band"},
+    {"$g_mkey_bor", "__bor"},
+    {"$g_mkey_bxor", "__bxor"},
+    {"$g_mkey_shl", "__shl"},
+    {"$g_mkey_shr", "__shr"},
+    {"$g_mkey_bnot", "__bnot"},
+    {"$g_mkey_concat", "__concat"},
+    {"$g_mkey_len", "__len"},
+    {"$g_mkey_eq", "__eq"},
+    {"$g_mkey_lt", "__lt"},
+    {"$g_mkey_le", "__le"},
+    {"$g_mkey_call", "__call"},
+    {"$g_mkey_close", "__close"},
+    {"$g_mkey_tostring", "__tostring"},
+    {"$g_mkey_metatable", "__metatable"},
+    {"$g_mkey_name", "__name"},
+};
+#define N_MKEYS (sizeof(MKEYS) / sizeof(MKEYS[0]))
+
+/* The global that holds constant string `bytes` (len <= KSTR_MAX), registering
+ * it for declaration at the module tail. Metamethod names and the empty string
+ * map to the prelude-visible globals. Returns `buf` or a static name. */
+static const char *kstr_name(CG *c, const char *bytes, size_t len, char *buf, size_t bufsz) {
+    if (len == 0) return "$g_empty_str";
+    for (size_t k = 0; k < N_MKEYS; k++)
+        if (strlen(MKEYS[k].key) == len && memcmp(MKEYS[k].key, bytes, len) == 0)
+            return MKEYS[k].name;
+    StrRef r = strpool_add(&c->kstrs, bytes, len);
+    size_t i;
+    for (i = 0; i < c->kstr_n; i++)
+        if (c->kstr_list[i].offset == r.offset && c->kstr_list[i].len == r.len) break;
+    if (i == c->kstr_n) {
+        if (c->kstr_n == c->kstr_cap) {
+            c->kstr_cap = c->kstr_cap ? c->kstr_cap * 2 : 64;
+            c->kstr_list = xrealloc(c->kstr_list, c->kstr_cap * sizeof *c->kstr_list);
+        }
+        c->kstr_list[c->kstr_n++] = r;
+    }
+    snprintf(buf, bufsz, "$kstr_%zu_%zu", r.offset, r.len);
+    return buf;
+}
+
+/* The one canonical expression for a constant string in value position:
+ * `(global.get $kstr_…)` for a hoistable literal, else a fresh
+ * `(struct.new $LuaString (array.new_data …) (i32.const 0))` from $str_data.
+ * Written into `buf` (no indentation, no newline). */
+static const char *kstr_expr(CG *c, const char *bytes, size_t len, char *buf, size_t bufsz) {
+    if (len <= KSTR_MAX) {
+        char nb[64];
+        snprintf(buf, bufsz, "(global.get %s)", kstr_name(c, bytes, len, nb, sizeof nb));
+    } else {
+        StrRef r = strpool_add(&c->strs, bytes, len);
+        snprintf(buf, bufsz,
+                 "(struct.new $LuaString (array.new_data $LuaArr $str_data "
+                 "(i32.const %zu) (i32.const %zu)) (i32.const 0))",
+                 r.offset, r.len);
+    }
+    return buf;
+}
+
+/* Emit a constant string as one folded line indented to `depth`. */
 static void emit_string_literal(CG *c, const char *bytes, size_t len, int depth) {
-    emit_pooled_string(c, strpool_add(&c->strs, bytes, len), depth);
+    char eb[160];
+    emit_indent(c, depth);
+    wat_appendf(c->w, "%s\n", kstr_expr(c, bytes, len, eb, sizeof eb));
 }
 
 /* ----- variable read / write -----
  * VAR_UPVAL is only emitted inside user functions (parser guarantees this:
  * main has no upvalues to capture).
  */
-/* Emit a `(struct.new $LuaString ...)` expression carrying the name of a
- * global. Used by every global read/write — the same name is pooled once
- * and reused at every site via $str_data offsets. */
+/* Emit the constant-string key carrying the name of a global (one line, no
+ * indentation). Used by every global read/write. */
 static void emit_global_key(CG *c, const char *name, size_t name_len) {
-    StrRef sr = strpool_add(&c->strs, name, name_len);
-    wat_appendf(c->w,
-                "(struct.new $LuaString (array.new_data $LuaArr $str_data\n"
-                "        (i32.const %zu) (i32.const %zu)))\n",
-                sr.offset, sr.len);
+    char eb[160];
+    wat_appendf(c->w, "%s\n", kstr_expr(c, name, name_len, eb, sizeof eb));
 }
 
 /* `(call <c->tab_set_fn> (local.get $tgt) "key" (global.get $g_<glob>))` — the
  * shape used everywhere stdlib_init wires a builtin closure into a library
  * table or a sub-table like a file handle. The setter is $tab_bootstrap_set or
  * $tab_set per the DCE gate (see program_writes_table). */
-static void emit_tab_set_global(CG *c, const char *tgt,
-                                StrRef key, const char *glob) {
-    wat_appendf(c->w,
-                "    (call %s (local.get %s)\n"
-                "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
-                "        (i32.const %zu) (i32.const %zu)))\n"
-                "      (global.get $g_%s))\n",
-                c->tab_set_fn, tgt, key.offset, key.len, glob);
+static void emit_tab_set_global(CG *c, const char *tgt, const char *key, size_t klen,
+                                const char *glob) {
+    char eb[160];
+    wat_appendf(c->w, "    (call %s (local.get %s) %s (global.get $g_%s))\n", c->tab_set_fn, tgt,
+                kstr_expr(c, key, klen, eb, sizeof eb), glob);
 }
 
 /* `(global <glob> (ref $LuaString) "<s>")` — an immutable module-level global
  * holding a Lua string whose bytes are inlined via array.new_fixed (a constant
- * expression, unlike array.new_data, so it's valid in a global initializer).
- * Declaring a constant string this way instead of assigning it in $stdlib_init
- * lets DCE drop it when no reachable code reads it. */
+ * expression, unlike array.new_data, so it's valid in a global initializer),
+ * with its hash precomputed. Declaring a constant string this way instead of
+ * assigning it in $stdlib_init lets DCE drop it when no reachable code reads
+ * it. */
 static void emit_global_const_str(CG *c, const char *glob, const char *s, size_t len) {
     wat_appendf(c->w,
                 "  (global %s (ref $LuaString)\n"
                 "    (struct.new $LuaString (array.new_fixed $LuaArr %zu",
                 glob, len);
     for (size_t i = 0; i < len; i++) wat_appendf(c->w, " (i32.const %u)", (unsigned char)s[i]);
-    wat_append(c->w, ")))\n");
+    wat_appendf(c->w, ") (i32.const %d)))\n", (int)kstr_hash(s, len));
+}
+
+/* Declare every hoisted constant string registered through kstr_name. */
+static void emit_kstr_globals(CG *c) {
+    if (c->kstr_n == 0) return;
+    wat_append(c->w, "\n  ;; @@SECTION:kstr@@ hoisted constant strings (bytes + precomputed hash)\n");
+    for (size_t i = 0; i < c->kstr_n; i++) {
+        char nb[64];
+        StrRef r = c->kstr_list[i];
+        snprintf(nb, sizeof nb, "$kstr_%zu_%zu", r.offset, r.len);
+        emit_global_const_str(c, nb, c->kstrs.bytes + r.offset, r.len);
+    }
 }
 
 /* `(call <c->tab_set_fn> <target> "<key>" <value>)` where <target> and <value>
@@ -574,28 +678,18 @@ static void emit_global_const_str(CG *c, const char *glob, const char *s, size_t
  * install whose value isn't itself a plain string. */
 static void emit_tab_set_str(CG *c, const char *target,
                              const char *key, size_t klen, const char *value) {
-    StrRef sr = strpool_add(&c->strs, key, klen);
-    wat_appendf(c->w,
-                "    (call %s %s\n"
-                "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
-                "        (i32.const %zu) (i32.const %zu)))\n"
-                "      %s)\n",
-                c->tab_set_fn, target, sr.offset, sr.len, value);
+    char eb[160];
+    wat_appendf(c->w, "    (call %s %s %s\n      %s)\n", c->tab_set_fn, target,
+                kstr_expr(c, key, klen, eb, sizeof eb), value);
 }
 
 /* `(call <c->tab_set_fn> <target> "<key>" "<val>")` — install a string-valued
- * entry; both key and value are interned (and deduplicated). */
+ * entry; both key and value are constants. */
 static void emit_tab_set_strval(CG *c, const char *target, const char *key,
                                 size_t klen, const char *val, size_t vlen) {
-    StrRef ks = strpool_add(&c->strs, key, klen);
-    StrRef vs = strpool_add(&c->strs, val, vlen);
-    wat_appendf(c->w,
-                "    (call %s %s\n"
-                "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
-                "        (i32.const %zu) (i32.const %zu)))\n"
-                "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
-                "        (i32.const %zu) (i32.const %zu))))\n",
-                c->tab_set_fn, target, ks.offset, ks.len, vs.offset, vs.len);
+    char kb[160], vb[160];
+    wat_appendf(c->w, "    (call %s %s %s %s)\n", c->tab_set_fn, target,
+                kstr_expr(c, key, klen, kb, sizeof kb), kstr_expr(c, val, vlen, vb, sizeof vb));
 }
 
 static void emit_global_read(CG *c, const char *name, size_t name_len, int depth) {
@@ -709,6 +803,13 @@ static void emit_target_open(CG *c, const AssignTarget *t, int depth) {
             break;
         }
         }
+    } else if (t->as.index.key->kind == EXPR_STRING && t->as.index.key->as.s.len <= KSTR_MAX) {
+        /* Constant string key: $lua_tabset_sk stores to the hash part directly
+         * when there is no metatable, else dispatches __newindex. */
+        emit_indent(c, depth);
+        wat_append(c->w, "(call $lua_tabset_sk\n");
+        emit_expr(c, t->as.index.table, depth + 1);
+        emit_string_literal(c, t->as.index.key->as.s.bytes, t->as.index.key->as.s.len, depth + 1);
     } else if (c->opt_int && expr_is_int(c, t->as.index.key)) {
         /* Int-typed key: $lua_tabset_ik takes the raw i64 (no make_int /
          * $as_arr_key) and still dispatches __newindex. The value is emitted
@@ -1038,16 +1139,18 @@ static void emit_args_array(CG *c, Expr **args, size_t nargs, int depth) {
     wat_append(c->w, ")\n");
 }
 
-/* Look up `obj:m` via $lua_index (which routes strings through the string
- * library). The receiver must already be parked in $tmp_any. Emits, at `depth`:
- *   (call $lua_index (local.get $tmp_any) <pooled method name> (i32.const line))
+/* Look up `obj:m` via $lua_index_sk (constant string key; routes strings
+ * through the string library). The receiver must already be parked in
+ * $tmp_any. Emits, at `depth`:
+ *   (call $lua_index_sk (local.get $tmp_any) <hoisted method name> (i32.const line))
  * Shared by the value and tail-call method forms. */
-static void emit_method_lookup(CG *c, StrRef method, int line, int depth) {
+static void emit_method_lookup(CG *c, const char *method, size_t method_len, int line,
+                               int depth) {
     emit_indent(c, depth);
-    wat_append(c->w, "(call $lua_index\n");
+    wat_append(c->w, "(call $lua_index_sk\n");
     emit_indent(c, depth + 1);
     wat_append(c->w, "(local.get $tmp_any)\n");
-    emit_pooled_string(c, method, depth + 1);
+    emit_string_literal(c, method, method_len, depth + 1);
     emit_indent(c, depth + 1);
     wat_appendf(c->w, "(i32.const %d)\n", line);
     emit_indent(c, depth);
@@ -1087,7 +1190,6 @@ static void emit_call_array(CG *c, const Expr *e, int depth) {
         /* obj:m(args). Evaluate receiver once into $tmp_any, look up the
          * method via $lua_index (which redirects strings through the
          * `string` library), then call with receiver prepended. */
-        StrRef sr = strpool_add(&c->strs, e->as.method_call.method, e->as.method_call.method_len);
         emit_indent(c, depth);
         wat_append(c->w, "(local.set $tmp_any\n");
         emit_expr(c, e->as.method_call.recv, depth + 1);
@@ -1095,7 +1197,8 @@ static void emit_call_array(CG *c, const Expr *e, int depth) {
         wat_append(c->w, ")\n");
         emit_indent(c, depth);
         wat_append(c->w, "(call $lua_call_any\n");
-        emit_method_lookup(c, sr, e->line, depth + 1);
+        emit_method_lookup(c, e->as.method_call.method, e->as.method_call.method_len,
+                           e->line, depth + 1);
         /* args = [recv] ++ method args */
         emit_method_args_array(c, e, depth + 1);
         emit_indent(c, depth + 1);
@@ -1193,8 +1296,6 @@ static void emit_tail_dispatch(CG *c, int line, int depth) {
  * the method args are evaluated, so an arg that itself reuses $tmp_any can't
  * clobber it. */
 static void emit_tail_method_call(CG *c, const Expr *e, int depth) {
-    StrRef sr = strpool_add(&c->strs, e->as.method_call.method,
-                            e->as.method_call.method_len);
     emit_indent(c, depth);
     wat_append(c->w, "(local.set $tmp_any\n");
     emit_expr(c, e->as.method_call.recv, depth + 1);
@@ -1202,7 +1303,8 @@ static void emit_tail_method_call(CG *c, const Expr *e, int depth) {
     wat_append(c->w, ")\n");
     emit_indent(c, depth);
     wat_append(c->w, "(local.set $tmp_callee\n");
-    emit_method_lookup(c, sr, e->line, depth + 1);
+    emit_method_lookup(c, e->as.method_call.method, e->as.method_call.method_len,
+                       e->line, depth + 1);
     emit_indent(c, depth);
     wat_append(c->w, ")\n");
     emit_indent(c, depth);
@@ -1272,6 +1374,19 @@ static void emit_index_expr(CG *c, const Expr *e, int depth) {
      * Lua-shaped error with a source line. For an int-typed key, the
      * $lua_index_ik fast path takes the raw i64 (no make_int / $as_arr_key)
      * and hits the array part directly. */
+    if (e->as.index.key->kind == EXPR_STRING && e->as.index.key->as.s.len <= KSTR_MAX) {
+        /* `t.name` / `t["lit"]`: the hoisted key global goes straight to the
+         * hash part (strings never live in the array part). */
+        emit_indent(c, depth);
+        wat_append(c->w, "(call $lua_index_sk\n");
+        emit_expr(c, e->as.index.table, depth + 1);
+        emit_string_literal(c, e->as.index.key->as.s.bytes, e->as.index.key->as.s.len, depth + 1);
+        emit_indent(c, depth + 1);
+        wat_appendf(c->w, "(i32.const %d)\n", e->line);
+        emit_indent(c, depth);
+        wat_append(c->w, ")\n");
+        return;
+    }
     if (c->opt_int && expr_is_int(c, e->as.index.key)) {
         emit_indent(c, depth);
         wat_append(c->w, "(call $lua_index_ik\n");
@@ -4268,9 +4383,7 @@ static void emit_library_tables(CG *c, const unsigned char *gref, int nb) {
              * as table keys on the library — codegen installs them
              * elsewhere on the right host objects. */
             if (key[0] == '_') continue;
-            size_t key_len = strlen(key);
-            StrRef sr = strpool_add(&c->strs, key, key_len);
-            emit_tab_set_global(c, "$tab", sr, builtin_func_name(bi) + 1);
+            emit_tab_set_global(c, "$tab", key, strlen(key), builtin_func_name(bi) + 1);
         }
         /* Plain-value constants for the math library. */
         if (cls == BLT_LIB_MATH) {
@@ -4304,18 +4417,14 @@ static void emit_library_tables(CG *c, const unsigned char *gref, int nb) {
                 {"stderr", 6, "io_handle_err_write", 2, NULL},
                 {"stdin", 5, NULL, 0, "$g_io_input"},
             };
-            StrRef wkey = strpool_add(&c->strs, "write", 5);
-            StrRef rkey = strpool_add(&c->strs, "read", 4);
-            StrRef ckey = strpool_add(&c->strs, "close", 5);
-            StrRef fkey = strpool_add(&c->strs, "flush", 5);
             for (size_t hi = 0; hi < sizeof(HANDLES) / sizeof(HANDLES[0]); hi++) {
                 wat_append(out, "    (local.set $h (call $tab_new))\n");
                 if (HANDLES[hi].method_glob)
-                    emit_tab_set_global(c, "$h", wkey, HANDLES[hi].method_glob);
+                    emit_tab_set_global(c, "$h", "write", 5, HANDLES[hi].method_glob);
                 else
-                    emit_tab_set_global(c, "$h", rkey, "io_handle_read");
-                emit_tab_set_global(c, "$h", ckey, "io_handle_noop");
-                emit_tab_set_global(c, "$h", fkey, "io_handle_noop");
+                    emit_tab_set_global(c, "$h", "read", 4, "io_handle_read");
+                emit_tab_set_global(c, "$h", "close", 5, "io_handle_noop");
+                emit_tab_set_global(c, "$h", "flush", 5, "io_handle_noop");
                 /* __fd so io.type reports "file" for the standard streams. */
                 char fdexpr[48];
                 snprintf(fdexpr, sizeof fdexpr,
@@ -4387,18 +4496,16 @@ static void emit_require_bridge(CG *c, const unsigned char *gref) {
             }
         }
         if (need_any && have_package) {
-            StrRef pkg_k = strpool_add(&c->strs, "package", 7);
-            StrRef loaded_k = strpool_add(&c->strs, "loaded", 6);
+            char pkg_e[160], loaded_e[160];
+            kstr_expr(c, "package", 7, pkg_e, sizeof pkg_e);
+            kstr_expr(c, "loaded", 6, loaded_e, sizeof loaded_e);
             wat_appendf(out,
                         "    (local.set $tab (ref.cast (ref $LuaTable)\n"
                         "      (call $tab_get\n"
                         "        (ref.cast (ref $LuaTable) (call $tab_get\n"
-                        "          (ref.as_non_null (global.get $g_globals))\n"
-                        "          (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
-                        "            (i32.const %zu) (i32.const %zu)))))\n"
-                        "        (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
-                        "          (i32.const %zu) (i32.const %zu))))))\n",
-                        pkg_k.offset, pkg_k.len, loaded_k.offset, loaded_k.len);
+                        "          (ref.as_non_null (global.get $g_globals)) %s))\n"
+                        "        %s)))\n",
+                        pkg_e, loaded_e);
             for (size_t li = 0; li < sizeof(LIB_NAMES) / sizeof(LIB_NAMES[0]); li++) {
                 size_t llen = strlen(LIB_NAMES[li]);
                 int gi_found = -1;
@@ -4411,15 +4518,12 @@ static void emit_require_bridge(CG *c, const unsigned char *gref) {
                     }
                 }
                 if (gi_found < 0) continue;
-                StrRef name_k = strpool_add(&c->strs, LIB_NAMES[li], llen);
+                char name_e[160];
+                kstr_expr(c, LIB_NAMES[li], llen, name_e, sizeof name_e);
                 wat_appendf(out,
-                            "    (call $tab_set (local.get $tab)\n"
-                            "      (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
-                            "        (i32.const %zu) (i32.const %zu)))\n"
-                            "      (call $tab_get (ref.as_non_null (global.get $g_globals))\n"
-                            "        (struct.new $LuaString (array.new_data $LuaArr $str_data\n"
-                            "          (i32.const %zu) (i32.const %zu)))))\n",
-                            name_k.offset, name_k.len, name_k.offset, name_k.len);
+                            "    (call $tab_set (local.get $tab) %s\n"
+                            "      (call $tab_get (ref.as_non_null (global.get $g_globals)) %s))\n",
+                            name_e, name_e);
             }
         }
     }
@@ -4624,8 +4728,9 @@ static void emit_data_segment(CG *c) {
 /* The host-call ABI (codegen_module's embed_api): a small block of exported
  * thunks over the prelude's $lua_call / $tab_* and the value constructors, so
  * an embedder can build Lua values and tables, look up globals by name, and
- * invoke Lua functions from outside the module. $LuaString has no cached hash
- * (just $bytes), so lua_str_new + per-byte lua_str_setb writes are safe.
+ * invoke Lua functions from outside the module. A string's hash is cached
+ * lazily on first use as a key, so lua_str_new + per-byte lua_str_setb writes
+ * are safe as long as the string is filled before it is handed to Lua.
  * lua_call / lua_pcall go through $lua_call_any, so they accept any callable
  * (closure or a __call table) and set up the call frame error() reads; a
  * non-callable raises a normal Lua error. lua_call propagates Lua errors via
@@ -4639,7 +4744,7 @@ static void emit_embed_api(CG *c) {
         c->w,
         "\n  ;; @@SECTION:embed-api@@\n"
         "  (func (export \"lua_str_new\") (param $n i32) (result anyref)\n"
-        "    (struct.new $LuaString (array.new $LuaArr (i32.const 0) (local.get $n))))\n"
+        "    (struct.new $LuaString (array.new $LuaArr (i32.const 0) (local.get $n)) (i32.const 0)))\n"
         "  (func (export \"lua_str_setb\") (param $s anyref) (param $i i32) (param $b i32)\n"
         "    (array.set $LuaArr\n"
         "      (struct.get $LuaString $bytes (ref.cast (ref $LuaString) (local.get $s)))\n"
@@ -4797,42 +4902,8 @@ int codegen_module(const ParseResult *pr, const char *src_name,
      * still tracks the global list for name resolution, but no wasm
      * globals are emitted for them. */
 
-    /* Metamethod-name key globals: immutable, const-initialized at module level
-     * (not assigned in $stdlib_init) so DCE drops the ones whose reader-helpers
-     * are dead — e.g. a fully-specialized integer program never reaches $lua_add
-     * and so doesn't need $g_mkey_add. */
-    static const struct {
-        const char *name;
-        const char *key;
-    } MKEYS[] = {
-        {"$g_mkey_index", "__index"},
-        {"$g_mkey_newindex", "__newindex"},
-        {"$g_mkey_add", "__add"},
-        {"$g_mkey_sub", "__sub"},
-        {"$g_mkey_mul", "__mul"},
-        {"$g_mkey_div", "__div"},
-        {"$g_mkey_mod", "__mod"},
-        {"$g_mkey_pow", "__pow"},
-        {"$g_mkey_unm", "__unm"},
-        {"$g_mkey_idiv", "__idiv"},
-        {"$g_mkey_band", "__band"},
-        {"$g_mkey_bor", "__bor"},
-        {"$g_mkey_bxor", "__bxor"},
-        {"$g_mkey_shl", "__shl"},
-        {"$g_mkey_shr", "__shr"},
-        {"$g_mkey_bnot", "__bnot"},
-        {"$g_mkey_concat", "__concat"},
-        {"$g_mkey_len", "__len"},
-        {"$g_mkey_eq", "__eq"},
-        {"$g_mkey_lt", "__lt"},
-        {"$g_mkey_le", "__le"},
-        {"$g_mkey_call", "__call"},
-        {"$g_mkey_close", "__close"},
-        {"$g_mkey_tostring", "__tostring"},
-        {"$g_mkey_metatable", "__metatable"},
-        {"$g_mkey_name", "__name"},
-    };
-    for (size_t k = 0; k < sizeof(MKEYS) / sizeof(MKEYS[0]); k++)
+    /* Metamethod-name key globals (see MKEYS). */
+    for (size_t k = 0; k < N_MKEYS; k++)
         emit_global_const_str(&c, MKEYS[k].name, MKEYS[k].key, strlen(MKEYS[k].key));
     /* The empty string and the source name (used by error()/traceback) are also
      * constants — const-init them so DCE can drop them when unreferenced. */
@@ -4910,6 +4981,7 @@ int codegen_module(const ParseResult *pr, const char *src_name,
 
     if (c.ok && embed_api) emit_embed_api(&c);
 
+    emit_kstr_globals(&c);
     emit_data_segment(&c);
 
     wat_append(out, ")\n");
@@ -4917,6 +4989,8 @@ int codegen_module(const ParseResult *pr, const char *src_name,
     if (!c.ok) {
         snprintf(err, errlen, "%s", c.err);
         strpool_free(&c.strs);
+        strpool_free(&c.kstrs);
+        free(c.kstr_list);
         free(live);
         free(gref);
         free_func_bindings(&c);
@@ -4924,6 +4998,8 @@ int codegen_module(const ParseResult *pr, const char *src_name,
         return 0;
     }
     strpool_free(&c.strs);
+    strpool_free(&c.kstrs);
+    free(c.kstr_list);
     free(live);
     free(gref);
     free_func_bindings(&c);

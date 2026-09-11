@@ -1,0 +1,14 @@
+1	1	2	3	str-one	int-one
+1	2	true	true	false
+10	10
+long	300	nil
+nil	nil
+42
+11	2	11	2	nil
+hello kim	HELLO KIM	kim	nil	nil
+foo!	bar!
+get foo, get bar, set baz=5, set baz=nil
+via runtime __index	via runtime __index
+5	function	xxx	el
+20	key10=10	key9=9	500	500
+ga	ga	ga

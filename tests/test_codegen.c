@@ -3,6 +3,7 @@
 #include "../src/parser.h"
 #include "../src/wat_builder.h"
 #include "../third_party/munit/munit.h"
+#include <stdio.h>
 #include <string.h>
 
 static MunitResult test_emits_expected(const MunitParameter params[], void *fixture) {
@@ -81,9 +82,14 @@ static MunitResult test_string_in_data_segment(const MunitParameter params[], vo
     int ok = codegen_module(&r, "test", 0, 1, 0, &w, err, sizeof(err));
     munit_assert_true(ok);
     const char *s = wat_cstr(&w);
-    /* Built-in literal prefix is 51 bytes; "hello" lands somewhere after that. */
+    /* The built-in literal prefix still heads $str_data. */
     munit_assert_not_null(strstr(s, "niltruefalse<float>numberstringtablefunctionboolean"));
-    munit_assert_not_null(strstr(s, "hello"));
+    /* A short literal is hoisted into an immutable global with inline bytes and
+     * a precomputed FNV-1a hash, not placed in $str_data. */
+    munit_assert_null(strstr(s, "hello\""));
+    munit_assert_not_null(strstr(s, "(array.new_fixed $LuaArr 5 (i32.const 104) (i32.const 101) "
+                                    "(i32.const 108) (i32.const 108) (i32.const 111)) "
+                                    "(i32.const 1335831723)"));
     wat_free(&w);
     parse_result_free(&r);
     node_pool_free(&pool);
@@ -91,11 +97,11 @@ static MunitResult test_string_in_data_segment(const MunitParameter params[], vo
     return MUNIT_OK;
 }
 
-/* The string pool interns by content: a key referenced many times is
- * emitted into $str_data exactly once. Here `zqxw` is referenced three
- * times (two stores + one load) yet must appear a single time in the
- * module text (it lives only in the data segment; access sites use
- * numeric offsets). */
+/* A string literal that occurs several times in the program is declared as
+ * one hoisted global. Here `zqxw` is referenced three times (two stores + one
+ * load): exactly one `(global $kstr_…)` declaration carries its bytes, and
+ * every access site reads that global (so the key is the same object at each
+ * site — table lookups then hit on identity). */
 static MunitResult test_data_segment_dedups(const MunitParameter params[], void *fixture) {
     (void)params; (void)fixture;
     TokenList t = lex("local t = {} t.zqxw = 1 t.zqxw = 2 print(t.zqxw)");
@@ -109,9 +115,22 @@ static MunitResult test_data_segment_dedups(const MunitParameter params[], void 
     if (!ok) munit_logf(MUNIT_LOG_ERROR, "codegen: %s", err);
     munit_assert_true(ok);
     const char *s = wat_cstr(&w);
+    munit_assert_null(strstr(s, "zqxw"));
+    const char *bytes = "(array.new_fixed $LuaArr 4 (i32.const 122) (i32.const 113) "
+                        "(i32.const 120) (i32.const 119))";
     int count = 0;
-    for (const char *p = strstr(s, "zqxw"); p; p = strstr(p + 1, "zqxw")) count++;
+    for (const char *p = strstr(s, bytes); p; p = strstr(p + 1, bytes)) count++;
     munit_assert_int(count, ==, 1);
+    /* Recover the global's name from its declaration and count its readers. */
+    const char *gname = strstr(s, bytes);
+    while (gname > s && strncmp(gname, "(global $kstr_", 14) != 0) gname--;
+    char name[64];
+    sscanf(gname + 8, "%63s", name);
+    char ref[80];
+    snprintf(ref, sizeof ref, "(global.get %s)", name);
+    int refs = 0;
+    for (const char *p = strstr(s, ref); p; p = strstr(p + 1, ref)) refs++;
+    munit_assert_int(refs, ==, 3);
 
     wat_free(&w);
     parse_result_free(&r);
