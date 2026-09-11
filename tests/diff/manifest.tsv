@@ -135,3 +135,4 @@ pass	format_c_mask	fuzzer-found: %c outputs the 64-bit low byte (n & 0xff), not 
 pass	sort_badcmp_detect	code-review #9: table.sort detects an inconsistent comparator (faithful auxsort port, size-exact vs lua5.5)
 pass	format_c_int_rules	perf port: string.format integer/char/%s/%q conversions done in wasm follow C printf rules (0-flag vs precision, #, %.f, trailing %)
 pass	format_float_ties	perf: float rendering fast path (native toFixed/toPrecision off ties) agrees with exact ties-to-even path and C %g/%a rules
+pass	deep_recursion_heavy	frame-weight stack budget: heavy frames still raise a catchable "stack overflow"

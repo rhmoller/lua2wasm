@@ -115,3 +115,18 @@ repeat
   flips = flips + 1
 until false
 print(flips, q1, p[1], p[2], p[3])
+
+-- inline math builtins: guarded by the callee's identity at runtime
+local sqrt, abs, floor, ceil = math.sqrt, math.abs, math.floor, math.ceil
+local nine, two_f, negf, big2 = t.i + 2, t.f, -t.f, t.big
+print(sqrt(nine), sqrt(two_f), math.sqrt(16), sqrt("25"), math.type(sqrt(nine)), sqrt(-1) ~= sqrt(-1))
+print(abs(t.neg), abs(negf), abs(math.mininteger), math.abs(-0.0), math.type(abs(t.neg)), abs("-3"))
+print(floor(two_f), ceil(two_f), floor(negf), ceil(negf), floor(t.i), math.floor(1e300), math.type(math.floor(1e300)))
+print(floor(2^63), floor(-2^63), math.type(floor(-2^63)), ceil(0/0) ~= ceil(0/0), floor(1/0), floor("7.9"))
+local function use_sqrt(v) return sqrt(v) * 2 end
+print(use_sqrt(big2 / (1 << 40)), (pcall(use_sqrt, {})), (pcall(use_sqrt, "x")))
+sqrt = function(v) return v + 1000 end   -- alias rebound: the guard fails, generic call
+print(sqrt(nine), use_sqrt(4))
+local mt2 = setmetatable({}, {__call = function(self, v) return v + 100 end})
+floor = mt2
+print(floor(two_f), math.floor(two_f))

@@ -34,7 +34,10 @@
                            (field $len (mut i32))))
   (rec
     (type $LuaClosure (sub (struct (field $code (ref $LuaFn))
-                                   (field $upvals (ref $UpvalArr)))))
+                                   (field $upvals (ref $UpvalArr))
+                                   ;; estimated wasm frame bytes of $code, for
+                                   ;; the stack-budget guard in $push_call_frame
+                                   (field $weight i32))))
     (type $LuaFn (func (param (ref $LuaClosure))
                        (param (ref $ArgArr))
                        (result (ref $ArgArr)))))
@@ -191,6 +194,14 @@
   ;; $call_depth is the count of active frames; index 0..depth-1 is live.
   (global $call_lines (mut (ref null $LineArr)) (ref.null $LineArr))
   (global $call_depth (mut i32) (i32.const 0))
+  ;; Stack budget: the sum of the active frames' closure weights (estimated
+  ;; wasm frame bytes, see codegen fn_weight). $push_call_frame raises a
+  ;; catchable "stack overflow" when it would pass $stack_budget, well before
+  ;; the engine's own (uncatchable) limit — a count of frames alone can't do
+  ;; that, since frame sizes differ by an order of magnitude across functions.
+  (global $stack_cost (mut i32) (i32.const 0))
+  (global $stack_budget i32 (i32.const 819200))
+  (global $call_weights (mut (ref null $LineArr)) (ref.null $LineArr))
   ;; Monotonic identity counter for tables. WasmGC exposes no pointer or
   ;; identity hash, so each $LuaTable is stamped with a unique id at creation
   ;; ($tab_new) and $lua_hash mixes it — without this, every table key hashes
@@ -2082,7 +2093,7 @@
   ;; If __newindex is absent, do the raw set.
   (func $lua_tabset (param $v anyref) (param $k anyref) (param $val anyref)
     (local $t (ref $LuaTable)) (local $mt (ref null $LuaTable))
-    (local $mm anyref) (local $depth i32)
+    (local $mm anyref) (local $depth i32) (local $cost_saved i32)
     (block $exit (loop $top
       ;; If $v isn't a table, fall through to the metamethod path on the
       ;; value's metatable (rare; objects with __index/__newindex but no
@@ -2229,10 +2240,11 @@
     (local $i i32)
     (local $v anyref)
     (local $pending anyref)
-    (local $depth i32)
+    (local $depth i32) (local $cost_saved i32)
     (local.set $items (struct.get $Tbc $items (local.get $tbc)))
     (local.set $pending (local.get $errobj))
     (local.set $depth (global.get $call_depth))
+    (local.set $cost_saved (global.get $stack_cost))
     (block $done
       (loop $L
         (local.set $i (struct.get $Tbc $len (local.get $tbc)))
@@ -2243,6 +2255,7 @@
         (if (call $lua_truthy (local.get $v))
           (then
             (global.set $call_depth (local.get $depth))
+            (global.set $stack_cost (local.get $cost_saved))
             (block $eldone
               (block $elcatch (result anyref)
                 (try_table (catch $LuaError $elcatch)
@@ -2256,6 +2269,7 @@
               (local.set $pending))))
         (br $L)))
     (global.set $call_depth (local.get $depth))
+            (global.set $stack_cost (local.get $cost_saved))
     (if (i32.eqz (ref.is_null (local.get $pending)))
       (then (throw $LuaError (local.get $pending)))))
 
@@ -2266,9 +2280,9 @@
   ;; depth would overflow. The pop counterpart is just a decrement —
   ;; on the error path it's outer-pcall's responsibility to restore
   ;; depth to its pre-try value.
-  (func $push_call_frame (param $line i32)
+  (func $push_call_frame (param $line i32) (param $weight i32)
     (local $lines (ref $LineArr)) (local $cap i32)
-    (local $new_cap i32) (local $new (ref $LineArr))
+    (local $new_cap i32) (local $new (ref $LineArr)) (local $weights (ref $LineArr))
     ;; Depth guard: raise a *catchable* "stack overflow" before deep non-tail
     ;; recursion exhausts the host's WASM call stack (which would be an
     ;; uncatchable trap). The cap sits below the trap point with headroom to
@@ -2276,9 +2290,11 @@
     ;; catch unwinds cleanly. Tail calls use $replace_top_call_frame (no push),
     ;; so proper-TCO loops are unaffected. Very heavy frames can still trap
     ;; below this cap — the host stack size is a runtime-config concern.
-    (if (i32.ge_s (global.get $call_depth) (i32.const 2000))
+    (global.set $stack_cost (i32.add (global.get $stack_cost) (local.get $weight)))
+    (if (i32.gt_s (global.get $stack_cost) (global.get $stack_budget))
       (then (call $throw_lit (i32.const 971) (i32.const 14))))   ;; "stack overflow"
     (local.set $lines (ref.as_non_null (global.get $call_lines)))
+    (local.set $weights (ref.as_non_null (global.get $call_weights)))
     (local.set $cap (array.len (local.get $lines)))
     (if (i32.ge_s (global.get $call_depth) (local.get $cap))
       (then
@@ -2289,27 +2305,45 @@
           (local.get $new) (i32.const 0)
           (local.get $lines) (i32.const 0) (local.get $cap))
         (global.set $call_lines (local.get $new))
-        (local.set $lines (local.get $new))))
+        (local.set $lines (local.get $new))
+        (local.set $new
+          (array.new $LineArr (i32.const 0) (local.get $new_cap)))
+        (array.copy $LineArr $LineArr
+          (local.get $new) (i32.const 0)
+          (local.get $weights) (i32.const 0) (local.get $cap))
+        (global.set $call_weights (local.get $new))
+        (local.set $weights (local.get $new))))
     (array.set $LineArr (local.get $lines)
       (global.get $call_depth) (local.get $line))
+    (array.set $LineArr (local.get $weights)
+      (global.get $call_depth) (local.get $weight))
     (global.set $call_depth
       (i32.add (global.get $call_depth) (i32.const 1))))
 
   (func $pop_call_frame
     (if (i32.gt_s (global.get $call_depth) (i32.const 0))
-      (then (global.set $call_depth
-              (i32.sub (global.get $call_depth) (i32.const 1))))))
+      (then
+        (global.set $call_depth (i32.sub (global.get $call_depth) (i32.const 1)))
+        (global.set $stack_cost (i32.sub (global.get $stack_cost)
+          (array.get $LineArr (ref.as_non_null (global.get $call_weights)) (global.get $call_depth)))))))
 
   ;; Tail calls reuse the caller's WASM frame, so semantically the top
   ;; entry is *replaced*, not pushed. Codegen emits this immediately
   ;; before return_call_ref.
-  (func $replace_top_call_frame (param $line i32)
-    (local $idx i32)
+  ;; A tail call replaces the top frame: its line and its weight (the wasm
+  ;; frame is replaced too, so the budget swaps rather than grows).
+  (func $replace_top_call_frame (param $line i32) (param $weight i32)
+    (local $idx i32) (local $weights (ref $LineArr))
     (local.set $idx (i32.sub (global.get $call_depth) (i32.const 1)))
     (if (i32.ge_s (local.get $idx) (i32.const 0))
-      (then (array.set $LineArr
-        (ref.as_non_null (global.get $call_lines))
-        (local.get $idx) (local.get $line)))))
+      (then
+        (array.set $LineArr (ref.as_non_null (global.get $call_lines)) (local.get $idx) (local.get $line))
+        (local.set $weights (ref.as_non_null (global.get $call_weights)))
+        (global.set $stack_cost (i32.add (i32.sub (global.get $stack_cost)
+          (array.get $LineArr (local.get $weights) (local.get $idx))) (local.get $weight)))
+        (array.set $LineArr (local.get $weights) (local.get $idx) (local.get $weight))
+        (if (i32.gt_s (global.get $stack_cost) (global.get $stack_budget))
+          (then (call $throw_lit (i32.const 971) (i32.const 14)))))))   ;; "stack overflow"
 
   ;; --- closure dispatch + multi-value helpers + print builtin ---
   (func $lua_call (param $closure (ref $LuaClosure)) (param $args (ref $ArgArr))
@@ -2331,11 +2365,12 @@
   (func $lua_call_any (param $v anyref) (param $args (ref $ArgArr))
                       (param $line i32) (result (ref $ArgArr))
     (local $mm anyref) (local $i i32) (local $r (ref $ArgArr))
-    (call $push_call_frame (local.get $line))
     (local.set $i (i32.const 0))
     (loop $resolve
       (if (ref.test (ref $LuaClosure) (local.get $v))
         (then
+          (call $push_call_frame (local.get $line)
+            (struct.get $LuaClosure $weight (ref.cast (ref $LuaClosure) (local.get $v))))
           (local.set $r (call $lua_call
                           (ref.cast (ref $LuaClosure) (local.get $v))
                           (local.get $args)))
@@ -2610,7 +2645,7 @@
     (local $callee anyref) (local $f_args (ref $ArgArr))
     (local $n_total i32) (local $line i32)
     (local $err anyref) (local $results (ref $ArgArr)) (local $r2 (ref $ArgArr))
-    (local $saved_depth i32)
+    (local $saved_depth i32) (local $cost_saved i32)
     (local.set $n_total (array.len (local.get $args)))
     (if (i32.eqz (local.get $n_total))
       (then (throw $LuaError (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 620) (i32.const 14)) (i32.const 0)))))
@@ -2618,6 +2653,7 @@
     ;; f_args = args[1..]. $args_slice does the bulk copy with array.copy.
     (local.set $f_args (call $args_slice (local.get $args) (i32.const 1)))
     (local.set $saved_depth (global.get $call_depth))
+    (local.set $cost_saved (global.get $stack_cost))
     ;; Pass the pcall call-site's line through to lua_call_any so error()
     ;; inside the callee reports the pcall(...) source position — matches
     ;; reference Lua, where pcall itself doesn't add a visible frame.
@@ -2637,6 +2673,7 @@
       (return (local.get $r2)))
     (local.set $err)
     (global.set $call_depth (local.get $saved_depth))
+    (global.set $stack_cost (local.get $cost_saved))
     (array.new_fixed $ArgArr 2 (global.get $g_false)
       (call $err_or_noobj (local.get $err))))
 
@@ -2648,7 +2685,7 @@
     (local $callee anyref) (local $msgh anyref) (local $f_args (ref $ArgArr))
     (local $n_total i32) (local $line i32)
     (local $err anyref) (local $results (ref $ArgArr)) (local $r2 (ref $ArgArr))
-    (local $handled anyref) (local $saved_depth i32)
+    (local $handled anyref) (local $saved_depth i32) (local $cost_saved i32)
     (local.set $n_total (array.len (local.get $args)))
     (if (i32.lt_s (local.get $n_total) (i32.const 2))
       (then (throw $LuaError (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 620) (i32.const 14)) (i32.const 0)))))
@@ -2657,6 +2694,7 @@
     ;; f_args = args[2..]. $args_slice does the bulk copy with array.copy.
     (local.set $f_args (call $args_slice (local.get $args) (i32.const 2)))
     (local.set $saved_depth (global.get $call_depth))
+    (local.set $cost_saved (global.get $stack_cost))
     (if (i32.gt_s (global.get $call_depth) (i32.const 0))
       (then (local.set $line (array.get $LineArr
         (ref.as_non_null (global.get $call_lines))
@@ -2673,6 +2711,7 @@
       (return (local.get $r2)))
     (local.set $err)
     (global.set $call_depth (local.get $saved_depth))
+    (global.set $stack_cost (local.get $cost_saved))
     (block $msgh_throw (result anyref)
       (local.set $handled (call $args_first
         (try_table (result (ref $ArgArr)) (catch $LuaError $msgh_throw)
@@ -2682,6 +2721,7 @@
         (call $err_or_noobj (local.get $handled)))))
     (local.set $handled)
     (global.set $call_depth (local.get $saved_depth))
+    (global.set $stack_cost (local.get $cost_saved))
     (array.new_fixed $ArgArr 2 (global.get $g_false)
       (call $err_or_noobj (local.get $handled))))
 
@@ -5368,7 +5408,7 @@
       ;; Inline closure for the iter — drops $g_builtin_utf8_codes_iter
       ;; from the live set when utf8.codes is unreferenced.
       (struct.new $LuaClosure
-        (ref.func $builtin_utf8_codes_iter) (global.get $g_empty_upvals))
+        (ref.func $builtin_utf8_codes_iter) (global.get $g_empty_upvals) (i32.const 256))
       (call $args_at (local.get $args) (i32.const 0))
       (ref.i31 (i32.const 0))))
 
@@ -6435,7 +6475,7 @@
           (struct.new $Box (call $arg_string (call $args_at (local.get $args) (i32.const 1))))
           (struct.new $Box (call $make_int
             (i64.extend_i32_s (i32.sub (local.get $init) (i32.const 1)))))
-          (struct.new $Box (call $make_int (i64.const -1)))))))
+          (struct.new $Box (call $make_int (i64.const -1)))) (i32.const 256))))
 
   ;; --- byte-builder for string.gsub output (step 7) ---
   (func $builder_new (result (ref $Builder))

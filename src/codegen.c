@@ -520,6 +520,7 @@ static void emit_maybe_store(CG *c, int slot, const Expr *e, int depth);
 static void emit_maybe_boxed(CG *c, const Expr *e, int depth);
 static void emit_maybe_cmp_block(CG *c, const Expr *e, int depth);
 static void emit_maybe_slot_box(CG *c, int slot, int depth);
+static void resolve_upval_origin(CG *c, int func_idx, int u, int *of, int *os);
 
 /* A cell is the four-part view of a maybe value used by the lowering: read
  * expressions for tag / i64 / f64 / boxed, plus the local names to write when
@@ -1389,9 +1390,12 @@ static void emit_tail_dispatch(CG *c, int line, int depth) {
     emit_indent(c, depth + 1);
     wat_append(c->w, "(then\n");
     emit_indent(c, depth + 2);
-    wat_appendf(c->w, "(call $replace_top_call_frame (i32.const %d))\n", line);
-    emit_indent(c, depth + 2);
     wat_append(c->w, "(local.set $tmp_clo (ref.cast (ref $LuaClosure) (local.get $tmp_callee)))\n");
+    emit_indent(c, depth + 2);
+    wat_appendf(c->w,
+                "(call $replace_top_call_frame (i32.const %d) "
+                "(struct.get $LuaClosure $weight (ref.as_non_null (local.get $tmp_clo))))\n",
+                line);
     emit_indent(c, depth + 2);
     wat_append(c->w, "(return_call_ref $LuaFn\n");
     emit_indent(c, depth + 3);
@@ -1463,6 +1467,7 @@ static void emit_tail_call(CG *c, const Expr *e, int depth) {
  * The upvalue array collects the parent's boxes per the function's
  * upvalue table.
  */
+static int fn_frame_weight(CG *c, const LuaFunc *fn);
 static void emit_function_expr(CG *c, const LuaFunc *fn, int depth) {
     emit_indent(c, depth);
     wat_append(c->w, "(struct.new $LuaClosure\n");
@@ -1482,6 +1487,8 @@ static void emit_function_expr(CG *c, const LuaFunc *fn, int depth) {
         emit_indent(c, depth + 1);
         wat_append(c->w, ")\n");
     }
+    emit_indent(c, depth + 1);
+    wat_appendf(c->w, "(i32.const %d)\n", fn_frame_weight(c, fn));
     emit_indent(c, depth);
     wat_append(c->w, ")\n");
 }
@@ -2319,7 +2326,7 @@ static int expr_temp_need(CG *c, const Expr *e) {
     case EXPR_CALL:
         m = 1 + expr_temp_need(c, e->as.call.callee);
         for (size_t i = 0; i < e->as.call.nargs; i++)
-            if ((v = 1 + expr_temp_need(c, e->as.call.args[i])) > m) m = v;
+            if ((v = 2 + expr_temp_need(c, e->as.call.args[i])) > m) m = v; /* +1 callee cell for inline math */
         return m;
     case EXPR_METHOD_CALL:
         m = 1 + expr_temp_need(c, e->as.method_call.recv);
@@ -2594,6 +2601,208 @@ static void emit_maybe_neg(CG *c, const MCell *a, const MCell *d, int depth) {
     wat_append(c->w, "))))\n");
 }
 
+/* --- inline math builtins ---
+ * `sqrt(x)` / `math.floor(x)` and friends in a lowered tree: the callee is
+ * evaluated as usual, then a runtime identity check against the builtin's
+ * closure global guards an inline f64.sqrt / abs / floor / ceil on a numeric
+ * argument; any other callee or argument takes the ordinary call. The
+ * decision of WHERE to emit the guard comes from the callee expression
+ * (`math.<key>`) or, for a local / upvalue, from its declaration's
+ * initializer — a heuristic only, the guard carries the correctness. */
+typedef enum { MB_NONE = 0,
+               MB_SQRT,
+               MB_ABS,
+               MB_FLOOR,
+               MB_CEIL } MathBuiltin;
+static const struct {
+    const char *key;
+    MathBuiltin kind;
+} MATH_INLINE[] = {{"sqrt", MB_SQRT}, {"abs", MB_ABS}, {"floor", MB_FLOOR}, {"ceil", MB_CEIL}};
+
+static MathBuiltin math_index_kind(CG *c, const Expr *e) {
+    if (e->kind != EXPR_INDEX) return MB_NONE;
+    const Expr *t = e->as.index.table, *k = e->as.index.key;
+    if (t->kind != EXPR_VAR || t->as.var.kind != VAR_GLOBAL) return MB_NONE;
+    if (c->pr->globals.items[t->as.var.idx].name_len != 4 ||
+        memcmp(c->pr->globals.items[t->as.var.idx].name, "math", 4) != 0)
+        return MB_NONE;
+    if (k->kind != EXPR_STRING) return MB_NONE;
+    for (size_t i = 0; i < sizeof(MATH_INLINE) / sizeof(MATH_INLINE[0]); i++)
+        if (strlen(MATH_INLINE[i].key) == k->as.s.len && memcmp(MATH_INLINE[i].key, k->as.s.bytes, k->as.s.len) == 0)
+            return MATH_INLINE[i].kind;
+    return MB_NONE;
+}
+
+/* The initializer of the `local` statement declaring `slot` in `b`, if it
+ * is a single-valued position; NULL otherwise. */
+static const Expr *find_local_init_block(const Block *b, int slot);
+static const Expr *find_local_init_stmt(const Stmt *s, int slot) {
+    const Expr *r = NULL;
+    switch (s->kind) {
+    case STMT_LOCAL: {
+        int nn = s->as.local.n_names, nv = s->as.local.n_values;
+        int last_call = nv > 0 && is_multival_tail(s->as.local.values[nv - 1]);
+        int n_lead = last_call ? nv - 1 : nv;
+        for (int j = 0; j < nn; j++)
+            if (s->as.local.local_idxs[j] == slot) return j < n_lead ? s->as.local.values[j] : NULL;
+        return NULL;
+    }
+    case STMT_IF:
+        for (size_t a = 0; a < s->as.if_stmt.narms && !r; a++) r = find_local_init_block(&s->as.if_stmt.arms[a].body, slot);
+        if (!r && s->as.if_stmt.has_else) r = find_local_init_block(&s->as.if_stmt.else_body, slot);
+        return r;
+    case STMT_WHILE: return find_local_init_block(&s->as.while_stmt.body, slot);
+    case STMT_DO: return find_local_init_block(&s->as.do_stmt.body, slot);
+    case STMT_REPEAT: return find_local_init_block(&s->as.repeat.body, slot);
+    case STMT_FOR_NUM: return find_local_init_block(&s->as.for_num.body, slot);
+    case STMT_FOR_GEN: return find_local_init_block(&s->as.for_gen.body, slot);
+    default: return NULL;
+    }
+}
+static const Expr *find_local_init_block(const Block *b, int slot) {
+    for (size_t i = 0; i < b->count; i++) {
+        const Expr *r = find_local_init_stmt(b->items[i], slot);
+        if (r) return r;
+    }
+    return NULL;
+}
+
+static MathBuiltin callee_math_kind(CG *c, const Expr *callee) {
+    MathBuiltin k = math_index_kind(c, callee);
+    if (k || callee->kind != EXPR_VAR) return k;
+    const Block *body;
+    int slot;
+    if (callee->as.var.kind == VAR_LOCAL) {
+        body = c->cur_func_idx < 0 ? &c->pr->main_body : &c->pr->funcs.items[c->cur_func_idx]->body;
+        slot = callee->as.var.idx;
+    } else if (callee->as.var.kind == VAR_UPVAL && c->cur_func_idx >= 0) {
+        int of, os;
+        resolve_upval_origin(c, c->cur_func_idx, callee->as.var.idx, &of, &os);
+        if (of == -2) return MB_NONE;
+        body = of < 0 ? &c->pr->main_body : &c->pr->funcs.items[of]->body;
+        slot = os;
+    } else {
+        return MB_NONE;
+    }
+    const Expr *init = find_local_init_block(body, slot);
+    return init ? math_index_kind(c, init) : MB_NONE;
+}
+
+/* The wasm global holding the builtin closure for math.<key>. */
+static const char *math_builtin_global(MathBuiltin k) {
+    const char *key = MATH_INLINE[k - 1].key;
+    int nb = builtin_count();
+    for (int i = 0; i < nb; i++)
+        if (builtin_class(i) == BLT_LIB_MATH && strcmp(builtin_lib_key(i), key) == 0) return builtin_func_name(i) + 1;
+    return NULL;
+}
+
+static void emit_maybe_lower(CG *c, const Expr *e, const MCell *d, int depth);
+
+/* d = <math builtin>(arg) with the guarded inline fast path. */
+static void emit_maybe_math_call(CG *c, const Expr *e, MathBuiltin mk, const MCell *d, int depth) {
+    const char *glob = math_builtin_global(mk);
+    if (!glob) {
+        cg_error(c, "internal: math builtin global not found");
+        return;
+    }
+    int k = c->mt_depth;
+    MCell cv = mcell_tmp(k); /* the callee, never the destination (d may be the arg) */
+    mt_alloc(c, 1);
+    emit_indent(c, depth);
+    wat_appendf(c->w, "(local.set %s\n", cv.sb);
+    emit_expr(c, e->as.call.callee, depth + 1);
+    emit_indent(c, depth);
+    wat_append(c->w, ")\n");
+    MCell a;
+    if (!operand_immediate(c, e->as.call.args[0], NULL, &a)) {
+        a = mcell_tmp(k + 1);
+        mt_alloc(c, 1);
+        emit_maybe_lower(c, e->as.call.args[0], &a, depth);
+    }
+    emit_indent(c, depth);
+    wat_appendf(c->w, "(if (i32.and (ref.eq (ref.cast (ref null eq) %s) (global.get $g_%s)) (i32.ne %s (i32.const 0)))\n",
+                cv.b, glob, a.t);
+    emit_indent(c, depth + 1);
+    wat_append(c->w, "(then\n");
+    switch (mk) {
+    case MB_SQRT:
+        emit_indent(c, depth + 2);
+        wat_appendf(c->w, "(local.set %s (f64.sqrt\n", d->sf);
+        emit_cell_f64(c, &a, depth + 3);
+        emit_indent(c, depth + 2);
+        wat_append(c->w, "))\n");
+        emit_set_tag(c, d, 2, depth + 2);
+        break;
+    case MB_ABS:
+        emit_indent(c, depth + 2);
+        wat_appendf(c->w, "(if (i32.eq %s (i32.const 1))\n", a.t);
+        emit_indent(c, depth + 3);
+        wat_appendf(c->w, "(then (local.set %s (select (i64.sub (i64.const 0) %s) %s (i64.lt_s %s (i64.const 0))))\n",
+                    d->si, a.i, a.i, a.i);
+        emit_set_tag(c, d, 1, depth + 4);
+        emit_indent(c, depth + 3);
+        wat_append(c->w, ")\n");
+        emit_indent(c, depth + 3);
+        wat_appendf(c->w, "(else (local.set %s (f64.abs %s))\n", d->sf, a.f);
+        emit_set_tag(c, d, 2, depth + 4);
+        emit_indent(c, depth + 3);
+        wat_append(c->w, "))\n");
+        break;
+    case MB_FLOOR:
+    case MB_CEIL:
+        /* An int is its own floor; a float rounds and converts to an
+         * integer when it fits (reference pushnumint), else stays float. */
+        emit_indent(c, depth + 2);
+        wat_appendf(c->w, "(if (i32.eq %s (i32.const 1))\n", a.t);
+        emit_indent(c, depth + 3);
+        wat_appendf(c->w, "(then (local.set %s %s)\n", d->si, a.i);
+        emit_set_tag(c, d, 1, depth + 4);
+        emit_indent(c, depth + 3);
+        wat_append(c->w, ")\n");
+        emit_indent(c, depth + 3);
+        wat_appendf(c->w, "(else (local.set %s (%s %s))\n", d->sf, mk == MB_FLOOR ? "f64.floor" : "f64.ceil", a.f);
+        emit_indent(c, depth + 4);
+        wat_appendf(c->w,
+                    "(if (i32.and (f64.ge %s (f64.const -9223372036854775808)) (f64.lt %s (f64.const 9223372036854775808)))\n",
+                    d->f, d->f);
+        emit_indent(c, depth + 5);
+        wat_appendf(c->w, "(then (local.set %s (i64.trunc_f64_s %s))\n", d->si, d->f);
+        emit_set_tag(c, d, 1, depth + 6);
+        emit_indent(c, depth + 5);
+        wat_append(c->w, ")\n");
+        emit_indent(c, depth + 5);
+        wat_append(c->w, "(else\n");
+        emit_set_tag(c, d, 2, depth + 6);
+        emit_indent(c, depth + 5);
+        wat_append(c->w, "))\n");
+        emit_indent(c, depth + 3);
+        wat_append(c->w, "))\n");
+        break;
+    default: break;
+    }
+    emit_indent(c, depth + 1);
+    wat_append(c->w, ")\n");
+    emit_indent(c, depth + 1);
+    wat_append(c->w, "(else\n");
+    emit_indent(c, depth + 2);
+    wat_appendf(c->w, "(local.set %s (call $args_first (call $lua_call_any %s (array.new_fixed $ArgArr 1\n", d->sb, cv.b);
+    emit_maybe_cell_box(c, &a, depth + 3);
+    emit_indent(c, depth + 2);
+    wat_appendf(c->w, ") (i32.const %d))))\n", e->line);
+    emit_indent(c, depth + 2);
+    wat_appendf(c->w, "(call $unbox_num %s)\n", d->b);
+    emit_indent(c, depth + 2);
+    wat_appendf(c->w, "local.set %s\n", d->sf);
+    emit_indent(c, depth + 2);
+    wat_appendf(c->w, "local.set %s\n", d->si);
+    emit_indent(c, depth + 2);
+    wat_appendf(c->w, "local.set %s\n", d->st);
+    emit_indent(c, depth + 1);
+    wat_append(c->w, "))\n");
+    c->mt_depth = k;
+}
+
 /* Lower `e` into cell `d` as a statement sequence. Provably typed
  * subexpressions keep their unboxed paths; a maybe read is a cell copy;
  * arithmetic and unary minus recurse; anything else is evaluated as a Lua
@@ -2643,6 +2852,15 @@ static void emit_maybe_lower(CG *c, const Expr *e, const MCell *d, int depth) {
             return;
         }
         break;
+    case EXPR_CALL: {
+        MathBuiltin mk;
+        if (e->as.call.nargs == 1 && !is_multival_tail(e->as.call.args[0]) &&
+            (mk = callee_math_kind(c, e->as.call.callee)) != MB_NONE) {
+            emit_maybe_math_call(c, e, mk, d, depth);
+            return;
+        }
+        break;
+    }
     case EXPR_UNOP:
         if (e->as.unop.op == UN_NEG) {
             int k = c->mt_depth;
@@ -4735,6 +4953,27 @@ static const char *num_wat_ty(NumTy t) {
 }
 
 /* Emit the body of one user function. */
+/* Estimated wasm frame bytes of $user_N, stored in every closure over it for
+ * the stack-budget guard ($push_call_frame). An upper bound that needs none
+ * of the per-function analyses: every slot counted as a maybe quadruple, the
+ * temporary bound taken with no typing information (larger), eight bytes a
+ * local, plus a fixed allowance for the call machinery's own frames. */
+static int fn_frame_weight(CG *c, const LuaFunc *fn) {
+    const unsigned char *pi = c->cur_is_int, *pf = c->cur_is_float, *pm = c->cur_is_maybe;
+    int pn = c->cur_n_locals;
+    c->cur_is_int = NULL;
+    c->cur_is_float = NULL;
+    c->cur_is_maybe = NULL;
+    c->cur_n_locals = fn->n_locals;
+    int temps = c->opt_int ? block_temp_need(c, &fn->body) : 0;
+    c->cur_is_int = pi;
+    c->cur_is_float = pf;
+    c->cur_is_maybe = pm;
+    c->cur_n_locals = pn;
+    int locals = fn->n_locals * 4 + temps * 4 + 16;
+    return 8 * locals + 300;
+}
+
 static void emit_user_function(CG *c, const LuaFunc *fn, int direct, int ret_single) {
     WatBuilder *w = c->w;
     const FuncSig *sg = (c->opt_int && fn->func_idx >= 0 && fn->func_idx < c->n_sigs)
@@ -5832,7 +6071,7 @@ int codegen_module(const ParseResult *pr, const char *src_name,
         if (!live[i]) continue;
         wat_appendf(out,
                     "  (global $g_%s (ref $LuaClosure)\n"
-                    "    (struct.new $LuaClosure (ref.func %s) (global.get $g_empty_upvals)))\n",
+                    "    (struct.new $LuaClosure (ref.func %s) (global.get $g_empty_upvals) (i32.const 256)))\n",
                     builtin_func_name(i) + 1, builtin_func_name(i));
     }
 
@@ -5859,6 +6098,8 @@ int codegen_module(const ParseResult *pr, const char *src_name,
                 "    (global.set $fmt_buf\n"
                 "      (array.new $LuaArr (i32.const 0) (i32.const %d)))\n"
                 "    (global.set $call_lines\n"
+                "      (array.new $LineArr (i32.const 0) (i32.const 256)))\n"
+                "    (global.set $call_weights\n"
                 "      (array.new $LineArr (i32.const 0) (i32.const 256)))\n",
                 LUA_FMT_BUF_CAP);
     /* Create the global-environment table $g_globals. Every Lua global
