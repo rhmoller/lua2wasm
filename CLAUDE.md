@@ -25,6 +25,7 @@ ctest --test-dir build --output-on-failure # run the full suite (must be green)
 ```
 
 Run a single test: `ctest --test-dir build -R test_e2e_<name> --output-on-failure`.
+Benchmarks vs reference Lua: `scripts/bench.sh [name...]` (`bench/*.lua`; `RUNS=3` keeps the fastest, `L2W_FLAGS=-O0` times the boxed fallback).
 
 Needs: clang ≥ 19 (C23 `#embed` of the prelude), cmake ≥ 3.25, Node ≥ 22.
 The WAT→wasm assembler is built in (`src/wat2wasm.c`, also the standalone

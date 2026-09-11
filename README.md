@@ -158,6 +158,19 @@ the columns, not the absolutes):
 | recursive `fib(34)`      | 0.18 s             | 0.31 s                  | **0.05 s** |
 | 5M `t[i]=i` then sum     | 0.06 s             | 0.24 s                  | **0.14 s** |
 
+Those are microbenchmarks over unboxed locals. `scripts/bench.sh` runs a set of
+*realistic* programs (`bench/*.lua`: nbody, binary-trees, fannkuch,
+spectral-norm, a metatable-OO particle sim, string processing, closures, hash
+tables) under `lua5.5`, `luajit` and lua2wasm, checks the outputs match, and
+prints the ratio to reference. Current picture (2026-09): allocation-heavy code
+runs ~2x *faster* than reference (the host GC is good), int-array / call-heavy
+code ~2x slower, but programs that read numbers out of named table fields
+(nbody, OO) run ~6x slower and string-heavy code ~10x slower. Profiling shows
+the gap is the table string-key path — each `t.name` allocates its key string,
+hashes the bytes, and byte-compares on hit; there is no interning or cached
+hash yet — not the WasmGC model itself. `bench/nbody_arr.lua` is the same
+program with integer indices and runs 3.8x faster than `bench/nbody.lua`.
+
 What the pass does, all within the WasmGC model (no linear memory, no deopt):
 
 - **Unboxes locals, parameters, returns, and recursion.** A whole-program
