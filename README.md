@@ -162,14 +162,37 @@ Those are microbenchmarks over unboxed locals. `scripts/bench.sh` runs a set of
 *realistic* programs (`bench/*.lua`: nbody, binary-trees, fannkuch,
 spectral-norm, a metatable-OO particle sim, string processing, closures, hash
 tables) under `lua5.5`, `luajit` and lua2wasm, checks the outputs match, and
-prints the ratio to reference. Current picture (2026-09): allocation-heavy code
-runs ~2x *faster* than reference (the host GC is good), int-array / call-heavy
-code ~2x slower, but programs that read numbers out of named table fields
-(nbody, OO) run ~6x slower and string-heavy code ~10x slower. Profiling shows
-the gap is the table string-key path — each `t.name` allocates its key string,
-hashes the bytes, and byte-compares on hit; there is no interning or cached
-hash yet — not the WasmGC model itself. `bench/nbody_arr.lua` is the same
-program with integer indices and runs 3.8x faster than `bench/nbody.lua`.
+prints the ratio to reference. Seconds, best of two, Node 24 on one machine:
+
+| program (`bench/`) | reference `lua5.5` | lua2wasm | ratio |
+|--------------------|-------------------:|---------:|------:|
+| binarytrees        | 0.36 | **0.18** | 0.5× |
+| spectralnorm       | 0.91 | 1.48 | 1.6× |
+| oo                 | 0.47 | 0.77 | 1.6× |
+| hashtab            | 0.11 | 0.19 | 1.8× |
+| closures           | 0.08 | 0.14 | 1.8× |
+| nbody              | 0.44 | 0.94 | 2.1× |
+| fannkuch           | 0.84 | 1.82 | 2.2× |
+| strings            | 0.07 | 0.25 | 3.6× |
+
+Allocation-heavy code runs faster than reference (the host GC is good); the
+rest sits within about 2× of the C interpreter. What closed the gap from the
+6–10× the table-field and string-heavy programs started at:
+
+- **Constant strings are hoisted into module globals** with their hash
+  precomputed, so `t.name` never allocates its key and the same literal is
+  the same object at every site; every string caches its hash, and table
+  lookups compare identity, then hashes, then bytes. Constant-key reads,
+  writes, constructors and method dispatch go through string-specialized
+  entry points that skip the generic key dispatch.
+- **`string.format` parses and renders directives in wasm**; only float
+  rendering crosses to the host, and the host takes a native formatting path
+  whenever no decimal rounding tie is possible.
+
+What remains is structural: values loaded from table fields are boxed, so
+`bix - bj.x` in nbody's inner loop is a generic call plus a fresh `$LuaFloat`
+per result (about a third of its remaining time). Unboxing across field
+loads needs speculative typing with guards; it is the next lever.
 
 What the pass does, all within the WasmGC model (no linear memory, no deopt):
 
