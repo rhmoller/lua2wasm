@@ -974,7 +974,7 @@ function watToWasm(wat) {
 /* ----- runtime host ----- */
 let curInstance;
 const helpers = makeHelpers({ getInstance: () => curInstance, formatFloat, cFormatG, cFormatF, cFormatE });
-const { luaToString, formatSpec, parseLuaNumber, osDate, osGetenv, objId } = helpers;
+const { luaToString, formatFloatDirective, parseLuaNumber, osDate, osGetenv, objId } = helpers;
 /* Lua's os.clock spec asks for "an approximation of CPU time"; in the
  * browser the closest cheap monotonic reading is performance.now() since
  * the page loaded. We subtract this baseline at every call. */
@@ -1168,7 +1168,7 @@ async function run() {
         math:      (kind, x)    => MATH_FNS[kind](x),
         math2:     (kind, x, y) => MATH2_FNS[kind](x, y),
         parse_num: (s, base)    => parseLuaNumber(s, base),
-        fmt_spec:  (spec, val)  => formatSpec(spec, val),
+        fmt_float: (conv, flags, width, prec, x) => formatFloatDirective(conv, flags, width, prec, x),
         read:      readImport,
         read_num:  readNumImport,
         os_time:   ()                    => BigInt(Math.floor(Date.now() / 1000)),

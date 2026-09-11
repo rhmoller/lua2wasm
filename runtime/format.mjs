@@ -56,8 +56,38 @@ function scaledRoundEven(m, e, k) {
     return q % 2n === 0n ? q : q + 1n; // exact tie -> round to even
 }
 
+// Fast path guard. Write |x| = M * 2^E with M odd; the exact decimal expansion
+// of |x| then has exactly max(0, -E) fractional digits and, since a leading
+// zero costs at most log10(2) of them, at least 0.69 * (-E) significant
+// digits. A decimal rounding tie needs the expansion to *end* exactly one
+// digit past the rounding position, so for E <= -27 the expansion is longer
+// than any precision we format at (<= 17 significant digits for tostring and
+// the two-digit precisions string.format allows up to ~26) and no tie can
+// occur. Then JS's toFixed / toExponential — correctly rounded except on
+// exact ties — agree with C, at a fraction of the BigInt path's cost. Values
+// with a short expansion (integers, halves, 0.125, ...) take the exact path.
+const F64 = new Float64Array(1);
+const U32 = new Uint32Array(F64.buffer);
+F64[0] = 1;
+const LO = U32[1] === 0x3ff00000 ? 0 : 1; // index of the low word (endianness)
+function lowBitExp(x) {
+    F64[0] = x;
+    const lo = U32[LO], hi = U32[1 - LO];
+    const expBits = (hi >>> 20) & 0x7ff;
+    let mhi = hi & 0xfffff;
+    if (expBits !== 0) mhi |= 0x100000;
+    const e = expBits === 0 ? -1074 : expBits - 1075;
+    const tz = lo !== 0 ? (Math.clz32(lo & -lo) ^ 31) : 32 + (Math.clz32(mhi & -mhi) ^ 31);
+    return e + tz;
+}
+function tieFree(x) {
+    return x !== 0 && Number.isFinite(x) && lowBitExp(x) <= -27;
+}
+
 // C printf "%.<prec>f", ties-to-even. Returns the body (with leading "-").
 export function cFormatF(x, prec) {
+    // toFixed switches to exponent form at 1e21 and caps the precision at 100.
+    if (prec <= 100 && Math.abs(x) < 1e21 && tieFree(x)) return x.toFixed(prec);
     const sign = x < 0 || Object.is(x, -0) ? "-" : "";
     if (x === 0) return sign + (prec > 0 ? "0." + "0".repeat(prec) : "0");
     const { m, e } = decomposeAbs(x);
@@ -69,6 +99,9 @@ export function cFormatF(x, prec) {
 
 // C printf "%.<prec>e", ties-to-even. Returns the body (with leading "-").
 export function cFormatE(x, prec) {
+    // C prints at least two exponent digits; JS prints the minimum.
+    if (prec <= 100 && tieFree(x))
+        return x.toExponential(prec).replace(/e([+-])(\d)$/, "e$10$2");
     const sign = x < 0 || Object.is(x, -0) ? "-" : "";
     const expStr = (E) => "e" + (E < 0 ? "-" : "+") + String(Math.abs(E)).padStart(2, "0");
     if (x === 0) return sign + (prec > 0 ? "0." + "0".repeat(prec) : "0") + expStr(0);
@@ -93,6 +126,22 @@ export function cFormatG(x, prec, strip = true) {
     if (x === 0) {
         const body = Object.is(x, -0) ? "-0" : "0";
         return strip ? body : body + "." + "0".repeat(prec - 1);
+    }
+    // Fast path: toPrecision rounds correctly off ties and picks fixed vs
+    // exponent form almost like C — C switches to exponent form below 1e-4,
+    // JS below 1e-6 — so only that band takes the exact route.
+    if (prec <= 100 && Math.abs(x) >= 1e-4 && tieFree(x)) {
+        const s = x.toPrecision(prec);
+        const ei = s.indexOf("e");
+        if (ei < 0) {
+            if (!strip) return s.indexOf(".") < 0 ? s + "." : s;
+            return s.indexOf(".") < 0 ? s : s.replace(/\.?0+$/, "");
+        }
+        let mant = s.slice(0, ei);
+        if (strip) mant = mant.replace(/\.?0+$/, "");
+        else if (mant.indexOf(".") < 0) mant += ".";
+        const exp = parseInt(s.slice(ei + 1), 10);
+        return mant + "e" + (exp < 0 ? "-" : "+") + String(Math.abs(exp)).padStart(2, "0");
     }
     // Canonical scientific form with `prec` significant digits handles all
     // rounding, including a carry that bumps the exponent (e.g. 9.99 -> 1e1).

@@ -18,7 +18,7 @@ if (!wasmPath) {
 
 let instance;
 const helpers = makeHelpers({ getInstance: () => instance, formatFloat, cFormatG, cFormatF, cFormatE });
-const { luaToString, formatSpec, parseLuaNumber, osDate, osGetenv, objId } = helpers;
+const { luaToString, formatFloatDirective, parseLuaNumber, osDate, osGetenv, objId } = helpers;
 
 // Optional override for deterministic tests: if LUA2WASM_TEST_TIME is set
 // (decimal unix seconds), `os.time()` and the implicit `os.date()` "now"
@@ -172,7 +172,7 @@ function osTmpname() {
         math:      (kind, x)      => MATH_FNS[kind](x),
         math2:     (kind, x, y)   => MATH2_FNS[kind](x, y),
         parse_num: (s, base)      => parseLuaNumber(s, base),
-        fmt_spec:  (spec, val)    => formatSpec(spec, val),
+        fmt_float: (conv, flags, width, prec, x) => formatFloatDirective(conv, flags, width, prec, x),
         read:      (mode, count)  => hostRead(mode, count),
         read_num:  ()             => hostReadNum(),
         os_time:   ()             => FROZEN_TIME ?? BigInt(Math.floor(Date.now() / 1000)),

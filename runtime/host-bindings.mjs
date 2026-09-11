@@ -74,7 +74,10 @@ export const LUA_NUM_RE =
 // than walking off the end of the GC array — the WAT side chunks larger reads.
 export function writeBytesToFmtBuf(exports, bytes) {
     const n = Math.min(bytes.length, FMT_BUF_CAP);
-    for (let i = 0; i < n; i++) exports.fmt_buf_set(i, bytes[i]);
+    // Four bytes per crossing (see $fmt_buf_set_word); reads past the end of
+    // a typed array are undefined -> 0, which the wasm side never stores.
+    for (let i = 0; i < n; i += 4)
+        exports.fmt_buf_set_word(i, bytes[i] | (bytes[i + 1] << 8) | (bytes[i + 2] << 16) | (bytes[i + 3] << 24), n);
     return n;
 }
 
@@ -181,7 +184,7 @@ export class BufferedFile {
     contents() { return this.buf; }
 }
 
-// `tostring`-like rendering for the host; needed by formatSpec's `%s` /
+// `tostring`-like rendering for the host; needed by print and `%s` /
 // `%q` and the playground's print. Caller passes in formatFloat to keep
 // dependency direction clean.
 export function makeHelpers({ getInstance, formatFloat, cFormatG, cFormatF, cFormatE }) {
@@ -245,11 +248,6 @@ export function makeHelpers({ getInstance, formatFloat, cFormatG, cFormatF, cFor
         return writeBytesToFmtBuf(exp(), latin1Bytes(s));
     }
 
-    function applyPad(body, flags, width) {
-        if (width <= body.length) return body;
-        const pad = " ".repeat(width - body.length);
-        return flags.includes("-") ? body + pad : pad + body;
-    }
 
     function applyPadNumeric(body, flags, width) {
         if (width <= body.length) return body;
@@ -261,21 +259,6 @@ export function makeHelpers({ getInstance, formatFloat, cFormatG, cFormatF, cFor
         return " ".repeat(width - body.length) + body;
     }
 
-    function formatIntSpec(v, base, upper, flags, prec) {
-        let bi = typeof v === "bigint" ? v : BigInt(v);
-        const neg = bi < 0n;
-        if (neg) bi = -bi;
-        let s = bi.toString(base);
-        if (upper) s = s.toUpperCase();
-        if (prec >= 0) {
-            if (prec === 0 && bi === 0n) s = "";
-            else if (s.length < prec) s = "0".repeat(prec - s.length) + s;
-        }
-        if (neg) return "-" + s;
-        if (flags.includes("+")) return "+" + s;
-        if (flags.includes(" ")) return " " + s;
-        return s;
-    }
 
     function formatFloatSpec(v, conv, prec, flags) {
         const upper = conv === conv.toUpperCase();
@@ -308,209 +291,86 @@ export function makeHelpers({ getInstance, formatFloat, cFormatG, cFormatF, cFor
         return body;
     }
 
-    function formatHexFloat(v, upper) {
+    // Exact decomposition of a finite positive double: |x| = m * 2^e with m the
+    // integer mantissa (implicit bit restored for normals).
+    function splitDouble(x) {
+        const dv = new DataView(new ArrayBuffer(8));
+        dv.setFloat64(0, x);
+        const hi = dv.getUint32(0), lo = dv.getUint32(4);
+        const expBits = (hi >>> 20) & 0x7ff;
+        let m = (BigInt(hi & 0xfffff) << 32n) | BigInt(lo >>> 0);
+        if (expBits === 0) return { m, e: -1074 };
+        return { m: m | (1n << 52n), e: expBits - 1075 };
+    }
+
+    // C "%a": 0x1.<hex>p<exp>. Without a precision the mantissa is exact with
+    // trailing zeros stripped; with one it is rounded to that many hex digits
+    // (ties to even, like glibc), a carry renormalising 0x1.fff -> 0x2.000.
+    function formatHexFloat(v, upper, prec = -1) {
         if (!Number.isFinite(v)) {
             if (Number.isNaN(v)) return upper ? "NAN" : "nan";
             return (v < 0 ? "-" : "") + (upper ? "INF" : "inf");
         }
-        if (v === 0) return upper ? "0X0P+0" : "0x0p+0";
-        const sign = v < 0 ? "-" : "";
-        v = Math.abs(v);
-        let e = Math.floor(Math.log2(v));
-        let frac = v / Math.pow(2, e);
-        let intPart = Math.floor(frac);
-        let f = frac - intPart;
-        let hex = intPart.toString(16);
-        let fracHex = "";
-        for (let i = 0; i < 13 && f > 0; i++) {
-            f *= 16;
-            const d = Math.floor(f);
-            fracHex += d.toString(16);
-            f -= d;
+        const sign = v < 0 || Object.is(v, -0) ? "-" : "";
+        let out;
+        if (v === 0) {
+            out = "0x0" + (prec > 0 ? "." + "0".repeat(prec) : "") + "p+0";
+        } else {
+            const { m, e } = splitDouble(Math.abs(v));       // |v| = m * 2^e exactly
+            const bits = m.toString(2).length;                // m normalised: top bit is the unit
+            let intPart = 1n, frac = m - (1n << BigInt(bits - 1));
+            let fracBits = bits - 1, exp = e + bits - 1;
+            let hex;
+            if (prec < 0) {
+                // pad the fraction to a nibble boundary, print, strip zeros
+                const pad = (4 - (fracBits % 4)) % 4;
+                hex = fracBits + pad > 0 ? (frac << BigInt(pad)).toString(16).padStart((fracBits + pad) / 4, "0") : "";
+                hex = hex.replace(/0+$/, "");
+            } else {
+                const keep = 4 * prec;
+                if (keep < fracBits) {
+                    const drop = BigInt(fracBits - keep);
+                    let q = frac >> drop;
+                    const r = frac & ((1n << drop) - 1n), half = 1n << (drop - 1n);
+                    if (r > half || (r === half && (q & 1n) === 1n)) q += 1n;
+                    if (q === 1n << BigInt(keep)) { q = 0n; intPart += 1n; }
+                    frac = q;
+                } else {
+                    frac <<= BigInt(keep - fracBits);
+                }
+                hex = prec > 0 ? frac.toString(16).padStart(prec, "0") : "";
+            }
+            out = "0x" + intPart.toString(16) + (hex ? "." + hex : "") + "p" + (exp >= 0 ? "+" : "") + exp;
         }
-        fracHex = fracHex.replace(/0+$/, "");
-        const out = "0x" + hex + (fracHex ? "." + fracHex : "")
-                  + "p" + (e >= 0 ? "+" : "") + e;
         return sign + (upper ? out.toUpperCase() : out);
     }
 
-    // Matches reference Lua's addquoted: ", \ and newline become a backslash
-    // followed by the character itself (so a literal "\n" is backslash + a real
-    // newline). Other control chars become \ddd, padded to 3 digits only when
-    // the next char is a digit (to keep the escape unambiguous).
-    function quoteForLua(s) {
-        let out = '"';
-        for (let i = 0; i < s.length; i++) {
-            const ch = s[i];
-            const c = s.charCodeAt(i);
-            if (ch === '"' || ch === "\\" || ch === "\n") {
-                out += "\\" + ch;
-            } else if (c < 32 || c === 127) {
-                const nxt = s.charCodeAt(i + 1);
-                const digits = String(c);
-                out += "\\" + (nxt >= 48 && nxt <= 57 ? digits.padStart(3, "0") : digits);
-            } else {
-                out += ch;
-            }
-        }
-        return out + '"';
-    }
 
-    function formatSpec(specRef, valRef) {
-        const spec = readLuaString(specRef);
-        const m = /^%([-+ #0']*)(\d*)(?:\.(\d+))?([hlLqjzt]*)([%a-zA-Z])$/.exec(spec);
-        if (!m) return writeFmtBuf(spec);
-        const flags = m[1];
-        const width = m[2] ? parseInt(m[2], 10) : 0;
-        const prec  = m[3] !== undefined ? parseInt(m[3], 10) : -1;
-        const conv  = m[5];
-        // Validate the directive against Lua's scanformat rules: it must be a
-        // valid conversion carrying only its allowed flags ('' = none), with no
-        // C length modifier, and width/precision each at most two digits and
-        // only where the conversion permits them. '+'/' ' are signed-numeric
-        // only; '#' is o/x/X + floats; '0' is numeric; '-' is universal; %q and
-        // %% take no modifiers; %c/%p/%q/%% take no precision; %q/%% take no
-        // width. Anything else returns -1 (catchable "invalid conversion").
-        const ALLOWED = {
-            d: "-+ 0", i: "-+ 0", u: "-0", o: "-0#", x: "-0#", X: "-0#",
-            c: "-", p: "-", s: "-",
-            f: "-+ #0", e: "-+ #0", E: "-+ #0", g: "-+ #0", G: "-+ #0",
-            a: "-+ #0", A: "-+ #0", q: "", "%": "",
-        };
-        if (m[4] !== "" || !(conv in ALLOWED)) return -1;   // length modifier or unknown conversion
-        for (const ch of flags) if (!ALLOWED[conv].includes(ch)) return -1;
-        if (m[2] !== "" && ("q%".includes(conv) || m[2].length > 2)) return -1;
-        if (m[3] !== undefined && ("cpq%".includes(conv) || m[3].length > 2)) return -1;
-        const tag = valRef === null || valRef === undefined ? 0
-                  : exp().lua_tag(valRef);
-        // Integer argument for %d/%i/%u/%o/%x/%X/%c. Returns null when the
-        // value has no integer representation (non-integral float, or a
-        // non-numeric value) so the caller can raise a catchable error rather
-        // than silently formatting 0. Numeric strings are coerced, like Lua.
-        // A float has an integer representation only if it is integral AND fits
-        // in a Lua integer (i64); 1e308 is integral as a double but far beyond
-        // ±2^63, so %d on it must raise rather than emit a giant integer.
-        const floatToI64OrNull = (f) =>
-            (Number.isInteger(f) && f >= -9223372036854775808 && f < 9223372036854775808)
-                ? BigInt(f) : null;
-        const asIntOrNull = () => {
-            if (tag === 2) return exp().lua_get_int(valRef);
-            if (tag === 3) return floatToI64OrNull(exp().lua_get_float(valRef));
-            if (tag === 4) {
-                const p = parseLuaNumber(valRef, 0);
-                if (p === null || p === undefined) return null;
-                const pt = exp().lua_tag(p);
-                if (pt === 2) return exp().lua_get_int(p);
-                if (pt === 3) return floatToI64OrNull(exp().lua_get_float(p));
-            }
-            return null;
-        };
-        // Float argument for %f/%e/%g/%a. Returns null for a non-numeric /
-        // nil / wrong-type value (caller raises) and coerces a numeric string,
-        // matching Lua — never silently 0.
-        const asFloatOrNull = () => {
-            if (tag === 3) return exp().lua_get_float(valRef);
-            if (tag === 2) return Number(exp().lua_get_int(valRef));
-            if (tag === 4) {
-                const p = parseLuaNumber(valRef, 0);
-                if (p === null || p === undefined) return null;
-                const pt = exp().lua_tag(p);
-                if (pt === 2) return Number(exp().lua_get_int(p));
-                if (pt === 3) return exp().lua_get_float(p);
-            }
-            return null;
-        };
-        let body;
-        switch (conv) {
-            case "%": return writeFmtBuf(applyPad("%", flags, width));
-            case "s": {
-                let s = valRef === null || valRef === undefined ? "nil"
-                      : tag === 4 ? readLuaString(valRef) : luaToString(valRef);
-                // Plain %s keeps the whole string (embedded NULs ok); %s with
-                // any modifier (flags/width/precision) requires a NUL-free
-                // string, like Lua ("string contains zeros").
-                const hasModifier = m[1] !== "" || m[2] !== "" || m[3] !== undefined;
-                if (hasModifier && s.indexOf("\0") >= 0) return -1;
-                if (prec >= 0 && s.length > prec) s = s.slice(0, prec);
-                return writeFmtBuf(applyPad(s, flags, width));
-            }
-            case "q": {
-                // %q must emit a value readable back as the SAME type: bare
-                // number/true/false/nil literals, a quoted string, or a
-                // round-trippable form for floats. Tables etc. have no literal
-                // form -> -1 signals a catchable error to the WAT caller.
-                if (tag === 0) return writeFmtBuf("nil");
-                if (tag === 1) return writeFmtBuf(exp().lua_get_bool(valRef) ? "true" : "false");
-                if (tag === 2) {
-                    const iv = exp().lua_get_int(valRef);
-                    // mininteger has no decimal literal that parses back.
-                    return writeFmtBuf(iv === -(2n ** 63n) ? "0x8000000000000000" : String(iv));
-                }
-                if (tag === 3) {
-                    const f = exp().lua_get_float(valRef);
-                    if (Number.isNaN(f)) return writeFmtBuf("(0/0)");
-                    if (f === Infinity) return writeFmtBuf("1e9999");
-                    if (f === -Infinity) return writeFmtBuf("-1e9999");
-                    return writeFmtBuf(formatHexFloat(f, false));
-                }
-                if (tag === 4) return writeFmtBuf(quoteForLua(readLuaString(valRef)));
-                return -1;
-            }
-            case "c": {
-                const iv = asIntOrNull(); if (iv === null) return -1;
-                // Mask the low byte on the BigInt (Number(iv) loses precision
-                // for |iv| >= 2^53 and JS & is 32-bit), then to a 0..255 char.
-                return writeFmtBuf(applyPad(
-                    String.fromCharCode(Number(iv & 0xffn)), flags, width));
-            }
-            case "d": case "i": {
-                const iv = asIntOrNull(); if (iv === null) return -1;
-                body = formatIntSpec(iv, 10, false, flags, prec);
-                return writeFmtBuf(applyPadNumeric(body, flags, width));
-            }
-            case "u": {
-                let v = asIntOrNull(); if (v === null) return -1;
-                if (v < 0n) v += (1n << 64n);
-                body = formatIntSpec(v, 10, false, flags, prec);
-                return writeFmtBuf(applyPadNumeric(body, flags, width));
-            }
-            case "o": {
-                let iv = asIntOrNull(); if (iv === null) return -1;
-                if (iv < 0n) iv += 1n << 64n;        // o/x/X are unsigned (two's complement)
-                body = formatIntSpec(iv, 8, false, flags, prec);
-                if (flags.includes("#") && !body.replace(/^[-+ ]/, "").startsWith("0"))
-                    body = body.replace(/^([-+ ]?)/, "$10");
-                return writeFmtBuf(applyPadNumeric(body, flags, width));
-            }
-            case "x": {
-                let iv = asIntOrNull(); if (iv === null) return -1;
-                if (iv < 0n) iv += 1n << 64n;
-                body = formatIntSpec(iv, 16, false, flags, prec);
-                if (flags.includes("#") && iv !== 0n)
-                    body = body.replace(/^([-+ ]?)/, "$10x");
-                return writeFmtBuf(applyPadNumeric(body, flags, width));
-            }
-            case "X": {
-                let iv = asIntOrNull(); if (iv === null) return -1;
-                if (iv < 0n) iv += 1n << 64n;
-                body = formatIntSpec(iv, 16, true, flags, prec);
-                if (flags.includes("#") && iv !== 0n)
-                    body = body.replace(/^([-+ ]?)/, "$10X");
-                return writeFmtBuf(applyPadNumeric(body, flags, width));
-            }
-            case "f": case "F": case "e": case "E": case "g": case "G": {
-                const fv = asFloatOrNull(); if (fv === null) return -1;
-                body = formatFloatSpec(fv, conv, prec, flags);
-                return writeFmtBuf(applyPadNumeric(body, flags, width));
-            }
-            case "a": case "A": {
-                const fv = asFloatOrNull(); if (fv === null) return -1;
-                body = formatHexFloat(fv, conv === "A");
-                return writeFmtBuf(applyPadNumeric(body, flags, width));
-            }
-            default:
-                return writeFmtBuf(spec);
+    // One float directive of string.format (%e %E %f %F %g %G %a %A), or the
+    // %q form of a float: the WAT side has parsed and validated the directive
+    // and hands over primitives only. Flag bits: 1 '-', 2 '+', 4 ' ', 8 '#',
+    // 16 '0'. Writes the padded bytes into $fmt_buf, returns the count.
+    function formatFloatDirective(conv, flagBits, width, prec, x) {
+        const c = String.fromCharCode(conv);
+        if (c === "q") {
+            if (Number.isNaN(x)) return writeFmtBuf("(0/0)");
+            if (x === Infinity) return writeFmtBuf("1e9999");
+            if (x === -Infinity) return writeFmtBuf("-1e9999");
+            return writeFmtBuf(formatHexFloat(x, false));
         }
+        let flags = "";
+        if (flagBits & 1) flags += "-";
+        if (flagBits & 2) flags += "+";
+        if (flagBits & 4) flags += " ";
+        if (flagBits & 8) flags += "#";
+        if (flagBits & 16) flags += "0";
+        let body = (c === "a" || c === "A") ? formatHexFloat(x, c === "A", prec)
+                                            : formatFloatSpec(x, c, prec, flags);
+        if ((c === "a" || c === "A") && !body.startsWith("-")) {
+            if (flags.includes("+")) body = "+" + body;
+            else if (flags.includes(" ")) body = " " + body;
+        }
+        return writeFmtBuf(applyPadNumeric(body, flags, width));
     }
 
     function parseLuaNumber(strRef, base) {
@@ -669,7 +529,7 @@ export function makeHelpers({ getInstance, formatFloat, cFormatG, cFormatF, cFor
         luaToString,
         objId,
         writeFmtBuf,
-        formatSpec,
+        formatFloatDirective,
         parseLuaNumber,
         osDate,
         osGetenv,
