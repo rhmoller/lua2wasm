@@ -3582,8 +3582,25 @@ static int emit_unboxed_index_store(CG *c, const AssignTarget *t, const Expr *v,
     int kmaybe = !kstr && !kint && key->kind == EXPR_VAR && key->as.var.kind == VAR_LOCAL &&
                  slot_is_maybe(c, key->as.var.idx);
     if (!(kstr || kint || kmaybe)) return 0;
+    /* Only values that can actually yield an unboxed float: a provable float,
+     * an arithmetic tree, a maybe slot, or an inline math call. A bare table
+     * read or ordinary call is a boxed value already — passing it through
+     * the plain store is cheaper than classifying and re-boxing it. */
     int vfloat = expr_is_float(c, v);
-    if (!vfloat && !expr_involves_maybe(c, v)) return 0;
+    int lowered = 0;
+    if (!vfloat) {
+        switch (v->kind) {
+        case EXPR_BINOP:
+        case EXPR_UNOP: lowered = expr_involves_maybe(c, v); break;
+        case EXPR_VAR: lowered = v->as.var.kind == VAR_LOCAL && slot_is_maybe(c, v->as.var.idx); break;
+        case EXPR_CALL:
+            lowered = v->as.call.nargs == 1 && !is_multival_tail(v->as.call.args[0]) &&
+                      callee_math_kind(c, v->as.call.callee) != MB_NONE;
+            break;
+        default: break;
+        }
+    }
+    if (!vfloat && !lowered) return 0;
     int k = mt_alloc(c, 2);
     MCell tc = mcell_tmp(k), vc = mcell_tmp(k + 1);
     emit_indent(c, depth);
