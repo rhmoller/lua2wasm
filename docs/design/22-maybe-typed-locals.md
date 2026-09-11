@@ -120,8 +120,36 @@ In a boxed context the whole lowering is wrapped in `(block (result anyref)
 - **Fuzzing.** `scripts/diff-fuzz.mjs --phase numeric` and `--phase tables`
   generate exactly this shape (values through tables into arithmetic).
 
-## Not in v1
+## Follow-ups landed after v1
 
-Parameters (classify at entry), generic-`for` variables, typed direct-call
-arguments from maybe slots, `//` `%` on floats, and a parallel `f64` value
-array in `$LuaTable` so float fields never box on store.
+- **Parameters** are candidates (classified at entry), and any arithmetic
+  tree with an *opaque* operand (table read, call, untyped variable) is
+  lowered, not only trees that read a maybe slot; comparisons need numeric
+  evidence on a side so `x == nil` keeps the plain call.
+- **Immediates**: literals and provably typed locals appear in the tag switch
+  as constants / plain `local.get`, and a maybe slot is read in place unless
+  the other operand could modify it — no temporary. Frame size matters: the
+  catchable stack-overflow guard is now a byte budget over per-closure frame
+  weights (`fn_frame_weight`, `$stack_cost`) instead of a frame count.
+- **Maybe-typed table keys** (`$lua_index_mk` / `$lua_tabset_mk`) and direct
+  multi-assignment stores for index targets on non-captured locals.
+- **Inline math builtins** (`sqrt`, `abs`, `floor`, `ceil`) guarded on the
+  callee's identity against the builtin's closure global.
+- **Unboxed float storage in tables**: parallel `f64` arrays (`$fvals`,
+  `$farr`) behind the `$g_fmark` sentinel; `$lua_tabset_*_f` writers and
+  `$lua_index_*_cell` readers so a float field never boxes on store or
+  classifies on load inside a lowered tree. Every other reader translates the
+  marker (`$tval`).
+
+## Tried and rejected
+
+A single hash-addressed node array for the hash part (key/value pairs
+inline, PUC-style) instead of keys / values / index arrays: correct, but
+nbody gained ~4%, hashtab lost ~13% (larger arrays: more rehash and GC
+work), and `pairs` order changed. The probe is dominated by struct loads and
+bounds checks, not by the number of arrays; not worth the rewrite.
+
+## Still open
+
+Generic-`for` variables, typed direct-call arguments from maybe slots,
+`//` `%` on floats, and the per-lookup probe cost itself.
