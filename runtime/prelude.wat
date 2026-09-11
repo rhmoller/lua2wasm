@@ -1321,13 +1321,46 @@
   ;; on hit, -1 on miss. Caller must ensure $idx is non-null (i.e. n>0
   ;; — empty tables short-circuit in tab_find).
   (func $tab_index_lookup (param $t (ref $LuaTable)) (param $k anyref) (result i32)
+    (call $tab_index_lookup_h (local.get $t) (local.get $k) (call $lua_hash (local.get $k))))
+
+  ;; Hash-part probe for a string key whose full hash is already known (the
+  ;; codegen constant-key entry points read it straight off the hoisted
+  ;; global). Same protocol as $tab_index_lookup_h minus the key-type
+  ;; dispatch: identity, then cached-hash gate, then bytes. A null index means
+  ;; the hash part has never been populated.
+  (func $tab_find_str (param $t (ref $LuaTable)) (param $k (ref $LuaString)) (param $full i32) (result i32)
+    (local $idx (ref null $IArr)) (local $keys (ref $TArr))
+    (local $mask i32) (local $h i32) (local $slot i32) (local $pos i32) (local $sk anyref)
+    (local.set $idx (struct.get $LuaTable $idx (local.get $t)))
+    (if (ref.is_null (local.get $idx)) (then (return (i32.const -1))))
+    (local.set $keys (ref.as_non_null (struct.get $LuaTable $keys (local.get $t))))
+    (local.set $mask (struct.get $LuaTable $mask (local.get $t)))
+    (local.set $h (i32.and (local.get $mask) (local.get $full)))
+    (loop $probe
+      (local.set $slot (array.get $IArr (ref.as_non_null (local.get $idx)) (local.get $h)))
+      (if (i32.eqz (local.get $slot)) (then (return (i32.const -1))))
+      (if (i32.gt_s (local.get $slot) (i32.const 0))
+        (then
+          (local.set $pos (i32.sub (local.get $slot) (i32.const 1)))
+          (local.set $sk (array.get $TArr (local.get $keys) (local.get $pos)))
+          (if (ref.eq (ref.cast (ref null eq) (local.get $sk)) (local.get $k))
+            (then (return (local.get $pos))))
+          (if (ref.test (ref $LuaString) (local.get $sk))
+            (then (if (i32.eq (struct.get $LuaString $hash (ref.cast (ref $LuaString) (local.get $sk)))
+                              (local.get $full))
+              (then (if (call $str_eq (local.get $sk) (local.get $k))
+                (then (return (local.get $pos))))))))))
+      (local.set $h (i32.and (local.get $mask) (i32.add (local.get $h) (i32.const 1))))
+      (br $probe))
+    (i32.const -1))
+
+  (func $tab_index_lookup_h (param $t (ref $LuaTable)) (param $k anyref) (param $full i32) (result i32)
     (local $idx (ref $IArr)) (local $keys (ref $TArr))
     (local $mask i32) (local $h i32) (local $slot i32) (local $pos i32)
-    (local $full i32) (local $is_str i32) (local $sk anyref)
+    (local $is_str i32) (local $sk anyref)
     (local.set $idx (ref.as_non_null (struct.get $LuaTable $idx (local.get $t))))
     (local.set $keys (ref.as_non_null (struct.get $LuaTable $keys (local.get $t))))
     (local.set $mask (struct.get $LuaTable $mask (local.get $t)))
-    (local.set $full (call $lua_hash (local.get $k)))
     (local.set $h (i32.and (local.get $mask) (local.get $full)))
     (local.set $is_str (ref.test (ref $LuaString) (local.get $k)))
     (loop $probe
@@ -1519,12 +1552,16 @@
   ;; __index chain; a non-table receiver defers to $lua_index (string lib /
   ;; error).
   (func $lua_index_sk (param $tv anyref) (param $k (ref $LuaString)) (param $line i32) (result anyref)
-    (local $t (ref $LuaTable)) (local $v anyref)
+    (local $t (ref $LuaTable)) (local $v anyref) (local $i i32)
     (if (ref.test (ref $LuaTable) (local.get $tv))
       (then
         (local.set $t (ref.cast (ref $LuaTable) (local.get $tv)))
-        (local.set $v (call $tab_get_hash (local.get $t) (local.get $k)))
-        (if (i32.eqz (ref.is_null (local.get $v))) (then (return (local.get $v))))
+        (local.set $i (call $tab_find_str (local.get $t) (local.get $k) (call $str_hash (local.get $k))))
+        (if (i32.ge_s (local.get $i) (i32.const 0))
+          (then
+            (local.set $v (array.get $TArr (ref.as_non_null (struct.get $LuaTable $vals (local.get $t)))
+                                           (local.get $i)))
+            (if (i32.eqz (ref.is_null (local.get $v))) (then (return (local.get $v))))))
         (return (call $tab_get_miss (local.get $t) (local.get $k) (i32.const 64)))))
     (call $lua_index (local.get $tv) (local.get $k) (local.get $line)))
 
@@ -1537,7 +1574,9 @@
       (then (call $throw_lit (i32.const 237) (i32.const 24))))   ;; "attempt to index a value"
     (local.set $t (ref.cast (ref $LuaTable) (local.get $tv)))
     (if (ref.is_null (struct.get $LuaTable $meta (local.get $t)))
-      (then (call $tab_set_hash (local.get $t) (local.get $k) (local.get $v)) (return)))
+      (then (call $tab_set_hash_str (local.get $t) (local.get $k)
+                                    (call $str_hash (local.get $k)) (local.get $v))
+            (return)))
     (call $lua_tabset (local.get $tv) (local.get $k) (local.get $v)))
 
   ;; Lua-spec lookup `t[k]` on an arbitrary value. Tables go through
@@ -1733,11 +1772,11 @@
     (call $lua_index (local.get $tv) (call $make_int (local.get $k)) (local.get $line)))
 
   (func $tab_set_hash (param $t (ref $LuaTable)) (param $k anyref) (param $v anyref)
-    (local $i i32) (local $n i32) (local $cap i32) (local $mask i32)
-    (local $keys (ref null $TArr)) (local $vals (ref null $TArr))
-    (local $idx (ref null $IArr)) (local $h i32) (local $hm i32)
-    (local $slot i32) (local $ftomb i32)
-    (local.set $i (call $tab_find (local.get $t) (local.get $k)))
+    (local $i i32) (local $full i32)
+    (local.set $full (call $lua_hash (local.get $k)))
+    (local.set $i (if (result i32) (struct.get $LuaTable $n (local.get $t))
+      (then (call $tab_index_lookup_h (local.get $t) (local.get $k) (local.get $full)))
+      (else (i32.const -1))))
     (if (i32.ge_s (local.get $i) (i32.const 0))
       (then
         ;; Existing slot: update in place, or *lazily* delete. We keep the
@@ -1753,6 +1792,28 @@
         (return)))
     ;; not found: nil value is a no-op; else append a new entry.
     (if (ref.is_null (local.get $v)) (then (return)))
+    (call $tab_insert_new (local.get $t) (local.get $k) (local.get $v) (local.get $full)))
+
+  ;; String-key store with a known hash: the constant-key setter's path.
+  (func $tab_set_hash_str (param $t (ref $LuaTable)) (param $k (ref $LuaString)) (param $full i32) (param $v anyref)
+    (local $i i32)
+    (local.set $i (call $tab_find_str (local.get $t) (local.get $k) (local.get $full)))
+    (if (i32.ge_s (local.get $i) (i32.const 0))
+      (then
+        (array.set $TArr (ref.as_non_null (struct.get $LuaTable $vals (local.get $t)))
+          (local.get $i) (local.get $v))
+        (return)))
+    (if (ref.is_null (local.get $v)) (then (return)))
+    (call $tab_insert_new (local.get $t) (local.get $k) (local.get $v) (local.get $full)))
+
+  ;; Append a key known to be absent (hash $full) to keys/vals and probe-insert
+  ;; it into the index, growing/rebuilding as needed. Shared by the boxed and
+  ;; string-key setters.
+  (func $tab_insert_new (param $t (ref $LuaTable)) (param $k anyref) (param $v anyref) (param $full i32)
+    (local $n i32) (local $cap i32) (local $mask i32)
+    (local $keys (ref null $TArr)) (local $vals (ref null $TArr))
+    (local $idx (ref null $IArr)) (local $h i32)
+    (local $slot i32) (local $ftomb i32)
     (local.set $n (struct.get $LuaTable $n (local.get $t)))
     (local.set $cap (struct.get $LuaTable $cap (local.get $t)))
     (if (i32.ge_s (local.get $n) (local.get $cap))
@@ -1791,7 +1852,7 @@
     (array.set $TArr (ref.as_non_null (local.get $keys)) (local.get $n) (local.get $k))
     (array.set $TArr (ref.as_non_null (local.get $vals)) (local.get $n) (local.get $v))
     (struct.set $LuaTable $n (local.get $t) (i32.add (local.get $n) (i32.const 1)))
-    (local.set $h (i32.and (local.get $mask) (call $lua_hash (local.get $k))))
+    (local.set $h (i32.and (local.get $mask) (local.get $full)))
     (local.set $ftomb (i32.const -1))
     (loop $probe
       (local.set $slot (array.get $IArr (ref.as_non_null (local.get $idx)) (local.get $h)))
