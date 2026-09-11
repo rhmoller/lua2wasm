@@ -1553,7 +1553,7 @@
     (local $nt (ref $LuaTable))
     (local.set $mt (struct.get $LuaTable $meta (local.get $t)))
     (if (ref.is_null (local.get $mt)) (then (return (ref.null any))))
-    (local.set $idx (call $tab_get_raw (ref.as_non_null (local.get $mt))
+    (local.set $idx (call $tab_get_str (ref.as_non_null (local.get $mt))
                                         (ref.as_non_null (global.get $g_mkey_index))))
     (if (ref.is_null (local.get $idx)) (then (return (ref.null any))))
     (if (ref.test (ref $LuaTable) (local.get $idx))
@@ -1634,13 +1634,30 @@
   ;; store (a string key needs none of $tab_set's nil/NaN/integer-key
   ;; normalization); otherwise the boxed setter handles __newindex.
   (func $lua_tabset_sk (param $tv anyref) (param $k (ref $LuaString)) (param $v anyref)
-    (local $t (ref $LuaTable))
+    (local $t (ref $LuaTable)) (local $full i32) (local $i i32) (local $mt (ref null $LuaTable))
     (if (i32.eqz (ref.test (ref $LuaTable) (local.get $tv)))
       (then (call $throw_lit (i32.const 237) (i32.const 24))))   ;; "attempt to index a value"
     (local.set $t (ref.cast (ref $LuaTable) (local.get $tv)))
-    (if (ref.is_null (struct.get $LuaTable $meta (local.get $t)))
-      (then (call $tab_set_hash_str (local.get $t) (local.get $k)
-                                    (struct.get $LuaString $hash (local.get $k)) (local.get $v))
+    (local.set $full (struct.get $LuaString $hash (local.get $k)))
+    (local.set $mt (struct.get $LuaTable $meta (local.get $t)))
+    (if (ref.is_null (local.get $mt))
+      (then (call $tab_set_hash_str (local.get $t) (local.get $k) (local.get $full) (local.get $v))
+            (return)))
+    ;; Metatable present (an object): __newindex only fires for an ABSENT key,
+    ;; so a present one is a plain overwrite — the common `self.x = …` case.
+    (local.set $i (call $tab_find_str (local.get $t) (local.get $k) (local.get $full)))
+    (if (i32.ge_s (local.get $i) (i32.const 0))
+      (then (if (i32.eqz (ref.is_null (array.get $TArr
+                  (ref.as_non_null (struct.get $LuaTable $vals (local.get $t))) (local.get $i))))
+        (then
+          (array.set $TArr (ref.as_non_null (struct.get $LuaTable $vals (local.get $t)))
+            (local.get $i) (local.get $v))
+          (return)))))
+    ;; Absent: no __newindex means a raw insert; otherwise the generic setter
+    ;; runs the function/table forms.
+    (if (ref.is_null (call $tab_get_str (ref.as_non_null (local.get $mt))
+                                        (ref.as_non_null (global.get $g_mkey_newindex))))
+      (then (call $tab_set_hash_str (local.get $t) (local.get $k) (local.get $full) (local.get $v))
             (return)))
     (call $lua_tabset (local.get $tv) (local.get $k) (local.get $v)))
 
@@ -1686,7 +1703,16 @@
     (local.set $t (ref.cast (ref $LuaTable) (local.get $v)))
     (local.set $mt (struct.get $LuaTable $meta (local.get $t)))
     (if (ref.is_null (local.get $mt)) (then (return (ref.null any))))
-    (call $tab_get_raw (ref.as_non_null (local.get $mt)) (local.get $key)))
+    (call $tab_get_str (ref.as_non_null (local.get $mt)) (local.get $key)))
+
+  ;; Raw hash-part read of a string key (no array part, no __index) through
+  ;; the string-specialized probe with the key's cached hash: the metamethod
+  ;; fetch path. A deleted entry reads as nil like any miss.
+  (func $tab_get_str (param $t (ref $LuaTable)) (param $k (ref $LuaString)) (result anyref)
+    (local $i i32)
+    (local.set $i (call $tab_find_str (local.get $t) (local.get $k) (call $str_hash (local.get $k))))
+    (if (i32.lt_s (local.get $i) (i32.const 0)) (then (return (ref.null any))))
+    (array.get $TArr (ref.as_non_null (struct.get $LuaTable $vals (local.get $t))) (local.get $i)))
 
   ;; Metamethod-name keys ($g_mkey_*) are immutable, const-initialized globals
   ;; emitted by codegen (see emit_global_const_str) rather than declared here:
@@ -2058,7 +2084,7 @@
       (if (i32.eqz (ref.is_null (call $tab_get_raw (local.get $t) (local.get $k))))
         (then (call $tab_set (local.get $t) (local.get $k) (local.get $val))
               (br $exit)))
-      (local.set $mm (call $tab_get_raw (ref.as_non_null (local.get $mt))
+      (local.set $mm (call $tab_get_str (ref.as_non_null (local.get $mt))
         (ref.as_non_null (global.get $g_mkey_newindex))))
       (if (ref.is_null (local.get $mm))
         (then (call $tab_set (local.get $t) (local.get $k) (local.get $val))
