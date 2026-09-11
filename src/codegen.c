@@ -1164,22 +1164,24 @@ static void emit_method_lookup(CG *c, const char *method, size_t method_len, int
 static void emit_method_args_array(CG *c, const Expr *e, int depth) {
     size_t mna = e->as.method_call.nargs;
     int has_mv = mna > 0 && is_multival_tail(e->as.method_call.args[mna - 1]);
+    if (!has_mv) {
+        /* Fixed arity: build [recv, args...] in one array.new_fixed. The
+         * receiver is read from $tmp_any first (operand order), so an argument
+         * that is itself a method call may reuse $tmp_any safely. */
+        emit_indent(c, depth);
+        wat_appendf(c->w, "(array.new_fixed $ArgArr %zu\n", mna + 1);
+        emit_indent(c, depth + 1);
+        wat_append(c->w, "(local.get $tmp_any)\n");
+        for (size_t i = 0; i < mna; i++) emit_expr(c, e->as.method_call.args[i], depth + 1);
+        emit_indent(c, depth);
+        wat_append(c->w, ")\n");
+        return;
+    }
     emit_indent(c, depth);
     wat_append(c->w, "(call $merge_args\n");
     emit_indent(c, depth + 1);
     wat_append(c->w, "(array.new_fixed $ArgArr 1 (local.get $tmp_any))\n");
-    if (mna == 0) {
-        emit_indent(c, depth + 1);
-        wat_append(c->w, "(global.get $g_empty_args)\n");
-    } else if (!has_mv) {
-        emit_indent(c, depth + 1);
-        wat_appendf(c->w, "(array.new_fixed $ArgArr %zu\n", mna);
-        for (size_t i = 0; i < mna; i++) emit_expr(c, e->as.method_call.args[i], depth + 2);
-        emit_indent(c, depth + 1);
-        wat_append(c->w, ")\n");
-    } else {
-        emit_args_array(c, e->as.method_call.args, mna, depth + 1);
-    }
+    emit_args_array(c, e->as.method_call.args, mna, depth + 1);
     emit_indent(c, depth);
     wat_append(c->w, ")\n");
 }
@@ -1432,11 +1434,30 @@ static void emit_table_ctor(CG *c, const Expr *e, int depth) {
         emit_indent(c, depth + 1);
         wat_append(c->w, "(ref.as_non_null (local.get $tmp_tab))\n");
         if (ent->kind == TENT_POSITIONAL) {
+            /* Raw integer key: straight to the array part, no key boxing. */
             emit_indent(c, depth + 1);
-            wat_appendf(c->w, "(ref.i31 (i32.const %d))\n", pos_idx++);
-        } else {
-            emit_expr(c, ent->key, depth + 1);
+            wat_appendf(c->w, "(i64.const %d)\n", pos_idx++);
+            emit_expr(c, ent->value, depth + 1);
+            emit_indent(c, depth + 1);
+            wat_append(c->w, "call $tab_set_ik\n");
+            continue;
         }
+        if (ent->key->kind == EXPR_STRING && ent->key->as.s.len <= KSTR_MAX) {
+            /* `{name = v}`: hoisted key global + its precomputed hash, straight
+             * into the hash part (a fresh table has no metatable). */
+            char eb[160];
+            emit_indent(c, depth + 1);
+            wat_appendf(c->w, "%s\n",
+                        kstr_expr(c, ent->key->as.s.bytes, ent->key->as.s.len, eb, sizeof eb));
+            emit_indent(c, depth + 1);
+            wat_appendf(c->w, "(i32.const %d)\n",
+                        (int)kstr_hash(ent->key->as.s.bytes, ent->key->as.s.len));
+            emit_expr(c, ent->value, depth + 1);
+            emit_indent(c, depth + 1);
+            wat_append(c->w, "call $tab_set_hash_str\n");
+            continue;
+        }
+        emit_expr(c, ent->key, depth + 1);
         emit_expr(c, ent->value, depth + 1);
         emit_indent(c, depth + 1);
         wat_append(c->w, "call $tab_set\n");

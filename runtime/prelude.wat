@@ -1552,18 +1552,53 @@
   ;; __index chain; a non-table receiver defers to $lua_index (string lib /
   ;; error).
   (func $lua_index_sk (param $tv anyref) (param $k (ref $LuaString)) (param $line i32) (result anyref)
-    (local $t (ref $LuaTable)) (local $v anyref) (local $i i32)
+    (local $t (ref $LuaTable)) (local $v anyref) (local $i i32) (local $full i32)
     (if (ref.test (ref $LuaTable) (local.get $tv))
       (then
         (local.set $t (ref.cast (ref $LuaTable) (local.get $tv)))
-        (local.set $i (call $tab_find_str (local.get $t) (local.get $k) (call $str_hash (local.get $k))))
+        (local.set $full (call $str_hash (local.get $k)))
+        (local.set $i (call $tab_find_str (local.get $t) (local.get $k) (local.get $full)))
         (if (i32.ge_s (local.get $i) (i32.const 0))
           (then
             (local.set $v (array.get $TArr (ref.as_non_null (struct.get $LuaTable $vals (local.get $t)))
                                            (local.get $i)))
             (if (i32.eqz (ref.is_null (local.get $v))) (then (return (local.get $v))))))
-        (return (call $tab_get_miss (local.get $t) (local.get $k) (i32.const 64)))))
+        (return (call $tab_get_miss_str (local.get $t) (local.get $k) (local.get $full) (i32.const 64)))))
     (call $lua_index (local.get $tv) (local.get $k) (local.get $line)))
+
+  ;; $tab_get_miss for a string key with known hash: the method-dispatch path
+  ;; (instance miss -> class via __index), every probe string-specialized.
+  (func $tab_get_miss_str (param $t (ref $LuaTable)) (param $k (ref $LuaString)) (param $full i32)
+                          (param $depth i32) (result anyref)
+    (local $v anyref) (local $mt (ref null $LuaTable)) (local $idx anyref)
+    (local $nt (ref $LuaTable)) (local $i i32) (local $mk (ref $LuaString))
+    (local.set $mt (struct.get $LuaTable $meta (local.get $t)))
+    (if (ref.is_null (local.get $mt)) (then (return (ref.null any))))
+    (local.set $mk (ref.as_non_null (global.get $g_mkey_index)))
+    (local.set $i (call $tab_find_str (ref.as_non_null (local.get $mt)) (local.get $mk)
+                                      (call $str_hash (local.get $mk))))
+    (if (i32.lt_s (local.get $i) (i32.const 0)) (then (return (ref.null any))))
+    (local.set $idx (array.get $TArr
+      (ref.as_non_null (struct.get $LuaTable $vals (ref.as_non_null (local.get $mt)))) (local.get $i)))
+    (if (ref.is_null (local.get $idx)) (then (return (ref.null any))))
+    (if (ref.test (ref $LuaTable) (local.get $idx))
+      (then
+        (if (i32.le_s (local.get $depth) (i32.const 1)) (then (return (ref.null any))))
+        (local.set $nt (ref.cast (ref $LuaTable) (local.get $idx)))
+        (local.set $i (call $tab_find_str (local.get $nt) (local.get $k) (local.get $full)))
+        (if (i32.ge_s (local.get $i) (i32.const 0))
+          (then
+            (local.set $v (array.get $TArr (ref.as_non_null (struct.get $LuaTable $vals (local.get $nt)))
+                                           (local.get $i)))
+            (if (i32.eqz (ref.is_null (local.get $v))) (then (return (local.get $v))))))
+        (return (call $tab_get_miss_str (local.get $nt) (local.get $k) (local.get $full)
+                                        (i32.sub (local.get $depth) (i32.const 1))))))
+    (if (ref.test (ref $LuaClosure) (local.get $idx))
+      (then (return
+        (call $args_first (call $lua_call
+          (ref.cast (ref $LuaClosure) (local.get $idx))
+          (array.new_fixed $ArgArr 2 (local.get $t) (local.get $k)))))))
+    (ref.null any))
 
   ;; `t.name = v` with a constant string key: no metatable means a plain hash
   ;; store (a string key needs none of $tab_set's nil/NaN/integer-key
