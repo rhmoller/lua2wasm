@@ -2386,7 +2386,10 @@ static void maybe_kill_stmt(CG *c, const Stmt *s, unsigned char *out, int *chang
                 KILLM(slot);
                 continue;
             }
-            if (j < n_lead && expr_numeric_plausible(s->as.local.values[j])) continue;
+            /* A leading value, or a trailing call whose FIRST value lands on
+             * exactly the last name (`local m = sqrt(x)`): a single store. */
+            int single = j < n_lead || (last_call && j == nv - 1 && nn == nv);
+            if (single && expr_numeric_plausible(s->as.local.values[j])) continue;
             KILLM(slot);
         }
         break;
@@ -4191,7 +4194,11 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
          *    no name consumes it). Spread slots are never int/float-
          *    specialized (the analysis only specializes single literal/int
          *    initializers), so the boxed/anyref path covers them. */
-        if (last_call) {
+        if (last_call && n_names == n_values && slot_is_maybe(c, s->as.local.local_idxs[n_names - 1])) {
+            /* `local m = f(x)`: only the call's first value is consumed, by a
+             * maybe slot — a single store, no result-array spread. */
+            emit_maybe_store(c, s->as.local.local_idxs[n_names - 1], s->as.local.values[n_values - 1], depth);
+        } else if (last_call) {
             emit_indent(c, depth);
             wat_append(c->w, "(local.set $tmp_args\n");
             emit_multival_array(c, s->as.local.values[n_values - 1], depth + 1);
