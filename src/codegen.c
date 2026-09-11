@@ -520,6 +520,65 @@ static void emit_maybe_store(CG *c, int slot, const Expr *e, int depth);
 static void emit_maybe_boxed(CG *c, const Expr *e, int depth);
 static void emit_maybe_cmp_block(CG *c, const Expr *e, int depth);
 static void emit_maybe_slot_box(CG *c, int slot, int depth);
+
+/* A cell is the four-part view of a maybe value used by the lowering: read
+ * expressions for tag / i64 / f64 / boxed, plus the local names to write when
+ * the cell is a destination (a slot or a temporary). An *immediate* cell has
+ * no write targets: a numeric literal, or a provably typed local, appears in
+ * the tag switch as constants / a plain local.get and costs no temporary. */
+typedef struct {
+    char t[48], i[48], f[48], b[48];     /* read expressions */
+    char st[16], si[16], sf[16], sb[16]; /* write targets ("" for an immediate) */
+} MCell;
+static MCell mcell_slot(int s) {
+    MCell m;
+    snprintf(m.st, sizeof m.st, "$Lt%d", s);
+    snprintf(m.si, sizeof m.si, "$Li%d", s);
+    snprintf(m.sf, sizeof m.sf, "$Lf%d", s);
+    snprintf(m.sb, sizeof m.sb, "$L%d", s);
+    snprintf(m.t, sizeof m.t, "(local.get %s)", m.st);
+    snprintf(m.i, sizeof m.i, "(local.get %s)", m.si);
+    snprintf(m.f, sizeof m.f, "(local.get %s)", m.sf);
+    snprintf(m.b, sizeof m.b, "(local.get %s)", m.sb);
+    return m;
+}
+static MCell mcell_tmp(int k) {
+    MCell m;
+    snprintf(m.st, sizeof m.st, "$mg%d", k);
+    snprintf(m.si, sizeof m.si, "$mi%d", k);
+    snprintf(m.sf, sizeof m.sf, "$mf%d", k);
+    snprintf(m.sb, sizeof m.sb, "$mt%d", k);
+    snprintf(m.t, sizeof m.t, "(local.get %s)", m.st);
+    snprintf(m.i, sizeof m.i, "(local.get %s)", m.si);
+    snprintf(m.f, sizeof m.f, "(local.get %s)", m.sf);
+    snprintf(m.b, sizeof m.b, "(local.get %s)", m.sb);
+    return m;
+}
+static MCell mcell_imm_int(int64_t v) {
+    MCell m = {0};
+    snprintf(m.t, sizeof m.t, "(i32.const 1)");
+    snprintf(m.i, sizeof m.i, "(i64.const %lld)", (long long)v);
+    snprintf(m.f, sizeof m.f, "(f64.const 0)");
+    snprintf(m.b, sizeof m.b, "(ref.null any)");
+    return m;
+}
+static MCell mcell_imm_float(double v) {
+    MCell m = {0};
+    snprintf(m.t, sizeof m.t, "(i32.const 2)");
+    snprintf(m.i, sizeof m.i, "(i64.const 0)");
+    snprintf(m.f, sizeof m.f, "(f64.const %.17g)", v);
+    snprintf(m.b, sizeof m.b, "(ref.null any)");
+    return m;
+}
+static MCell mcell_typed_local(int slot, int is_float) {
+    MCell m = {0};
+    snprintf(m.t, sizeof m.t, "(i32.const %d)", is_float ? 2 : 1);
+    snprintf(m.i, sizeof m.i, is_float ? "(i64.const 0)" : "(local.get $L%d)", slot);
+    snprintf(m.f, sizeof m.f, is_float ? "(local.get $L%d)" : "(f64.const 0)", slot);
+    snprintf(m.b, sizeof m.b, "(ref.null any)");
+    return m;
+}
+
 static void emit_num_as_f64(CG *c, const Expr *e, int depth);
 
 /* ----- literal emission ----- */
@@ -835,6 +894,14 @@ static void emit_target_open(CG *c, const AssignTarget *t, int depth) {
         wat_append(c->w, "(call $lua_tabset_sk\n");
         emit_expr(c, t->as.index.table, depth + 1);
         emit_string_literal(c, t->as.index.key->as.s.bytes, t->as.index.key->as.s.len, depth + 1);
+    } else if (t->as.index.key->kind == EXPR_VAR && t->as.index.key->as.var.kind == VAR_LOCAL &&
+               slot_is_maybe(c, t->as.index.key->as.var.idx)) {
+        MCell k = mcell_slot(t->as.index.key->as.var.idx);
+        emit_indent(c, depth);
+        wat_append(c->w, "(call $lua_tabset_mk\n");
+        emit_expr(c, t->as.index.table, depth + 1);
+        emit_indent(c, depth + 1);
+        wat_appendf(c->w, "%s %s %s %s\n", k.t, k.i, k.f, k.b);
     } else if (c->opt_int && expr_is_int(c, t->as.index.key)) {
         /* Int-typed key: $lua_tabset_ik takes the raw i64 (no make_int /
          * $as_arr_key) and still dispatches __newindex. The value is emitted
@@ -1440,6 +1507,20 @@ static void emit_index_expr(CG *c, const Expr *e, int depth) {
         wat_append(c->w, ")\n");
         return;
     }
+    if (e->as.index.key->kind == EXPR_VAR && e->as.index.key->as.var.kind == VAR_LOCAL &&
+        slot_is_maybe(c, e->as.index.key->as.var.idx)) {
+        /* Maybe-typed key: the cell goes over unboxed; an int takes the
+         * array fast path, anything else boxes on the slow path. */
+        MCell k = mcell_slot(e->as.index.key->as.var.idx);
+        emit_indent(c, depth);
+        wat_append(c->w, "(call $lua_index_mk\n");
+        emit_expr(c, e->as.index.table, depth + 1);
+        emit_indent(c, depth + 1);
+        wat_appendf(c->w, "%s %s %s %s (i32.const %d)\n", k.t, k.i, k.f, k.b, e->line);
+        emit_indent(c, depth);
+        wat_append(c->w, ")\n");
+        return;
+    }
     if (c->opt_int && expr_is_int(c, e->as.index.key)) {
         emit_indent(c, depth);
         wat_append(c->w, "(call $lua_index_ik\n");
@@ -2002,19 +2083,59 @@ static int expr_numeric_plausible(const Expr *e) {
     }
 }
 
-/* A tree is lowered by the maybe machinery iff it is an arithmetic /
- * comparison binop or a unary minus that, through such nodes, reads a maybe
- * slot. (A bare maybe read answers 1 too; callers ask about operator nodes.) */
-static int expr_involves_maybe(CG *c, const Expr *e) {
-    if (!c->opt_int || !c->cur_is_maybe) return 0;
+/* Operand classification for the lowering decision. "Opaque": a value the
+ * runtime classifies rather than the compiler proves — a maybe slot, any
+ * other untyped variable, a table read or a call; recursion goes through
+ * arithmetic / comparison / unary-minus nodes. "Numeric evidence": something
+ * that makes a number likely — a numeric literal, a provably typed
+ * expression, a maybe slot, or an arithmetic node. */
+static int expr_has_opaque(CG *c, const Expr *e) {
     switch (e->kind) {
-    case EXPR_VAR: return e->as.var.kind == VAR_LOCAL && slot_is_maybe(c, e->as.var.idx);
+    case EXPR_VAR:
+        if (e->as.var.kind == VAR_LOCAL)
+            return slot_is_maybe(c, e->as.var.idx) ||
+                   (!slot_is_int(c, e->as.var.idx) && !slot_is_float(c, e->as.var.idx));
+        return 1;
+    case EXPR_INDEX:
+    case EXPR_CALL:
+    case EXPR_METHOD_CALL: return 1;
     case EXPR_BINOP:
         if (!maybe_arith_op(e->as.binop.op) && !maybe_cmp_op(e->as.binop.op)) return 0;
-        return expr_involves_maybe(c, e->as.binop.lhs) || expr_involves_maybe(c, e->as.binop.rhs);
-    case EXPR_UNOP: return e->as.unop.op == UN_NEG && expr_involves_maybe(c, e->as.unop.operand);
+        return expr_has_opaque(c, e->as.binop.lhs) || expr_has_opaque(c, e->as.binop.rhs);
+    case EXPR_UNOP: return e->as.unop.op == UN_NEG && expr_has_opaque(c, e->as.unop.operand);
     default: return 0;
     }
+}
+static int expr_numeric_evidence(CG *c, const Expr *e) {
+    switch (e->kind) {
+    case EXPR_INT:
+    case EXPR_FLOAT: return 1;
+    case EXPR_VAR:
+        return e->as.var.kind == VAR_LOCAL &&
+               (slot_is_maybe(c, e->as.var.idx) || slot_is_int(c, e->as.var.idx) ||
+                slot_is_float(c, e->as.var.idx));
+    case EXPR_BINOP:
+        if (maybe_arith_op(e->as.binop.op)) return 1;
+        if (!maybe_cmp_op(e->as.binop.op)) return 0;
+        return expr_numeric_evidence(c, e->as.binop.lhs) || expr_numeric_evidence(c, e->as.binop.rhs);
+    case EXPR_UNOP: return e->as.unop.op == UN_NEG;
+    case EXPR_CALL: return expr_is_int(c, e) || expr_is_float(c, e);
+    default: return 0;
+    }
+}
+
+/* A tree is lowered by the maybe machinery iff it is an arithmetic binop or
+ * a unary minus with an opaque operand, or a comparison with an opaque
+ * operand AND numeric evidence on some side (so `x == nil` or `a == b` on
+ * two unknowns keep the plain generic call instead of paying to classify).
+ * (A bare operand answers per expr_has_opaque; callers ask about operator
+ * nodes.) */
+static int expr_involves_maybe(CG *c, const Expr *e) {
+    if (!c->opt_int || !c->cur_is_maybe) return 0;
+    if (e->kind == EXPR_BINOP && maybe_cmp_op(e->as.binop.op))
+        return expr_has_opaque(c, e) &&
+               (expr_numeric_evidence(c, e->as.binop.lhs) || expr_numeric_evidence(c, e->as.binop.rhs));
+    return expr_has_opaque(c, e);
 }
 
 /* --- generic walk over every expression of a body (not nested functions) --- */
@@ -2121,53 +2242,118 @@ static void numuse_expr(const Expr *e, NumUse *u, int in_arith) {
 }
 static void numuse_visit(const Expr *e, void *ctx) { numuse_expr(e, (NumUse *)ctx, 0); }
 
+/* An expression whose evaluation has no side effects and reads no mutable
+ * state that another operand's evaluation could change: literals, and
+ * arithmetic / unary minus over literals and local variables. Used to decide
+ * whether a left operand read in place must instead be copied before the
+ * right operand runs. */
+static int expr_side_effect_free(const Expr *e) {
+    switch (e->kind) {
+    case EXPR_INT:
+    case EXPR_FLOAT:
+    case EXPR_NIL:
+    case EXPR_TRUE:
+    case EXPR_FALSE:
+    case EXPR_STRING: return 1;
+    case EXPR_VAR: return e->as.var.kind == VAR_LOCAL;
+    case EXPR_BINOP:
+        return (maybe_arith_op(e->as.binop.op) || maybe_cmp_op(e->as.binop.op)) &&
+               expr_side_effect_free(e->as.binop.lhs) && expr_side_effect_free(e->as.binop.rhs);
+    case EXPR_UNOP: return e->as.unop.op == UN_NEG && expr_side_effect_free(e->as.unop.operand);
+    default: return 0;
+    }
+}
+
+/* If `e` can be an operand without a temporary — a numeric literal, a typed
+ * local, or a maybe slot read in place — fill `out` and return 1. A variable
+ * read is only used in place when the operand evaluated after it
+ * (`other_after`, NULL if none) cannot modify it. */
+static int operand_immediate(CG *c, const Expr *e, const Expr *other_after, MCell *out) {
+    switch (e->kind) {
+    case EXPR_INT:
+        if (out) *out = mcell_imm_int(e->as.i_val);
+        return 1;
+    case EXPR_FLOAT:
+        if (out) *out = mcell_imm_float(e->as.f_val);
+        return 1;
+    case EXPR_VAR:
+        if (e->as.var.kind != VAR_LOCAL) return 0;
+        if (other_after && !expr_side_effect_free(other_after)) return 0;
+        if (slot_is_int(c, e->as.var.idx)) {
+            if (out) *out = mcell_typed_local(e->as.var.idx, 0);
+            return 1;
+        }
+        if (slot_is_float(c, e->as.var.idx)) {
+            if (out) *out = mcell_typed_local(e->as.var.idx, 1);
+            return 1;
+        }
+        if (slot_is_maybe(c, e->as.var.idx)) {
+            if (out) *out = mcell_slot(e->as.var.idx);
+            return 1;
+        }
+        return 0;
+    default: return 0;
+    }
+}
+
 /* --- lowering temporaries: an upper bound on how many a body needs.
- * Lowering a binop takes two temporaries above the current depth and lowers
- * each operand above those; a unary minus takes one; an opaque node's child
- * lowered in a boxed context takes one for its root. --- */
-static int expr_temp_need(const Expr *e) {
+ * Lowering a binop takes a temporary per non-immediate operand above the
+ * current depth and lowers each such operand above those; a unary minus
+ * likewise; an opaque node's child lowered in a boxed context takes one for
+ * its root. --- */
+static int expr_temp_need(CG *c, const Expr *e) {
     if (!e) return 0;
     int m = 0, v;
     switch (e->kind) {
     case EXPR_BINOP: {
-        int l = expr_temp_need(e->as.binop.lhs), r = expr_temp_need(e->as.binop.rhs);
-        return 2 + (l > r ? l : r);
+        const Expr *l = e->as.binop.lhs, *r = e->as.binop.rhs;
+        int tl = !operand_immediate(c, l, r, NULL), tr = !operand_immediate(c, r, NULL, NULL);
+        int nl = tl ? expr_temp_need(c, l) : 0, nr = tr ? expr_temp_need(c, r) : 0;
+        return tl + tr + (nl > nr ? nl : nr);
     }
-    case EXPR_UNOP: return 1 + expr_temp_need(e->as.unop.operand);
+    case EXPR_UNOP: {
+        const Expr *o = e->as.unop.operand;
+        int t = !operand_immediate(c, o, NULL, NULL);
+        return t + (t ? expr_temp_need(c, o) : 0);
+    }
     case EXPR_CALL:
-        m = 1 + expr_temp_need(e->as.call.callee);
+        m = 1 + expr_temp_need(c, e->as.call.callee);
         for (size_t i = 0; i < e->as.call.nargs; i++)
-            if ((v = 1 + expr_temp_need(e->as.call.args[i])) > m) m = v;
+            if ((v = 1 + expr_temp_need(c, e->as.call.args[i])) > m) m = v;
         return m;
     case EXPR_METHOD_CALL:
-        m = 1 + expr_temp_need(e->as.method_call.recv);
+        m = 1 + expr_temp_need(c, e->as.method_call.recv);
         for (size_t i = 0; i < e->as.method_call.nargs; i++)
-            if ((v = 1 + expr_temp_need(e->as.method_call.args[i])) > m) m = v;
+            if ((v = 1 + expr_temp_need(c, e->as.method_call.args[i])) > m) m = v;
         return m;
     case EXPR_INDEX:
-        m = 1 + expr_temp_need(e->as.index.table);
-        if ((v = 1 + expr_temp_need(e->as.index.key)) > m) m = v;
+        m = 1 + expr_temp_need(c, e->as.index.table);
+        if ((v = 1 + expr_temp_need(c, e->as.index.key)) > m) m = v;
         return m;
     case EXPR_TABLE:
         for (int i = 0; i < e->as.table_ctor.n_entries; i++) {
             if (e->as.table_ctor.entries[i].key &&
-                (v = 1 + expr_temp_need(e->as.table_ctor.entries[i].key)) > m)
+                (v = 1 + expr_temp_need(c, e->as.table_ctor.entries[i].key)) > m)
                 m = v;
-            if ((v = 1 + expr_temp_need(e->as.table_ctor.entries[i].value)) > m) m = v;
+            if ((v = 1 + expr_temp_need(c, e->as.table_ctor.entries[i].value)) > m) m = v;
         }
         return m;
     default: return 0;
     }
 }
+typedef struct {
+    CG *c;
+    int m;
+} TempNeed;
 static void temp_need_visit(const Expr *e, void *ctx) {
-    int *m = (int *)ctx;
-    int v = 1 + expr_temp_need(e);
-    if (v > *m) *m = v;
+    TempNeed *t = (TempNeed *)ctx;
+    int v = 1 + expr_temp_need(t->c, e);
+    if (v > t->m) t->m = v;
 }
-static int block_temp_need(const Block *b) {
-    int m = 0;
-    walk_block_exprs(b, temp_need_visit, &m);
-    return m;
+static int block_temp_need(CG *c, const Block *b) {
+    TempNeed t = {.c = c, .m = 0};
+    walk_block_exprs(b, temp_need_visit, &t);
+    return t.m;
 }
 
 /* --- kill rules: a candidate survives only if every store to it is a single
@@ -2242,10 +2428,11 @@ static int compute_maybe_slots(CG *c, const Block *body, int n_locals, int n_par
     NumUse u = {.use = calloc(n_locals ? n_locals : 1, 1), .n = n_locals};
     walk_block_exprs(body, numuse_visit, &u);
     for (int i = 0; i < n_locals; i++) {
-        out[i] = i >= n_params && !(captured && captured[i]) &&
+        out[i] = !(captured && captured[i]) &&
                  !(c->cur_is_int && c->cur_is_int[i]) && !(c->cur_is_float && c->cur_is_float[i]) &&
                  u.use[i];
     }
+    (void)n_params; /* parameters are candidates too: classified at entry */
     free(u.use);
     int saved_n = c->cur_n_locals;
     c->cur_n_locals = n_locals;
@@ -2262,27 +2449,6 @@ static int compute_maybe_slots(CG *c, const Block *body, int n_locals, int n_par
 
 /* --- emission --- */
 
-/* The four wasm locals of a maybe cell: a slot ($Lt/$Li/$Lf/$L) or a lowering
- * temporary ($mg/$mi/$mf/$mt). */
-typedef struct {
-    char t[16], i[16], f[16], b[16];
-} MCell;
-static MCell mcell_slot(int s) {
-    MCell m;
-    snprintf(m.t, sizeof m.t, "$Lt%d", s);
-    snprintf(m.i, sizeof m.i, "$Li%d", s);
-    snprintf(m.f, sizeof m.f, "$Lf%d", s);
-    snprintf(m.b, sizeof m.b, "$L%d", s);
-    return m;
-}
-static MCell mcell_tmp(int k) {
-    MCell m;
-    snprintf(m.t, sizeof m.t, "$mg%d", k);
-    snprintf(m.i, sizeof m.i, "$mi%d", k);
-    snprintf(m.f, sizeof m.f, "$mf%d", k);
-    snprintf(m.b, sizeof m.b, "$mt%d", k);
-    return m;
-}
 static int mt_alloc(CG *c, int n) {
     int k = c->mt_depth;
     c->mt_depth += n;
@@ -2291,13 +2457,12 @@ static int mt_alloc(CG *c, int n) {
 }
 static void emit_set_tag(CG *c, const MCell *m, int tag, int depth) {
     emit_indent(c, depth);
-    wat_appendf(c->w, "(local.set %s (i32.const %d))\n", m->t, tag);
+    wat_appendf(c->w, "(local.set %s (i32.const %d))\n", m->st, tag);
 }
 /* `(call $box_num tag i f b)` — the cell as a Lua value. */
 static void emit_maybe_cell_box(CG *c, const MCell *m, int depth) {
     emit_indent(c, depth);
-    wat_appendf(c->w, "(call $box_num (local.get %s) (local.get %s) (local.get %s) (local.get %s))\n",
-                m->t, m->i, m->f, m->b);
+    wat_appendf(c->w, "(call $box_num %s %s %s %s)\n", m->t, m->i, m->f, m->b);
 }
 static void emit_maybe_slot_box(CG *c, int slot, int depth) {
     MCell m = mcell_slot(slot);
@@ -2306,21 +2471,18 @@ static void emit_maybe_slot_box(CG *c, int slot, int depth) {
 /* The f64 view of a cell known to be numeric (tag 1 or 2). */
 static void emit_cell_f64(CG *c, const MCell *m, int depth) {
     emit_indent(c, depth);
-    wat_appendf(c->w,
-                "(if (result f64) (i32.eq (local.get %s) (i32.const 2)) (then (local.get %s)) "
-                "(else (f64.convert_i64_s (local.get %s))))\n",
+    wat_appendf(c->w, "(if (result f64) (i32.eq %s (i32.const 2)) (then %s) (else (f64.convert_i64_s %s)))\n",
                 m->t, m->f, m->i);
 }
 static void emit_both_tags(CG *c, const MCell *a, const MCell *b, int tag, int depth) {
     emit_indent(c, depth);
-    wat_appendf(c->w, "(i32.and (i32.eq (local.get %s) (i32.const %d)) (i32.eq (local.get %s) (i32.const %d)))\n",
-                a->t, tag, b->t, tag);
+    wat_appendf(c->w, "(i32.and (i32.eq %s (i32.const %d)) (i32.eq %s (i32.const %d)))\n", a->t, tag, b->t, tag);
 }
 /* d = generic helper(box a, box b); tag 0. */
 static void emit_maybe_generic2(CG *c, const char *helper, const MCell *a, const MCell *b,
                                 const MCell *d, int depth) {
     emit_indent(c, depth);
-    wat_appendf(c->w, "(local.set %s (call %s\n", d->b, helper);
+    wat_appendf(c->w, "(local.set %s (call %s\n", d->sb, helper);
     emit_maybe_cell_box(c, a, depth + 1);
     emit_maybe_cell_box(c, b, depth + 1);
     emit_indent(c, depth);
@@ -2330,8 +2492,23 @@ static void emit_maybe_generic2(CG *c, const char *helper, const MCell *a, const
 
 static void emit_maybe_lower(CG *c, const Expr *e, const MCell *d, int depth);
 
-/* d = a <op> b over two lowered cells: int×int inline (i64; `/` converts to
- * f64; `//` `%` via the floor helpers), numeric with a float side inline for
+/* Evaluate the two operands of a lowered binop left to right into cells:
+ * immediates in place, anything else into a fresh temporary. Returns the
+ * temporary depth to restore once the result has been computed. */
+static int emit_maybe_operands(CG *c, const Expr *l, const Expr *r, MCell *a, MCell *b, int depth) {
+    int k = c->mt_depth;
+    int il = operand_immediate(c, l, r, a), ir = operand_immediate(c, r, NULL, b);
+    int next = k;
+    if (!il) *a = mcell_tmp(next++);
+    if (!ir) *b = mcell_tmp(next++);
+    mt_alloc(c, next - k);
+    if (!il) emit_maybe_lower(c, l, a, depth);
+    if (!ir) emit_maybe_lower(c, r, b, depth);
+    return k;
+}
+
+/* d = a <op> b over two cells: int×int inline (i64; `/` converts to f64;
+ * `//` `%` via the floor helpers), numeric with a float side inline for
  * + - * /, everything else through the generic helper. */
 static void emit_maybe_arith(CG *c, BinOp op, const MCell *a, const MCell *b, const MCell *d, int depth) {
     const char *iop = NULL, *ifn = NULL, *fop = NULL;
@@ -2351,14 +2528,13 @@ static void emit_maybe_arith(CG *c, BinOp op, const MCell *a, const MCell *b, co
     wat_append(c->w, "(then\n");
     emit_indent(c, depth + 2);
     if (op == BIN_DIV) {
-        wat_appendf(c->w, "(local.set %s (f64.div (f64.convert_i64_s (local.get %s)) (f64.convert_i64_s (local.get %s))))\n",
-                    d->f, a->i, b->i);
+        wat_appendf(c->w, "(local.set %s (f64.div (f64.convert_i64_s %s) (f64.convert_i64_s %s)))\n", d->sf, a->i, b->i);
         emit_set_tag(c, d, 2, depth + 2);
     } else if (ifn) {
-        wat_appendf(c->w, "(local.set %s (call %s (local.get %s) (local.get %s)))\n", d->i, ifn, a->i, b->i);
+        wat_appendf(c->w, "(local.set %s (call %s %s %s))\n", d->si, ifn, a->i, b->i);
         emit_set_tag(c, d, 1, depth + 2);
     } else {
-        wat_appendf(c->w, "(local.set %s (%s (local.get %s) (local.get %s)))\n", d->i, iop, a->i, b->i);
+        wat_appendf(c->w, "(local.set %s (%s %s %s))\n", d->si, iop, a->i, b->i);
         emit_set_tag(c, d, 1, depth + 2);
     }
     emit_indent(c, depth + 1);
@@ -2367,12 +2543,11 @@ static void emit_maybe_arith(CG *c, BinOp op, const MCell *a, const MCell *b, co
     wat_append(c->w, "(else\n");
     if (fop) {
         emit_indent(c, depth + 2);
-        wat_appendf(c->w, "(if (i32.and (i32.ne (local.get %s) (i32.const 0)) (i32.ne (local.get %s) (i32.const 0)))\n",
-                    a->t, b->t);
+        wat_appendf(c->w, "(if (i32.and (i32.ne %s (i32.const 0)) (i32.ne %s (i32.const 0)))\n", a->t, b->t);
         emit_indent(c, depth + 3);
         wat_append(c->w, "(then\n");
         emit_indent(c, depth + 4);
-        wat_appendf(c->w, "(local.set %s (%s\n", d->f, fop);
+        wat_appendf(c->w, "(local.set %s (%s\n", d->sf, fop);
         emit_cell_f64(c, a, depth + 5);
         emit_cell_f64(c, b, depth + 5);
         emit_indent(c, depth + 4);
@@ -2394,23 +2569,23 @@ static void emit_maybe_arith(CG *c, BinOp op, const MCell *a, const MCell *b, co
 
 static void emit_maybe_neg(CG *c, const MCell *a, const MCell *d, int depth) {
     emit_indent(c, depth);
-    wat_appendf(c->w, "(if (i32.eq (local.get %s) (i32.const 1))\n", a->t);
+    wat_appendf(c->w, "(if (i32.eq %s (i32.const 1))\n", a->t);
     emit_indent(c, depth + 1);
-    wat_appendf(c->w, "(then (local.set %s (i64.sub (i64.const 0) (local.get %s)))\n", d->i, a->i);
+    wat_appendf(c->w, "(then (local.set %s (i64.sub (i64.const 0) %s))\n", d->si, a->i);
     emit_set_tag(c, d, 1, depth + 2);
     emit_indent(c, depth + 1);
     wat_appendf(c->w, ")\n");
     emit_indent(c, depth + 1);
-    wat_appendf(c->w, "(else (if (i32.eq (local.get %s) (i32.const 2))\n", a->t);
+    wat_appendf(c->w, "(else (if (i32.eq %s (i32.const 2))\n", a->t);
     emit_indent(c, depth + 2);
-    wat_appendf(c->w, "(then (local.set %s (f64.neg (local.get %s)))\n", d->f, a->f);
+    wat_appendf(c->w, "(then (local.set %s (f64.neg %s))\n", d->sf, a->f);
     emit_set_tag(c, d, 2, depth + 3);
     emit_indent(c, depth + 2);
     wat_append(c->w, ")\n");
     emit_indent(c, depth + 2);
     wat_append(c->w, "(else\n");
     emit_indent(c, depth + 3);
-    wat_appendf(c->w, "(local.set %s (call $lua_neg\n", d->b);
+    wat_appendf(c->w, "(local.set %s (call $lua_neg\n", d->sb);
     emit_maybe_cell_box(c, a, depth + 4);
     emit_indent(c, depth + 3);
     wat_append(c->w, "))\n");
@@ -2421,13 +2596,13 @@ static void emit_maybe_neg(CG *c, const MCell *a, const MCell *d, int depth) {
 
 /* Lower `e` into cell `d` as a statement sequence. Provably typed
  * subexpressions keep their unboxed paths; a maybe read is a cell copy;
- * arithmetic and unary minus recurse through temporaries; anything else is
- * evaluated as a Lua value and classified once. */
+ * arithmetic and unary minus recurse; anything else is evaluated as a Lua
+ * value and classified once. */
 static void emit_maybe_lower(CG *c, const Expr *e, const MCell *d, int depth) {
     if (!c->ok) return;
     if (expr_is_int(c, e)) {
         emit_indent(c, depth);
-        wat_appendf(c->w, "(local.set %s\n", d->i);
+        wat_appendf(c->w, "(local.set %s\n", d->si);
         emit_int_expr(c, e, depth + 1);
         emit_indent(c, depth);
         wat_append(c->w, ")\n");
@@ -2436,7 +2611,7 @@ static void emit_maybe_lower(CG *c, const Expr *e, const MCell *d, int depth) {
     }
     if (expr_is_float(c, e)) {
         emit_indent(c, depth);
-        wat_appendf(c->w, "(local.set %s\n", d->f);
+        wat_appendf(c->w, "(local.set %s\n", d->sf);
         emit_float_expr(c, e, depth + 1);
         emit_indent(c, depth);
         wat_append(c->w, ")\n");
@@ -2447,24 +2622,22 @@ static void emit_maybe_lower(CG *c, const Expr *e, const MCell *d, int depth) {
     case EXPR_VAR:
         if (e->as.var.kind == VAR_LOCAL && slot_is_maybe(c, e->as.var.idx)) {
             MCell src = mcell_slot(e->as.var.idx);
-            if (strcmp(src.t, d->t) == 0) return; /* x = x */
+            if (strcmp(src.st, d->st) == 0) return; /* x = x */
             emit_indent(c, depth);
-            wat_appendf(c->w, "(local.set %s (local.get %s))\n", d->t, src.t);
+            wat_appendf(c->w, "(local.set %s %s)\n", d->st, src.t);
             emit_indent(c, depth);
-            wat_appendf(c->w, "(local.set %s (local.get %s))\n", d->i, src.i);
+            wat_appendf(c->w, "(local.set %s %s)\n", d->si, src.i);
             emit_indent(c, depth);
-            wat_appendf(c->w, "(local.set %s (local.get %s))\n", d->f, src.f);
+            wat_appendf(c->w, "(local.set %s %s)\n", d->sf, src.f);
             emit_indent(c, depth);
-            wat_appendf(c->w, "(local.set %s (local.get %s))\n", d->b, src.b);
+            wat_appendf(c->w, "(local.set %s %s)\n", d->sb, src.b);
             return;
         }
         break;
     case EXPR_BINOP:
         if (maybe_arith_op(e->as.binop.op)) {
-            int k = mt_alloc(c, 2);
-            MCell a = mcell_tmp(k), b = mcell_tmp(k + 1);
-            emit_maybe_lower(c, e->as.binop.lhs, &a, depth);
-            emit_maybe_lower(c, e->as.binop.rhs, &b, depth);
+            MCell a, b;
+            int k = emit_maybe_operands(c, e->as.binop.lhs, e->as.binop.rhs, &a, &b, depth);
             emit_maybe_arith(c, e->as.binop.op, &a, &b, d, depth);
             c->mt_depth = k;
             return;
@@ -2472,9 +2645,13 @@ static void emit_maybe_lower(CG *c, const Expr *e, const MCell *d, int depth) {
         break;
     case EXPR_UNOP:
         if (e->as.unop.op == UN_NEG) {
-            int k = mt_alloc(c, 1);
-            MCell a = mcell_tmp(k);
-            emit_maybe_lower(c, e->as.unop.operand, &a, depth);
+            int k = c->mt_depth;
+            MCell a;
+            if (!operand_immediate(c, e->as.unop.operand, NULL, &a)) {
+                mt_alloc(c, 1);
+                a = mcell_tmp(k);
+                emit_maybe_lower(c, e->as.unop.operand, &a, depth);
+            }
             emit_maybe_neg(c, &a, d, depth);
             c->mt_depth = k;
             return;
@@ -2484,18 +2661,18 @@ static void emit_maybe_lower(CG *c, const Expr *e, const MCell *d, int depth) {
     }
     /* Opaque: a Lua value, classified once. */
     emit_indent(c, depth);
-    wat_appendf(c->w, "(local.set %s\n", d->b);
+    wat_appendf(c->w, "(local.set %s\n", d->sb);
     emit_expr(c, e, depth + 1);
     emit_indent(c, depth);
     wat_append(c->w, ")\n");
     emit_indent(c, depth);
-    wat_appendf(c->w, "(call $unbox_num (local.get %s))\n", d->b);
+    wat_appendf(c->w, "(call $unbox_num %s)\n", d->b);
     emit_indent(c, depth);
-    wat_appendf(c->w, "local.set %s\n", d->f);
+    wat_appendf(c->w, "local.set %s\n", d->sf);
     emit_indent(c, depth);
-    wat_appendf(c->w, "local.set %s\n", d->i);
+    wat_appendf(c->w, "local.set %s\n", d->si);
     emit_indent(c, depth);
-    wat_appendf(c->w, "local.set %s\n", d->t);
+    wat_appendf(c->w, "local.set %s\n", d->st);
 }
 
 /* `slot = e` for a maybe slot. */
@@ -2518,9 +2695,9 @@ static void emit_maybe_boxed(CG *c, const Expr *e, int depth) {
     c->mt_depth = k;
 }
 
-/* A comparison involving a maybe read, as `(block (result i32) …)`: same-tag
- * int or float compares inline; mixed int/float (Lua compares those exactly)
- * and everything else through the generic helper + $lua_truthy. */
+/* A comparison involving an opaque operand, as `(block (result i32) …)`:
+ * same-tag int or float compares inline; mixed int/float (Lua compares those
+ * exactly) and everything else through the generic helper + $lua_truthy. */
 static void emit_maybe_cmp_block(CG *c, const Expr *e, int depth) {
     static const char *iops[] = {"i64.lt_s", "i64.le_s", "i64.gt_s", "i64.ge_s", "i64.eq", "i64.ne"};
     static const char *fops[] = {"f64.lt", "f64.le", "f64.gt", "f64.ge", "f64.eq", "f64.ne"};
@@ -2533,22 +2710,20 @@ static void emit_maybe_cmp_block(CG *c, const Expr *e, int depth) {
     case BIN_EQ: j = 4; break;
     default: j = 5; break; /* BIN_NEQ */
     }
-    int k = mt_alloc(c, 2);
-    MCell a = mcell_tmp(k), b = mcell_tmp(k + 1);
+    MCell a, b;
     emit_indent(c, depth);
     wat_append(c->w, "(block (result i32)\n");
-    emit_maybe_lower(c, e->as.binop.lhs, &a, depth + 1);
-    emit_maybe_lower(c, e->as.binop.rhs, &b, depth + 1);
+    int k = emit_maybe_operands(c, e->as.binop.lhs, e->as.binop.rhs, &a, &b, depth + 1);
     emit_indent(c, depth + 1);
     wat_append(c->w, "(if (result i32)\n");
     emit_both_tags(c, &a, &b, 1, depth + 2);
     emit_indent(c, depth + 2);
-    wat_appendf(c->w, "(then (%s (local.get %s) (local.get %s)))\n", iops[j], a.i, b.i);
+    wat_appendf(c->w, "(then (%s %s %s))\n", iops[j], a.i, b.i);
     emit_indent(c, depth + 2);
     wat_append(c->w, "(else (if (result i32)\n");
     emit_both_tags(c, &a, &b, 2, depth + 3);
     emit_indent(c, depth + 3);
-    wat_appendf(c->w, "(then (%s (local.get %s) (local.get %s)))\n", fops[j], a.f, b.f);
+    wat_appendf(c->w, "(then (%s %s %s))\n", fops[j], a.f, b.f);
     emit_indent(c, depth + 3);
     wat_appendf(c->w, "(else (call $lua_truthy (call %s\n", binop_helper(e->as.binop.op));
     emit_maybe_cell_box(c, &a, depth + 4);
@@ -3191,12 +3366,25 @@ static void emit_assign(CG *c, const Stmt *s, int depth) {
      * target is a variable. (last_call is only relevant to the
      * single-target branch above; the multi-target path always
      * builds the full $tmp_args array via emit_args_array.) */
+    /* An index target whose table and key are non-captured locals (or the
+     * key a literal) has a static address too: evaluating the values first
+     * can't change it, and neither can an earlier store's __newindex (locals
+     * are unreachable from metamethods unless captured). Such targets store
+     * through emit_target_open like single stores — keeping the int / maybe /
+     * constant-key fast paths (`q[i], q[j] = q[j], q[i]`). */
     int has_index = 0;
-    for (int i = 0; i < n_targets; i++)
-        if (s->as.assign.targets[i].kind != TGT_VAR) {
+    for (int i = 0; i < n_targets; i++) {
+        AssignTarget *t = &s->as.assign.targets[i];
+        if (t->kind == TGT_VAR) continue;
+        const Expr *tb = t->as.index.table, *k = t->as.index.key;
+        int tb_static = tb->kind == EXPR_VAR && tb->as.var.kind == VAR_LOCAL && !slot_is_boxed(c, tb->as.var.idx);
+        int k_static = k->kind == EXPR_INT || k->kind == EXPR_FLOAT || k->kind == EXPR_STRING ||
+                       (k->kind == EXPR_VAR && k->as.var.kind == VAR_LOCAL && !slot_is_boxed(c, k->as.var.idx));
+        if (!(tb_static && k_static)) {
             has_index = 1;
             break;
         }
+    }
     if (has_index) {
         emit_indent(c, depth);
         wat_appendf(c->w,
@@ -3236,7 +3424,7 @@ static void emit_assign(CG *c, const Stmt *s, int depth) {
     wat_append(c->w, ")\n");
     for (int i = n_targets - 1; i >= 0; i--) {
         AssignTarget *t = &s->as.assign.targets[i];
-        if (t->kind == TGT_VAR) {
+        if (t->kind == TGT_VAR || !has_index) {
             emit_target_open(c, t, depth);
             emit_args_at(c, i, depth + 1);
             emit_target_close(c, depth);
@@ -4611,7 +4799,10 @@ static void emit_user_function(CG *c, const LuaFunc *fn, int direct, int ret_sin
     int prev_mt_max = c->mt_max, prev_mt_depth = c->mt_depth;
     c->cur_is_maybe = ismaybe;
     c->mt_depth = 0;
-    c->mt_max = any_maybe ? block_temp_need(&fn->body) : 0;
+    /* Lowering also fires on opaque operands with no maybe slot in sight, so
+     * the temporaries are sized whenever the specializer is on. */
+    c->mt_max = c->opt_int ? block_temp_need(c, &fn->body) : 0;
+    (void)any_maybe;
 
     /* Run the label pre-pass NOW so block_dispatch_id is populated on
      * every label and goto before we emit the $next_BID i32 locals. */
@@ -4684,6 +4875,11 @@ static void emit_user_function(CG *c, const LuaFunc *fn, int direct, int ret_sin
             wat_appendf(w, "    (local.set $L%d (struct.new $Box %s))\n", i, src);
         else
             wat_appendf(w, "    (local.set $L%d %s)\n", i, src);
+        if (ismaybe && ismaybe[i])
+            wat_appendf(w,
+                        "    (call $unbox_num (local.get $L%d))\n"
+                        "    local.set $Lf%d\n    local.set $Li%d\n    local.set $Lt%d\n",
+                        i, i, i, i);
     }
     if (fn->is_vararg) {
         wat_appendf(w,
@@ -5375,7 +5571,8 @@ static void emit_main_chunk(CG *c) {
     c->cur_is_float = isfloat;
     c->cur_is_maybe = ismaybe;
     c->mt_depth = 0;
-    c->mt_max = any_maybe ? block_temp_need(&pr->main_body) : 0;
+    c->mt_max = c->opt_int ? block_temp_need(c, &pr->main_body) : 0;
+    (void)any_maybe;
     /* Pre-pass before locals: dispatch ids must be assigned so the
      * $next_BID i32 locals can be declared up-front. */
     c->next_label_id = 0;

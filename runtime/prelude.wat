@@ -1843,6 +1843,24 @@
       (then (call $tab_set_ik (local.get $t) (local.get $k) (local.get $v)) (return)))
     (call $lua_tabset (local.get $tv) (call $make_int (local.get $k)) (local.get $v)))
 
+  ;; Maybe-typed key (docs/design/22): the cell's (tag, i64, f64, boxed) —
+  ;; an int key takes the raw-i64 fast path, anything else boxes and goes
+  ;; generic. Boxing only happens on the slow path.
+  (func $lua_index_mk (param $tv anyref) (param $tag i32) (param $ki i64) (param $kf f64)
+                      (param $kb anyref) (param $line i32) (result anyref)
+    (if (i32.eq (local.get $tag) (i32.const 1))
+      (then (return (call $lua_index_ik (local.get $tv) (local.get $ki) (local.get $line)))))
+    (call $lua_index (local.get $tv)
+      (call $box_num (local.get $tag) (local.get $ki) (local.get $kf) (local.get $kb))
+      (local.get $line)))
+  (func $lua_tabset_mk (param $tv anyref) (param $tag i32) (param $ki i64) (param $kf f64)
+                       (param $kb anyref) (param $v anyref)
+    (if (i32.eq (local.get $tag) (i32.const 1))
+      (then (call $lua_tabset_ik (local.get $tv) (local.get $ki) (local.get $v)) (return)))
+    (call $lua_tabset (local.get $tv)
+      (call $box_num (local.get $tag) (local.get $ki) (local.get $kf) (local.get $kb))
+      (local.get $v)))
+
   ;; `t[k]` read with an unboxed integer key — the codegen entry point for
   ;; `t[<int-typed>]`. An in-range array hit returns directly (the dense prefix
   ;; means the key is present, so __index never applies) with no key boxing and
