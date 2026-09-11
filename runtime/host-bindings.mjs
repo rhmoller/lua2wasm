@@ -42,9 +42,19 @@ export const UTF8_DECODER = new TextDecoder();
 // only encoding where each byte maps to exactly one code point (0x00..0xFF)
 // and back — UTF-8 would mangle any non-UTF-8 byte into U+FFFD. ASCII (the
 // only thing host-generated text ever contains) is a subset, so numbers,
-// format output and error messages survive unchanged. TextDecoder has a
-// latin1 mode; TextEncoder is UTF-8-only, so latin1Bytes() does the encode.
-export const LATIN1_DECODER = new TextDecoder("latin1");
+// format output and error messages survive unchanged. Neither TextDecoder
+// nor TextEncoder can do this: per the WHATWG Encoding standard the "latin1"
+// label is an alias of windows-1252, which maps 0x80..0x9F to non-Latin-1
+// code points (0x89 -> U+2030), and re-encoding by low byte then corrupts
+// them. Both directions are hand-rolled.
+export function latin1Decode(bytes) {
+    let out = "";
+    // String.fromCharCode.apply takes the whole chunk as arguments; keep the
+    // chunks well under engine argument limits.
+    for (let i = 0; i < bytes.length; i += 8192)
+        out += String.fromCharCode.apply(null, bytes.subarray(i, i + 8192));
+    return out;
+}
 export function latin1Bytes(s) {
     const b = new Uint8Array(s.length);
     for (let i = 0; i < s.length; i++) b[i] = s.charCodeAt(i) & 0xff;
@@ -138,7 +148,7 @@ export class BufferedFile {
             else break;
         }
         if (this.pos >= this.buf.length) return null;
-        const tail = LATIN1_DECODER.decode(this.buf.subarray(this.pos));
+        const tail = latin1Decode(this.buf.subarray(this.pos));
         const m = LUA_NUM_RE.exec(tail);
         if (!m) return null;
         // latin1: one matched char == one source byte, so advance by length.
@@ -190,7 +200,7 @@ export function makeHelpers({ getInstance, formatFloat, cFormatG, cFormatF, cFor
             out[i + 2] = w >>> 16;
             out[i + 3] = w >>> 24;
         }
-        return LATIN1_DECODER.decode(out);
+        return latin1Decode(out);
     }
 
     // Stable, distinct per-object identity for the "type: 0xADDR" forms of
