@@ -143,6 +143,33 @@ that's only valid when `A` is true, you get an OOB trap, not a `false`.
 **Look-here-first instinct:** when a prelude helper traps on a boundary
 input but the logic *reads* correct, suspect this before reading deeper.
 
+### V8 decides runtime performance by what it can inline
+
+The prelude's hot helpers only pay off when V8's TurboFan tier inlines
+them, and it inlines by a *budget*: callees up to 500 wire bytes, scored
+by call count over size, until the caller's graph has grown by a fixed
+factor. One fat helper inlined early (the old 274-byte `$tab_set_arr`)
+can starve every later call site in the same function. Keeping each hot
+helper to its common case and moving the rest behind a `return_call` to a
+`_slow`/`_probe` companion bought ~10% on fannkuch/particles/nbody_arr and
+~5% on the OO benches — and made each function easier to read. Measure
+every such split: the same treatment of `$unbox_num` (multi-value result,
+tail call to the boxed cases) made binarytrees 13% *slower*.
+
+To see the decisions: build with names (`wasm-as --all-features -g`) and
+run `node --trace-wasm-inlining`; "not enough inlining budget" next to a
+hot callee is the signal.
+
+### A loop in a run-once function stays on the baseline tier
+
+V8 has no on-stack replacement for wasm. A function is tiered up to
+TurboFan for its *next* call, so a long loop in a function that runs once
+— the main chunk, or a `main()` called once — runs on Liftoff for its whole
+life: ~2.5x slower than the same loop in a function called repeatedly.
+`--no-liftoff` is not the cure (it loses the call-count feedback TurboFan
+inlines by, and spectralnorm/oo/nbody got slower). Keep it in mind when
+reading benchmark profiles: hot code in `$main` is unoptimized code.
+
 ### Cascade fixes when fixing a fundamental
 
 A correctness fix in a primitive op (`..`, `==`, `<`) often exposes
