@@ -543,7 +543,6 @@ static void emit_int_expr(CG *c, const Expr *e, int depth);
 static int expr_is_float(CG *c, const Expr *e);
 static void emit_float_expr(CG *c, const Expr *e, int depth);
 static int slot_is_maybe(const CG *c, int slot);
-static int maybe_cmp_op(BinOp op);
 static int expr_involves_maybe(CG *c, const Expr *e);
 static void emit_maybe_store(CG *c, int slot, const Expr *e, int depth);
 static void emit_maybe_boxed(CG *c, const Expr *e, int depth);
@@ -992,15 +991,46 @@ static const char *binop_helper(BinOp op) {
     }
 }
 
-/* Index of a comparison operator in the iops/fops/mixed tables below. */
-static int cmp_op_index(BinOp op) {
+/* ----- comparisons ----- */
+
+/* Every spelling of one comparison operator: the native i64/f64 opcodes, and
+ * the prelude helpers comparing an int with a float exactly — Lua compares
+ * them exactly, which converting the integer to f64 does not preserve beyond
+ * 2^53 — taking their operands in source order. `~=` has no helper of its
+ * own: it negates the `==` one. */
+typedef struct {
+    const char *i64, *f64;
+    const char *int_float, *float_int;
+    int negate;
+} CmpOp;
+
+static int is_cmp_op(BinOp op) {
     switch (op) {
-    case BIN_LT: return 0;
-    case BIN_LE: return 1;
-    case BIN_GT: return 2;
-    case BIN_GE: return 3;
-    case BIN_EQ: return 4;
-    default: return 5; /* BIN_NEQ */
+    case BIN_LT:
+    case BIN_LE:
+    case BIN_GT:
+    case BIN_GE:
+    case BIN_EQ:
+    case BIN_NEQ: return 1;
+    default: return 0;
+    }
+}
+
+/* The spellings of comparison operator `op` (is_cmp_op). */
+static const CmpOp *cmp_op(BinOp op) {
+    static const CmpOp LT = {"i64.lt_s", "f64.lt", "$int_lt_float", "$float_lt_int", 0};
+    static const CmpOp LE = {"i64.le_s", "f64.le", "$int_le_float", "$float_le_int", 0};
+    static const CmpOp GT = {"i64.gt_s", "f64.gt", "$int_gt_float", "$float_gt_int", 0};
+    static const CmpOp GE = {"i64.ge_s", "f64.ge", "$int_ge_float", "$float_ge_int", 0};
+    static const CmpOp EQ = {"i64.eq", "f64.eq", "$int_eq_float", "$float_eq_int", 0};
+    static const CmpOp NE = {"i64.ne", "f64.ne", "$int_eq_float", "$float_eq_int", 1};
+    switch (op) {
+    case BIN_LT: return &LT;
+    case BIN_LE: return &LE;
+    case BIN_GT: return &GT;
+    case BIN_GE: return &GE;
+    case BIN_EQ: return &EQ;
+    default: return &NE;
     }
 }
 
@@ -1011,56 +1041,39 @@ static int expr_is_exact_f64_int_literal(const Expr *e) {
     return e->kind == EXPR_INT && e->as.i_val >= -lim && e->as.i_val <= lim;
 }
 
-/* Lua compares int vs float exactly, which converting the integer to f64 does
- * not preserve beyond 2^53, so a mixed comparison calls these prelude helpers
- * (operands in source order: int-left or float-left). `~=` is the negated
- * `==` helper. */
-static const char *mixed_cmp_helper(int j, int int_left) {
-    static const char *il[] = {"$int_lt_float", "$int_le_float", "$int_gt_float",
-                               "$int_ge_float", "$int_eq_float", "$int_eq_float"};
-    static const char *fl[] = {"$float_lt_int", "$float_le_int", "$float_gt_int",
-                               "$float_ge_int", "$float_eq_int", "$float_eq_int"};
-    return int_left ? il[j] : fl[j];
+/* The operand types of a comparison whose operands are both unboxed numbers
+ * (CMP_NONE when they aren't). */
+typedef enum { CMP_NONE,
+               CMP_INT,
+               CMP_FLOAT,
+               CMP_INT_FLOAT,
+               CMP_FLOAT_INT } CmpKind;
+
+static CmpKind cmp_numeric_kind(CG *c, const Expr *e) {
+    if (!c->opt_int || e->kind != EXPR_BINOP || !is_cmp_op(e->as.binop.op)) return CMP_NONE;
+    const Expr *l = e->as.binop.lhs, *r = e->as.binop.rhs;
+    if (expr_is_int(c, l) && expr_is_int(c, r)) return CMP_INT;
+    if (expr_is_float(c, l) && expr_is_float(c, r)) return CMP_FLOAT;
+    if (expr_is_int(c, l) && expr_is_float(c, r)) return CMP_INT_FLOAT;
+    if (expr_is_float(c, l) && expr_is_int(c, r)) return CMP_FLOAT_INT;
+    return CMP_NONE;
 }
 
-/* A relational/equality binop with both operands unboxed numeric types:
- * 1 = both int (i64 compare), 2 = both float (f64 compare), 3 = int vs float,
- * 4 = float vs int (exact mixed compare), 0 = not both typed. */
-static int cmp_numeric_kind(CG *c, const Expr *e) {
-    if (!c->opt_int || e->kind != EXPR_BINOP) return 0;
-    switch (e->as.binop.op) {
-    case BIN_LT:
-    case BIN_LE:
-    case BIN_GT:
-    case BIN_GE:
-    case BIN_EQ:
-    case BIN_NEQ: break;
-    default: return 0;
-    }
+/* Emit a typed numeric comparison (cmp_numeric_kind != CMP_NONE) as a raw
+ * i32. An int-vs-float one is an f64 compare when the integer is a literal
+ * that converts exactly, else the exact mixed helper. */
+static void emit_cmp_i32(CG *c, const Expr *e, int depth, CmpKind kind) {
+    const CmpOp *op = cmp_op(e->as.binop.op);
     const Expr *l = e->as.binop.lhs, *r = e->as.binop.rhs;
-    if (expr_is_int(c, l) && expr_is_int(c, r)) return 1;
-    if (expr_is_float(c, l) && expr_is_float(c, r)) return 2;
-    if (expr_is_int(c, l) && expr_is_float(c, r)) return 3;
-    if (expr_is_float(c, l) && expr_is_int(c, r)) return 4;
-    return 0;
-}
-
-/* Emit a typed numeric comparison (cmp_numeric_kind != 0) as a raw i32. */
-static void emit_cmp_i32(CG *c, const Expr *e, int depth, int kind) {
-    static const char *iops[] = {"i64.lt_s", "i64.le_s", "i64.gt_s", "i64.ge_s", "i64.eq", "i64.ne"};
-    static const char *fops[] = {"f64.lt", "f64.le", "f64.gt", "f64.ge", "f64.eq", "f64.ne"};
-    int j = cmp_op_index(e->as.binop.op);
-    const Expr *l = e->as.binop.lhs, *r = e->as.binop.rhs;
-    if (kind >= 3) {
-        int int_left = kind == 3;
+    if (kind == CMP_INT_FLOAT || kind == CMP_FLOAT_INT) {
+        int int_left = kind == CMP_INT_FLOAT;
         if (expr_is_exact_f64_int_literal(int_left ? l : r)) {
-            emit_linef(c, depth, "(%s\n", fops[j]);
+            emit_linef(c, depth, "(%s\n", op->f64);
             emit_num_as_f64(c, l, depth + 1);
             emit_num_as_f64(c, r, depth + 1);
         } else {
-            emit_indent(c, depth);
-            if (j == 5) wat_append(c->w, "(i32.eqz ");
-            wat_appendf(c->w, "(call %s\n", mixed_cmp_helper(j, int_left));
+            emit_linef(c, depth, "%s(call %s\n", op->negate ? "(i32.eqz " : "",
+                       int_left ? op->int_float : op->float_int);
             if (int_left) {
                 emit_int_expr(c, l, depth + 1);
                 emit_float_expr(c, r, depth + 1);
@@ -1068,15 +1081,13 @@ static void emit_cmp_i32(CG *c, const Expr *e, int depth, int kind) {
                 emit_float_expr(c, l, depth + 1);
                 emit_int_expr(c, r, depth + 1);
             }
-            if (j == 5) {
-                emit_line(c, depth, ")\n");
-            }
+            if (op->negate) emit_line(c, depth, ")\n");
         }
         emit_line(c, depth, ")\n");
         return;
     }
-    emit_linef(c, depth, "(%s\n", kind == 1 ? iops[j] : fops[j]);
-    if (kind == 1) {
+    emit_linef(c, depth, "(%s\n", kind == CMP_INT ? op->i64 : op->f64);
+    if (kind == CMP_INT) {
         emit_int_expr(c, e->as.binop.lhs, depth + 1);
         emit_int_expr(c, e->as.binop.rhs, depth + 1);
     } else {
@@ -1089,11 +1100,11 @@ static void emit_cmp_i32(CG *c, const Expr *e, int depth, int kind) {
 /* Emit `e` as an i32 truthiness (0/1). A numeric comparison becomes a direct
  * iXX/fXX compare, skipping the boxed boolean and $lua_truthy. */
 static void emit_truthy(CG *c, const Expr *e, int depth) {
-    if (e->kind == EXPR_BINOP && maybe_cmp_op(e->as.binop.op) && expr_involves_maybe(c, e)) {
+    if (e->kind == EXPR_BINOP && is_cmp_op(e->as.binop.op) && expr_involves_maybe(c, e)) {
         emit_maybe_cmp_block(c, e, depth);
         return;
     }
-    int k = cmp_numeric_kind(c, e);
+    CmpKind k = cmp_numeric_kind(c, e);
     if (k) {
         emit_cmp_i32(c, e, depth, k);
         return;
@@ -1138,7 +1149,7 @@ static void emit_binop(CG *c, const Expr *e, int depth) {
         return;
     }
     if (expr_involves_maybe(c, e)) {
-        if (maybe_cmp_op(op)) {
+        if (is_cmp_op(op)) {
             emit_line(c, depth, "(select (result anyref)\n");
             emit_line(c, depth + 1, "(global.get $g_true)\n");
             emit_line(c, depth + 1, "(global.get $g_false)\n");
@@ -1149,7 +1160,7 @@ static void emit_binop(CG *c, const Expr *e, int depth) {
         }
         return;
     }
-    int ck = cmp_numeric_kind(c, e);
+    CmpKind ck = cmp_numeric_kind(c, e);
     if (ck) {
         /* Value context: materialize the i32 compare as a Lua boolean. */
         emit_line(c, depth, "(select (result anyref)\n");
@@ -2222,18 +2233,6 @@ static int maybe_arith_op(BinOp op) {
     }
 }
 
-static int maybe_cmp_op(BinOp op) {
-    switch (op) {
-    case BIN_LT:
-    case BIN_LE:
-    case BIN_GT:
-    case BIN_GE:
-    case BIN_EQ:
-    case BIN_NEQ: return 1;
-    default: return 0;
-    }
-}
-
 static int slot_is_maybe(const CG *c, int slot) {
     if (!c->opt_int || !c->cur_is_maybe) return 0;
     if (slot < 0 || slot >= c->cur_n_locals) return 0;
@@ -2285,7 +2284,7 @@ static int expr_has_opaque(CG *c, const Expr *e) {
     case EXPR_CALL:
     case EXPR_METHOD_CALL: return 1;
     case EXPR_BINOP:
-        if (!maybe_arith_op(e->as.binop.op) && !maybe_cmp_op(e->as.binop.op)) return 0;
+        if (!maybe_arith_op(e->as.binop.op) && !is_cmp_op(e->as.binop.op)) return 0;
         return expr_has_opaque(c, e->as.binop.lhs) || expr_has_opaque(c, e->as.binop.rhs);
     case EXPR_UNOP: return e->as.unop.op == UN_NEG && expr_has_opaque(c, e->as.unop.operand);
     default: return 0;
@@ -2301,7 +2300,7 @@ static int expr_numeric_evidence(CG *c, const Expr *e) {
                 slot_is_float(c, e->as.var.idx));
     case EXPR_BINOP:
         if (maybe_arith_op(e->as.binop.op)) return 1;
-        if (!maybe_cmp_op(e->as.binop.op)) return 0;
+        if (!is_cmp_op(e->as.binop.op)) return 0;
         return expr_numeric_evidence(c, e->as.binop.lhs) || expr_numeric_evidence(c, e->as.binop.rhs);
     case EXPR_UNOP: return e->as.unop.op == UN_NEG;
     case EXPR_CALL: return expr_is_int(c, e) || expr_is_float(c, e);
@@ -2317,7 +2316,7 @@ static int expr_numeric_evidence(CG *c, const Expr *e) {
  * nodes.) */
 static int expr_involves_maybe(CG *c, const Expr *e) {
     if (!c->opt_int || !c->cur_is_maybe) return 0;
-    if (e->kind == EXPR_BINOP && maybe_cmp_op(e->as.binop.op))
+    if (e->kind == EXPR_BINOP && is_cmp_op(e->as.binop.op))
         return expr_has_opaque(c, e) &&
                (expr_numeric_evidence(c, e->as.binop.lhs) || expr_numeric_evidence(c, e->as.binop.rhs));
     return expr_has_opaque(c, e);
@@ -2399,7 +2398,7 @@ static void numuse_expr(const Expr *e, NumUse *u, int in_arith) {
             u->use[e->as.var.idx] = 1;
         return;
     case EXPR_BINOP:
-        if (maybe_arith_op(e->as.binop.op) || maybe_cmp_op(e->as.binop.op)) {
+        if (maybe_arith_op(e->as.binop.op) || is_cmp_op(e->as.binop.op)) {
             numuse_expr(e->as.binop.lhs, u, 1);
             numuse_expr(e->as.binop.rhs, u, 1);
         } else {
@@ -2449,7 +2448,7 @@ static int expr_side_effect_free(const Expr *e) {
     case EXPR_STRING: return 1;
     case EXPR_VAR: return e->as.var.kind == VAR_LOCAL;
     case EXPR_BINOP:
-        return (maybe_arith_op(e->as.binop.op) || maybe_cmp_op(e->as.binop.op)) &&
+        return (maybe_arith_op(e->as.binop.op) || is_cmp_op(e->as.binop.op)) &&
                expr_side_effect_free(e->as.binop.lhs) && expr_side_effect_free(e->as.binop.rhs);
     case EXPR_UNOP: return e->as.unop.op == UN_NEG && expr_side_effect_free(e->as.unop.operand);
     default: return 0;
@@ -3132,17 +3131,16 @@ static int mcell_static_tag(const MCell *m) {
 /* The mixed int/float compare of cells a (lhs) and b (rhs), one int and one
  * float, as an i32: an f64 compare when the int side is an exactly
  * representable literal, else the exact helper. */
-static void emit_mixed_cell_cmp(CG *c, int j, const Expr *e, const MCell *a, const MCell *b, int int_left,
-                                int depth) {
-    static const char *fops[] = {"f64.lt", "f64.le", "f64.gt", "f64.ge", "f64.eq", "f64.ne"};
+static void emit_mixed_cell_cmp(CG *c, const CmpOp *op, const Expr *e, const MCell *a, const MCell *b,
+                                int int_left, int depth) {
     const MCell *ic = int_left ? a : b, *fc = int_left ? b : a;
-    emit_indent(c, depth);
     if (expr_is_exact_f64_int_literal(int_left ? e->as.binop.lhs : e->as.binop.rhs)) {
-        if (int_left) wat_appendf(c->w, "(%s (f64.convert_i64_s %s) %s)\n", fops[j], ic->i, fc->f);
-        else wat_appendf(c->w, "(%s %s (f64.convert_i64_s %s))\n", fops[j], fc->f, ic->i);
+        if (int_left) emit_linef(c, depth, "(%s (f64.convert_i64_s %s) %s)\n", op->f64, ic->i, fc->f);
+        else emit_linef(c, depth, "(%s %s (f64.convert_i64_s %s))\n", op->f64, fc->f, ic->i);
     } else {
-        wat_appendf(c->w, "%s(call %s %s %s)%s\n", j == 5 ? "(i32.eqz " : "", mixed_cmp_helper(j, int_left),
-                    int_left ? ic->i : fc->f, int_left ? fc->f : ic->i, j == 5 ? ")" : "");
+        emit_linef(c, depth, "%s(call %s %s %s)%s\n", op->negate ? "(i32.eqz " : "",
+                   int_left ? op->int_float : op->float_int, int_left ? ic->i : fc->f, int_left ? fc->f : ic->i,
+                   op->negate ? ")" : "");
     }
 }
 
@@ -3151,18 +3149,16 @@ static void emit_mixed_cell_cmp(CG *c, int j, const Expr *e, const MCell *a, con
  * mixed compare, and everything else through the generic helper +
  * $lua_truthy. */
 static void emit_maybe_cmp_block(CG *c, const Expr *e, int depth) {
-    static const char *iops[] = {"i64.lt_s", "i64.le_s", "i64.gt_s", "i64.ge_s", "i64.eq", "i64.ne"};
-    static const char *fops[] = {"f64.lt", "f64.le", "f64.gt", "f64.ge", "f64.eq", "f64.ne"};
-    int j = cmp_op_index(e->as.binop.op);
+    const CmpOp *op = cmp_op(e->as.binop.op);
     MCell a, b;
     emit_line(c, depth, "(block (result i32)\n");
     int k = emit_maybe_operands(c, e->as.binop.lhs, e->as.binop.rhs, &a, &b, depth + 1);
     emit_line(c, depth + 1, "(if (result i32)\n");
     emit_both_tags(c, &a, &b, 1, depth + 2);
-    emit_linef(c, depth + 2, "(then (%s %s %s))\n", iops[j], a.i, b.i);
+    emit_linef(c, depth + 2, "(then (%s %s %s))\n", op->i64, a.i, b.i);
     emit_line(c, depth + 2, "(else (if (result i32)\n");
     emit_both_tags(c, &a, &b, 2, depth + 3);
-    emit_linef(c, depth + 3, "(then (%s %s %s))\n", fops[j], a.f, b.f);
+    emit_linef(c, depth + 3, "(then (%s %s %s))\n", op->f64, a.f, b.f);
     /* Both numeric with different tags: int vs float. A side whose tag is
      * static decides which way round; otherwise test at run time. */
     int at = mcell_static_tag(&a), bt = mcell_static_tag(&b);
@@ -3172,16 +3168,16 @@ static void emit_maybe_cmp_block(CG *c, const Expr *e, int depth) {
                    a.t, b.t);
         emit_line(c, depth + 4, "(then\n");
         if (at == 1 || bt == 2) {
-            emit_mixed_cell_cmp(c, j, e, &a, &b, 1, depth + 5);
+            emit_mixed_cell_cmp(c, op, e, &a, &b, 1, depth + 5);
         } else if (at == 2 || bt == 1) {
-            emit_mixed_cell_cmp(c, j, e, &a, &b, 0, depth + 5);
+            emit_mixed_cell_cmp(c, op, e, &a, &b, 0, depth + 5);
         } else {
             emit_linef(c, depth + 5, "(if (result i32) (i32.eq %s (i32.const 1))\n", a.t);
             emit_line(c, depth + 6, "(then\n");
-            emit_mixed_cell_cmp(c, j, e, &a, &b, 1, depth + 7);
+            emit_mixed_cell_cmp(c, op, e, &a, &b, 1, depth + 7);
             emit_line(c, depth + 6, ")\n");
             emit_line(c, depth + 6, "(else\n");
-            emit_mixed_cell_cmp(c, j, e, &a, &b, 0, depth + 7);
+            emit_mixed_cell_cmp(c, op, e, &a, &b, 0, depth + 7);
             emit_line(c, depth + 6, "))\n");
         }
         emit_line(c, depth + 4, ")\n");
