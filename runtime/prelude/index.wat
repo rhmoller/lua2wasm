@@ -150,19 +150,25 @@
     (call $ic_fill (local.get $tv) (local.get $k) (local.get $ic))
     (call $lua_tabset_sk_f (local.get $tv) (local.get $k) (local.get $f)))
 
-  ;; `obj:m` method lookup. The cached case is the usual class pattern: the
+;; `obj:m` method lookup. The cached case is the usual class pattern: the
   ;; receiver's (shared) shape lacks the key, its metatable has __index at a
   ;; cached position, that slot still holds the cached class table, and the
   ;; class's shape has the method at a cached position. Five identity checks
   ;; instead of three hash probes; anything else takes $lua_method_ic_miss.
+  ;; A string receiver (`s:byte(i)`) is the same with the string metatable
+  ;; and the string library as the class; its entry has no receiver shape
+  ;; ($s1 null), so a table receiver never matches it.
   (func $lua_method_ic (param $tv anyref) (param $k (ref $LuaString)) (param $line i32) (param $ic (ref $MIC))
                        (result anyref)
     (local $t (ref $LuaTable)) (local $m (ref null $LuaTable)) (local $c (ref $LuaTable)) (local $v anyref)
     (block $miss
-      (br_if $miss (i32.eqz (ref.test (ref $LuaTable) (local.get $tv))))
-      (local.set $t (ref.cast (ref $LuaTable) (local.get $tv)))
-      (br_if $miss (i32.eqz (ref.eq (struct.get $LuaTable $shape (local.get $t)) (struct.get $MIC $s1 (local.get $ic)))))
-      (local.set $m (struct.get $LuaTable $meta (local.get $t)))
+      (if (ref.test (ref $LuaString) (local.get $tv))
+        (then (local.set $m (global.get $g_string_mt)))
+        (else
+          (br_if $miss (i32.eqz (ref.test (ref $LuaTable) (local.get $tv))))
+          (local.set $t (ref.cast (ref $LuaTable) (local.get $tv)))
+          (br_if $miss (i32.eqz (ref.eq (struct.get $LuaTable $shape (local.get $t)) (struct.get $MIC $s1 (local.get $ic)))))
+          (local.set $m (struct.get $LuaTable $meta (local.get $t)))))
       (br_if $miss (ref.is_null (local.get $m)))
       (br_if $miss (i32.eqz (ref.eq (struct.get $LuaTable $shape (ref.as_non_null (local.get $m)))
                                     (struct.get $MIC $ms (local.get $ic)))))
@@ -180,28 +186,33 @@
     (return_call $lua_method_ic_miss (local.get $tv) (local.get $k) (local.get $line) (local.get $ic)))
   (func $lua_method_ic_miss (param $tv anyref) (param $k (ref $LuaString)) (param $line i32) (param $ic (ref $MIC))
                             (result anyref)
-    (local $t (ref $LuaTable)) (local $m (ref $LuaTable)) (local $c (ref $LuaTable)) (local $full i32)
-    (local $mp i32) (local $cp i32) (local $iv anyref)
+    (local $t (ref $LuaTable)) (local $m (ref null $LuaTable)) (local $c (ref $LuaTable)) (local $full i32)
+    (local $mp i32) (local $cp i32) (local $iv anyref) (local $s1 (ref null $Shape))
+    (local.set $full (struct.get $LuaString $hash (local.get $k)))
     (block $nocache
-      (br_if $nocache (i32.eqz (ref.test (ref $LuaTable) (local.get $tv))))
-      (local.set $t (ref.cast (ref $LuaTable) (local.get $tv)))
-      ;; absence is a property of a shared shape only (an owned one can grow)
-      (br_if $nocache (struct.get $LuaTable $own (local.get $t)))
-      (local.set $full (struct.get $LuaString $hash (local.get $k)))
-      (br_if $nocache (i32.ge_s (call $tab_find_str (local.get $t) (local.get $k) (local.get $full)) (i32.const 0)))
-      (br_if $nocache (ref.is_null (struct.get $LuaTable $meta (local.get $t))))
-      (local.set $m (ref.as_non_null (struct.get $LuaTable $meta (local.get $t))))
-      (local.set $mp (call $tab_find_str (local.get $m) (ref.as_non_null (global.get $g_mkey_index))
+      (if (ref.test (ref $LuaString) (local.get $tv))
+        (then (local.set $m (call $get_string_mt)))
+        (else
+          (br_if $nocache (i32.eqz (ref.test (ref $LuaTable) (local.get $tv))))
+          (local.set $t (ref.cast (ref $LuaTable) (local.get $tv)))
+          ;; absence is a property of a shared shape only (an owned one can grow)
+          (br_if $nocache (struct.get $LuaTable $own (local.get $t)))
+          (br_if $nocache (i32.ge_s (call $tab_find_str (local.get $t) (local.get $k) (local.get $full)) (i32.const 0)))
+          (local.set $m (struct.get $LuaTable $meta (local.get $t)))
+          (local.set $s1 (struct.get $LuaTable $shape (local.get $t)))))
+      (br_if $nocache (ref.is_null (local.get $m)))
+      (local.set $mp (call $tab_find_str (ref.as_non_null (local.get $m)) (ref.as_non_null (global.get $g_mkey_index))
                                          (struct.get $LuaString $hash (ref.as_non_null (global.get $g_mkey_index)))))
       (br_if $nocache (i32.lt_s (local.get $mp) (i32.const 0)))
-      (local.set $iv (array.get $TArr (ref.as_non_null (struct.get $LuaTable $vals (local.get $m))) (local.get $mp)))
+      (local.set $iv (array.get $TArr (ref.as_non_null (struct.get $LuaTable $vals (ref.as_non_null (local.get $m))))
+                                      (local.get $mp)))
       (br_if $nocache (i32.eqz (ref.test (ref $LuaTable) (local.get $iv))))
       (local.set $c (ref.cast (ref $LuaTable) (local.get $iv)))
       (local.set $cp (call $tab_find_str (local.get $c) (local.get $k) (local.get $full)))
       (br_if $nocache (i32.lt_s (local.get $cp) (i32.const 0)))
       (br_if $nocache (ref.is_null (array.get $TArr (ref.as_non_null (struct.get $LuaTable $vals (local.get $c))) (local.get $cp))))
-      (struct.set $MIC $s1 (local.get $ic) (struct.get $LuaTable $shape (local.get $t)))
-      (struct.set $MIC $ms (local.get $ic) (struct.get $LuaTable $shape (local.get $m)))
+      (struct.set $MIC $s1 (local.get $ic) (local.get $s1))
+      (struct.set $MIC $ms (local.get $ic) (struct.get $LuaTable $shape (ref.as_non_null (local.get $m))))
       (struct.set $MIC $mp (local.get $ic) (local.get $mp))
       (struct.set $MIC $c  (local.get $ic) (local.get $c))
       (struct.set $MIC $cs (local.get $ic) (struct.get $LuaTable $shape (local.get $c)))

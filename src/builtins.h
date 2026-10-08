@@ -24,5 +24,7 @@ BuiltinClass builtin_class(int idx);
 /* For library entries, the table key under which the function is exposed.
  * (Same as builtin_name for now.) */
 const char *builtin_lib_key(int idx);
+/* Whether the builtin has a $LuaFn1 fast entry, <func_name>_f. */
+int builtin_has_fast_entry(int idx);
 
 #endif

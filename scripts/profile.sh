@@ -22,7 +22,7 @@ command -v wasm-as >/dev/null || { echo "error: needs Binaryen's wasm-as (functi
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 # shellcheck disable=SC2086  # L2W_FLAGS: extra compiler flags, word-split
-"$root/build/lua2wasm" "$src" ${L2W_FLAGS:-} -o "$tmp/prog.wat"
+"${L2W_BIN:-$root/build/lua2wasm}" "$src" ${L2W_FLAGS:-} -o "$tmp/prog.wat"
 wasm-as --all-features -g "$tmp/prog.wat" -o "$tmp/prog.wasm"
 
 node --experimental-wasm-exnref --cpu-prof --cpu-prof-interval "${PROFILE_INTERVAL_US:-100}" \

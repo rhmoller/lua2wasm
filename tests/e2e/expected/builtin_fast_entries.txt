@@ -1,0 +1,38 @@
+max0	false	err	false	err
+max1	true	3	true	3
+max2	true	7.5	true	7.5
+max3	true	9	true	9
+max4	true	4	true	4
+max5	true	5	true	5
+maxint	true	2	true	2
+min2	true	-7.5	true	-7.5
+min4	true	1	true	1
+min5	true	1	true	1
+floor	true	3	true	3
+floor-	true	-4	true	-4
+floorint	true	5	true	5
+floorstr	true	2	true	2
+floorbig	true	1e+300	true	1e+300
+floorerr	false	err	false	err
+ceil	true	4	true	4
+abs	true	4	true	4
+absmin	true	-9223372036854775808	true	-9223372036854775808
+absf	true	0.5	true	0.5
+sqrt	true	4.0	true	4.0
+sin	true	0.0	true	0.0
+cos	true	1.0	true	1.0
+type0	false	err	false	err
+type1	true	nil	true	nil
+type2	true	table	true	table
+tostring0	false	err	false	err
+tostring1	true	1.5	true	1.5
+tostringnil	true	nil	true	nil
+tostringmm	true	custom	true	custom
+setmt	true	x!
+setmt nil	true	nil
+setmt bad	false	false
+setmt locked	false	cannot change a protected metatable
+setmt loop	3	y!
+insert	0 1 99 4 9 16 25
+insert errs	false	false	false	false
+insert __newindex	40

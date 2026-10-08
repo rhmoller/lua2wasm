@@ -376,11 +376,22 @@
     ;; by tostring and error messages, is the __name-aware variant.
     (array.new_fixed $ArgArr 1 (call $basic_type_name (call $args_at (local.get $args) (i32.const 0)))))
 
+  ;; type()'s fast entry: no argument is the generic entry's error.
+  (func $builtin_type_f (type $LuaFn1) (param $self (ref $LuaClosure))
+    (param $a0 anyref) (param $a1 anyref) (param $a2 anyref) (param $a3 anyref) (param $n i32) (result anyref)
+    (if (i32.eqz (local.get $n))
+      (then (return (call $args_first (call $builtin_type (local.get $self) (global.get $g_empty_args))))))
+    (call $basic_type_name (local.get $a0)))
+
   (func $builtin_tostring (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
     (call $need_arg (local.get $args) (i32.const 0))
     (array.new_fixed $ArgArr 1
       (call $lua_tostring (call $args_at (local.get $args) (i32.const 0)))))
+  (func $builtin_tostring_f (type $LuaFn1) (param $self (ref $LuaClosure))
+    (param $a0 anyref) (param $a1 anyref) (param $a2 anyref) (param $a3 anyref) (param $n i32) (result anyref)
+    (if (i32.eqz (local.get $n)) (then (call $throw_lit (i32.const 620) (i32.const 14))))   ;; "value expected"
+    (call $lua_tostring (local.get $a0)))
 
   ;; tonumber(v [, base])
   ;;   - numbers: passthrough (when base absent)
@@ -540,14 +551,17 @@
 
   (func $builtin_setmetatable (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
-    (local $t (ref $LuaTable)) (local $mt anyref) (local $cur (ref null $LuaTable))
-    (local $arg0 anyref)
+    (array.new_fixed $ArgArr 1
+      (call $set_metatable (call $args_at (local.get $args) (i32.const 0)) (call $args_at (local.get $args) (i32.const 1)))))
+  (func $builtin_setmetatable_f (type $LuaFn1) (param $self (ref $LuaClosure))
+    (param $a0 anyref) (param $a1 anyref) (param $a2 anyref) (param $a3 anyref) (param $n i32) (result anyref)
+    (call $set_metatable (local.get $a0) (local.get $a1)))
+  (func $set_metatable (param $arg0 anyref) (param $mt anyref) (result anyref)
+    (local $t (ref $LuaTable)) (local $cur (ref null $LuaTable))
     ;; arg #1 must be a table (was an illegal-cast trap for strings/etc.).
-    (local.set $arg0 (call $args_at (local.get $args) (i32.const 0)))
     (if (i32.eqz (ref.test (ref $LuaTable) (local.get $arg0)))
       (then (call $throw_lit (i32.const 684) (i32.const 14))))   ;; "table expected"
     (local.set $t (ref.cast (ref $LuaTable) (local.get $arg0)))
-    (local.set $mt (call $args_at (local.get $args) (i32.const 1)))
     ;; arg #2 must be nil or a table.
     (if (i32.and (i32.eqz (ref.is_null (local.get $mt)))
                  (i32.eqz (ref.test (ref $LuaTable) (local.get $mt))))
@@ -564,7 +578,7 @@
       (then (struct.set $LuaTable $meta (local.get $t) (ref.null $LuaTable)))
       (else (struct.set $LuaTable $meta (local.get $t)
         (ref.cast (ref $LuaTable) (local.get $mt)))))
-    (array.new_fixed $ArgArr 1 (local.get $t)))
+    (local.get $t))
 
   ;; Lazily build (and cache) the shared string metatable {__index = string}.
   (func $get_string_mt (result (ref $LuaTable))

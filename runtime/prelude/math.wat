@@ -59,43 +59,58 @@
       (then (call $make_int (i64.trunc_f64_s (local.get $f))))
       (else (call $make_float (local.get $f)))))
 
+  ;; One-argument math functions: a core on the value, the generic entry
+  ;; and the fast entry ($LuaFn1, see string.wat) around it.
+  (func $math_floor (param $v anyref) (result anyref)
+    (if (call $is_int (local.get $v)) (then (return (local.get $v))))
+    (call $f64_to_int_result (f64.floor (call $as_float_co (local.get $v)))))
   (func $builtin_math_floor (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
-    (local $v anyref)
-    (local.set $v (call $args_at (local.get $args) (i32.const 0)))
-    (if (call $is_int (local.get $v))
-      (then (return (array.new_fixed $ArgArr 1 (local.get $v)))))
-    (array.new_fixed $ArgArr 1
-      (call $f64_to_int_result (f64.floor (call $as_float_co (local.get $v))))))
+    (array.new_fixed $ArgArr 1 (call $math_floor (call $args_at (local.get $args) (i32.const 0)))))
+  (func $builtin_math_floor_f (type $LuaFn1) (param $self (ref $LuaClosure))
+    (param $a0 anyref) (param $a1 anyref) (param $a2 anyref) (param $a3 anyref) (param $n i32) (result anyref)
+    (call $math_floor (local.get $a0)))
 
-  (func $builtin_math_abs (type $LuaFn)
-    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
-    (local $v anyref) (local $i i64)
-    (local.set $v (call $args_at (local.get $args) (i32.const 0)))
+  (func $math_abs (param $v anyref) (result anyref)
+    (local $i i64)
     (if (call $is_int (local.get $v))
       (then
         (local.set $i (call $as_int (local.get $v)))
         (if (i64.lt_s (local.get $i) (i64.const 0))
           (then (local.set $i (i64.sub (i64.const 0) (local.get $i)))))
-        (return (array.new_fixed $ArgArr 1 (call $make_int (local.get $i))))))
-    (array.new_fixed $ArgArr 1
-      (call $make_float (f64.abs (call $as_float_co (local.get $v))))))
+        (return (call $make_int (local.get $i)))))
+    (call $make_float (f64.abs (call $as_float_co (local.get $v)))))
+  (func $builtin_math_abs (type $LuaFn)
+    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
+    (array.new_fixed $ArgArr 1 (call $math_abs (call $args_at (local.get $args) (i32.const 0)))))
+  (func $builtin_math_abs_f (type $LuaFn1) (param $self (ref $LuaClosure))
+    (param $a0 anyref) (param $a1 anyref) (param $a2 anyref) (param $a3 anyref) (param $n i32) (result anyref)
+    (call $math_abs (local.get $a0)))
 
   (func $builtin_math_sqrt (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
     (array.new_fixed $ArgArr 1
       (call $make_float (f64.sqrt (call $as_float_co
         (call $args_at (local.get $args) (i32.const 0)))))))
+  (func $builtin_math_sqrt_f (type $LuaFn1) (param $self (ref $LuaClosure))
+    (param $a0 anyref) (param $a1 anyref) (param $a2 anyref) (param $a3 anyref) (param $n i32) (result anyref)
+    (call $make_float (f64.sqrt (call $as_float_co (local.get $a0)))))
 
   ;; Transcendentals all route through host_math with a kind index.
+  (func $math_host1 (param $kind i32) (param $v anyref) (result anyref)
+    (call $make_float (call $host_math (local.get $kind) (call $as_float_co (local.get $v)))))
   (func $math_via_host (param $kind i32) (param $args (ref $ArgArr)) (result (ref $ArgArr))
-    (array.new_fixed $ArgArr 1
-      (call $make_float (call $host_math (local.get $kind)
-        (call $as_float_co (call $args_at (local.get $args) (i32.const 0)))))))
+    (array.new_fixed $ArgArr 1 (call $math_host1 (local.get $kind) (call $args_at (local.get $args) (i32.const 0)))))
   (func $builtin_math_sin  (type $LuaFn) (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
     (call $math_via_host (i32.const 0) (local.get $args)))
+  (func $builtin_math_sin_f (type $LuaFn1) (param $self (ref $LuaClosure))
+    (param $a0 anyref) (param $a1 anyref) (param $a2 anyref) (param $a3 anyref) (param $n i32) (result anyref)
+    (call $math_host1 (i32.const 0) (local.get $a0)))
   (func $builtin_math_cos  (type $LuaFn) (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
     (call $math_via_host (i32.const 1) (local.get $args)))
+  (func $builtin_math_cos_f (type $LuaFn1) (param $self (ref $LuaClosure))
+    (param $a0 anyref) (param $a1 anyref) (param $a2 anyref) (param $a3 anyref) (param $n i32) (result anyref)
+    (call $math_host1 (i32.const 1) (local.get $a0)))
   (func $builtin_math_tan  (type $LuaFn) (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
     (call $math_via_host (i32.const 2) (local.get $args)))
   (func $builtin_math_asin (type $LuaFn) (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
@@ -376,14 +391,15 @@
         (f64.mul (call $as_float_co (call $args_at (local.get $args) (i32.const 0)))
                  (f64.const 0.017453292519943295))))) ;; pi / 180
 
+  (func $math_ceil (param $v anyref) (result anyref)
+    (if (call $is_int (local.get $v)) (then (return (local.get $v))))
+    (call $f64_to_int_result (f64.ceil (call $as_float_co (local.get $v)))))
   (func $builtin_math_ceil (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
-    (local $v anyref)
-    (local.set $v (call $args_at (local.get $args) (i32.const 0)))
-    (if (call $is_int (local.get $v))
-      (then (return (array.new_fixed $ArgArr 1 (local.get $v)))))
-    (array.new_fixed $ArgArr 1
-      (call $f64_to_int_result (f64.ceil (call $as_float_co (local.get $v))))))
+    (array.new_fixed $ArgArr 1 (call $math_ceil (call $args_at (local.get $args) (i32.const 0)))))
+  (func $builtin_math_ceil_f (type $LuaFn1) (param $self (ref $LuaClosure))
+    (param $a0 anyref) (param $a1 anyref) (param $a2 anyref) (param $a3 anyref) (param $n i32) (result anyref)
+    (call $math_ceil (local.get $a0)))
 
   ;; math.min/max: pick the smaller/larger of args[0..n-1] using $num_lt.
   (func $builtin_math_min (type $LuaFn)
@@ -401,6 +417,32 @@
       (local.set $i (i32.add (local.get $i) (i32.const 1)))
       (br $lp)))
     (array.new_fixed $ArgArr 1 (local.get $best)))
+  ;; The fast entries of min/max: up to four arguments, the same comparisons
+  ;; in the same order.
+  (func $builtin_math_min_f (type $LuaFn1) (param $self (ref $LuaClosure))
+    (param $a0 anyref) (param $a1 anyref) (param $a2 anyref) (param $a3 anyref) (param $n i32) (result anyref)
+    (local $best anyref)
+    (if (i32.eqz (local.get $n)) (then (call $throw_lit (i32.const 620) (i32.const 14))))   ;; "value expected"
+    (local.set $best (local.get $a0))
+    (if (i32.gt_s (local.get $n) (i32.const 1))
+      (then (if (call $lua_lt_raw (local.get $a1) (local.get $best)) (then (local.set $best (local.get $a1))))))
+    (if (i32.gt_s (local.get $n) (i32.const 2))
+      (then (if (call $lua_lt_raw (local.get $a2) (local.get $best)) (then (local.set $best (local.get $a2))))))
+    (if (i32.gt_s (local.get $n) (i32.const 3))
+      (then (if (call $lua_lt_raw (local.get $a3) (local.get $best)) (then (local.set $best (local.get $a3))))))
+    (local.get $best))
+  (func $builtin_math_max_f (type $LuaFn1) (param $self (ref $LuaClosure))
+    (param $a0 anyref) (param $a1 anyref) (param $a2 anyref) (param $a3 anyref) (param $n i32) (result anyref)
+    (local $best anyref)
+    (if (i32.eqz (local.get $n)) (then (call $throw_lit (i32.const 620) (i32.const 14))))   ;; "value expected"
+    (local.set $best (local.get $a0))
+    (if (i32.gt_s (local.get $n) (i32.const 1))
+      (then (if (call $lua_lt_raw (local.get $best) (local.get $a1)) (then (local.set $best (local.get $a1))))))
+    (if (i32.gt_s (local.get $n) (i32.const 2))
+      (then (if (call $lua_lt_raw (local.get $best) (local.get $a2)) (then (local.set $best (local.get $a2))))))
+    (if (i32.gt_s (local.get $n) (i32.const 3))
+      (then (if (call $lua_lt_raw (local.get $best) (local.get $a3)) (then (local.set $best (local.get $a3))))))
+    (local.get $best))
 
   (func $builtin_math_max (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))

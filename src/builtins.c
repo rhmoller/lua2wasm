@@ -166,3 +166,34 @@ const char *builtin_name(int idx) { return BUILTINS[idx].name; }
 const char *builtin_func_name(int idx) { return BUILTINS[idx].func_name; }
 BuiltinClass builtin_class(int idx) { return BUILTINS[idx].cls; }
 const char *builtin_lib_key(int idx) { return BUILTINS[idx].name; }
+
+/* Builtins with a fast entry of their own: a $LuaFn1 named <func_name>_f in
+ * the prelude, taking the arguments in registers and returning the first
+ * result. The others get $fast_adapter, which packs an $ArgArr for the
+ * generic entry and unpacks its result array. */
+static const char *const FAST_ENTRIES[] = {
+    "$builtin_string_byte",
+    "$builtin_string_sub",
+    "$builtin_string_len",
+    "$builtin_string_char",
+    "$builtin_string_upper",
+    "$builtin_string_lower",
+    "$builtin_string_rep",
+    "$builtin_math_floor",
+    "$builtin_math_ceil",
+    "$builtin_math_abs",
+    "$builtin_math_sqrt",
+    "$builtin_math_sin",
+    "$builtin_math_cos",
+    "$builtin_math_min",
+    "$builtin_math_max",
+    "$builtin_type",
+    "$builtin_tostring",
+    "$builtin_setmetatable",
+    "$builtin_table_insert",
+};
+int builtin_has_fast_entry(int idx) {
+    for (size_t i = 0; i < sizeof FAST_ENTRIES / sizeof *FAST_ENTRIES; i++)
+        if (strcmp(BUILTINS[idx].func_name, FAST_ENTRIES[i]) == 0) return 1;
+    return 0;
+}

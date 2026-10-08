@@ -1,0 +1,15 @@
+byte	104	104	101	100	nil
+byte all	104	101	108
+byte many	12	114	108	100
+sub	world	world	world	hello, world	true	he
+huge		hello, world	nil	hel	true
+len	12	xxx	ab-ab-ab	abab		true
+rep empty	0	0
+case	HELLO, WORLD	mixed
+char		A	ABCD	abcde
+numbers	50	23	5	1.5	777
+errors	false	false	false	false	false
+loop	1160
+replaced	UP:v1 UP:v2 UP:v3	3	BACK
+__index	custom z	custom z	Z	122
+mixed	A obj B obj

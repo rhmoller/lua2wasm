@@ -3,17 +3,35 @@
 
   ;; table.insert(t, v)         -> append at #t+1
   ;; table.insert(t, pos, v)    -> shift t[pos..#t] up, t[pos] = v
+  ;; The append honours __len and __newindex, as lua_seti does in reference
+  ;; Lua (a table with no metatable is a raw append). The fast entry does
+  ;; the append; any other arity takes the generic entry.
+  (func $table_append (param $tv anyref) (param $v anyref)
+    (local $t (ref $LuaTable)) (local $n i64)
+    (local.set $t (call $arg_table (local.get $tv)))
+    (if (ref.is_null (struct.get $LuaTable $meta (local.get $t)))
+      (then
+        (call $tab_set (local.get $t) (ref.i31 (i32.add (call $tab_len (local.get $t)) (i32.const 1))) (local.get $v))
+        (return)))
+    (local.set $n (call $as_int_co (call $lua_len (local.get $t))))
+    (call $lua_tabset (local.get $t) (call $make_int (i64.add (local.get $n) (i64.const 1))) (local.get $v)))
+  (func $builtin_table_insert_f (type $LuaFn1) (param $self (ref $LuaClosure))
+    (param $a0 anyref) (param $a1 anyref) (param $a2 anyref) (param $a3 anyref) (param $n i32) (result anyref)
+    (if (i32.ne (local.get $n) (i32.const 2))
+      (then (return (call $args_first (call $builtin_table_insert (local.get $self)
+        (call $pack_args4 (local.get $a0) (local.get $a1) (local.get $a2) (local.get $a3) (local.get $n)))))))
+    (call $table_append (local.get $a0) (local.get $a1))
+    (ref.null any))
   (func $builtin_table_insert (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
     (local $t (ref $LuaTable)) (local $n i32) (local $pos i32) (local $v anyref)
     (local $i i32) (local $alen i32) (local $arr (ref null $TArr))
-    (local.set $t (call $arg_table (call $args_at (local.get $args) (i32.const 0))))
-    (local.set $n (call $tab_len (local.get $t)))
     (if (i32.eq (array.len (local.get $args)) (i32.const 2))
       (then
-        (local.set $v (call $args_at (local.get $args) (i32.const 1)))
-        (call $tab_set (local.get $t) (ref.i31 (i32.add (local.get $n) (i32.const 1))) (local.get $v))
+        (call $table_append (call $args_at (local.get $args) (i32.const 0)) (call $args_at (local.get $args) (i32.const 1)))
         (return (global.get $g_empty_args))))
+    (local.set $t (call $arg_table (call $args_at (local.get $args) (i32.const 0))))
+    (local.set $n (call $tab_len (local.get $t)))
     ;; Only the 2- and 3-argument forms exist (the 1-arg/4+-arg cases used to
     ;; trap or silently drop arguments).
     (if (i32.ne (array.len (local.get $args)) (i32.const 3))

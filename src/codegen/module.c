@@ -956,6 +956,7 @@ static void emit_builtin_globals(CG *c, const unsigned char *live, int nb) {
     for (int i = 0; i < nb; i++) {
         if (!live[i]) continue;
         wat_appendf(c->w, " %s", builtin_func_name(i));
+        if (builtin_has_fast_entry(i)) wat_appendf(c->w, " %s_f", builtin_func_name(i));
     }
     wat_append(c->w, ")\n");
     for (int i = 0; i < nb; i++) {
@@ -963,8 +964,10 @@ static void emit_builtin_globals(CG *c, const unsigned char *live, int nb) {
         wat_appendf(c->w,
                     "  (global $g_%s (ref $LuaClosure)\n"
                     "    (struct.new $LuaClosure (ref.func %s) (global.get $g_empty_upvals) (i32.const 256)\n"
-                    "      (ref.func $fast_adapter)))\n",
-                    builtin_func_name(i) + 1, builtin_func_name(i));
+                    "      (ref.func %s%s)))\n",
+                    builtin_func_name(i) + 1, builtin_func_name(i),
+                    builtin_has_fast_entry(i) ? builtin_func_name(i) : "$fast_adapter",
+                    builtin_has_fast_entry(i) ? "_f" : "");
     }
 }
 
