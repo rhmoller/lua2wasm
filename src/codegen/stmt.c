@@ -258,6 +258,36 @@ static void emit_index_store_from(CG *c, const char *tb, StoreKey kkind, const c
     emit_linef(c, depth + 1, "(else %s))\n", store);
 }
 
+/* `slot = e` for a local the analyses typed (int, float or maybe); returns 0,
+ * emitting nothing, for an untyped slot. */
+static int emit_typed_slot_store(CG *c, int slot, const Expr *e, int depth) {
+    if (slot_is_int(c, slot)) {
+        /* i64 slot: the analysis guarantees a matching single int value. */
+        emit_linef(c, depth, "(local.set $L%d\n", slot);
+        emit_int_expr(c, e, depth + 1);
+        emit_line(c, depth, ")\n");
+    } else if (slot_is_float(c, slot)) {
+        emit_linef(c, depth, "(local.set $L%d\n", slot);
+        emit_float_expr(c, e, depth + 1);
+        emit_line(c, depth, ")\n");
+    } else if (slot_is_maybe(c, slot)) {
+        emit_maybe_store(c, slot, e, depth);
+    } else {
+        return 0;
+    }
+    return 1;
+}
+
+/* The declaration-time store of a local: a captured slot gets a fresh $Box
+ * around the value (each declaration is a new variable), any other slot the
+ * value itself. The value is emitted between open and close. */
+static void emit_local_init_open(CG *c, int slot, int depth) {
+    emit_linef(c, depth, slot_is_boxed(c, slot) ? "(local.set $L%d (struct.new $Box\n" : "(local.set $L%d\n", slot);
+}
+static void emit_local_init_close(CG *c, int slot, int depth) {
+    emit_line(c, depth, slot_is_boxed(c, slot) ? "))\n" : ")\n");
+}
+
 /* `t[k] = v` where v is a lowered tree or a provably float expression and k
  * is a constant string, an int-typed expression or a maybe slot: evaluate
  * the table (Lua order: table, key, value), lower the value into a cell, and
@@ -387,22 +417,9 @@ static void emit_assign(CG *c, const Stmt *s, int depth) {
      * it. */
     if (n_targets == 1 && n_values == 1) {
         AssignTarget *t = &s->as.assign.targets[0];
-        if (t->kind == TGT_VAR && t->as.var.kind == VAR_LOCAL && slot_is_int(c, t->as.var.idx)) {
-            emit_linef(c, depth, "(local.set $L%d\n", t->as.var.idx);
-            emit_int_expr(c, s->as.assign.values[0], depth + 1);
-            emit_line(c, depth, ")\n");
+        if (t->kind == TGT_VAR && t->as.var.kind == VAR_LOCAL &&
+            emit_typed_slot_store(c, t->as.var.idx, s->as.assign.values[0], depth))
             return;
-        }
-        if (t->kind == TGT_VAR && t->as.var.kind == VAR_LOCAL && slot_is_float(c, t->as.var.idx)) {
-            emit_linef(c, depth, "(local.set $L%d\n", t->as.var.idx);
-            emit_float_expr(c, s->as.assign.values[0], depth + 1);
-            emit_line(c, depth, ")\n");
-            return;
-        }
-        if (t->kind == TGT_VAR && t->as.var.kind == VAR_LOCAL && slot_is_maybe(c, t->as.var.idx)) {
-            emit_maybe_store(c, t->as.var.idx, s->as.assign.values[0], depth);
-            return;
-        }
         if (t->kind == TGT_INDEX && emit_unboxed_index_store(c, t, s->as.assign.values[0], depth)) return;
         /* A lone call / `...` value supplies its first value (emit_expr takes
          * the call's single-value entry). */
@@ -920,28 +937,10 @@ static void emit_local_stmt(CG *c, const Stmt *s, int depth) {
             continue;
         }
         int slot = s->as.local.local_idxs[i];
-        if (slot_is_int(c, slot)) {
-            /* i64 slot: analysis guarantees a matching single int value. */
-            emit_linef(c, depth, "(local.set $L%d\n", slot);
-            emit_int_expr(c, s->as.local.values[i], depth + 1);
-            emit_line(c, depth, ")\n");
-            continue;
-        }
-        if (slot_is_float(c, slot)) {
-            emit_linef(c, depth, "(local.set $L%d\n", slot);
-            emit_float_expr(c, s->as.local.values[i], depth + 1);
-            emit_line(c, depth, ")\n");
-            continue;
-        }
-        if (slot_is_maybe(c, slot)) {
-            emit_maybe_store(c, slot, s->as.local.values[i], depth);
-            continue;
-        }
-        int boxed = slot_is_boxed(c, slot);
-        emit_linef(c, depth, boxed ? "(local.set $L%d (struct.new $Box\n" : "(local.set $L%d\n",
-                   slot);
+        if (emit_typed_slot_store(c, slot, s->as.local.values[i], depth)) continue;
+        emit_local_init_open(c, slot, depth);
         emit_expr(c, s->as.local.values[i], depth + 1);
-        emit_line(c, depth, boxed ? "))\n" : ")\n");
+        emit_local_init_close(c, slot, depth);
     }
     /* 2. Trailing multivalue tail, evaluated *after* the leading values
      *    and spread across the remaining names (and evaluated even when
@@ -954,11 +953,9 @@ static void emit_local_stmt(CG *c, const Stmt *s, int depth) {
         emit_line(c, depth, ")\n");
         for (int i = n_lead; i < n_names; i++) {
             int slot = s->as.local.local_idxs[i];
-            int boxed = slot_is_boxed(c, slot);
-            emit_linef(c, depth, boxed ? "(local.set $L%d (struct.new $Box\n" : "(local.set $L%d\n",
-                       slot);
+            emit_local_init_open(c, slot, depth);
             emit_args_at(c, i - n_lead, depth + 1);
-            emit_line(c, depth, boxed ? "))\n" : ")\n");
+            emit_local_init_close(c, slot, depth);
         }
     } else {
         /* 3. No trailing tail: names past the value list get nil. */
