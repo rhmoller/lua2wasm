@@ -8,6 +8,7 @@
 #   INLINING=ol_2 scripts/profile.sh bench/particles.lua
 #                     # plus V8's inlining decisions while optimizing $ol_2
 #   L2W_FLAGS=-O0 scripts/profile.sh ...            # extra compiler flags
+#   L2W_BIN=/path/to/lua2wasm scripts/profile.sh ...  # profile another build
 #
 # Function names need a wasm name section, which lua2wasm's own assembler
 # doesn't write, so the WAT is assembled with Binaryen's `wasm-as -g` (and
