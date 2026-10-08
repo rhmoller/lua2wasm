@@ -610,17 +610,115 @@ static void emit_tab_set_strval(CG *c, const char *target, const char *key,
                 kstr_expr(c, key, klen, kb, sizeof kb), kstr_expr(c, val, vlen, vb, sizeof vb));
 }
 
+/* package = { loaded = {}, preload = {}, path, cpath, config } in $tab.
+ * No builtins live under this table; require() walks it. The path/cpath/
+ * config stubs let tests that probe `type(package.path) == "string"` pass. */
+static void emit_package_table(CG *c) {
+    static const struct {
+        const char *key;
+        const char *val;
+    } PKG_STR[] = {
+        {"loaded", NULL}, /* table — handled separately */
+        {"preload", NULL},
+        {"path", ""}, /* empty: there's no filesystem here */
+        {"cpath", ""},
+        {"config", "/\n;\n?\n!\n-\n"}, /* the stock Lua default */
+    };
+    wat_append(c->w, "    (local.set $tab (call $tab_new))\n");
+    for (size_t pi = 0; pi < sizeof(PKG_STR) / sizeof(PKG_STR[0]); pi++) {
+        size_t klen = strlen(PKG_STR[pi].key);
+        if (PKG_STR[pi].val == NULL)
+            emit_tab_set_str(c, "(local.get $tab)", PKG_STR[pi].key, klen,
+                             "(call $tab_new)");
+        else
+            emit_tab_set_strval(c, "(local.get $tab)", PKG_STR[pi].key, klen,
+                                PKG_STR[pi].val, strlen(PKG_STR[pi].val));
+    }
+}
+
+/* io.stdout / io.stderr / io.stdin in the io table ($tab): a sub-table per
+ * stream, populated with the relevant file-handle methods. The methods
+ * themselves were registered as leading-underscore entries in builtins.c so
+ * the library install loop skips them, but their closure globals
+ * ($g_io_handle_{write,err_write,read,noop}) are live and ready to use. */
+static void emit_std_handles(CG *c) {
+    /* `method_glob == NULL` selects the read method on stdin;
+     * the rest take a writer matching the handle's stream. */
+    static const struct {
+        const char *handle;
+        size_t handle_len;
+        const char *method_glob;
+        int fd;                     /* host fd; io.type reads __fd */
+        const char *default_global; /* capture as a default io file, or NULL */
+    } HANDLES[] = {
+        {"stdout", 6, "io_handle_write", 1, "$g_io_output"},
+        {"stderr", 6, "io_handle_err_write", 2, NULL},
+        {"stdin", 5, NULL, 0, "$g_io_input"},
+    };
+    for (size_t hi = 0; hi < sizeof(HANDLES) / sizeof(HANDLES[0]); hi++) {
+        wat_append(c->w, "    (local.set $h (call $tab_new))\n");
+        if (HANDLES[hi].method_glob)
+            emit_tab_set_global(c, "$h", "write", 5, HANDLES[hi].method_glob);
+        else
+            emit_tab_set_global(c, "$h", "read", 4, "io_handle_read");
+        emit_tab_set_global(c, "$h", "close", 5, "io_handle_noop");
+        emit_tab_set_global(c, "$h", "flush", 5, "io_handle_noop");
+        /* __fd so io.type reports "file" for the standard streams. */
+        char fdexpr[48];
+        snprintf(fdexpr, sizeof fdexpr,
+                 "(call $make_int (i64.const %d))", HANDLES[hi].fd);
+        emit_tab_set_str(c, "(local.get $h)", "__fd", 4, fdexpr);
+        emit_tab_set_str(c, "(local.get $tab)", HANDLES[hi].handle,
+                         HANDLES[hi].handle_len, "(local.get $h)");
+        if (HANDLES[hi].default_global)
+            wat_appendf(c->w, "    (global.set %s (local.get $h))\n",
+                        HANDLES[hi].default_global);
+    }
+}
+
+/* A function-bearing library (math/string/io/table/utf8/debug/os) in $tab:
+ * its builtins, then its plain-value fields. */
+static void emit_builtin_library(CG *c, BuiltinClass cls, int nb) {
+    wat_append(c->w, "    (local.set $tab (call $tab_new))\n");
+    for (int bi = 0; bi < nb; bi++) {
+        if (builtin_class(bi) != cls) continue;
+        const char *key = builtin_lib_key(bi);
+        /* Leading-underscore names are internal helpers (e.g. the
+         * io file-handle methods). They get live-marked + closure
+         * globals like any other builtin, but we don't expose them
+         * as table keys on the library — codegen installs them
+         * elsewhere on the right host objects. */
+        if (key[0] == '_') continue;
+        emit_tab_set_global(c, "$tab", key, strlen(key), builtin_func_name(bi) + 1);
+    }
+    if (cls == BLT_LIB_MATH) {
+        emit_tab_set_str(c, "(local.get $tab)", "pi", 2,
+                         "(struct.new $LuaFloat (f64.const 3.141592653589793))");
+        emit_tab_set_str(c, "(local.get $tab)", "huge", 4,
+                         "(struct.new $LuaFloat (f64.const inf))");
+        emit_tab_set_str(c, "(local.get $tab)", "maxinteger", 10,
+                         "(call $make_int (i64.const 9223372036854775807))");
+        emit_tab_set_str(c, "(local.get $tab)", "mininteger", 10,
+                         "(call $make_int (i64.const -9223372036854775808))");
+    }
+    if (cls == BLT_LIB_IO) emit_std_handles(c);
+    if (cls == BLT_LIB_UTF8) {
+        /* utf8.charpattern: the Lua-pattern string that matches one
+         * UTF-8 codepoint. Binary content; strpool_add and data-segment
+         * escaping handle the non-printable bytes. */
+        static const char CHARPAT[] =
+            "[\x00-\x7F\xC2-\xFD][\x80-\xBF]*";
+        emit_tab_set_strval(c, "(local.get $tab)", "charpattern", 11,
+                            CHARPAT, sizeof(CHARPAT) - 1);
+    }
+}
+
 /* Build each referenced stdlib library table (math/string/io/table/utf8/
  * debug/os/package/coroutine) plus _VERSION, and install them in $g_globals.
  * Tree-shake skips a library whose global name was never referenced. */
 static void emit_library_tables(CG *c, const unsigned char *gref, int nb) {
-    WatBuilder *out = c->w;
     const ParseResult *pr = c->pr;
     const char *G = "(ref.as_non_null (global.get $g_globals))";
-    /* Library tables + the _VERSION constant. Each library table is built
-     * locally, then installed as $g_globals.<name>. With tree-shake on,
-     * a library is skipped unless its global name was actually
-     * referenced in user code. */
     for (size_t gi = 0; gi < pr->globals.count; gi++) {
         const char *gname = pr->globals.items[gi].name;
         size_t glen = pr->globals.items[gi].name_len;
@@ -632,119 +730,19 @@ static void emit_library_tables(CG *c, const unsigned char *gref, int nb) {
         if (glen == 2 && memcmp(gname, "_G", 2) == 0) continue; /* installed above */
         if (!gref[gi]) continue;                                /* tree-shake: library not referenced */
         if (glen == 7 && memcmp(gname, "package", 7) == 0) {
-            /* Milestone 25: package = { loaded = {}, preload = {} }.
-             * No builtins live under this table; require() walks it.
-             * We also stub package.path, package.cpath, package.config so
-             * tests that probe `type(package.path) == "string"` pass. */
-            wat_append(out, "    (local.set $tab (call $tab_new))\n");
-            static const struct {
-                const char *key;
-                const char *val;
-            } PKG_STR[] = {
-                {"loaded", NULL}, /* table — handled separately */
-                {"preload", NULL},
-                {"path", ""}, /* empty: there's no filesystem here */
-                {"cpath", ""},
-                {"config", "/\n;\n?\n!\n-\n"}, /* the stock Lua default */
-            };
-            for (size_t pi = 0; pi < sizeof(PKG_STR) / sizeof(PKG_STR[0]); pi++) {
-                size_t klen = strlen(PKG_STR[pi].key);
-                if (PKG_STR[pi].val == NULL)
-                    emit_tab_set_str(c, "(local.get $tab)", PKG_STR[pi].key, klen,
-                                     "(call $tab_new)");
-                else
-                    emit_tab_set_strval(c, "(local.get $tab)", PKG_STR[pi].key, klen,
-                                        PKG_STR[pi].val, strlen(PKG_STR[pi].val));
-            }
-            emit_tab_set_str(c, G, gname, glen, "(local.get $tab)");
-            continue;
-        }
-        if (glen == 9 && memcmp(gname, "coroutine", 9) == 0) {
+            emit_package_table(c);
+        } else if (glen == 9 && memcmp(gname, "coroutine", 9) == 0) {
             /* Empty stub library — no functions installed. Enough to
              * satisfy `require "coroutine" == coroutine` style identity
              * checks and to keep `type(coroutine) == "table"` happy;
              * any actual coroutine.* call still trips later. */
-            wat_append(out, "    (local.set $tab (call $tab_new))\n");
-            emit_tab_set_str(c, G, gname, glen, "(local.get $tab)");
-            continue;
-        }
-        /* The function-bearing libraries (math/string/io/table/utf8/debug/os)
-         * map name -> BuiltinClass via the same helper the live-set pass uses. */
-        int cls_i = class_for_global(gname, glen);
-        if (cls_i < 0) continue;
-        BuiltinClass cls = (BuiltinClass)cls_i;
-        wat_append(out, "    (local.set $tab (call $tab_new))\n");
-        for (int bi = 0; bi < nb; bi++) {
-            if (builtin_class(bi) != cls) continue;
-            const char *key = builtin_lib_key(bi);
-            /* Leading-underscore names are internal helpers (e.g. the
-             * io file-handle methods). They get live-marked + closure
-             * globals like any other builtin, but we don't expose them
-             * as table keys on the library — codegen installs them
-             * elsewhere on the right host objects. */
-            if (key[0] == '_') continue;
-            emit_tab_set_global(c, "$tab", key, strlen(key), builtin_func_name(bi) + 1);
-        }
-        /* Plain-value constants for the math library. */
-        if (cls == BLT_LIB_MATH) {
-            emit_tab_set_str(c, "(local.get $tab)", "pi", 2,
-                             "(struct.new $LuaFloat (f64.const 3.141592653589793))");
-            emit_tab_set_str(c, "(local.get $tab)", "huge", 4,
-                             "(struct.new $LuaFloat (f64.const inf))");
-            emit_tab_set_str(c, "(local.get $tab)", "maxinteger", 10,
-                             "(call $make_int (i64.const 9223372036854775807))");
-            emit_tab_set_str(c, "(local.get $tab)", "mininteger", 10,
-                             "(call $make_int (i64.const -9223372036854775808))");
-        }
-        /* io.stdout / io.stderr / io.stdin: build a sub-table per
-         * stream, populated with the relevant file-handle methods. The
-         * methods themselves were registered as leading-underscore
-         * entries in builtins.c so the standard install loop above
-         * skipped them, but their closure globals
-         * ($g_io_handle_{write,err_write,read,noop}) are live and
-         * ready to use. */
-        if (cls == BLT_LIB_IO) {
-            /* `method_glob == NULL` selects the read method on stdin;
-             * the rest take a writer matching the handle's stream. */
-            static const struct {
-                const char *handle;
-                size_t handle_len;
-                const char *method_glob;
-                int fd;                     /* host fd; io.type reads __fd */
-                const char *default_global; /* capture as a default io file, or NULL */
-            } HANDLES[] = {
-                {"stdout", 6, "io_handle_write", 1, "$g_io_output"},
-                {"stderr", 6, "io_handle_err_write", 2, NULL},
-                {"stdin", 5, NULL, 0, "$g_io_input"},
-            };
-            for (size_t hi = 0; hi < sizeof(HANDLES) / sizeof(HANDLES[0]); hi++) {
-                wat_append(out, "    (local.set $h (call $tab_new))\n");
-                if (HANDLES[hi].method_glob)
-                    emit_tab_set_global(c, "$h", "write", 5, HANDLES[hi].method_glob);
-                else
-                    emit_tab_set_global(c, "$h", "read", 4, "io_handle_read");
-                emit_tab_set_global(c, "$h", "close", 5, "io_handle_noop");
-                emit_tab_set_global(c, "$h", "flush", 5, "io_handle_noop");
-                /* __fd so io.type reports "file" for the standard streams. */
-                char fdexpr[48];
-                snprintf(fdexpr, sizeof fdexpr,
-                         "(call $make_int (i64.const %d))", HANDLES[hi].fd);
-                emit_tab_set_str(c, "(local.get $h)", "__fd", 4, fdexpr);
-                emit_tab_set_str(c, "(local.get $tab)", HANDLES[hi].handle,
-                                 HANDLES[hi].handle_len, "(local.get $h)");
-                if (HANDLES[hi].default_global)
-                    wat_appendf(out, "    (global.set %s (local.get $h))\n",
-                                HANDLES[hi].default_global);
-            }
-        }
-        /* utf8.charpattern: the Lua-pattern string that matches one
-         * UTF-8 codepoint. Binary content; strpool_add and data-segment
-         * escaping handle the non-printable bytes. */
-        if (cls == BLT_LIB_UTF8) {
-            static const char CHARPAT[] =
-                "[\x00-\x7F\xC2-\xFD][\x80-\xBF]*";
-            emit_tab_set_strval(c, "(local.get $tab)", "charpattern", 11,
-                                CHARPAT, sizeof(CHARPAT) - 1);
+            wat_append(c->w, "    (local.set $tab (call $tab_new))\n");
+        } else {
+            /* The function-bearing libraries map name -> BuiltinClass via
+             * the same helper the live-set pass uses. */
+            int cls = class_for_global(gname, glen);
+            if (cls < 0) continue;
+            emit_builtin_library(c, (BuiltinClass)cls, nb);
         }
         emit_tab_set_str(c, G, gname, glen, "(local.get $tab)");
     }

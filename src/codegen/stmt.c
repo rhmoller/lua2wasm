@@ -495,67 +495,70 @@ static void emit_assign(CG *c, const Stmt *s, int depth) {
  * $user_N_f) rather than a result array? */
 static int entry_single_result(const CG *c) { return c->entry == ENTRY_DIRECT1 || c->entry == ENTRY_FAST; }
 
-static void emit_return(CG *c, const Stmt *s, int depth) {
-    int n_values = s->as.return_stmt.n_values;
-    /* Close-aware return: any to-be-closed local in scope must be closed
-     * before the function returns. Evaluate the result onto the stack first
-     * ($close_upto is stack-neutral, so it stays beneath), then close the whole
-     * to-be-closed stack (down to 0), then return. A `return f()` here is NOT a
-     * tail call — the locals must close after f() returns. */
-    if (c->close_count > 0) {
-        if (c->in_main) {
-            for (int i = 0; i < n_values; i++) {
-                emit_expr(c, s->as.return_stmt.values[i], depth);
-                emit_line(c, depth, "drop\n");
-            }
-            emit_close_upto(c, 0, "(ref.null any)", depth);
-            emit_line(c, depth, "return\n");
-            return;
-        }
-        if (entry_single_result(c)) {
-            if ((c->cur_ret_ty == NT_INT || c->cur_ret_ty == NT_FLOAT) && n_values == 1) {
-                if (c->cur_ret_ty == NT_INT)
-                    emit_int_expr(c, s->as.return_stmt.values[0], depth);
-                else
-                    emit_num_as_f64(c, s->as.return_stmt.values[0], depth);
-            } else if (n_values == 0) {
-                emit_line(c, depth, "(ref.null any)\n");
-            } else {
-                emit_expr(c, s->as.return_stmt.values[0], depth);
-                for (int i = 1; i < n_values; i++) {
-                    emit_expr(c, s->as.return_stmt.values[i], depth);
-                    emit_line(c, depth, "drop\n");
-                }
-            }
-        } else if (n_values == 1 && is_multival_tail(s->as.return_stmt.values[0])) {
-            emit_multival_array(c, s->as.return_stmt.values[0], depth);
-        } else {
-            emit_args_array(c, s->as.return_stmt.values, n_values, depth);
-        }
-        emit_close_upto(c, 0, "(ref.null any)", depth);
-        emit_line(c, depth, "return\n");
-        return;
+/* Evaluate values[from..n) for their side effects only. */
+static void emit_values_dropped(CG *c, Expr **values, int from, int n, int depth) {
+    for (int i = from; i < n; i++) {
+        emit_expr(c, values[i], depth);
+        emit_line(c, depth, "drop\n");
     }
+}
+
+/* The returned values in the shape the entry returns, left on the stack: one
+ * value (raw i64/f64 for a numerically typed single-result entry; extra
+ * values still evaluate, in order) or the result array. */
+static void emit_return_values(CG *c, Expr **values, int n, int depth) {
+    if (entry_single_result(c)) {
+        if ((c->cur_ret_ty == NT_INT || c->cur_ret_ty == NT_FLOAT) && n == 1) {
+            if (c->cur_ret_ty == NT_INT)
+                emit_int_expr(c, values[0], depth);
+            else
+                emit_num_as_f64(c, values[0], depth);
+        } else if (n == 0) {
+            emit_line(c, depth, "(ref.null any)\n");
+        } else {
+            emit_expr(c, values[0], depth);
+            emit_values_dropped(c, values, 1, n, depth);
+        }
+    } else if (n == 1 && is_multival_tail(values[0])) {
+        /* A lone multi-value tail (a single call/vararg) returns its array as-is. */
+        emit_multival_array(c, values[0], depth);
+    } else {
+        emit_args_array(c, values, n, depth);
+    }
+}
+
+static void emit_return(CG *c, const Stmt *s, int depth) {
+    Expr **values = s->as.return_stmt.values;
+    int n_values = s->as.return_stmt.n_values;
     if (c->in_main) {
         /* $main is exported with no result, so the chunk's return
          * value can't be surfaced to the host — but we still have
          * to evaluate the expressions so their side effects fire
          * (e.g. `return print("hi")`). Drop each result after
-         * evaluation, then exit. */
-        for (int i = 0; i < n_values; i++) {
-            emit_expr(c, s->as.return_stmt.values[i], depth);
-            emit_line(c, depth, "drop\n");
-        }
+         * evaluation, close what is open, then exit. */
+        emit_values_dropped(c, values, 0, n_values, depth);
+        if (c->close_count > 0) emit_close_upto(c, 0, "(ref.null any)", depth);
         emit_line(c, depth, "return\n");
         return;
     }
-    if (c->entry == ENTRY_FAST && n_values == 1 && !s->as.return_stmt.values[0]->paren &&
-        fast_call_nargs(c, s->as.return_stmt.values[0]) >= 0) {
+    if (c->close_count > 0) {
+        /* Close-aware return: any to-be-closed local in scope must be closed
+         * before the function returns. Evaluate the result onto the stack
+         * first ($close_upto is stack-neutral, so it stays beneath), then
+         * close the whole to-be-closed stack (down to 0), then return. A
+         * `return f()` here is NOT a tail call — the locals must close after
+         * f() returns. */
+        emit_return_values(c, values, n_values, depth);
+        emit_close_upto(c, 0, "(ref.null any)", depth);
+        emit_line(c, depth, "return\n");
+        return;
+    }
+    if (c->entry == ENTRY_FAST && n_values == 1 && !values[0]->paren && fast_call_nargs(c, values[0]) >= 0) {
         /* A $user_N_f body's tail call that fits the fast entry stays a
          * proper tail call; wider ones fall to the single-value code below
          * (an ordinary call — the callee's generic body keeps its own tail
          * calls proper, so the stack stays bounded). */
-        emit_fast_tail_call(c, s->as.return_stmt.values[0], depth);
+        emit_fast_tail_call(c, values[0], depth);
         return;
     }
     if (entry_single_result(c)) {
@@ -565,8 +568,8 @@ static void emit_return(CG *c, const Stmt *s, int depth) {
          * raw (i64/f64). */
         if ((c->cur_ret_ty == NT_INT || c->cur_ret_ty == NT_FLOAT) && n_values == 1) {
             emit_line(c, depth, "(return\n");
-            if (c->cur_ret_ty == NT_INT) emit_int_expr(c, s->as.return_stmt.values[0], depth + 1);
-            else emit_num_as_f64(c, s->as.return_stmt.values[0], depth + 1);
+            if (c->cur_ret_ty == NT_INT) emit_int_expr(c, values[0], depth + 1);
+            else emit_num_as_f64(c, values[0], depth + 1);
             emit_line(c, depth, ")\n");
             return;
         }
@@ -578,16 +581,13 @@ static void emit_return(CG *c, const Stmt *s, int depth) {
             emit_line(c, depth, "(return (ref.null any))\n");
         } else if (n_values == 1) {
             emit_line(c, depth, "(return\n");
-            emit_expr(c, s->as.return_stmt.values[0], depth + 1);
+            emit_expr(c, values[0], depth + 1);
             emit_line(c, depth, ")\n");
         } else {
             emit_line(c, depth, "(local.set $tmp_any\n");
-            emit_expr(c, s->as.return_stmt.values[0], depth + 1);
+            emit_expr(c, values[0], depth + 1);
             emit_line(c, depth, ")\n");
-            for (int i = 1; i < n_values; i++) {
-                emit_expr(c, s->as.return_stmt.values[i], depth);
-                emit_line(c, depth, "drop\n");
-            }
+            emit_values_dropped(c, values, 1, n_values, depth);
             emit_line(c, depth, "(return (local.get $tmp_any))\n");
         }
         return;
@@ -595,104 +595,103 @@ static void emit_return(CG *c, const Stmt *s, int depth) {
     /* Tail-call optimization: exactly `return f(args)` or
      * `return obj:m(args)` (not parenthesized, which forces adjust-to-
      * one and so isn't a tail call). */
-    if (n_values == 1 && !s->as.return_stmt.values[0]->paren && (s->as.return_stmt.values[0]->kind == EXPR_CALL || s->as.return_stmt.values[0]->kind == EXPR_METHOD_CALL)) {
-        emit_tail_call(c, s->as.return_stmt.values[0], depth);
+    if (n_values == 1 && !values[0]->paren && (values[0]->kind == EXPR_CALL || values[0]->kind == EXPR_METHOD_CALL)) {
+        emit_tail_call(c, values[0], depth);
         return;
     }
-    /* `return f(), x, ...` and similar: build the result array. A lone
-     * multi-value tail (a single call/vararg) returns its array as-is. */
-    if (n_values == 1 && is_multival_tail(s->as.return_stmt.values[0])) {
-        emit_multival_array(c, s->as.return_stmt.values[0], depth);
-    } else {
-        emit_args_array(c, s->as.return_stmt.values, n_values, depth);
-    }
+    /* `return f(), x, ...` and similar: build the result array. */
+    emit_return_values(c, values, n_values, depth);
     emit_line(c, depth, "return\n");
 }
 
-static void emit_for_num(CG *c, const Stmt *s, int depth) {
-    int label = c->next_label++;
-    if (!push_break_label(c, label)) return;
+/* `(br_if $brk_<label> (i64.<op> a b))`, leaving an integer for loop: `op` is
+ * `asc` when the loop counts up and `desc` when it counts down; when the
+ * step's sign is unknown at compile time (sign == 0) it is tested at run time. */
+static void emit_int_for_exit(CG *c, int label, int sign, const char *step, const char *asc, const char *desc,
+                              const char *a, const char *b, int depth) {
+    if (sign)
+        emit_linef(c, depth, "(br_if $brk_%d (i64.%s %s %s))\n", label, sign > 0 ? asc : desc, a, b);
+    else
+        emit_linef(c, depth,
+                   "(if (i64.gt_s %s (i64.const 0)) (then (br_if $brk_%d (i64.%s %s %s))) "
+                   "(else (br_if $brk_%d (i64.%s %s %s))))\n",
+                   step, label, asc, a, b, label, desc, a, b);
+}
+
+/* The integer-specialized loop: control var + bounds are i64, the
+ * counter is an unboxed i64 slot, no per-iteration boxing or
+ * generic-helper calls. The analysis only marks the slot int when
+ * start and step are integer and the var isn't captured; a limit that
+ * isn't statically an integer is converted once by $for_limit. */
+static void emit_for_num_int(CG *c, const Stmt *s, int label, int depth) {
     int slot = s->as.for_num.local_idx;
-    /* Integer-specialized loop: control var + bounds are i64, the
-     * counter is an unboxed i64 slot, no per-iteration boxing or
-     * generic-helper calls. The analysis only marks the slot int when
-     * start and step are integer and the var isn't captured; a limit that
-     * isn't statically an integer is converted once by $for_limit. */
-    if (slot_is_int(c, slot)) {
-        int fd = c->for_depth;
-        const Expr *st = s->as.for_num.step;
-        int stop_int = expr_is_int(c, s->as.for_num.stop);
-        char step_s[40];
-        int sign; /* +1/-1 known at compile time; 0 = runtime */
-        if (!st) {
-            snprintf(step_s, sizeof step_s, "(i64.const 1)");
-            sign = 1;
-        } else if (st->kind == EXPR_INT && st->as.i_val != 0) {
-            snprintf(step_s, sizeof step_s, "(i64.const %lld)", (long long)st->as.i_val);
-            sign = st->as.i_val > 0 ? 1 : -1;
-        } else {
-            snprintf(step_s, sizeof step_s, "(local.get $ifor_step_%d)", fd);
-            sign = 0;
-        }
-        emit_linef(c, depth, "(local.set $L%d\n", slot);
-        emit_int_expr(c, s->as.for_num.start, depth + 1);
-        emit_line(c, depth, ")\n");
-        emit_indent(c, depth);
-        if (stop_int) {
-            wat_appendf(c->w, "(local.set $ifor_stop_%d\n", fd);
-            emit_int_expr(c, s->as.for_num.stop, depth + 1);
-        } else {
-            wat_appendf(c->w, "(local.set $for_stop_%d\n", fd);
-            emit_expr(c, s->as.for_num.stop, depth + 1);
-        }
-        emit_line(c, depth, ")\n");
-        if (sign == 0) {
-            emit_linef(c, depth, "(local.set $ifor_step_%d\n", fd);
-            emit_int_expr(c, st, depth + 1);
-            emit_line(c, depth, ")\n");
-            emit_linef(c, depth, "(if (i64.eqz %s) (then (call $throw_lit_at %s (i32.const %d))))\n",
-                       step_s, slab_ref("'for' step is zero"), s->line);
-        }
-        if (!stop_int) {
-            emit_linef(c, depth, "(call $for_limit (local.get $for_stop_%d) (local.get $L%d) %s (i32.const %d))\n", fd,
-                       slot, step_s, s->line);
-            emit_linef(c, depth, "(local.set $for_skip_%d)\n", fd);
-            emit_linef(c, depth, "(local.set $ifor_stop_%d)\n", fd);
-        }
-        emit_linef(c, depth, "(block $brk_%d\n", label);
-        if (!stop_int) {
-            emit_linef(c, depth + 1, "(br_if $brk_%d (local.get $for_skip_%d))\n", label, fd);
-        }
-        emit_linef(c, depth + 1, "(loop $cont_%d\n", label);
-        emit_indent(c, depth + 2);
-        if (sign == 1)
-            wat_appendf(c->w, "(br_if $brk_%d (i64.gt_s (local.get $L%d) (local.get $ifor_stop_%d)))\n", label, slot, fd);
-        else if (sign == -1)
-            wat_appendf(c->w, "(br_if $brk_%d (i64.lt_s (local.get $L%d) (local.get $ifor_stop_%d)))\n", label, slot, fd);
-        else
-            wat_appendf(c->w,
-                        "(if (i64.gt_s %s (i64.const 0)) (then (br_if $brk_%d (i64.gt_s (local.get $L%d) (local.get $ifor_stop_%d)))) (else (br_if $brk_%d (i64.lt_s (local.get $L%d) (local.get $ifor_stop_%d)))))\n",
-                        step_s, label, slot, fd, label, slot, fd);
-        c->for_depth++;
-        emit_block(c, &s->as.for_num.body, depth + 2);
-        c->for_depth--;
-        emit_linef(c, depth + 2, "(local.set $ifor_next_%d (i64.add (local.get $L%d) %s))\n", fd, slot, step_s);
-        emit_indent(c, depth + 2);
-        if (sign == 1)
-            wat_appendf(c->w, "(br_if $brk_%d (i64.lt_s (local.get $ifor_next_%d) (local.get $L%d)))\n", label, fd, slot);
-        else if (sign == -1)
-            wat_appendf(c->w, "(br_if $brk_%d (i64.gt_s (local.get $ifor_next_%d) (local.get $L%d)))\n", label, fd, slot);
-        else
-            wat_appendf(c->w,
-                        "(if (i64.gt_s %s (i64.const 0)) (then (br_if $brk_%d (i64.lt_s (local.get $ifor_next_%d) (local.get $L%d)))) (else (br_if $brk_%d (i64.gt_s (local.get $ifor_next_%d) (local.get $L%d)))))\n",
-                        step_s, label, fd, slot, label, fd, slot);
-        emit_linef(c, depth + 2, "(local.set $L%d (local.get $ifor_next_%d))\n", slot, fd);
-        emit_linef(c, depth + 2, "br $cont_%d\n", label);
-        emit_line(c, depth + 1, ")\n");
-        emit_line(c, depth, ")\n");
-        c->break_depth--;
-        return;
+    int fd = c->for_depth;
+    const Expr *st = s->as.for_num.step;
+    int stop_int = expr_is_int(c, s->as.for_num.stop);
+    char step_s[40];
+    int sign; /* +1/-1 known at compile time; 0 = runtime */
+    if (!st) {
+        snprintf(step_s, sizeof step_s, "(i64.const 1)");
+        sign = 1;
+    } else if (st->kind == EXPR_INT && st->as.i_val != 0) {
+        snprintf(step_s, sizeof step_s, "(i64.const %lld)", (long long)st->as.i_val);
+        sign = st->as.i_val > 0 ? 1 : -1;
+    } else {
+        snprintf(step_s, sizeof step_s, "(local.get $ifor_step_%d)", fd);
+        sign = 0;
     }
+    char var[32], stop[40], next[40];
+    snprintf(var, sizeof var, "(local.get $L%d)", slot);
+    snprintf(stop, sizeof stop, "(local.get $ifor_stop_%d)", fd);
+    snprintf(next, sizeof next, "(local.get $ifor_next_%d)", fd);
+    emit_linef(c, depth, "(local.set $L%d\n", slot);
+    emit_int_expr(c, s->as.for_num.start, depth + 1);
+    emit_line(c, depth, ")\n");
+    emit_indent(c, depth);
+    if (stop_int) {
+        wat_appendf(c->w, "(local.set $ifor_stop_%d\n", fd);
+        emit_int_expr(c, s->as.for_num.stop, depth + 1);
+    } else {
+        wat_appendf(c->w, "(local.set $for_stop_%d\n", fd);
+        emit_expr(c, s->as.for_num.stop, depth + 1);
+    }
+    emit_line(c, depth, ")\n");
+    if (sign == 0) {
+        emit_linef(c, depth, "(local.set $ifor_step_%d\n", fd);
+        emit_int_expr(c, st, depth + 1);
+        emit_line(c, depth, ")\n");
+        emit_linef(c, depth, "(if (i64.eqz %s) (then (call $throw_lit_at %s (i32.const %d))))\n",
+                   step_s, slab_ref("'for' step is zero"), s->line);
+    }
+    if (!stop_int) {
+        emit_linef(c, depth, "(call $for_limit (local.get $for_stop_%d) (local.get $L%d) %s (i32.const %d))\n", fd,
+                   slot, step_s, s->line);
+        emit_linef(c, depth, "(local.set $for_skip_%d)\n", fd);
+        emit_linef(c, depth, "(local.set $ifor_stop_%d)\n", fd);
+    }
+    emit_linef(c, depth, "(block $brk_%d\n", label);
+    if (!stop_int) {
+        emit_linef(c, depth + 1, "(br_if $brk_%d (local.get $for_skip_%d))\n", label, fd);
+    }
+    emit_linef(c, depth + 1, "(loop $cont_%d\n", label);
+    /* Exit when the counter has passed the limit. */
+    emit_int_for_exit(c, label, sign, step_s, "gt_s", "lt_s", var, stop, depth + 2);
+    c->for_depth++;
+    emit_block(c, &s->as.for_num.body, depth + 2);
+    c->for_depth--;
+    emit_linef(c, depth + 2, "(local.set $ifor_next_%d (i64.add (local.get $L%d) %s))\n", fd, slot, step_s);
+    /* Exit when the step wrapped past the integer range. */
+    emit_int_for_exit(c, label, sign, step_s, "lt_s", "gt_s", next, var, depth + 2);
+    emit_linef(c, depth + 2, "(local.set $L%d (local.get $ifor_next_%d))\n", slot, fd);
+    emit_linef(c, depth + 2, "br $cont_%d\n", label);
+    emit_line(c, depth + 1, ")\n");
+    emit_line(c, depth, ")\n");
+}
+
+/* The generic loop over boxed control values: $for_prep settles the loop's
+ * type at entry, the step goes through $lua_add with an overflow check. */
+static void emit_for_num_boxed(CG *c, const Stmt *s, int label, int depth) {
+    int slot = s->as.for_num.local_idx;
     int boxed = slot_is_boxed(c, slot);
     /* Per-nesting-level scratch so an inner for-loop can't clobber
      * this loop's stop/step. */
@@ -772,6 +771,13 @@ static void emit_for_num(CG *c, const Stmt *s, int depth) {
     emit_linef(c, depth + 2, "br $cont_%d\n", label);
     emit_line(c, depth + 1, ")\n");
     emit_line(c, depth, ")\n");
+}
+
+static void emit_for_num(CG *c, const Stmt *s, int depth) {
+    int label = c->next_label++;
+    if (!push_break_label(c, label)) return;
+    if (slot_is_int(c, s->as.for_num.local_idx)) emit_for_num_int(c, s, label, depth);
+    else emit_for_num_boxed(c, s, label, depth);
     c->break_depth--;
 }
 
