@@ -250,6 +250,12 @@ add_test(
     COMMAND node --test ${CMAKE_SOURCE_DIR}/tests/test_host_format.mjs
 )
 
+# Prelude literal references ($throw_lit offsets etc.) vs codegen's LITERAL_SLAB.
+add_test(
+    NAME test_literal_slab
+    COMMAND node --test ${CMAKE_SOURCE_DIR}/tests/test_literal_slab.mjs
+)
+
 # --embed-api host-call ABI: compile a fixture with the ABI exported, then call
 # named Lua functions from the host (lua_call / lua_get_global / lua_args_*) and
 # check args, multiple returns, persistent state, and error propagation.

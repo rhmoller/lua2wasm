@@ -540,6 +540,7 @@ static int i31_fits(int64_t v) {
 }
 
 /* ----- forward decls ----- */
+static const char *slab_ref(const char *text);
 static void emit_expr(CG *c, const Expr *e, int depth);
 static void emit_block(CG *c, const Block *b, int depth);
 static void emit_stmt(CG *c, const Stmt *s, int depth);
@@ -4015,8 +4016,8 @@ static void emit_for_num(CG *c, const Stmt *s, int depth) {
             emit_linef(c, depth, "(local.set $ifor_step_%d\n", fd);
             emit_int_expr(c, st, depth + 1);
             emit_line(c, depth, ")\n");
-            emit_linef(c, depth, "(if (i64.eqz %s) (then (call $throw_lit_at (i32.const 75) (i32.const 18) (i32.const %d))))\n",
-                       step_s, s->line);
+            emit_linef(c, depth, "(if (i64.eqz %s) (then (call $throw_lit_at %s (i32.const %d))))\n",
+                       step_s, slab_ref("'for' step is zero"), s->line);
         }
         if (!stop_int) {
             emit_linef(c, depth, "(call $for_limit (local.get $for_stop_%d) (local.get $L%d) %s (i32.const %d))\n", fd,
@@ -4968,6 +4969,19 @@ static const char *verify_literal_slab(void) {
         expect_off = off + (unsigned)len;
     }
     return expect_off == LITERAL_PREFIX_LEN ? NULL : "(slab total length)";
+}
+
+/* The `(i32.const off) (i32.const len)` operands addressing the slab literal
+ * `text`, for emitted code that raises it ($throw_lit / $throw_lit_at). */
+static const char *slab_ref(const char *text) {
+    static char buf[48];
+    for (size_t i = 0; i < sizeof(LITERAL_SLAB) / sizeof(LITERAL_SLAB[0]); i++)
+        if (strcmp(LITERAL_SLAB[i].s, text) == 0) {
+            snprintf(buf, sizeof buf, "(i32.const %u) (i32.const %zu)", LITERAL_SLAB[i].off, strlen(text));
+            return buf;
+        }
+    fprintf(stderr, "lua2wasm: internal: \"%s\" is not a slab literal\n", text);
+    abort();
 }
 
 /* WAT type keyword for an inferred numeric type. */
