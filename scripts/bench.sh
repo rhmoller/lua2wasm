@@ -10,6 +10,7 @@
 #
 # Every program prints its result before the TIME line; the lua2wasm output is
 # diffed against lua5.5's, and a mismatch is reported in the last column.
+# Extra timing lines a program prints as TIME_<name> are left out of the diff.
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -31,7 +32,8 @@ else
 fi
 
 # best_time CMD... -> prints the smallest TIME over $runs runs; the first run's
-# full output (minus TIME) goes to $tmp/last.out for the correctness diff.
+# full output (minus TIME / TIME_* lines) goes to $tmp/last.out for the
+# correctness diff.
 best_time() {
     local best="" t
     for ((i = 0; i < runs; i++)); do
@@ -39,7 +41,7 @@ best_time() {
         t=$(grep '^TIME ' "$tmp/run.out" | awk '{print $2}')
         [ -n "$t" ] || { echo "NOTIME"; return; }
         if [ -z "$best" ] || awk "BEGIN{exit !($t < $best)}"; then best=$t; fi
-        [ $i -eq 0 ] && grep -v '^TIME ' "$tmp/run.out" >"$tmp/last.out"
+        [ $i -eq 0 ] && grep -Ev '^TIME[ _]' "$tmp/run.out" >"$tmp/last.out"
     done
     echo "$best"
 }
