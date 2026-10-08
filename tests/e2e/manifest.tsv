@@ -138,3 +138,4 @@ array_inline	tests/fixtures/array_inline.lua
 int_upvalues	tests/fixtures/int_upvalues.lua
 string_methods_fast	tests/fixtures/string_methods_fast.lua
 builtin_fast_entries	tests/fixtures/builtin_fast_entries.lua
+table_ctor_list	tests/fixtures/table_ctor_list.lua

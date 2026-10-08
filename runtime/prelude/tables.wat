@@ -68,6 +68,37 @@
       (ref.null $TArr) (i32.const 0)   ;; $arr, $alen
       (ref.null $FArr) (ref.null $FArr)))
 
+  ;; `{v1, ..., vn}`: a constructor's positional values, evaluated into $a,
+  ;; become the array part at once. As the stores one by one would have it,
+  ;; the array part is the values before the first nil; any after it are
+  ;; moved out through $tab_set_ik (to the hash part).
+  (func $tab_new_arr (param $a (ref $TArr)) (result anyref)
+    (local $t (ref $LuaTable)) (local $n i32) (local $i i32) (local $j i32) (local $v anyref)
+    (local.set $t (call $tab_new))
+    (local.set $n (array.len (local.get $a)))
+    (block $end (loop $prefix
+      (br_if $end (i32.ge_u (local.get $i) (local.get $n)))
+      (br_if $end (ref.is_null (array.get $TArr (local.get $a) (local.get $i))))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br $prefix)))
+    (struct.set $LuaTable $arr (local.get $t) (local.get $a))
+    (struct.set $LuaTable $alen (local.get $t) (local.get $i))
+    (if (i32.lt_u (local.get $i) (local.get $n))
+      (then (return_call $tab_new_arr_rest (local.get $t) (local.get $a) (local.get $i))))
+    (local.get $t))
+  ;; The values after the first nil at $from.
+  (func $tab_new_arr_rest (param $t (ref $LuaTable)) (param $a (ref $TArr)) (param $from i32) (result anyref)
+    (local $j i32) (local $v anyref)
+    (local.set $j (i32.add (local.get $from) (i32.const 1)))
+    (block $done (loop $lp
+      (br_if $done (i32.ge_u (local.get $j) (array.len (local.get $a))))
+      (local.set $v (array.get $TArr (local.get $a) (local.get $j)))
+      (array.set $TArr (local.get $a) (local.get $j) (ref.null any))
+      (if (i32.eqz (ref.is_null (local.get $v)))
+        (then (call $tab_set_ik (local.get $t) (i64.extend_i32_u (i32.add (local.get $j) (i32.const 1))) (local.get $v))))
+      (local.set $j (i32.add (local.get $j) (i32.const 1)))
+      (br $lp)))
+    (local.get $t))
 
   ;; Make room for `need` values in the hash part's value array (geometric,
   ;; initial 4), growing the parallel float storage with it.

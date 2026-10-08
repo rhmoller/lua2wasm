@@ -1,0 +1,18 @@
+plain	3	3	1=1 2=2 3=3
+one	1	1	1=a
+mid nil	1	1	1=1 3=3
+lead nil	0	0	2=2
+trail nil	2	2	1=1 2=2
+all nil	0	0	
+vars	1	1	1=7
+vars2	2	2	1=7 2=7
+floats	3	3	1=1.5 2=2 3=3.25
+strings	3	3	1=a 2=b 3=c
+order	1,2,3	4	3
+spread	3	5	extra
+nested	2	4	2
+grow	5	10,20,30,40,50
+filled	3	1,2,3
+insert	4	4
+shrink	1	1
+meta	1	mm3

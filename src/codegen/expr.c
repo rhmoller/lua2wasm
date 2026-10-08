@@ -939,8 +939,28 @@ static int ctor_shape_fields(const CG *c, const Expr *e) {
     return k <= CTOR_SHAPE_MAX ? k : 0;
 }
 
+/* Largest list constructor `{v1, ..., vn}` built from one array.new_fixed. */
+#define CTOR_LIST_MAX 1000
+
+/* A constructor of positional values only, none of them a multi-value tail. */
+static int ctor_is_list(const Expr *e) {
+    int n = e->as.table_ctor.n_entries;
+    if (n == 0 || n > CTOR_LIST_MAX) return 0;
+    for (int i = 0; i < n; i++)
+        if (e->as.table_ctor.entries[i].kind != TENT_POSITIONAL) return 0;
+    return !is_multival_tail(e->as.table_ctor.entries[n - 1].value);
+}
+
 static void emit_table_ctor(CG *c, const Expr *e, int depth) {
     int n = e->as.table_ctor.n_entries;
+    if (ctor_is_list(e)) {
+        /* `{v1, ..., vn}`: the values in one array, which becomes the array part. */
+        emit_line(c, depth, "(call $tab_new_arr\n");
+        emit_linef(c, depth + 1, "(array.new_fixed $TArr %d\n", n);
+        for (int i = 0; i < n; i++) emit_expr(c, e->as.table_ctor.entries[i].value, depth + 2);
+        emit_line(c, depth + 1, "))\n");
+        return;
+    }
     /* Wrap in a block so the constructor appears as a single folded
      * expression from outside (works inside array.new_fixed arg lists,
      * function calls, etc.) but uses stack-form internally to keep the

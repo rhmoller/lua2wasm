@@ -13,19 +13,19 @@ and parallel GC threads; `wall` is the same run timed by the wall clock
 
 | bench | lua5.5 | lua2wasm | ratio | wall | wall ratio |
 |---|---:|---:|---:|---:|---:|
-| fannkuch | 0.815 | 0.335 | 0.41× | 0.332 | 0.41× |
-| binarytrees | 0.353 | 0.153 | 0.43× | 0.115 | 0.33× |
-| spectralnorm | 0.951 | 0.530 | 0.56× | 0.524 | 0.55× |
-| oo | 0.454 | 0.268 | 0.59× | 0.250 | 0.55× |
-| nbody_arr | 0.386 | 0.237 | 0.61× | 0.232 | 0.60× |
-| vectors | 1.074 | 0.741 | 0.69× | 0.662 | 0.62× |
-| particles | 0.583 | 0.463 | 0.79× | 0.431 | 0.74× |
-| nbody | 0.439 | 0.350 | 0.80× | 0.345 | 0.79× |
-| entities | 0.683 | 0.569 | 0.83× | 0.518 | 0.76× |
-| tilemap | 0.286 | 0.256 | 0.90× | 0.213 | 0.74× |
-| closures | 0.074 | 0.090 | 1.22× | 0.062 | 0.84× |
-| hashtab | 0.096 | 0.146 | 1.52× | 0.089 | 0.93× |
-| strings | 0.066 | 0.155 | 2.35× | 0.094 | 1.42× |
+| binarytrees | 0.359 | 0.121 | 0.34× | 0.086 | 0.24× |
+| fannkuch | 0.826 | 0.337 | 0.41× | 0.333 | 0.40× |
+| spectralnorm | 0.952 | 0.528 | 0.55× | 0.523 | 0.55× |
+| oo | 0.461 | 0.264 | 0.57× | 0.236 | 0.51× |
+| nbody_arr | 0.383 | 0.238 | 0.62× | 0.232 | 0.61× |
+| vectors | 1.078 | 0.680 | 0.63× | 0.599 | 0.56× |
+| particles | 0.585 | 0.454 | 0.78× | 0.420 | 0.72× |
+| nbody | 0.436 | 0.350 | 0.80× | 0.348 | 0.80× |
+| entities | 0.678 | 0.554 | 0.82× | 0.502 | 0.74× |
+| tilemap | 0.284 | 0.240 | 0.85× | 0.187 | 0.66× |
+| closures | 0.074 | 0.091 | 1.23× | 0.060 | 0.81× |
+| hashtab | 0.096 | 0.150 | 1.56× | 0.088 | 0.92× |
+| strings | 0.067 | 0.160 | 2.39× | 0.093 | 1.39× |
 
 ## Measuring
 
@@ -77,25 +77,6 @@ scavenges copying fresh strings that stay alive).
 hash in a 4-byte header); possibly interning short run-time strings.
 
 **Verify.** strings, hashtab, tilemap, closures; the GC share in profiles.
-
-### 4. String method calls take the generic path
-
-**Evidence.** `s:byte(i)`: 52 ms against 35 ms in lua5.5 (`ops.lua`, 2M
-calls, warm); strings' `byte` section 11–14 ms against 3.3.
-
-**Cause.** The method inline cache (`$MIC`) serves table receivers; a string
-receiver goes through `$lua_index` → the string metatable → its `__index`
-table → a hash lookup of the method name, on every call. Then the builtin's
-fast entry is `$fast_adapter`, which packs the arguments into an `$ArgArr` and
-unpacks a result array: two allocations per call.
-
-**Fix.** Let the method cache handle string receivers (remember the string
-metatable's `__index` table and the method's position; check the receiver is
-a `$LuaString` and the metatable unchanged). Give the hot string builtins
-(`byte`, `sub`, `len`, `find`, `char`, `upper`, `lower`, `rep`) real `$LuaFn1`
-fast entries instead of `$fast_adapter` (closure globals are built in
-`emit_builtin_globals`, module.c). Where: runtime/prelude/index.wat
-(`$lua_method_ic`, `$lua_method_ic_miss`), runtime/prelude/string.wat.
 
 ### 5. gmatch iteration
 
@@ -174,6 +155,29 @@ seedings a body is emitted with). Signature inference reads the boxes, so a
 function returning one returns an i64; the two alternate until the set
 settles. 6M calls of hashtab's `rnd()`: 67 → 18 ms (lua5.5: 94). tilemap
 0.28 → 0.26, hashtab 0.147 → 0.142.
+
+**String methods and builtin fast entries** (was item 4). The method cache
+takes string receivers: the string metatable and the string library play
+the metatable and the class, and the entry has no receiver shape, so a table
+never matches it. Builtins can have a `$LuaFn1` fast entry of their own
+(`<name>_f`, listed in src/builtins.c) instead of `$fast_adapter`'s two
+arrays per call: the string functions byte/sub/len/char/upper/lower/rep,
+math floor/ceil/abs/sqrt/sin/cos/min/max, type, tostring, setmetatable and
+table.insert's append. `s:byte(i)` 49.6 → 19.2 ms (lua5.5 32.6),
+`setmetatable` 20 → 12, `math.max` 25 → 15. Fixed on the way: an explicit
+nil optional argument is absent (`s:byte(nil)`, `s:sub(2, nil)`,
+`s:rep(2, nil)`), positions past 2^31 clamp instead of wrapping, and
+`table.insert(t, v)` honours `__len` / `__newindex`. `math.sin` stays at
+34 ms against 24: the wasm→JS call dominates (importing `Math.sin` directly
+saves 10–20%).
+
+**List constructors in one array.** `{v1, ..., vn}` (positional values, no
+multi-value tail) evaluates its values into one `array.new_fixed` that
+becomes the array part (`$tab_new_arr`), instead of `$tab_set_ik` per value
+through `$arr_append` / `$arr_ensure`. Those two also crowded `$tab_new` out
+of V8's inlining budget in binarytrees' `BottomUpTree`, where the choice
+then flipped with function indices (an unrelated prelude change cost 8%).
+binarytrees 0.159 → 0.121 s (wall 0.116 → 0.086), tilemap 0.27 → 0.24.
 
 **Warm-up, measured by the wall clock** (was item 3). bench.sh reports wall
 time next to `TIME`: much of what read as warm-up cost on the short
