@@ -1,0 +1,21 @@
+1	name=r1 x=1 y=2
+2	name=r2 x=2 y=4 z=extra
+3	name=r3 x=3
+4	name=r4 x=40 y=8
+5	name=back w=1 x=5 y=10
+p=1 q=2 r=3	p=1 q=2 r=3	true	true
+4	nil	k1=10 k2=20 k3=30 k4=40
+k2=again	k1=10 k2=20 k3=30 k4=40
+dict	1830	1	33	60
+dict after deletes	30	nil	2	60
+dict refilled	30
+true=bool -3=neg 1.5=float 1099511627776=big a=1 b=2 tbl=self	a=1 b=2	float	bool	self	big	neg
+2	2	alpha=2	alpha=second
+pt	1	x=5.0625 y=10.9375
+pt	2	x=8.4375 y=18.0625 z=9.75
+pt	3	x=str y=25.1875
+pt	4	x=15.1875 y=32.3125
+hi o1	override o2	nil	nil
+age=5 extra=2 name=g2	extra,age
+a=1 b=2	0
+churn	30	887

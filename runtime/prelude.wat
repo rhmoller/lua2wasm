@@ -53,15 +53,30 @@
                         (param anyref anyref anyref anyref) (param i32)
                         (result anyref))))
   ;; --- table type ---
-  ;; The table keeps an insertion-ordered dense pair of arrays (keys/vals)
-  ;; so iteration stays simple and `next` is well-defined. Lookups go
-  ;; through an open-addressing hash index $idx, which stores
-  ;; (entry_position + 1) for each populated slot; 0 means empty. The
-  ;; index is power-of-two sized and probed linearly (the simple variant
-  ;; of robin-hood; we don't displace, but the load factor cap keeps
-  ;; chains short).
+  ;; The hash part keeps its keys in insertion order (so iteration stays
+  ;; simple and `next` is well-defined) in a $Shape, and the values at the
+  ;; same positions in the table's $vals. Lookups go through the shape's
+  ;; open-addressing hash index $idx, which stores (key_position + 1) for each
+  ;; populated slot; 0 means empty, -1 a tombstone. The index is power-of-two
+  ;; sized and probed linearly (the load factor cap keeps chains short).
+  ;; Tables built by adding the same string keys in the same order share one
+  ;; immutable shape, reached through cached transitions; a table that turns
+  ;; into a dictionary gets a private shape it mutates in place
+  ;; (docs/design/23-table-shapes.md).
   (type $TArr (array (mut anyref)))
   (type $IArr (array (mut i32)))
+  (rec
+    (type $Shape (struct
+      (field $keys (mut (ref $TArr)))   ;; keys[0..n) in insertion order
+      (field $idx  (mut (ref $IArr)))
+      (field $mask (mut i32))
+      (field $n    (mut i32))
+      (field $used (mut i32))           ;; occupied index slots: keys + tombstones
+      ;; transition cache (shared shapes): key -> child shape, direct-mapped
+      ;; by the key's hash, matched by key identity
+      (field $tkeys (mut (ref null $TArr)))
+      (field $tkids (mut (ref null $ShapeArr)))))
+    (type $ShapeArr (array (mut (ref null $Shape)))))
   ;; Unboxed float storage (docs/design/22, "typed table storage"): a table
   ;; value slot holding $g_fmark means the real value is the f64 at the same
   ;; index of the parallel $fvals / $farr array. Readers translate; the
@@ -70,13 +85,9 @@
   (type $FMark (struct))
   (rec
     (type $LuaTable (sub (struct
-      (field $keys (mut (ref null $TArr)))
-      (field $vals (mut (ref null $TArr)))
-      (field $n    (mut i32))
-      (field $cap  (mut i32))
-      (field $idx  (mut (ref null $IArr)))
-      (field $mask (mut i32))
-      (field $used (mut i32))   ;; occupied index slots: live entries + tombstones
+      (field $shape (mut (ref $Shape)))     ;; the hash part's key layout
+      (field $vals (mut (ref null $TArr)))  ;; hash values by key position
+      (field $own  (mut i32))               ;; 1: $shape is this table's alone
       (field $meta (mut (ref null $LuaTable)))
       (field $id   i32)         ;; unique identity for hashing table keys
       ;; Array part: integer keys 1..$alen in $arr[0..alen-1]. Slots may be nil
@@ -1210,7 +1221,8 @@
     (local.set $fa (struct.get $LuaTable $fvals (local.get $t)))
     (if (ref.is_null (local.get $fa))
       (then
-        (local.set $fa (array.new $FArr (f64.const 0) (struct.get $LuaTable $cap (local.get $t))))
+        (local.set $fa (array.new $FArr (f64.const 0)
+          (array.len (ref.as_non_null (struct.get $LuaTable $vals (local.get $t))))))
         (struct.set $LuaTable $fvals (local.get $t) (local.get $fa))))
     (ref.as_non_null (local.get $fa)))
   (func $farr_ensure (param $t (ref $LuaTable)) (result (ref $FArr))
@@ -1228,50 +1240,158 @@
           (struct.set $LuaTable $farr (local.get $t) (local.get $fa))))))
     (ref.as_non_null (local.get $fa)))
 
+  ;; Every table starts on the shared empty shape. Its transition cache is
+  ;; larger than a child's: every table built up from `{}` starts here.
+  (global $g_root_shape (ref $Shape)
+    (struct.new $Shape (array.new_fixed $TArr 0) (array.new $IArr (i32.const 0) (i32.const 8))
+      (i32.const 7) (i32.const 0) (i32.const 0)
+      (array.new $TArr (ref.null any) (i32.const 64))
+      (array.new $ShapeArr (ref.null $Shape) (i32.const 64))))
+  ;; A table whose hash part reaches this many keys gets a private shape:
+  ;; it is a dictionary, not a record.
+  (global $shape_share_max i32 (i32.const 32))
+
   (func $tab_new (result (ref $LuaTable))
     (local $id i32)
     (local.set $id (global.get $g_next_table_id))
     (global.set $g_next_table_id (i32.add (local.get $id) (i32.const 1)))
     (struct.new $LuaTable
-      (ref.null $TArr) (ref.null $TArr)
-      (i32.const 0) (i32.const 0)
-      (ref.null $IArr) (i32.const 0) (i32.const 0)
+      (global.get $g_root_shape) (ref.null $TArr) (i32.const 0)
       (ref.null $LuaTable)
       (local.get $id)
       (ref.null $TArr) (i32.const 0)   ;; $arr, $alen
       (ref.null $FArr) (ref.null $FArr)))
 
-  ;; Grow keys/vals arrays to at least new_cap; copies old contents.
-  (func $tab_grow (param $t (ref $LuaTable)) (param $new_cap i32)
-    (local $nk (ref $TArr)) (local $nv (ref $TArr))
-    (local $oldk (ref null $TArr)) (local $oldv (ref null $TArr))
-    (local $n i32)
+
+  ;; Make room for `need` values in the hash part's value array (geometric,
+  ;; initial 4), growing the parallel float storage with it.
+  (func $vals_reserve (param $t (ref $LuaTable)) (param $need i32)
+    (local $v (ref null $TArr)) (local $len i32) (local $cap i32) (local $nv (ref $TArr))
+    (local.set $v (struct.get $LuaTable $vals (local.get $t)))
+    (local.set $len (if (result i32) (ref.is_null (local.get $v))
+      (then (i32.const 0)) (else (array.len (ref.as_non_null (local.get $v))))))
+    (if (i32.ge_s (local.get $len) (local.get $need)) (then (return)))
+    (local.set $cap (if (result i32) (i32.eqz (local.get $len))
+      (then (i32.const 4)) (else (i32.shl (local.get $len) (i32.const 1)))))
+    (if (i32.gt_s (local.get $need) (local.get $cap)) (then (local.set $cap (local.get $need))))
     ;; Trip a Lua-level "table overflow" before wasm's array.new traps.
     ;; 2^24 = 16M slots keeps each (anyref) array at ~128MB on a 64-bit
     ;; host, well under V8's per-array allocation limit. Pcall can then
     ;; catch the error cleanly (heavy.lua relies on this for its
     ;; "expected error" smoke).
-    (if (i32.gt_u (local.get $new_cap) (i32.const 16777216))
+    (if (i32.gt_u (local.get $cap) (i32.const 16777216))
       (then (call $throw_lit (i32.const 341) (i32.const 14))))   ;; "table overflow"
-    (local.set $nk (array.new $TArr (ref.null any) (local.get $new_cap)))
-    (local.set $nv (array.new $TArr (ref.null any) (local.get $new_cap)))
-    (local.set $oldk (struct.get $LuaTable $keys (local.get $t)))
-    (local.set $oldv (struct.get $LuaTable $vals (local.get $t)))
-    (local.set $n    (struct.get $LuaTable $n    (local.get $t)))
-    (if (ref.is_null (local.get $oldk))
-      (then)
-      (else
-        (array.copy $TArr $TArr (local.get $nk) (i32.const 0)
-          (ref.as_non_null (local.get $oldk)) (i32.const 0) (local.get $n))
-        (array.copy $TArr $TArr (local.get $nv) (i32.const 0)
-          (ref.as_non_null (local.get $oldv)) (i32.const 0) (local.get $n))))
-    (struct.set $LuaTable $keys (local.get $t) (local.get $nk))
+    (local.set $nv (array.new $TArr (ref.null any) (local.get $cap)))
+    (if (i32.gt_s (local.get $len) (i32.const 0))
+      (then (array.copy $TArr $TArr (local.get $nv) (i32.const 0)
+              (ref.as_non_null (local.get $v)) (i32.const 0) (local.get $len))))
     (struct.set $LuaTable $vals (local.get $t) (local.get $nv))
-    (struct.set $LuaTable $cap  (local.get $t) (local.get $new_cap))
     (if (i32.eqz (ref.is_null (struct.get $LuaTable $fvals (local.get $t))))
       (then (struct.set $LuaTable $fvals (local.get $t)
         (call $farr_grow (ref.as_non_null (struct.get $LuaTable $fvals (local.get $t)))
-                         (local.get $new_cap) (local.get $n))))))
+                         (local.get $cap) (local.get $len))))))
+
+  ;; A fresh index over keys[0..n): power-of-two sized >= 2*(n+1), minimum 8,
+  ;; no tombstones. Returns it with its mask.
+  (func $shape_index (param $keys (ref $TArr)) (param $n i32) (result (ref $IArr) i32)
+    (local $cap i32) (local $mask i32) (local $idx (ref $IArr)) (local $i i32) (local $h i32)
+    (local.set $cap (i32.const 8))
+    (block $sized (loop $grow
+      (br_if $sized (i32.ge_u (local.get $cap) (i32.shl (i32.add (local.get $n) (i32.const 1)) (i32.const 1))))
+      (local.set $cap (i32.shl (local.get $cap) (i32.const 1)))
+      (br $grow)))
+    (local.set $mask (i32.sub (local.get $cap) (i32.const 1)))
+    (local.set $idx (array.new $IArr (i32.const 0) (local.get $cap)))
+    (block $done (loop $lp
+      (br_if $done (i32.ge_s (local.get $i) (local.get $n)))
+      (local.set $h (i32.and (local.get $mask)
+        (call $lua_hash (array.get $TArr (local.get $keys) (local.get $i)))))
+      (block $placed (loop $probe
+        (if (i32.eqz (array.get $IArr (local.get $idx) (local.get $h)))
+          (then
+            (array.set $IArr (local.get $idx) (local.get $h) (i32.add (local.get $i) (i32.const 1)))
+            (br $placed)))
+        (local.set $h (i32.and (local.get $mask) (i32.add (local.get $h) (i32.const 1))))
+        (br $probe)))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br $lp)))
+    (local.get $idx) (local.get $mask))
+
+  ;; The shape `parent` plus string key $k (hash $full) at position parent.n:
+  ;; from the parent's transition cache when this key object was added before,
+  ;; else built and cached (evicting whatever shared its slot). Shapes are
+  ;; immutable once built, so any number of tables can share one.
+  (func $shape_child (param $parent (ref $Shape)) (param $k (ref $LuaString)) (param $full i32)
+                     (result (ref $Shape))
+    (local $tk (ref null $TArr)) (local $tc (ref null $ShapeArr)) (local $slot i32)
+    (local $n i32) (local $keys (ref $TArr)) (local $idx (ref $IArr)) (local $mask i32)
+    (local $child (ref $Shape))
+    (local.set $tk (struct.get $Shape $tkeys (local.get $parent)))
+    (if (i32.eqz (ref.is_null (local.get $tk)))
+      (then
+        (local.set $slot (i32.and (local.get $full)
+          (i32.sub (array.len (ref.as_non_null (local.get $tk))) (i32.const 1))))
+        (if (ref.eq (ref.cast (ref null eq) (array.get $TArr (ref.as_non_null (local.get $tk)) (local.get $slot)))
+                    (local.get $k))
+          (then (return (ref.as_non_null (array.get $ShapeArr
+            (ref.as_non_null (struct.get $Shape $tkids (local.get $parent))) (local.get $slot))))))))
+    (local.set $n (struct.get $Shape $n (local.get $parent)))
+    (local.set $keys (array.new $TArr (ref.null any) (i32.add (local.get $n) (i32.const 1))))
+    (array.copy $TArr $TArr (local.get $keys) (i32.const 0)
+      (struct.get $Shape $keys (local.get $parent)) (i32.const 0) (local.get $n))
+    (array.set $TArr (local.get $keys) (local.get $n) (local.get $k))
+    (call $shape_index (local.get $keys) (i32.add (local.get $n) (i32.const 1)))
+    (local.set $mask)
+    (local.set $idx)
+    (local.set $child (struct.new $Shape (local.get $keys) (local.get $idx) (local.get $mask)
+      (i32.add (local.get $n) (i32.const 1)) (i32.add (local.get $n) (i32.const 1))
+      (ref.null $TArr) (ref.null $ShapeArr)))
+    (if (ref.is_null (local.get $tk))
+      (then
+        (local.set $tk (array.new $TArr (ref.null any) (i32.const 8)))
+        (struct.set $Shape $tkeys (local.get $parent) (local.get $tk))
+        (struct.set $Shape $tkids (local.get $parent) (array.new $ShapeArr (ref.null $Shape) (i32.const 8)))
+        (local.set $slot (i32.and (local.get $full) (i32.const 7)))))
+    (array.set $TArr (ref.as_non_null (local.get $tk)) (local.get $slot) (local.get $k))
+    (array.set $ShapeArr (ref.as_non_null (struct.get $Shape $tkids (local.get $parent)))
+      (local.get $slot) (local.get $child))
+    (local.get $child))
+
+  ;; Give $t a private copy of its shape, which its inserts then mutate in
+  ;; place (a dictionary: non-string keys, or past $shape_share_max keys).
+  (func $tab_own (param $t (ref $LuaTable))
+    (local $sh (ref $Shape)) (local $n i32) (local $keys (ref $TArr)) (local $idx (ref $IArr))
+    (if (struct.get $LuaTable $own (local.get $t)) (then (return)))
+    (local.set $sh (struct.get $LuaTable $shape (local.get $t)))
+    (local.set $n (struct.get $Shape $n (local.get $sh)))
+    (local.set $keys (array.new $TArr (ref.null any)
+      (if (result i32) (i32.gt_s (local.get $n) (i32.const 4)) (then (local.get $n)) (else (i32.const 4)))))
+    (array.copy $TArr $TArr (local.get $keys) (i32.const 0)
+      (struct.get $Shape $keys (local.get $sh)) (i32.const 0) (local.get $n))
+    (local.set $idx (array.new $IArr (i32.const 0) (array.len (struct.get $Shape $idx (local.get $sh)))))
+    (array.copy $IArr $IArr (local.get $idx) (i32.const 0)
+      (struct.get $Shape $idx (local.get $sh)) (i32.const 0) (array.len (local.get $idx)))
+    (struct.set $LuaTable $shape (local.get $t)
+      (struct.new $Shape (local.get $keys) (local.get $idx) (struct.get $Shape $mask (local.get $sh))
+        (local.get $n) (struct.get $Shape $used (local.get $sh)) (ref.null $TArr) (ref.null $ShapeArr)))
+    (struct.set $LuaTable $own (local.get $t) (i32.const 1)))
+
+  ;; Reserve room for `cap` hash entries (table.create's record hint): a
+  ;; private shape with that much key capacity, and the value array.
+  (func $tab_reserve_hash (param $t (ref $LuaTable)) (param $cap i32)
+    (local $sh (ref $Shape)) (local $nk (ref $TArr))
+    (call $tab_own (local.get $t))
+    (local.set $sh (struct.get $LuaTable $shape (local.get $t)))
+    (if (i32.gt_s (local.get $cap) (array.len (struct.get $Shape $keys (local.get $sh))))
+      (then
+        (if (i32.gt_u (local.get $cap) (i32.const 16777216))
+          (then (call $throw_lit (i32.const 341) (i32.const 14))))   ;; "table overflow"
+        (local.set $nk (array.new $TArr (ref.null any) (local.get $cap)))
+        (array.copy $TArr $TArr (local.get $nk) (i32.const 0)
+          (struct.get $Shape $keys (local.get $sh)) (i32.const 0) (struct.get $Shape $n (local.get $sh)))
+        (struct.set $Shape $keys (local.get $sh) (local.get $nk))))
+    (call $vals_reserve (local.get $t) (local.get $cap)))
+
 
   ;; Hash any Lua value to an i32. The only requirement for correctness
   ;; is that values that compare equal (via $lua_eq_raw) hash equally —
@@ -1344,12 +1464,16 @@
   ;; so it grows on a normal insert burst yet shrinks back when the rebuild
   ;; reclaims dead entries — keeping insert/delete churn O(1) in space.
   (func $tab_index_rebuild (param $t (ref $LuaTable))
-    (local $idx (ref $IArr)) (local $keys (ref null $TArr)) (local $vals (ref null $TArr))
+    (local $sh (ref $Shape))
+    (local $idx (ref $IArr)) (local $keys (ref $TArr)) (local $vals (ref null $TArr))
     (local $i i32) (local $j i32) (local $n i32) (local $h i32) (local $mask i32)
     (local $cap i32) (local $live i32) (local $kk anyref)
-    (local.set $keys (struct.get $LuaTable $keys (local.get $t)))
+    ;; Only a private (owned) shape is rebuilt; compaction moves keys within
+    ;; it and values within this table.
+    (local.set $sh (struct.get $LuaTable $shape (local.get $t)))
+    (local.set $keys (struct.get $Shape $keys (local.get $sh)))
     (local.set $vals (struct.get $LuaTable $vals (local.get $t)))
-    (local.set $n (struct.get $LuaTable $n (local.get $t)))
+    (local.set $n (struct.get $Shape $n (local.get $sh)))
     ;; First pass: count the live entries so the index can be sized to them.
     (if (i32.eqz (ref.is_null (local.get $vals)))
       (then
@@ -1370,7 +1494,7 @@
     (local.set $mask (i32.sub (local.get $cap) (i32.const 1)))
     (local.set $idx (array.new $IArr (i32.const 0) (local.get $cap)))
     (local.set $i (i32.const 0))
-    (if (i32.eqz (ref.is_null (local.get $keys)))
+    (if (i32.eqz (ref.is_null (local.get $vals)))
       (then
         (block $kdone (loop $klp
           (br_if $kdone (i32.ge_s (local.get $i) (local.get $n)))
@@ -1381,14 +1505,14 @@
               ;; Compact entry $i down to $j (no-op when $i == $j).
               (if (i32.ne (local.get $i) (local.get $j))
                 (then
-                  (array.set $TArr (ref.as_non_null (local.get $keys)) (local.get $j)
-                    (array.get $TArr (ref.as_non_null (local.get $keys)) (local.get $i)))
+                  (array.set $TArr (local.get $keys) (local.get $j)
+                    (array.get $TArr (local.get $keys) (local.get $i)))
                   (array.set $TArr (ref.as_non_null (local.get $vals)) (local.get $j)
                     (array.get $TArr (ref.as_non_null (local.get $vals)) (local.get $i)))
                   (if (i32.eqz (ref.is_null (struct.get $LuaTable $fvals (local.get $t))))
                     (then (array.set $FArr (ref.as_non_null (struct.get $LuaTable $fvals (local.get $t))) (local.get $j)
                       (array.get $FArr (ref.as_non_null (struct.get $LuaTable $fvals (local.get $t))) (local.get $i)))))))
-              (local.set $kk (array.get $TArr (ref.as_non_null (local.get $keys)) (local.get $j)))
+              (local.set $kk (array.get $TArr (local.get $keys) (local.get $j)))
               (local.set $h (i32.and (local.get $mask) (call $lua_hash (local.get $kk))))
               (block $place (loop $probe
                 (if (i32.eqz (array.get $IArr (local.get $idx) (local.get $h)))
@@ -1406,15 +1530,16 @@
         (local.set $i (local.get $j))
         (block $cdone (loop $clp
           (br_if $cdone (i32.ge_s (local.get $i) (local.get $n)))
-          (array.set $TArr (ref.as_non_null (local.get $keys)) (local.get $i) (ref.null any))
+          (array.set $TArr (local.get $keys) (local.get $i) (ref.null any))
           (array.set $TArr (ref.as_non_null (local.get $vals)) (local.get $i) (ref.null any))
           (local.set $i (i32.add (local.get $i) (i32.const 1)))
           (br $clp)))))
-    (struct.set $LuaTable $idx  (local.get $t) (local.get $idx))
-    (struct.set $LuaTable $mask (local.get $t) (local.get $mask))
-    (struct.set $LuaTable $n    (local.get $t) (local.get $j))
+    (struct.set $Shape $idx  (local.get $sh) (local.get $idx))
+    (struct.set $Shape $mask (local.get $sh) (local.get $mask))
+    (struct.set $Shape $n    (local.get $sh) (local.get $j))
     ;; A fresh index has no tombstones: occupied slots == live entries.
-    (struct.set $LuaTable $used (local.get $t) (local.get $j)))
+    (struct.set $Shape $used (local.get $sh) (local.get $j)))
+
 
   ;; Probe the hash index for a key. Returns position in keys[] (>=0)
   ;; on hit, -1 on miss. Caller must ensure $idx is non-null (i.e. n>0
@@ -1428,12 +1553,12 @@
   ;; dispatch: identity, then cached-hash gate, then bytes. A null index means
   ;; the hash part has never been populated.
   (func $tab_find_str (param $t (ref $LuaTable)) (param $k (ref $LuaString)) (param $full i32) (result i32)
-    (local $idx (ref null $IArr)) (local $keys (ref $TArr))
+    (local $idx (ref null $IArr)) (local $keys (ref $TArr)) (local $sh (ref $Shape))
     (local $mask i32) (local $h i32) (local $slot i32) (local $pos i32) (local $sk anyref)
-    (local.set $idx (struct.get $LuaTable $idx (local.get $t)))
-    (if (ref.is_null (local.get $idx)) (then (return (i32.const -1))))
-    (local.set $keys (ref.as_non_null (struct.get $LuaTable $keys (local.get $t))))
-    (local.set $mask (struct.get $LuaTable $mask (local.get $t)))
+    (local.set $sh (struct.get $LuaTable $shape (local.get $t)))
+    (local.set $idx (struct.get $Shape $idx (local.get $sh)))
+    (local.set $keys (struct.get $Shape $keys (local.get $sh)))
+    (local.set $mask (struct.get $Shape $mask (local.get $sh)))
     (local.set $h (i32.and (local.get $mask) (local.get $full)))
     (loop $probe
       (local.set $slot (array.get $IArr (ref.as_non_null (local.get $idx)) (local.get $h)))
@@ -1457,9 +1582,11 @@
     (local $idx (ref $IArr)) (local $keys (ref $TArr))
     (local $mask i32) (local $h i32) (local $slot i32) (local $pos i32)
     (local $is_str i32) (local $sk anyref)
-    (local.set $idx (ref.as_non_null (struct.get $LuaTable $idx (local.get $t))))
-    (local.set $keys (ref.as_non_null (struct.get $LuaTable $keys (local.get $t))))
-    (local.set $mask (struct.get $LuaTable $mask (local.get $t)))
+    (local $sh (ref $Shape))
+    (local.set $sh (struct.get $LuaTable $shape (local.get $t)))
+    (local.set $idx (struct.get $Shape $idx (local.get $sh)))
+    (local.set $keys (struct.get $Shape $keys (local.get $sh)))
+    (local.set $mask (struct.get $Shape $mask (local.get $sh)))
     (local.set $h (i32.and (local.get $mask) (local.get $full)))
     (local.set $is_str (ref.test (ref $LuaString) (local.get $k)))
     (loop $probe
@@ -1493,7 +1620,7 @@
 
   ;; Public lookup: returns position in keys[] (>=0) or -1 on miss.
   (func $tab_find (param $t (ref $LuaTable)) (param $k anyref) (result i32)
-    (if (i32.eqz (struct.get $LuaTable $n (local.get $t)))
+    (if (i32.eqz (struct.get $Shape $n (struct.get $LuaTable $shape (local.get $t))))
       (then (return (i32.const -1))))
     (call $tab_index_lookup (local.get $t) (local.get $k)))
 
@@ -1969,7 +2096,7 @@
     (if (i32.lt_s (local.get $i) (i32.const 0))
       (then
         (call $tab_insert_new (local.get $t) (local.get $k) (global.get $g_fmark) (local.get $full))
-        (local.set $i (i32.sub (struct.get $LuaTable $n (local.get $t)) (i32.const 1))))
+        (local.set $i (i32.sub (struct.get $Shape $n (struct.get $LuaTable $shape (local.get $t))) (i32.const 1))))
       (else
         (array.set $TArr (ref.as_non_null (struct.get $LuaTable $vals (local.get $t))) (local.get $i)
           (global.get $g_fmark))))
@@ -1977,13 +2104,13 @@
   (func $tab_set_f_hash (param $t (ref $LuaTable)) (param $k anyref) (param $f f64)
     (local $i i32) (local $full i32)
     (local.set $full (call $lua_hash (local.get $k)))
-    (local.set $i (if (result i32) (struct.get $LuaTable $n (local.get $t))
+    (local.set $i (if (result i32) (struct.get $Shape $n (struct.get $LuaTable $shape (local.get $t)))
       (then (call $tab_index_lookup_h (local.get $t) (local.get $k) (local.get $full)))
       (else (i32.const -1))))
     (if (i32.lt_s (local.get $i) (i32.const 0))
       (then
         (call $tab_insert_new (local.get $t) (local.get $k) (global.get $g_fmark) (local.get $full))
-        (local.set $i (i32.sub (struct.get $LuaTable $n (local.get $t)) (i32.const 1))))
+        (local.set $i (i32.sub (struct.get $Shape $n (struct.get $LuaTable $shape (local.get $t))) (i32.const 1))))
       (else
         (array.set $TArr (ref.as_non_null (struct.get $LuaTable $vals (local.get $t))) (local.get $i)
           (global.get $g_fmark))))
@@ -2136,7 +2263,7 @@
   (func $tab_set_hash (param $t (ref $LuaTable)) (param $k anyref) (param $v anyref)
     (local $i i32) (local $full i32)
     (local.set $full (call $lua_hash (local.get $k)))
-    (local.set $i (if (result i32) (struct.get $LuaTable $n (local.get $t))
+    (local.set $i (if (result i32) (struct.get $Shape $n (struct.get $LuaTable $shape (local.get $t)))
       (then (call $tab_index_lookup_h (local.get $t) (local.get $k) (local.get $full)))
       (else (i32.const -1))))
     (if (i32.ge_s (local.get $i) (i32.const 0))
@@ -2172,70 +2299,76 @@
   ;; it into the index, growing/rebuilding as needed. Shared by the boxed and
   ;; string-key setters.
   (func $tab_insert_new (param $t (ref $LuaTable)) (param $k anyref) (param $v anyref) (param $full i32)
-    (local $n i32) (local $cap i32) (local $mask i32)
-    (local $keys (ref null $TArr)) (local $vals (ref null $TArr))
-    (local $idx (ref null $IArr)) (local $h i32)
-    (local $slot i32) (local $ftomb i32)
-    (local.set $n (struct.get $LuaTable $n (local.get $t)))
-    (local.set $cap (struct.get $LuaTable $cap (local.get $t)))
-    (if (i32.ge_s (local.get $n) (local.get $cap))
+    (local $sh (ref $Shape)) (local $n i32)
+    (if (i32.eqz (struct.get $LuaTable $own (local.get $t)))
       (then
-        (call $tab_grow (local.get $t)
-          (if (result i32) (i32.eqz (local.get $cap))
-            (then (i32.const 4))
-            (else (i32.mul (local.get $cap) (i32.const 2)))))))
-    ;; Keep the index under 50% occupancy (live + tombstones = $used).
-    ;; Initial size 8; doubled each time, which also clears tombstones.
-    ;; $idx/$mask are loaded once here and only reloaded when a rebuild
-    ;; actually replaces them; the no-rebuild path leaves them current, so the
-    ;; probe-insert below can reuse them without re-reading the struct.
-    (local.set $idx (struct.get $LuaTable $idx (local.get $t)))
-    (if (ref.is_null (local.get $idx))
-      (then
-        (call $tab_index_rebuild (local.get $t))
-        (local.set $idx  (struct.get $LuaTable $idx  (local.get $t)))
-        (local.set $mask (struct.get $LuaTable $mask (local.get $t))))
-      (else
-        (local.set $mask (struct.get $LuaTable $mask (local.get $t)))
-        (if (i32.ge_u (i32.shl (i32.add (struct.get $LuaTable $used (local.get $t))
-                                        (i32.const 1)) (i32.const 1))
-                      (i32.add (local.get $mask) (i32.const 1)))
+        ;; Shared shape: move to the child shape that adds $k, keeping the
+        ;; layout shareable — unless the table is turning into a dictionary
+        ;; (a non-string key, or too many keys): that gets a private shape.
+        (if (i32.and (ref.test (ref $LuaString) (local.get $k))
+                     (i32.lt_s (struct.get $Shape $n (struct.get $LuaTable $shape (local.get $t)))
+                               (global.get $shape_share_max)))
           (then
-            (call $tab_index_rebuild (local.get $t))
-            (local.set $idx  (struct.get $LuaTable $idx  (local.get $t)))
-            (local.set $mask (struct.get $LuaTable $mask (local.get $t)))))))
-    ;; Append to keys/vals and probe-insert into idx, reusing the first
-    ;; tombstone in the probe chain if any (so churn doesn't grow $used).
-    ;; Re-read $n: a rebuild above may have compacted lazily-deleted entries,
-    ;; lowering the live count and hence the append position.
-    (local.set $n (struct.get $LuaTable $n (local.get $t)))
-    (local.set $keys (struct.get $LuaTable $keys (local.get $t)))
-    (local.set $vals (struct.get $LuaTable $vals (local.get $t)))
-    (array.set $TArr (ref.as_non_null (local.get $keys)) (local.get $n) (local.get $k))
-    (array.set $TArr (ref.as_non_null (local.get $vals)) (local.get $n) (local.get $v))
-    (struct.set $LuaTable $n (local.get $t) (i32.add (local.get $n) (i32.const 1)))
+            (local.set $sh (call $shape_child (struct.get $LuaTable $shape (local.get $t))
+                             (ref.cast (ref $LuaString) (local.get $k)) (local.get $full)))
+            (local.set $n (struct.get $Shape $n (local.get $sh)))
+            (call $vals_reserve (local.get $t) (local.get $n))
+            (struct.set $LuaTable $shape (local.get $t) (local.get $sh))
+            (array.set $TArr (ref.as_non_null (struct.get $LuaTable $vals (local.get $t)))
+              (i32.sub (local.get $n) (i32.const 1)) (local.get $v))
+            (return)))
+        (call $tab_own (local.get $t))))
+    (call $tab_insert_owned (local.get $t) (local.get $k) (local.get $v) (local.get $full)))
+
+  ;; Append a new key to a table's private shape and its value to $vals, then
+  ;; probe-insert it into the index, reusing the first tombstone in the probe
+  ;; chain if any (so churn doesn't grow $used). The index is kept under 50%
+  ;; occupancy (keys + tombstones = $used): a rebuild doubles it and drops
+  ;; lazily-deleted entries.
+  (func $tab_insert_owned (param $t (ref $LuaTable)) (param $k anyref) (param $v anyref) (param $full i32)
+    (local $sh (ref $Shape)) (local $n i32) (local $mask i32) (local $idx (ref $IArr))
+    (local $keys (ref $TArr)) (local $nk (ref $TArr)) (local $h i32) (local $slot i32) (local $ftomb i32)
+    (local.set $sh (struct.get $LuaTable $shape (local.get $t)))
+    (if (i32.ge_u (i32.shl (i32.add (struct.get $Shape $used (local.get $sh)) (i32.const 1)) (i32.const 1))
+                  (i32.add (struct.get $Shape $mask (local.get $sh)) (i32.const 1)))
+      (then (call $tab_index_rebuild (local.get $t))))
+    ;; (a rebuild may have compacted deleted entries, lowering the append position)
+    (local.set $n (struct.get $Shape $n (local.get $sh)))
+    (local.set $keys (struct.get $Shape $keys (local.get $sh)))
+    (if (i32.ge_s (local.get $n) (array.len (local.get $keys)))
+      (then
+        (if (i32.gt_u (local.get $n) (i32.const 8388608))
+          (then (call $throw_lit (i32.const 341) (i32.const 14))))   ;; "table overflow"
+        (local.set $nk (array.new $TArr (ref.null any) (i32.shl (local.get $n) (i32.const 1))))
+        (array.copy $TArr $TArr (local.get $nk) (i32.const 0) (local.get $keys) (i32.const 0) (local.get $n))
+        (struct.set $Shape $keys (local.get $sh) (local.get $nk))
+        (local.set $keys (local.get $nk))))
+    (call $vals_reserve (local.get $t) (i32.add (local.get $n) (i32.const 1)))
+    (array.set $TArr (local.get $keys) (local.get $n) (local.get $k))
+    (array.set $TArr (ref.as_non_null (struct.get $LuaTable $vals (local.get $t))) (local.get $n) (local.get $v))
+    (struct.set $Shape $n (local.get $sh) (i32.add (local.get $n) (i32.const 1)))
+    (local.set $idx (struct.get $Shape $idx (local.get $sh)))
+    (local.set $mask (struct.get $Shape $mask (local.get $sh)))
     (local.set $h (i32.and (local.get $mask) (local.get $full)))
     (local.set $ftomb (i32.const -1))
     (loop $probe
-      (local.set $slot (array.get $IArr (ref.as_non_null (local.get $idx)) (local.get $h)))
+      (local.set $slot (array.get $IArr (local.get $idx) (local.get $h)))
       (if (i32.eqz (local.get $slot))
         (then
           (if (i32.ge_s (local.get $ftomb) (i32.const 0))
             (then  ;; reuse a tombstone — occupied count ($used) unchanged
-              (array.set $IArr (ref.as_non_null (local.get $idx)) (local.get $ftomb)
-                (i32.add (local.get $n) (i32.const 1))))
+              (array.set $IArr (local.get $idx) (local.get $ftomb) (i32.add (local.get $n) (i32.const 1))))
             (else  ;; consume a fresh empty slot — one more occupied
-              (array.set $IArr (ref.as_non_null (local.get $idx)) (local.get $h)
-                (i32.add (local.get $n) (i32.const 1)))
-              (struct.set $LuaTable $used (local.get $t)
-                (i32.add (struct.get $LuaTable $used (local.get $t)) (i32.const 1)))))
+              (array.set $IArr (local.get $idx) (local.get $h) (i32.add (local.get $n) (i32.const 1)))
+              (struct.set $Shape $used (local.get $sh)
+                (i32.add (struct.get $Shape $used (local.get $sh)) (i32.const 1)))))
           (return)))
       (if (i32.lt_s (local.get $slot) (i32.const 0))
         (then (if (i32.lt_s (local.get $ftomb) (i32.const 0))
           (then (local.set $ftomb (local.get $h))))))
-      (local.set $h (i32.and (local.get $mask)
-        (i32.add (local.get $h) (i32.const 1))))
+      (local.set $h (i32.and (local.get $mask) (i32.add (local.get $h) (i32.const 1))))
       (br $probe)))
+
 
   ;; Bootstrap-only hash insert: append a fresh, unique key into the hash part,
   ;; self-growing keys/vals and self-rehashing the index as needed. Unlike
@@ -2246,87 +2379,9 @@
   ;; skip the find-and-update step) and string-typed (so it belongs in the hash
   ;; part, never the array prefix).
   (func $tab_bootstrap_set (param $t (ref $LuaTable)) (param $k anyref) (param $v anyref)
-    (local $n i32) (local $cap i32) (local $mask i32) (local $h i32) (local $i i32)
-    (local $keys (ref null $TArr)) (local $vals (ref null $TArr)) (local $idx (ref null $IArr))
-    (local $nk (ref $TArr)) (local $nv (ref $TArr))
-    (local.set $n (struct.get $LuaTable $n (local.get $t)))
-    (local.set $cap (struct.get $LuaTable $cap (local.get $t)))
-    ;; grow keys/vals to fit one more entry (geometric, initial 4)
-    (if (i32.ge_s (local.get $n) (local.get $cap))
-      (then
-        (local.set $cap (if (result i32) (i32.eqz (local.get $cap))
-          (then (i32.const 4)) (else (i32.mul (local.get $cap) (i32.const 2)))))
-        (local.set $nk (array.new $TArr (ref.null any) (local.get $cap)))
-        (local.set $nv (array.new $TArr (ref.null any) (local.get $cap)))
-        (local.set $keys (struct.get $LuaTable $keys (local.get $t)))
-        (local.set $vals (struct.get $LuaTable $vals (local.get $t)))
-        (if (i32.eqz (ref.is_null (local.get $keys)))
-          (then
-            (array.copy $TArr $TArr (local.get $nk) (i32.const 0)
-              (ref.as_non_null (local.get $keys)) (i32.const 0) (local.get $n))
-            (array.copy $TArr $TArr (local.get $nv) (i32.const 0)
-              (ref.as_non_null (local.get $vals)) (i32.const 0) (local.get $n))))
-        (struct.set $LuaTable $keys (local.get $t) (local.get $nk))
-        (struct.set $LuaTable $vals (local.get $t) (local.get $nv))
-        (struct.set $LuaTable $cap  (local.get $t) (local.get $cap))
-        (if (i32.eqz (ref.is_null (struct.get $LuaTable $fvals (local.get $t))))
-          (then (struct.set $LuaTable $fvals (local.get $t)
-            (call $farr_grow (ref.as_non_null (struct.get $LuaTable $fvals (local.get $t)))
-                             (local.get $cap) (local.get $n)))))))
-    ;; ensure the index keeps the new entry under 50% load; rebuild it bigger
-    ;; (power-of-two capacity ≥ 2*(n+1), minimum 8) from scratch when needed.
-    (local.set $idx  (struct.get $LuaTable $idx  (local.get $t)))
-    (local.set $mask (struct.get $LuaTable $mask (local.get $t)))
-    (if (i32.or (ref.is_null (local.get $idx))
-                (i32.gt_u (i32.shl (i32.add (local.get $n) (i32.const 1)) (i32.const 1))
-                          (i32.add (local.get $mask) (i32.const 1))))
-      (then
-        (local.set $cap (i32.const 8))
-        (block $sized (loop $grow
-          (br_if $sized (i32.ge_u (local.get $cap)
-            (i32.shl (i32.add (local.get $n) (i32.const 1)) (i32.const 1))))
-          (local.set $cap (i32.shl (local.get $cap) (i32.const 1)))
-          (br $grow)))
-        (local.set $mask (i32.sub (local.get $cap) (i32.const 1)))
-        (local.set $idx (array.new $IArr (i32.const 0) (local.get $cap)))
-        (local.set $keys (struct.get $LuaTable $keys (local.get $t)))
-        (local.set $i (i32.const 0))
-        (block $rdone (loop $rlp
-          (br_if $rdone (i32.ge_s (local.get $i) (local.get $n)))
-          (local.set $h (i32.and (local.get $mask) (call $lua_hash
-            (array.get $TArr (ref.as_non_null (local.get $keys)) (local.get $i)))))
-          (block $placed (loop $rprobe
-            (if (i32.eqz (array.get $IArr (ref.as_non_null (local.get $idx)) (local.get $h)))
-              (then
-                (array.set $IArr (ref.as_non_null (local.get $idx)) (local.get $h)
-                  (i32.add (local.get $i) (i32.const 1)))
-                (br $placed)))
-            (local.set $h (i32.and (local.get $mask) (i32.add (local.get $h) (i32.const 1))))
-            (br $rprobe)))
-          (local.set $i (i32.add (local.get $i) (i32.const 1)))
-          (br $rlp)))
-        (struct.set $LuaTable $idx  (local.get $t) (local.get $idx))
-        (struct.set $LuaTable $mask (local.get $t) (local.get $mask))
-        (struct.set $LuaTable $used (local.get $t) (local.get $n))))
-    ;; append the new key/value, then probe-insert it into the index
-    (array.set $TArr (ref.as_non_null (struct.get $LuaTable $keys (local.get $t)))
-      (local.get $n) (local.get $k))
-    (array.set $TArr (ref.as_non_null (struct.get $LuaTable $vals (local.get $t)))
-      (local.get $n) (local.get $v))
-    (struct.set $LuaTable $n (local.get $t) (i32.add (local.get $n) (i32.const 1)))
-    (local.set $idx  (struct.get $LuaTable $idx  (local.get $t)))
-    (local.set $mask (struct.get $LuaTable $mask (local.get $t)))
-    (local.set $h (i32.and (local.get $mask) (call $lua_hash (local.get $k))))
-    (loop $probe
-      (if (i32.eqz (array.get $IArr (ref.as_non_null (local.get $idx)) (local.get $h)))
-        (then
-          (array.set $IArr (ref.as_non_null (local.get $idx)) (local.get $h)
-            (i32.add (local.get $n) (i32.const 1)))
-          (struct.set $LuaTable $used (local.get $t)
-            (i32.add (struct.get $LuaTable $used (local.get $t)) (i32.const 1)))
-          (return)))
-      (local.set $h (i32.and (local.get $mask) (i32.add (local.get $h) (i32.const 1))))
-      (br $probe)))
+    (call $tab_own (local.get $t))
+    (call $tab_insert_owned (local.get $t) (local.get $k) (local.get $v) (call $lua_hash (local.get $k))))
+
 
   ;; `t[k] = v` with __newindex dispatch. Used by user-code assignments.
   ;; Table-constructor inserts go through bare \$tab_set since they target
@@ -3934,7 +3989,7 @@
           (local.set $idx (i32.add (local.get $idx) (i32.const 1)))
           (br $scan)))
       (local.set $idx (i32.const 0)))
-    (local.set $n (struct.get $LuaTable $n (local.get $t)))
+    (local.set $n (struct.get $Shape $n (struct.get $LuaTable $shape (local.get $t))))
     (local.set $vals (struct.get $LuaTable $vals (local.get $t)))
     ;; Skip lazily-deleted entries (value cleared to nil), so a key removed
     ;; mid-traversal is resumed past rather than mistaken for a live entry.
@@ -3950,7 +4005,7 @@
     (if (i32.ge_s (local.get $idx) (local.get $n))
       (then (return (array.new_fixed $ArgArr 1 (ref.null any)))))
     (array.new_fixed $ArgArr 2
-      (array.get $TArr (ref.as_non_null (struct.get $LuaTable $keys (local.get $t)))
+      (array.get $TArr (struct.get $Shape $keys (struct.get $LuaTable $shape (local.get $t)))
                        (local.get $idx))
       (call $tval (array.get $TArr (ref.as_non_null (local.get $vals)) (local.get $idx))
                   (struct.get $LuaTable $fvals (local.get $t)) (local.get $idx))))
@@ -5394,8 +5449,10 @@
       (then (local.set $nrec
               (i32.wrap_i64 (call $as_int_co (call $args_at (local.get $args) (i32.const 1)))))))
     (local.set $cap (i32.add (local.get $nseq) (local.get $nrec)))
-    (if (i32.gt_s (local.get $cap) (i32.const 0))
-      (then (call $tab_grow (local.get $t) (local.get $cap))))
+    (if (i32.gt_s (local.get $nseq) (i32.const 0))
+      (then (call $arr_ensure (local.get $t) (local.get $nseq))))
+    (if (i32.gt_s (local.get $nrec) (i32.const 0))
+      (then (call $tab_reserve_hash (local.get $t) (local.get $nrec))))
     (array.new_fixed $ArgArr 1 (local.get $t)))
 
   ;; table.move(a1, f, e, t [, a2]): copy a1[f..e] to (a2 or a1)[t..].

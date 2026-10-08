@@ -142,3 +142,4 @@ pass	index_key_local	key-only locals (maybe-typed keys): normalization, NaN/nil,
 pass	multi_assign_index	multi-target index stores: order, key snapshot, leftmost wins, __newindex, unboxed floats
 pass	array_holes	nil holes in the array part: reads/__index, __newindex, traversal clearing, borders, table lib, queue/stack
 pass	dynamic_calls	single-value dynamic calls: arity adjust, varargs, truncation, __call, tail calls, error levels, metamethods
+pass	table_shapes	shared key layouts never leak: diverging records, deletes, dictionary mode, mixed keys, float fields, metatables, churn
