@@ -11,18 +11,18 @@ Seconds (`TIME`, best of five) on one machine, Node 24:
 | bench | lua5.5 | lua2wasm | ratio |
 |---|---:|---:|---:|
 | fannkuch | 0.82 | 0.34 | 0.41× |
-| binarytrees | 0.35 | 0.15 | 0.42× |
+| binarytrees | 0.36 | 0.15 | 0.42× |
 | spectralnorm | 0.95 | 0.54 | 0.57× |
-| oo | 0.46 | 0.28 | 0.60× |
-| nbody_arr | 0.38 | 0.24 | 0.63× |
-| vectors | 1.07 | 0.72 | 0.67× |
+| oo | 0.46 | 0.27 | 0.59× |
+| nbody_arr | 0.38 | 0.23 | 0.62× |
+| vectors | 1.07 | 0.73 | 0.68× |
 | particles | 0.58 | 0.46 | 0.78× |
 | nbody | 0.43 | 0.35 | 0.80× |
-| entities | 0.67 | 0.58 | 0.87× |
-| tilemap | 0.28 | 0.28 | 0.99× |
+| entities | 0.68 | 0.57 | 0.84× |
+| tilemap | 0.28 | 0.26 | 0.91× |
 | closures | 0.07 | 0.09 | 1.20× |
-| hashtab | 0.10 | 0.15 | 1.52× |
-| strings | 0.07 | 0.18 | 2.71× |
+| hashtab | 0.10 | 0.14 | 1.48× |
+| strings | 0.07 | 0.16 | 2.39× |
 
 ## Measuring
 
@@ -63,20 +63,14 @@ scavenges copying fresh strings that stay alive).
 **Causes.**
 - Every Lua string is two GC objects: the `$LuaString` struct and its
   `(array i8)`.
-- Concatenating a number allocates its digits (`$int_to_bytes`) before the
-  result.
 - A string made at run time is hashed (FNV over its bytes) when first used as
   a key, and compared byte by byte with the stored key; reference Lua interns
   short strings and compares pointers.
-- An integer from 2^30 up in a boxed place (a captured local, a table value)
-  is a `$LuaInt` object: hashtab's `rnd()` keeps its seed in a captured local,
-  so about half of its calls allocate.
+- An integer from 2^30 up in a boxed place other than a captured local (a
+  table value, a maybe-typed cell boxed for a call) is a `$LuaInt` object.
 
 **Fix ideas.** One object per string (the bytes array carrying the cached
-hash in a 4-byte header); concatenation writing number digits straight into
-the result; typed boxes for captured locals that only ever hold integers (the
-maybe-typed slot analysis, extended to upvalues); possibly interning short
-run-time strings.
+hash in a 4-byte header); possibly interning short run-time strings.
 
 **Verify.** strings, hashtab, tilemap, closures; the GC share in profiles.
 
@@ -173,6 +167,20 @@ calls the helper only on a miss (src/codegen/arrays.c). particles 0.68 →
 more than `--wasm-inlining-budget=50000` gave (0.60 on particles). Modules
 grow ~150 bytes per site (+1% over the e2e fixtures, +29% on nbody_arr);
 dropping the inline small-int case costs fannkuch 6%.
+
+**`..` writes integer digits in place** (item 2). `$concat_piece` /
+`$concat_put` size an integer operand with `$int_len` and write it into the
+result with `$int_write`, instead of allocating its digits first. strings
+0.184 → 0.156 s.
+
+**Int boxes** (item 2). A captured local that only ever holds integers lives
+in an `$IBox` — a `$Box` subtype with a raw i64 — instead of a `$Box` holding
+a `$LuaInt` from 2^30 up (analysis.c, "Int boxes": every store, in its own
+function or a closure's, must be one int-typed value, under both parameter
+seedings a body is emitted with). Signature inference reads the boxes, so a
+function returning one returns an i64; the two alternate until the set
+settles. 6M calls of hashtab's `rnd()`: 67 → 18 ms (lua5.5: 94). tilemap
+0.28 → 0.26, hashtab 0.147 → 0.142.
 
 Maybe-typed locals ([note 22](design/22-maybe-typed-locals.md)), table shapes
 and inline caches ([note 23](design/23-table-shapes.md)), run-once loop

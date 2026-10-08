@@ -229,6 +229,12 @@ typedef struct {
     int n_outlined; /* $ol_N functions so far */
     WatBuilder ol_pending;
     unsigned char *run_once; /* by func_idx: the function provably runs at most once */
+    /* Int boxes (analysis.c, compute_ibox): captured locals held in an $IBox,
+     * by slot — ibox_fn[func_idx] for a function, ibox_main for the main
+     * chunk. NULL until computed (signature inference runs without them). */
+    unsigned char **ibox_fn;
+    unsigned char *ibox_main;
+    int n_ibox_fn;
     char err[256];
     int ok;
 } CG;
@@ -242,6 +248,7 @@ typedef struct Body {
     int func_idx;                             /* -1 for the main chunk */
     const LuaFunc **func_slot, **upval_func;  /* direct-call binding maps */
     unsigned char *isint, *isfloat, *ismaybe; /* slot analyses (NULL at -O0) */
+    const unsigned char *ibox;                /* captured slots held in an $IBox (NULL: none) */
     int n_close;                              /* to-be-closed locals */
     int is_vararg;
     int outline; /* runs once: its outermost loops become resumable functions (outline.c) */
@@ -251,6 +258,7 @@ typedef struct Body {
 typedef enum {
     REP_ANY,   /* $L<i> anyref */
     REP_BOX,   /* $L<i> (ref $Box): captured by a closure */
+    REP_IBOX,  /* $L<i> (ref $IBox): captured, and only ever an integer */
     REP_I64,   /* $L<i> i64: integer-typed */
     REP_F64,   /* $L<i> f64: float-typed */
     REP_MAYBE, /* $L<i> anyref + $Lt<i> i32 + $Li<i> i64 + $Lf<i> f64 */
@@ -259,8 +267,16 @@ static inline SlotRep slot_rep(const Body *b, int i) {
     if (b->isint && b->isint[i]) return REP_I64;
     if (b->isfloat && b->isfloat[i]) return REP_F64;
     if (b->ismaybe && b->ismaybe[i]) return REP_MAYBE;
+    if (b->ibox && b->ibox[i]) return REP_IBOX;
     if (b->captured && b->captured[i]) return REP_BOX;
     return REP_ANY;
+}
+
+/* What a captured slot holds until its declaration runs: the validator wants
+ * a set before every get of a non-nullable local. */
+static inline const char *box_placeholder(const Body *b, int i) {
+    return slot_rep(b, i) == REP_IBOX ? "(struct.new $IBox (ref.null any) (i64.const 0))"
+                                      : "(struct.new $Box (ref.null any))";
 }
 
 /* A cell is the four-part view of a maybe value used by the lowering: read
@@ -386,6 +402,12 @@ void compute_func_bindings(CG *c, const ParseResult *pr);
 void free_func_bindings(CG *c);
 void infer_signatures(CG *c, const ParseResult *pr);
 void free_signatures(CG *c);
+const unsigned char *ibox_row(const CG *c, int func_idx);
+int slot_is_ibox(const CG *c, int slot);
+int upval_is_ibox(CG *c, int u);
+int ibox_init(CG *c, const ParseResult *pr);
+int ibox_settle(CG *c, const ParseResult *pr);
+void free_ibox(CG *c);
 
 /* ----- expr.c ----- */
 const char *ic_new(CG *c, char *buf, size_t bufsz);
@@ -393,6 +415,7 @@ void emit_string_literal(CG *c, const char *bytes, size_t len, int depth);
 void emit_global_key(CG *c, const char *name, size_t name_len);
 void emit_target_open(CG *c, const AssignTarget *t, int depth);
 void emit_target_close(CG *c, const AssignTarget *t, int depth);
+void emit_ibox_ref(CG *c, VarKind kind, int idx);
 const char *binop_helper(BinOp op);
 int is_cmp_op(BinOp op);
 const CmpOp *cmp_op(BinOp op);

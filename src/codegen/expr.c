@@ -50,6 +50,17 @@ static void emit_global_read(CG *c, const char *name, size_t name_len, int depth
     emit_line(c, depth, ")\n");
 }
 
+/* The $IBox of a variable held in one (analysis.c, "int boxes"), inline: the
+ * local, or the closure's upvalue cast to it. */
+void emit_ibox_ref(CG *c, VarKind kind, int idx) {
+    if (kind == VAR_UPVAL)
+        wat_appendf(c->w,
+                    "(ref.cast (ref $IBox) (array.get $UpvalArr "
+                    "(struct.get $LuaClosure $upvals (local.get $closure)) (i32.const %d)))",
+                    idx);
+    else wat_appendf(c->w, "(local.get $L%d)", idx);
+}
+
 static void emit_var_read(CG *c, VarKind kind, int idx, int depth) {
     switch (kind) {
     case VAR_LOCAL:
@@ -129,6 +140,10 @@ void emit_target_open(CG *c, const AssignTarget *t, int depth) {
     if (t->kind == TGT_VAR) {
         switch (t->as.var.kind) {
         case VAR_LOCAL:
+            if (slot_is_ibox(c, t->as.var.idx)) {
+                cg_error(c, "internal: int box in a generic store");
+                return;
+            }
             if (slot_is_maybe(c, t->as.var.idx)) {
                 /* The analysis kills a maybe slot on every multi-value store
                  * path, so only single stores (emit_maybe_store) reach one. */
@@ -143,6 +158,10 @@ void emit_target_open(CG *c, const AssignTarget *t, int depth) {
             }
             break;
         case VAR_UPVAL:
+            if (upval_is_ibox(c, t->as.var.idx)) {
+                cg_error(c, "internal: int box in a generic store");
+                return;
+            }
             emit_line(c, depth, "(struct.set $Box $v\n");
             emit_box_ref(c, t->as.var.kind, t->as.var.idx, depth + 1);
             break;
@@ -1015,7 +1034,13 @@ void emit_int_expr(CG *c, const Expr *e, int depth) {
         emit_linef(c, depth, "(i64.const %lld)\n", (long long)e->as.i_val);
         return;
     case EXPR_VAR:
-        emit_linef(c, depth, "(local.get $L%d)\n", e->as.var.idx);
+        if (e->as.var.kind == VAR_UPVAL || slot_is_ibox(c, e->as.var.idx)) {
+            emit_line(c, depth, "(struct.get $IBox $i ");
+            emit_ibox_ref(c, e->as.var.kind, e->as.var.idx);
+            wat_append(c->w, ")\n");
+        } else {
+            emit_linef(c, depth, "(local.get $L%d)\n", e->as.var.idx);
+        }
         return;
     case EXPR_UNOP:
         if (e->as.unop.op == UN_NEG) {

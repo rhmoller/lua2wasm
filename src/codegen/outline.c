@@ -233,6 +233,7 @@ static void state_add_slot(OlState *st, const Body *b, int i) {
     case REP_I64: state_add(st, "i64", "$L%d", i); break;
     case REP_F64: state_add(st, "f64", "$L%d", i); break;
     case REP_BOX: state_add(st, "(ref $Box)", "$L%d", i); break;
+    case REP_IBOX: state_add(st, "(ref $IBox)", "$L%d", i); break;
     case REP_ANY: state_add(st, "anyref", "$L%d", i); break;
     case REP_MAYBE:
         state_add(st, "anyref", "$L%d", i);
@@ -298,8 +299,8 @@ static void emit_loop_function(CG *c, const Stmt *s, int id, const LoopScan *sc,
      * validator wants a set before every get; see body_emit), then the
      * state. */
     for (int i = 0; i < sc->n_slots; i++)
-        if (sc->decl[i] && slot_rep(b, i) == REP_BOX)
-            wat_appendf(w, "    (local.set $L%d (struct.new $Box (ref.null any)))\n", i);
+        if (sc->decl[i] && (slot_rep(b, i) == REP_BOX || slot_rep(b, i) == REP_IBOX))
+            wat_appendf(w, "    (local.set $L%d %s)\n", i, box_placeholder(b, i));
     for (int i = 0; i < st->n; i++) wat_appendf(w, "    (local.set %s (local.get $olp%d))\n", st->v[i].name, i);
     if (pass_varargs) wat_append(w, "    (local.set $varargs (local.get $olp_varargs))\n");
     if (pass_tbc) wat_append(w, "    (local.set $tbc (local.get $olp_tbc))\n");

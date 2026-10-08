@@ -1082,7 +1082,14 @@ int codegen_module(const ParseResult *pr, const char *src_name,
     if (c.opt_int) {
         c.n_sigs = (int)pr->funcs.count;
         compute_func_bindings(&c, pr);
+        /* Signatures and int boxes depend on each other (analysis.c, "Int
+         * boxes"): infer, settle, and infer again until settling drops none. */
+        int ibox = ibox_init(&c, pr);
         infer_signatures(&c, pr);
+        while (ibox && ibox_settle(&c, pr)) {
+            free_signatures(&c);
+            infer_signatures(&c, pr);
+        }
         compute_run_once(&c, pr);
     }
     strpool_add(&c.strs, LITERAL_PREFIX, LITERAL_PREFIX_LEN);
@@ -1164,6 +1171,7 @@ int codegen_module(const ParseResult *pr, const char *src_name,
     free(gref);
     free_func_bindings(&c);
     free_signatures(&c);
+    free_ibox(&c);
     wat_free(&c.ol_pending);
     free(c.run_once);
     return c.ok;

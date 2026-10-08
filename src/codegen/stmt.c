@@ -290,6 +290,18 @@ static int emit_typed_slot_store(CG *c, int slot, const Expr *e, int depth) {
     return 1;
 }
 
+/* `x = e` for a variable held in an $IBox (the analysis proved `e` int-typed);
+ * returns 0, emitting nothing, for any other variable. */
+static int emit_ibox_store(CG *c, VarRef v, const Expr *e, int depth) {
+    if (!(v.kind == VAR_LOCAL ? slot_is_ibox(c, v.idx) : v.kind == VAR_UPVAL && upval_is_ibox(c, v.idx))) return 0;
+    emit_line(c, depth, "(struct.set $IBox $i ");
+    emit_ibox_ref(c, v.kind, v.idx);
+    wat_append(c->w, "\n");
+    emit_int_expr(c, e, depth + 1);
+    emit_line(c, depth, ")\n");
+    return 1;
+}
+
 /* The declaration-time store of a local: a captured slot gets a fresh $Box
  * around the value (each declaration is a new variable), any other slot the
  * value itself. The value is emitted between open and close. */
@@ -429,6 +441,7 @@ static void emit_assign(CG *c, const Stmt *s, int depth) {
      * it. */
     if (n_targets == 1 && n_values == 1) {
         AssignTarget *t = &s->as.assign.targets[0];
+        if (t->kind == TGT_VAR && emit_ibox_store(c, t->as.var, s->as.assign.values[0], depth)) return;
         if (t->kind == TGT_VAR && t->as.var.kind == VAR_LOCAL &&
             emit_typed_slot_store(c, t->as.var.idx, s->as.assign.values[0], depth))
             return;
@@ -971,6 +984,12 @@ static void emit_local_stmt(CG *c, const Stmt *s, int depth) {
             continue;
         }
         int slot = s->as.local.local_idxs[i];
+        if (slot_is_ibox(c, slot)) { /* a fresh int box per declaration */
+            emit_linef(c, depth, "(local.set $L%d (struct.new $IBox (ref.null any)\n", slot);
+            emit_int_expr(c, s->as.local.values[i], depth + 1);
+            emit_line(c, depth, "))\n");
+            continue;
+        }
         if (emit_typed_slot_store(c, slot, s->as.local.values[i], depth)) continue;
         emit_local_init_open(c, slot, depth);
         emit_expr(c, s->as.local.values[i], depth + 1);
@@ -1544,6 +1563,7 @@ void body_begin(CG *c, Body *b, const NumTy *param_seed) {
     c->cur_upval_func = b->upval_func;
     c->cur_is_int = c->cur_is_float = c->cur_is_maybe = NULL;
     b->isint = b->isfloat = b->ismaybe = NULL;
+    b->ibox = ibox_row(c, b->func_idx);
     if (c->opt_int) {
         /* The analyses recognize direct calls (expr_is_int on EXPR_CALL needs
          * the binding maps, set just above), so a slot assigned the result of
@@ -1587,6 +1607,7 @@ void body_declare_locals_of(CG *c, const Body *b, const unsigned char *slots, in
                         i, i, i, i);
             break;
         case REP_BOX: wat_appendf(w, "    (local $L%d (ref $Box))\n", i); break;
+        case REP_IBOX: wat_appendf(w, "    (local $L%d (ref $IBox))\n", i); break;
         case REP_ANY: wat_appendf(w, "    (local $L%d anyref)\n", i); break;
         }
     }
@@ -1643,8 +1664,7 @@ void body_emit(CG *c, const Body *b) {
      * the box, and any closure captured at that point holds the fresh
      * one — no observable difference from the old eager-only-on-decl scheme. */
     for (int i = b->n_params; i < b->n_locals; i++)
-        if (b->captured && b->captured[i])
-            wat_appendf(c->w, "    (local.set $L%d (struct.new $Box (ref.null any)))\n", i);
+        if (b->captured && b->captured[i]) wat_appendf(c->w, "    (local.set $L%d %s)\n", i, box_placeholder(b, i));
     if (b->n_close > 0) emit_tbc_init(c->w, b->n_close);
     if (c->ok) emit_close_body(c, b->body, b->n_close > 0, 2);
 }

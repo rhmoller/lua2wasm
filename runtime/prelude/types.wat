@@ -14,6 +14,10 @@
   (type $LuaBool   (sub (struct (field $b i32))))
   ;; --- closure / function types (mutually recursive) ---
   (type $Box       (sub (struct (field $v (mut anyref)))))
+  ;; A captured local that only ever holds an integer (src/codegen/analysis.c,
+  ;; "int boxes"): the value is the raw $i — no $LuaInt for one from 2^30 up —
+  ;; and $v stays nil. A $Box still, so it sits in a closure's $UpvalArr.
+  (type $IBox      (sub final $Box (struct (field $v (mut anyref)) (field $i (mut i64)))))
   (type $ArgArr    (array (mut anyref)))
   (type $UpvalArr  (array (mut (ref $Box))))
   ;; Per-activation to-be-closed stack: $items holds the values bound to

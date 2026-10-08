@@ -149,7 +149,8 @@ int expr_is_int(CG *c, const Expr *e) {
     switch (e->kind) {
     case EXPR_INT: return 1;
     case EXPR_VAR:
-        return e->as.var.kind == VAR_LOCAL && slot_is_int(c, e->as.var.idx);
+        if (e->as.var.kind == VAR_UPVAL) return upval_is_ibox(c, e->as.var.idx);
+        return e->as.var.kind == VAR_LOCAL && (slot_is_int(c, e->as.var.idx) || slot_is_ibox(c, e->as.var.idx));
     case EXPR_BINOP:
         switch (e->as.binop.op) {
         case BIN_ADD:
@@ -1115,4 +1116,187 @@ void free_signatures(CG *c) {
     free(c->sigs);
     c->sigs = NULL;
     c->n_sigs = 0;
+}
+
+/* ===== Int boxes =====
+ * A local a closure captures lives in a $Box shared with the closure, so the
+ * slot analyses above leave it boxed, and an integer from 2^30 up costs a
+ * $LuaInt at every store (an RNG seed, a hash, a counter). A captured local
+ * that only ever holds integers — declared by `local x = <int>`, and every
+ * store to it, in its own function or a closure's, one int-typed value —
+ * gets an $IBox instead: a $Box with an i64 the code reads and writes raw.
+ *
+ * Which stores are int-typed depends on the slot typing of the function
+ * they are in, which depends on the int boxes it reads, so candidates (every
+ * captured non-parameter local) are dropped until none is (ibox_settle). A
+ * body is emitted with boxed parameters (its generic and fast entries) and,
+ * when it has direct calls, with its signature's: the stores must be
+ * int-typed under both. The signatures in turn are inferred reading the int
+ * boxes (`return seed` returns an i64), so codegen_module alternates the two
+ * until settling drops nothing: then the boxes hold under the signatures
+ * inferred from them. */
+
+static int fn_n_locals(const CG *c, int func_idx) {
+    return func_idx == -1 ? c->pr->main_n_locals : c->pr->funcs.items[func_idx]->n_locals;
+}
+
+static unsigned char *ibox_row_mut(const CG *c, int func_idx) {
+    if (func_idx == -1) return c->ibox_main;
+    if (!c->ibox_fn || func_idx < 0 || func_idx >= c->n_ibox_fn) return NULL;
+    return c->ibox_fn[func_idx];
+}
+const unsigned char *ibox_row(const CG *c, int func_idx) { return ibox_row_mut(c, func_idx); }
+
+int slot_is_ibox(const CG *c, int slot) {
+    const unsigned char *r = ibox_row(c, c->cur_func_idx);
+    return r && slot >= 0 && slot < fn_n_locals(c, c->cur_func_idx) && r[slot];
+}
+
+int upval_is_ibox(CG *c, int u) {
+    if (!c->ibox_fn || c->cur_func_idx < 0) return 0;
+    int of, os;
+    resolve_upval_origin(c, c->cur_func_idx, u, &of, &os);
+    if (of < -1) return 0;
+    const unsigned char *r = ibox_row(c, of);
+    return r && os >= 0 && os < fn_n_locals(c, of) && r[os];
+}
+
+typedef struct {
+    CG *c;
+    int *changed;
+} IboxPass;
+
+static void ibox_drop(IboxPass *p, int func_idx, int slot) {
+    unsigned char *r = ibox_row_mut(p->c, func_idx);
+    if (r && slot >= 0 && slot < fn_n_locals(p->c, func_idx) && r[slot]) {
+        r[slot] = 0;
+        *p->changed = 1;
+    }
+}
+static void ibox_drop_var(IboxPass *p, VarRef v) {
+    if (v.kind == VAR_LOCAL) {
+        ibox_drop(p, p->c->cur_func_idx, v.idx);
+    } else if (v.kind == VAR_UPVAL && p->c->cur_func_idx >= 0) {
+        int of, os;
+        resolve_upval_origin(p->c, p->c->cur_func_idx, v.idx, &of, &os);
+        if (of >= -1) ibox_drop(p, of, os);
+    }
+}
+
+/* Drop the candidates a statement stores something other than one int into
+ * (or declares other than by `local`). */
+static void ibox_check_stmt(const Stmt *s, void *ctx) {
+    IboxPass *p = ctx;
+    CG *c = p->c;
+    int fi = c->cur_func_idx;
+    switch (s->kind) {
+    case STMT_LOCAL: {
+        int nn = s->as.local.n_names, nv = s->as.local.n_values;
+        int last_call = nv > 0 && nn > nv && is_multival_tail(s->as.local.values[nv - 1]);
+        int n_lead = last_call ? nv - 1 : nv;
+        for (int i = 0; i < nn; i++) {
+            int slot = s->as.local.local_idxs[i];
+            if (!slot_is_ibox(c, slot)) continue;
+            if (i >= n_lead || (s->as.local.attribs && s->as.local.attribs[i] == 2) ||
+                !expr_is_int(c, s->as.local.values[i]))
+                ibox_drop(p, fi, slot);
+        }
+        break;
+    }
+    case STMT_ASSIGN: {
+        const AssignTarget *t = s->as.assign.targets;
+        if (s->as.assign.n_targets == 1 && s->as.assign.n_values == 1) {
+            if (t->kind == TGT_VAR && !expr_is_int(c, s->as.assign.values[0])) ibox_drop_var(p, t->as.var);
+            break;
+        }
+        for (int i = 0; i < s->as.assign.n_targets; i++)
+            if (t[i].kind == TGT_VAR) ibox_drop_var(p, t[i].as.var);
+        break;
+    }
+    case STMT_LOCAL_FUNC: ibox_drop(p, fi, s->as.local_func.local_idx); break;
+    case STMT_FOR_NUM: ibox_drop(p, fi, s->as.for_num.local_idx); break;
+    case STMT_FOR_GEN:
+        for (int i = 0; i < s->as.for_gen.n_names; i++) ibox_drop(p, fi, s->as.for_gen.local_idxs[i]);
+        break;
+    default: break;
+    }
+}
+
+/* Check one body's stores with its slots typed from `param_seed`. */
+static void ibox_check_body(CG *c, const Block *body, int n_locals, int n_params, const unsigned char *captured,
+                            const NumTy *param_seed, int func_idx, int *changed) {
+    const unsigned char *p_int = c->cur_is_int, *p_float = c->cur_is_float;
+    const LuaFunc **p_fs = c->cur_func_slot, **p_uv = c->cur_upval_func;
+    int p_nl = c->cur_n_locals, p_np = c->cur_n_params, p_fi = c->cur_func_idx;
+    unsigned char *isint = xcalloc(n_locals ? n_locals : 1, 1);
+    unsigned char *isfloat = xcalloc(n_locals ? n_locals : 1, 1);
+    int nn;
+    c->cur_func_slot = bind_slot_map(c, func_idx, &nn);
+    c->cur_upval_func = func_idx >= 0 ? c->bind_upval[func_idx] : NULL;
+    c->cur_func_idx = func_idx;
+    c->cur_n_locals = n_locals;
+    c->cur_n_params = n_params;
+    compute_int_slots(c, body, n_locals, n_params, captured, isint, param_seed);
+    c->cur_is_int = isint;
+    compute_float_slots(c, body, n_locals, n_params, captured, isfloat, param_seed);
+    c->cur_is_float = isfloat;
+    walk_stmts(body, ibox_check_stmt, &(IboxPass){c, changed});
+    c->cur_is_int = p_int;
+    c->cur_is_float = p_float;
+    c->cur_func_slot = p_fs;
+    c->cur_upval_func = p_uv;
+    c->cur_n_locals = p_nl;
+    c->cur_n_params = p_np;
+    c->cur_func_idx = p_fi;
+    free(isint);
+    free(isfloat);
+}
+
+/* Make every captured non-parameter local a candidate; returns 0 (and
+ * leaves int boxes off) when there is none. */
+int ibox_init(CG *c, const ParseResult *pr) {
+    if (!c->opt_int) return 0;
+    int n = (int)pr->funcs.count, any = 0;
+    c->n_ibox_fn = n;
+    c->ibox_fn = xcalloc(n ? n : 1, sizeof *c->ibox_fn);
+    c->ibox_main = xcalloc(pr->main_n_locals ? pr->main_n_locals : 1, 1);
+    for (int i = 0; i < pr->main_n_locals; i++)
+        if (pr->main_captured && pr->main_captured[i]) c->ibox_main[i] = 1, any = 1;
+    for (int f = 0; f < n; f++) {
+        const LuaFunc *fn = pr->funcs.items[f];
+        c->ibox_fn[f] = xcalloc(fn->n_locals ? fn->n_locals : 1, 1);
+        for (int i = fn->n_params; i < fn->n_locals; i++)
+            if (fn->captured && fn->captured[i]) c->ibox_fn[f][i] = 1, any = 1;
+    }
+    if (!any) free_ibox(c);
+    return any;
+}
+
+/* Drop the candidates whose stores aren't all int-typed under the current
+ * signatures, to a fixpoint; returns whether any was dropped. */
+int ibox_settle(CG *c, const ParseResult *pr) {
+    int n = (int)pr->funcs.count, dropped = 0, changed = 1;
+    while (changed) {
+        changed = 0;
+        ibox_check_body(c, &pr->main_body, pr->main_n_locals, 0, pr->main_captured, NULL, -1, &changed);
+        for (int f = 0; f < n; f++) {
+            const LuaFunc *fn = pr->funcs.items[f];
+            ibox_check_body(c, &fn->body, fn->n_locals, fn->n_params, fn->captured, NULL, f, &changed);
+            if (c->sigs && c->sigs[f].has_site)
+                ibox_check_body(c, &fn->body, fn->n_locals, fn->n_params, fn->captured, c->sigs[f].param_ty, f,
+                                &changed);
+        }
+        dropped |= changed;
+    }
+    return dropped;
+}
+
+void free_ibox(CG *c) {
+    if (c->ibox_fn)
+        for (int f = 0; f < c->n_ibox_fn; f++) free(c->ibox_fn[f]);
+    free(c->ibox_fn);
+    free(c->ibox_main);
+    c->ibox_fn = NULL;
+    c->ibox_main = NULL;
+    c->n_ibox_fn = 0;
 }
