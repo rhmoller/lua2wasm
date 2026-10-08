@@ -1821,6 +1821,105 @@ static void emit_table_ctor(CG *c, const Expr *e, int depth) {
     emit_line(c, depth, ")\n");
 }
 
+/* ----- statement traversal -----
+ * Analyses look at one function body at a time: every statement, those in
+ * nested blocks included, but not nested function literals — each function
+ * is analysed on its own. */
+typedef void (*BlockVisit)(const Block *b, void *ctx);
+typedef void (*StmtVisit)(const Stmt *s, void *ctx);
+typedef void (*ExprVisit)(const Expr *e, void *ctx);
+
+/* Call fn on each block nested directly in s, in source order: an `if`'s arm
+ * bodies then its else body, or the body of a loop or `do`. */
+static void for_each_nested_block(const Stmt *s, BlockVisit fn, void *ctx) {
+    switch (s->kind) {
+    case STMT_IF:
+        for (size_t a = 0; a < s->as.if_stmt.narms; a++) fn(&s->as.if_stmt.arms[a].body, ctx);
+        if (s->as.if_stmt.has_else) fn(&s->as.if_stmt.else_body, ctx);
+        break;
+    case STMT_WHILE: fn(&s->as.while_stmt.body, ctx); break;
+    case STMT_DO: fn(&s->as.do_stmt.body, ctx); break;
+    case STMT_REPEAT: fn(&s->as.repeat.body, ctx); break;
+    case STMT_FOR_NUM: fn(&s->as.for_num.body, ctx); break;
+    case STMT_FOR_GEN: fn(&s->as.for_gen.body, ctx); break;
+    default: break;
+    }
+}
+
+typedef struct {
+    StmtVisit fn;
+    void *ctx;
+} StmtWalk;
+static void walk_stmts_in(const Block *b, void *walk) {
+    const StmtWalk *w = walk;
+    for (size_t i = 0; i < b->count; i++) {
+        w->fn(b->items[i], w->ctx);
+        for_each_nested_block(b->items[i], walk_stmts_in, walk);
+    }
+}
+
+/* Call fn on every statement of b, nested ones included, in source order:
+ * each statement before those nested in it. */
+static void walk_stmts(const Block *b, StmtVisit fn, void *ctx) {
+    StmtWalk w = {fn, ctx};
+    walk_stmts_in(b, &w);
+}
+
+/* Call fn on each expression s evaluates itself — not those of its nested
+ * blocks: values, conditions, index targets, loop bounds, iterators. */
+static void for_each_own_expr(const Stmt *s, ExprVisit fn, void *ctx) {
+    switch (s->kind) {
+    case STMT_LOCAL:
+        for (int i = 0; i < s->as.local.n_values; i++) fn(s->as.local.values[i], ctx);
+        break;
+    case STMT_ASSIGN:
+        for (int i = 0; i < s->as.assign.n_targets; i++)
+            if (s->as.assign.targets[i].kind == TGT_INDEX) {
+                fn(s->as.assign.targets[i].as.index.table, ctx);
+                fn(s->as.assign.targets[i].as.index.key, ctx);
+            }
+        for (int i = 0; i < s->as.assign.n_values; i++) fn(s->as.assign.values[i], ctx);
+        break;
+    case STMT_EXPR: fn(s->as.expr_stmt.expr, ctx); break;
+    case STMT_IF:
+        for (size_t a = 0; a < s->as.if_stmt.narms; a++) fn(s->as.if_stmt.arms[a].cond, ctx);
+        break;
+    case STMT_WHILE: fn(s->as.while_stmt.cond, ctx); break;
+    case STMT_REPEAT: fn(s->as.repeat.cond, ctx); break;
+    case STMT_RETURN:
+        for (int i = 0; i < s->as.return_stmt.n_values; i++) fn(s->as.return_stmt.values[i], ctx);
+        break;
+    case STMT_FOR_NUM:
+        fn(s->as.for_num.start, ctx);
+        fn(s->as.for_num.stop, ctx);
+        if (s->as.for_num.step) fn(s->as.for_num.step, ctx);
+        break;
+    case STMT_FOR_GEN:
+        for (int i = 0; i < s->as.for_gen.n_exprs; i++) fn(s->as.for_gen.exprs[i], ctx);
+        break;
+    case STMT_GLOBAL:
+        for (int i = 0; i < s->as.global_decl.n_values; i++) fn(s->as.global_decl.values[i], ctx);
+        break;
+    default: break;
+    }
+}
+
+typedef struct {
+    ExprVisit fn;
+    void *ctx;
+} ExprWalk;
+static void walk_own_exprs(const Stmt *s, void *walk) {
+    const ExprWalk *w = walk;
+    for_each_own_expr(s, w->fn, w->ctx);
+}
+
+/* Call fn on every expression the statements of b evaluate, nested blocks
+ * included. fn sees the roots; it recurses into sub-expressions itself. */
+static void walk_block_exprs(const Block *b, ExprVisit fn, void *ctx) {
+    ExprWalk w = {fn, ctx};
+    walk_stmts(b, walk_own_exprs, &w);
+}
+
 /* ----- integer specialization (opt >= 1) ----- */
 
 /* Is this slot a local proven to hold only integers (declared as i64)? */
@@ -2012,78 +2111,73 @@ static void emit_float_expr(CG *c, const Expr *e, int depth) {
     }
 }
 
-/* Walk one block, clearing out[] entries whose slot has any assignment that
- * isn't a clean single integer expression. Conservative and sound: a slot
- * stays set only if *every* assignment to it is provably integer. */
-static void int_kill_block(CG *c, const Block *b, unsigned char *out, int *changed);
+/* One run of a slot-typing analysis: out[] holds the slots still believed
+ * to have the type; a kill rule that finds a store contradicting it drops
+ * the slot, and the analysis reruns until nothing changes. */
+typedef struct {
+    CG *c;
+    unsigned char *out;
+    int changed;
+    NumTy ty; /* the int / float analysis: NT_INT or NT_FLOAT */
+} SlotPass;
 
-static void int_kill_stmt(CG *c, const Stmt *s, unsigned char *out, int *changed) {
-#define KILL(slot)                                        \
-    do {                                                  \
-        int _s = (slot);                                  \
-        if (_s >= 0 && _s < c->cur_n_locals && out[_s]) { \
-            out[_s] = 0;                                  \
-            *changed = 1;                                 \
-        }                                                 \
-    } while (0)
+static void slot_kill(SlotPass *p, int slot) {
+    if (slot >= 0 && slot < p->c->cur_n_locals && p->out[slot]) {
+        p->out[slot] = 0;
+        p->changed = 1;
+    }
+}
+
+/* Lua 5.4+: integer init and step make a numeric for an integer loop,
+ * whatever the limit is ($for_limit settles a non-integer limit at loop
+ * entry). */
+static int int_for_loop(CG *c, const Stmt *s) {
+    const Expr *st = s->as.for_num.step;
+    return expr_is_int(c, s->as.for_num.start) && (st == NULL || expr_is_int(c, st));
+}
+
+static int expr_has_ty(CG *c, const Expr *e, NumTy ty) {
+    return ty == NT_INT ? expr_is_int(c, e) : expr_is_float(c, e);
+}
+
+/* Kill rules of the int and float analyses: a slot keeps the type only if
+ * every store to it is a single expression of that type (a multi-value store
+ * writes anyref). Never typed: a <close> variable, whose value flows into the
+ * to-be-closed machinery ($tbc_push/$close_upto) as an anyref; generic-for
+ * variables; local functions; and numeric-for control variables, except the
+ * int one of an integer loop (there is no f64 for-loop). */
+static void typed_kill_stmt(const Stmt *s, void *ctx) {
+    SlotPass *p = ctx;
+    CG *c = p->c;
     switch (s->kind) {
     case STMT_LOCAL: {
         int nn = s->as.local.n_names, nv = s->as.local.n_values;
         for (int j = 0; j < nn; j++) {
-            int slot = s->as.local.local_idxs[j];
-            /* A <close> variable's value flows into the to-be-closed machinery
-             * ($tbc_push/$close_upto) as an anyref, so it must stay boxed —
-             * never i64-specialize it even when its initializer is integer. */
-            if (s->as.local.attribs && s->as.local.attribs[j] == 2) {
-                KILL(slot);
-                continue;
-            }
-            if (nv == nn && expr_is_int(c, s->as.local.values[j])) continue;
-            KILL(slot);
+            int is_close = s->as.local.attribs && s->as.local.attribs[j] == 2;
+            if (!is_close && nv == nn && expr_has_ty(c, s->as.local.values[j], p->ty)) continue;
+            slot_kill(p, s->as.local.local_idxs[j]);
         }
         break;
     }
     case STMT_ASSIGN: {
         int nt = s->as.assign.n_targets, nv = s->as.assign.n_values;
         for (int j = 0; j < nt; j++) {
-            AssignTarget *t = &s->as.assign.targets[j];
+            const AssignTarget *t = &s->as.assign.targets[j];
             if (t->kind != TGT_VAR || t->as.var.kind != VAR_LOCAL) continue;
-            /* Only a single-target single-value int store is specialized; the
-             * multi-target path stores anyref, which an i64 slot can't hold. */
-            if (nt == 1 && nv == 1 && expr_is_int(c, s->as.assign.values[0])) continue;
-            KILL(t->as.var.idx);
+            if (nt == 1 && nv == 1 && expr_has_ty(c, s->as.assign.values[0], p->ty)) continue;
+            slot_kill(p, t->as.var.idx);
         }
         break;
     }
-    case STMT_FOR_NUM: {
-        const Expr *st = s->as.for_num.step;
-        /* Lua 5.4+: integer init and step make an integer loop whatever the
-         * limit is ($for_limit settles a non-integer limit at loop entry). */
-        if (!(expr_is_int(c, s->as.for_num.start) && (st == NULL || expr_is_int(c, st))))
-            KILL(s->as.for_num.local_idx);
-        int_kill_block(c, &s->as.for_num.body, out, changed);
+    case STMT_FOR_NUM:
+        if (p->ty != NT_INT || !int_for_loop(c, s)) slot_kill(p, s->as.for_num.local_idx);
         break;
-    }
     case STMT_FOR_GEN:
-        for (int j = 0; j < s->as.for_gen.n_names; j++) KILL(s->as.for_gen.local_idxs[j]);
-        int_kill_block(c, &s->as.for_gen.body, out, changed);
+        for (int j = 0; j < s->as.for_gen.n_names; j++) slot_kill(p, s->as.for_gen.local_idxs[j]);
         break;
-    case STMT_LOCAL_FUNC: KILL(s->as.local_func.local_idx); break;
-    case STMT_IF:
-        for (size_t a = 0; a < s->as.if_stmt.narms; a++)
-            int_kill_block(c, &s->as.if_stmt.arms[a].body, out, changed);
-        if (s->as.if_stmt.has_else) int_kill_block(c, &s->as.if_stmt.else_body, out, changed);
-        break;
-    case STMT_WHILE: int_kill_block(c, &s->as.while_stmt.body, out, changed); break;
-    case STMT_DO: int_kill_block(c, &s->as.do_stmt.body, out, changed); break;
-    case STMT_REPEAT: int_kill_block(c, &s->as.repeat.body, out, changed); break;
+    case STMT_LOCAL_FUNC: slot_kill(p, s->as.local_func.local_idx); break;
     default: break;
     }
-#undef KILL
-}
-
-static void int_kill_block(CG *c, const Block *b, unsigned char *out, int *changed) {
-    for (size_t i = 0; i < b->count; i++) int_kill_stmt(c, b->items[i], out, changed);
 }
 
 /* Fill out[0..n_locals) with the integer-only slots of one function body.
@@ -2110,77 +2204,13 @@ static void compute_int_slots(CG *c, const Block *body, int n_locals, int n_para
     int saved_n = c->cur_n_locals;
     c->cur_is_int = out;
     c->cur_n_locals = n_locals;
-    int changed = 1;
-    while (changed) {
-        changed = 0;
-        int_kill_block(c, body, out, &changed);
+    SlotPass p = {.c = c, .out = out, .changed = 1, .ty = NT_INT};
+    while (p.changed) {
+        p.changed = 0;
+        walk_stmts(body, typed_kill_stmt, &p);
     }
     c->cur_is_int = saved;
     c->cur_n_locals = saved_n;
-}
-
-/* Float analog of int_kill_*. A slot stays float only if every assignment is a
- * float-typed expression. Numeric-for control vars are never float-specialized
- * (no f64 for-loop yet), so they are killed. Requires the final int bitmap. */
-static void float_kill_block(CG *c, const Block *b, unsigned char *out, int *changed);
-
-static void float_kill_stmt(CG *c, const Stmt *s, unsigned char *out, int *changed) {
-#define KILLF(slot)                                       \
-    do {                                                  \
-        int _s = (slot);                                  \
-        if (_s >= 0 && _s < c->cur_n_locals && out[_s]) { \
-            out[_s] = 0;                                  \
-            *changed = 1;                                 \
-        }                                                 \
-    } while (0)
-    switch (s->kind) {
-    case STMT_LOCAL: {
-        int nn = s->as.local.n_names, nv = s->as.local.n_values;
-        for (int j = 0; j < nn; j++) {
-            /* <close> vars stay boxed (anyref) — see int_kill_stmt. */
-            if (s->as.local.attribs && s->as.local.attribs[j] == 2) {
-                KILLF(s->as.local.local_idxs[j]);
-                continue;
-            }
-            if (nv == nn && expr_is_float(c, s->as.local.values[j])) continue;
-            KILLF(s->as.local.local_idxs[j]);
-        }
-        break;
-    }
-    case STMT_ASSIGN: {
-        int nt = s->as.assign.n_targets, nv = s->as.assign.n_values;
-        for (int j = 0; j < nt; j++) {
-            AssignTarget *t = &s->as.assign.targets[j];
-            if (t->kind != TGT_VAR || t->as.var.kind != VAR_LOCAL) continue;
-            if (nt == 1 && nv == 1 && expr_is_float(c, s->as.assign.values[0])) continue;
-            KILLF(t->as.var.idx);
-        }
-        break;
-    }
-    case STMT_FOR_NUM:
-        KILLF(s->as.for_num.local_idx);
-        float_kill_block(c, &s->as.for_num.body, out, changed);
-        break;
-    case STMT_FOR_GEN:
-        for (int j = 0; j < s->as.for_gen.n_names; j++) KILLF(s->as.for_gen.local_idxs[j]);
-        float_kill_block(c, &s->as.for_gen.body, out, changed);
-        break;
-    case STMT_LOCAL_FUNC: KILLF(s->as.local_func.local_idx); break;
-    case STMT_IF:
-        for (size_t a = 0; a < s->as.if_stmt.narms; a++)
-            float_kill_block(c, &s->as.if_stmt.arms[a].body, out, changed);
-        if (s->as.if_stmt.has_else) float_kill_block(c, &s->as.if_stmt.else_body, out, changed);
-        break;
-    case STMT_WHILE: float_kill_block(c, &s->as.while_stmt.body, out, changed); break;
-    case STMT_DO: float_kill_block(c, &s->as.do_stmt.body, out, changed); break;
-    case STMT_REPEAT: float_kill_block(c, &s->as.repeat.body, out, changed); break;
-    default: break;
-    }
-#undef KILLF
-}
-
-static void float_kill_block(CG *c, const Block *b, unsigned char *out, int *changed) {
-    for (size_t i = 0; i < b->count; i++) float_kill_stmt(c, b->items[i], out, changed);
 }
 
 /* Fill out[] with float-only slots. Run AFTER compute_int_slots (with the
@@ -2200,10 +2230,10 @@ static void compute_float_slots(CG *c, const Block *body, int n_locals, int n_pa
     int saved_n = c->cur_n_locals;
     c->cur_is_float = out;
     c->cur_n_locals = n_locals;
-    int changed = 1;
-    while (changed) {
-        changed = 0;
-        float_kill_block(c, body, out, &changed);
+    SlotPass p = {.c = c, .out = out, .changed = 1, .ty = NT_FLOAT};
+    while (p.changed) {
+        p.changed = 0;
+        walk_stmts(body, typed_kill_stmt, &p);
     }
     c->cur_is_float = saved;
     c->cur_n_locals = saved_n;
@@ -2320,62 +2350,6 @@ static int expr_involves_maybe(CG *c, const Expr *e) {
         return expr_has_opaque(c, e) &&
                (expr_numeric_evidence(c, e->as.binop.lhs) || expr_numeric_evidence(c, e->as.binop.rhs));
     return expr_has_opaque(c, e);
-}
-
-/* --- generic walk over every expression of a body (not nested functions) --- */
-typedef void (*ExprVisit)(const Expr *e, void *ctx);
-static void walk_block_exprs(const Block *b, ExprVisit fn, void *ctx);
-static void walk_stmt_exprs(const Stmt *s, ExprVisit fn, void *ctx) {
-    switch (s->kind) {
-    case STMT_LOCAL:
-        for (int i = 0; i < s->as.local.n_values; i++) fn(s->as.local.values[i], ctx);
-        break;
-    case STMT_ASSIGN:
-        for (int i = 0; i < s->as.assign.n_targets; i++)
-            if (s->as.assign.targets[i].kind == TGT_INDEX) {
-                fn(s->as.assign.targets[i].as.index.table, ctx);
-                fn(s->as.assign.targets[i].as.index.key, ctx);
-            }
-        for (int i = 0; i < s->as.assign.n_values; i++) fn(s->as.assign.values[i], ctx);
-        break;
-    case STMT_EXPR: fn(s->as.expr_stmt.expr, ctx); break;
-    case STMT_IF:
-        for (size_t a = 0; a < s->as.if_stmt.narms; a++) {
-            fn(s->as.if_stmt.arms[a].cond, ctx);
-            walk_block_exprs(&s->as.if_stmt.arms[a].body, fn, ctx);
-        }
-        if (s->as.if_stmt.has_else) walk_block_exprs(&s->as.if_stmt.else_body, fn, ctx);
-        break;
-    case STMT_WHILE:
-        fn(s->as.while_stmt.cond, ctx);
-        walk_block_exprs(&s->as.while_stmt.body, fn, ctx);
-        break;
-    case STMT_DO: walk_block_exprs(&s->as.do_stmt.body, fn, ctx); break;
-    case STMT_RETURN:
-        for (int i = 0; i < s->as.return_stmt.n_values; i++) fn(s->as.return_stmt.values[i], ctx);
-        break;
-    case STMT_FOR_NUM:
-        fn(s->as.for_num.start, ctx);
-        fn(s->as.for_num.stop, ctx);
-        if (s->as.for_num.step) fn(s->as.for_num.step, ctx);
-        walk_block_exprs(&s->as.for_num.body, fn, ctx);
-        break;
-    case STMT_FOR_GEN:
-        for (int i = 0; i < s->as.for_gen.n_exprs; i++) fn(s->as.for_gen.exprs[i], ctx);
-        walk_block_exprs(&s->as.for_gen.body, fn, ctx);
-        break;
-    case STMT_REPEAT:
-        walk_block_exprs(&s->as.repeat.body, fn, ctx);
-        fn(s->as.repeat.cond, ctx);
-        break;
-    case STMT_GLOBAL:
-        for (int i = 0; i < s->as.global_decl.n_values; i++) fn(s->as.global_decl.values[i], ctx);
-        break;
-    default: break;
-    }
-}
-static void walk_block_exprs(const Block *b, ExprVisit fn, void *ctx) {
-    for (size_t i = 0; i < b->count; i++) walk_stmt_exprs(b->items[i], fn, ctx);
 }
 
 /* --- numeric-use analysis: which slots are read inside an arithmetic,
@@ -2543,9 +2517,8 @@ static void temp_need_visit(const Expr *e, void *ctx) {
 }
 /* emit_assign_multi_cells holds a table and a key cell per index target and a
  * value cell per value while it evaluates the next sub-expression above them. */
-static int multi_assign_temp_need(CG *c, const Block *b);
 static int multi_assign_stmt_need(CG *c, const Stmt *s) {
-    int m = 0, v;
+    int v;
     switch (s->kind) {
     case STMT_ASSIGN: {
         int nt = s->as.assign.n_targets, nv = s->as.assign.n_values;
@@ -2562,30 +2535,18 @@ static int multi_assign_stmt_need(CG *c, const Stmt *s) {
             if ((v = 1 + expr_temp_need(c, s->as.assign.values[i])) > sub) sub = v;
         return live + sub;
     }
-    case STMT_IF:
-        for (size_t a = 0; a < s->as.if_stmt.narms; a++)
-            if ((v = multi_assign_temp_need(c, &s->as.if_stmt.arms[a].body)) > m) m = v;
-        if (s->as.if_stmt.has_else && (v = multi_assign_temp_need(c, &s->as.if_stmt.else_body)) > m) m = v;
-        return m;
-    case STMT_WHILE: return multi_assign_temp_need(c, &s->as.while_stmt.body);
-    case STMT_DO: return multi_assign_temp_need(c, &s->as.do_stmt.body);
-    case STMT_REPEAT: return multi_assign_temp_need(c, &s->as.repeat.body);
-    case STMT_FOR_NUM: return multi_assign_temp_need(c, &s->as.for_num.body);
-    case STMT_FOR_GEN: return multi_assign_temp_need(c, &s->as.for_gen.body);
     default: return 0;
     }
 }
-static int multi_assign_temp_need(CG *c, const Block *b) {
-    int m = 0, v;
-    for (size_t i = 0; i < b->count; i++)
-        if ((v = multi_assign_stmt_need(c, b->items[i])) > m) m = v;
-    return m;
+static void multi_assign_need_visit(const Stmt *s, void *ctx) {
+    TempNeed *t = ctx;
+    int v = multi_assign_stmt_need(t->c, s);
+    if (v > t->m) t->m = v;
 }
 static int block_temp_need(CG *c, const Block *b) {
     TempNeed t = {.c = c, .m = 0};
     walk_block_exprs(b, temp_need_visit, &t);
-    int m = multi_assign_temp_need(c, b);
-    if (m > t.m) t.m = m;
+    walk_stmts(b, multi_assign_need_visit, &t);
     return t.m + 2; /* + the table and value cells of an unboxed store */
 }
 
@@ -2601,16 +2562,9 @@ static int key_store_ok(const CG *c, int slot, const Expr *v) {
 
 /* --- kill rules: a candidate survives only if every store to it is a single
  * numeric-plausible value on a path emit_maybe_store handles. --- */
-static void maybe_kill_block(CG *c, const Block *b, unsigned char *out, int *changed);
-static void maybe_kill_stmt(CG *c, const Stmt *s, unsigned char *out, int *changed) {
-#define KILLM(slot)                                       \
-    do {                                                  \
-        int _s = (slot);                                  \
-        if (_s >= 0 && _s < c->cur_n_locals && out[_s]) { \
-            out[_s] = 0;                                  \
-            *changed = 1;                                 \
-        }                                                 \
-    } while (0)
+static void maybe_kill_stmt(const Stmt *s, void *ctx) {
+    SlotPass *p = ctx;
+    CG *c = p->c;
     switch (s->kind) {
     case STMT_LOCAL: {
         int nn = s->as.local.n_names, nv = s->as.local.n_values;
@@ -2619,7 +2573,7 @@ static void maybe_kill_stmt(CG *c, const Stmt *s, unsigned char *out, int *chang
         for (int j = 0; j < nn; j++) {
             int slot = s->as.local.local_idxs[j];
             if (s->as.local.attribs && s->as.local.attribs[j] == 2) {
-                KILLM(slot);
+                slot_kill(p, slot);
                 continue;
             }
             /* A leading value, or a trailing call whose FIRST value lands on
@@ -2628,7 +2582,7 @@ static void maybe_kill_stmt(CG *c, const Stmt *s, unsigned char *out, int *chang
             if (single && key_store_ok(c, slot, s->as.local.values[j]) &&
                 expr_numeric_plausible(s->as.local.values[j]))
                 continue;
-            KILLM(slot);
+            slot_kill(p, slot);
         }
         break;
     }
@@ -2640,33 +2594,17 @@ static void maybe_kill_stmt(CG *c, const Stmt *s, unsigned char *out, int *chang
             if (nt == 1 && nv == 1 && key_store_ok(c, t->as.var.idx, s->as.assign.values[0]) &&
                 expr_numeric_plausible(s->as.assign.values[0]))
                 continue;
-            KILLM(t->as.var.idx);
+            slot_kill(p, t->as.var.idx);
         }
         break;
     }
-    case STMT_FOR_NUM:
-        KILLM(s->as.for_num.local_idx);
-        maybe_kill_block(c, &s->as.for_num.body, out, changed);
-        break;
+    case STMT_FOR_NUM: slot_kill(p, s->as.for_num.local_idx); break;
     case STMT_FOR_GEN:
-        for (int j = 0; j < s->as.for_gen.n_names; j++) KILLM(s->as.for_gen.local_idxs[j]);
-        maybe_kill_block(c, &s->as.for_gen.body, out, changed);
+        for (int j = 0; j < s->as.for_gen.n_names; j++) slot_kill(p, s->as.for_gen.local_idxs[j]);
         break;
-    case STMT_LOCAL_FUNC: KILLM(s->as.local_func.local_idx); break;
-    case STMT_IF:
-        for (size_t a = 0; a < s->as.if_stmt.narms; a++)
-            maybe_kill_block(c, &s->as.if_stmt.arms[a].body, out, changed);
-        if (s->as.if_stmt.has_else) maybe_kill_block(c, &s->as.if_stmt.else_body, out, changed);
-        break;
-    case STMT_WHILE: maybe_kill_block(c, &s->as.while_stmt.body, out, changed); break;
-    case STMT_DO: maybe_kill_block(c, &s->as.do_stmt.body, out, changed); break;
-    case STMT_REPEAT: maybe_kill_block(c, &s->as.repeat.body, out, changed); break;
+    case STMT_LOCAL_FUNC: slot_kill(p, s->as.local_func.local_idx); break;
     default: break;
     }
-#undef KILLM
-}
-static void maybe_kill_block(CG *c, const Block *b, unsigned char *out, int *changed) {
-    for (size_t i = 0; i < b->count; i++) maybe_kill_stmt(c, b->items[i], out, changed);
 }
 
 /* Fill out[] with the maybe-typed slots of one body. Run AFTER the int and
@@ -2691,10 +2629,10 @@ static int compute_maybe_slots(CG *c, const Block *body, int n_locals, int n_par
     int saved_n = c->cur_n_locals;
     c->cur_n_locals = n_locals;
     c->maybe_key_only = u.key;
-    int changed = 1;
-    while (changed) {
-        changed = 0;
-        maybe_kill_block(c, body, out, &changed);
+    SlotPass p = {.c = c, .out = out, .changed = 1};
+    while (p.changed) {
+        p.changed = 0;
+        walk_stmts(body, maybe_kill_stmt, &p);
     }
     c->maybe_key_only = NULL;
     free(u.key);
@@ -2857,36 +2795,27 @@ static MathBuiltin math_index_kind(CG *c, const Expr *e) {
 
 /* The initializer of the `local` statement declaring `slot` in `b`, if it
  * is a single-valued position; NULL otherwise. */
-static const Expr *find_local_init_block(const Block *b, int slot);
-static const Expr *find_local_init_stmt(const Stmt *s, int slot) {
-    const Expr *r = NULL;
-    switch (s->kind) {
-    case STMT_LOCAL: {
-        int nn = s->as.local.n_names, nv = s->as.local.n_values;
-        int last_call = nv > 0 && is_multival_tail(s->as.local.values[nv - 1]);
-        int n_lead = last_call ? nv - 1 : nv;
-        for (int j = 0; j < nn; j++)
-            if (s->as.local.local_idxs[j] == slot) return j < n_lead ? s->as.local.values[j] : NULL;
-        return NULL;
-    }
-    case STMT_IF:
-        for (size_t a = 0; a < s->as.if_stmt.narms && !r; a++) r = find_local_init_block(&s->as.if_stmt.arms[a].body, slot);
-        if (!r && s->as.if_stmt.has_else) r = find_local_init_block(&s->as.if_stmt.else_body, slot);
-        return r;
-    case STMT_WHILE: return find_local_init_block(&s->as.while_stmt.body, slot);
-    case STMT_DO: return find_local_init_block(&s->as.do_stmt.body, slot);
-    case STMT_REPEAT: return find_local_init_block(&s->as.repeat.body, slot);
-    case STMT_FOR_NUM: return find_local_init_block(&s->as.for_num.body, slot);
-    case STMT_FOR_GEN: return find_local_init_block(&s->as.for_gen.body, slot);
-    default: return NULL;
-    }
+typedef struct {
+    int slot, found;
+    const Expr *init;
+} LocalInit;
+static void find_local_init_visit(const Stmt *s, void *ctx) {
+    LocalInit *li = ctx;
+    if (li->found || s->kind != STMT_LOCAL) return;
+    int nn = s->as.local.n_names, nv = s->as.local.n_values;
+    int last_call = nv > 0 && is_multival_tail(s->as.local.values[nv - 1]);
+    int n_lead = last_call ? nv - 1 : nv;
+    for (int j = 0; j < nn; j++)
+        if (s->as.local.local_idxs[j] == li->slot) {
+            li->found = 1;
+            li->init = j < n_lead ? s->as.local.values[j] : NULL;
+            return;
+        }
 }
 static const Expr *find_local_init_block(const Block *b, int slot) {
-    for (size_t i = 0; i < b->count; i++) {
-        const Expr *r = find_local_init_stmt(b->items[i], slot);
-        if (r) return r;
-    }
-    return NULL;
+    LocalInit li = {.slot = slot};
+    walk_stmts(b, find_local_init_visit, &li);
+    return li.init;
 }
 
 static MathBuiltin callee_math_kind(CG *c, const Expr *callee) {
@@ -3191,48 +3120,19 @@ static void emit_maybe_cmp_block(CG *c, const Expr *e, int depth) {
     c->mt_depth = k;
 }
 
-/* Record which local slots are statically bound to a known function (lever 3). */
-static void func_slot_walk(const Block *b, const LuaFunc **out,
-                           unsigned char *reassigned, int n);
-static void func_slot_walk_stmt(const Stmt *s, const LuaFunc **out,
-                                unsigned char *reassigned, int n) {
-    switch (s->kind) {
-    case STMT_LOCAL_FUNC: {
-        int sl = s->as.local_func.local_idx;
-        if (sl >= 0 && sl < n) out[sl] = s->as.local_func.func;
-        break;
+/* Mark the local slots an assignment statement stores to. */
+typedef struct {
+    unsigned char *reassigned;
+    int n;
+} Reassigned;
+static void mark_reassigned_visit(const Stmt *s, void *ctx) {
+    Reassigned *r = ctx;
+    if (s->kind != STMT_ASSIGN) return;
+    for (int j = 0; j < s->as.assign.n_targets; j++) {
+        const AssignTarget *t = &s->as.assign.targets[j];
+        if (t->kind == TGT_VAR && t->as.var.kind == VAR_LOCAL && t->as.var.idx >= 0 && t->as.var.idx < r->n)
+            r->reassigned[t->as.var.idx] = 1;
     }
-    case STMT_LOCAL:
-        if (s->as.local.n_values == s->as.local.n_names)
-            for (int j = 0; j < s->as.local.n_names; j++)
-                if (s->as.local.values[j]->kind == EXPR_FUNCTION) {
-                    int sl = s->as.local.local_idxs[j];
-                    if (sl >= 0 && sl < n) out[sl] = s->as.local.values[j]->as.func_expr.func;
-                }
-        break;
-    case STMT_ASSIGN:
-        for (int j = 0; j < s->as.assign.n_targets; j++) {
-            AssignTarget *t = &s->as.assign.targets[j];
-            if (t->kind == TGT_VAR && t->as.var.kind == VAR_LOCAL && t->as.var.idx >= 0 && t->as.var.idx < n)
-                reassigned[t->as.var.idx] = 1;
-        }
-        break;
-    case STMT_IF:
-        for (size_t a = 0; a < s->as.if_stmt.narms; a++)
-            func_slot_walk(&s->as.if_stmt.arms[a].body, out, reassigned, n);
-        if (s->as.if_stmt.has_else) func_slot_walk(&s->as.if_stmt.else_body, out, reassigned, n);
-        break;
-    case STMT_WHILE: func_slot_walk(&s->as.while_stmt.body, out, reassigned, n); break;
-    case STMT_DO: func_slot_walk(&s->as.do_stmt.body, out, reassigned, n); break;
-    case STMT_REPEAT: func_slot_walk(&s->as.repeat.body, out, reassigned, n); break;
-    case STMT_FOR_NUM: func_slot_walk(&s->as.for_num.body, out, reassigned, n); break;
-    case STMT_FOR_GEN: func_slot_walk(&s->as.for_gen.body, out, reassigned, n); break;
-    default: break;
-    }
-}
-static void func_slot_walk(const Block *b, const LuaFunc **out,
-                           unsigned char *reassigned, int n) {
-    for (size_t i = 0; i < b->count; i++) func_slot_walk_stmt(b->items[i], out, reassigned, n);
 }
 
 /* ----- global function-binding maps (direct-call resolution) -----
@@ -3253,8 +3153,8 @@ typedef struct {
     int n_locals, n_upvalues;
 } BindAccum;
 
-static void bind_walk_block(const Block *b, BindAccum *a);
-static void bind_walk_stmt(const Stmt *s, BindAccum *a) {
+static void bind_visit(const Stmt *s, void *ctx) {
+    BindAccum *a = ctx;
     switch (s->kind) {
     case STMT_LOCAL_FUNC: {
         int sl = s->as.local_func.local_idx;
@@ -3280,20 +3180,8 @@ static void bind_walk_stmt(const Stmt *s, BindAccum *a) {
                 a->reass_upval[t->as.var.idx] = 1;
         }
         break;
-    case STMT_IF:
-        for (size_t k = 0; k < s->as.if_stmt.narms; k++) bind_walk_block(&s->as.if_stmt.arms[k].body, a);
-        if (s->as.if_stmt.has_else) bind_walk_block(&s->as.if_stmt.else_body, a);
-        break;
-    case STMT_WHILE: bind_walk_block(&s->as.while_stmt.body, a); break;
-    case STMT_DO: bind_walk_block(&s->as.do_stmt.body, a); break;
-    case STMT_REPEAT: bind_walk_block(&s->as.repeat.body, a); break;
-    case STMT_FOR_NUM: bind_walk_block(&s->as.for_num.body, a); break;
-    case STMT_FOR_GEN: bind_walk_block(&s->as.for_gen.body, a); break;
     default: break; /* nested function literals are walked on their own row */
     }
-}
-static void bind_walk_block(const Block *b, BindAccum *a) {
-    for (size_t i = 0; i < b->count; i++) bind_walk_stmt(b->items[i], a);
 }
 
 /* The slot_func map (and its length) for a given enclosing scope; func_idx == -1
@@ -3344,7 +3232,7 @@ static void compute_func_bindings(CG *c, const ParseResult *pr) {
     {
         unsigned char *rl = calloc(pr->main_n_locals ? pr->main_n_locals : 1, 1);
         BindAccum a = {c->main_slot_func, rl, NULL, pr->main_n_locals, 0};
-        bind_walk_block(&pr->main_body, &a);
+        walk_stmts(&pr->main_body, bind_visit, &a);
         for (int s = 0; s < pr->main_n_locals; s++)
             if (rl[s]) c->main_slot_func[s] = NULL;
         free(rl);
@@ -3356,7 +3244,7 @@ static void compute_func_bindings(CG *c, const ParseResult *pr) {
         reass_upval[f] = calloc(F->n_upvalues ? F->n_upvalues : 1, 1);
         unsigned char *rl = calloc(F->n_locals ? F->n_locals : 1, 1);
         BindAccum a = {c->bind_slot[f], rl, reass_upval[f], F->n_locals, F->n_upvalues};
-        bind_walk_block(&F->body, &a);
+        walk_stmts(&F->body, bind_visit, &a);
         for (int s = 0; s < F->n_locals; s++)
             if (rl[s]) c->bind_slot[f][s] = NULL;
         free(rl);
@@ -3449,29 +3337,15 @@ static int block_always_returns(const Block *b) {
 /* Meet every return's value type into *acc (NT_UNSET is the identity). A return
  * that isn't a single numeric value, or that disagrees with another (int vs
  * float), folds *acc to NT_ANY. Skips nested functions. */
-static void ret_scan_block(CG *c, const Block *b, NumTy *acc);
-static void ret_scan_stmt(CG *c, const Stmt *s, NumTy *acc) {
-    switch (s->kind) {
-    case STMT_RETURN:
-        *acc = num_meet(*acc, s->as.return_stmt.n_values == 1
-                                  ? expr_num_ty(c, s->as.return_stmt.values[0])
-                                  : NT_ANY);
-        return;
-    case STMT_IF:
-        for (size_t a = 0; a < s->as.if_stmt.narms; a++)
-            ret_scan_block(c, &s->as.if_stmt.arms[a].body, acc);
-        if (s->as.if_stmt.has_else) ret_scan_block(c, &s->as.if_stmt.else_body, acc);
-        return;
-    case STMT_WHILE: ret_scan_block(c, &s->as.while_stmt.body, acc); return;
-    case STMT_DO: ret_scan_block(c, &s->as.do_stmt.body, acc); return;
-    case STMT_REPEAT: ret_scan_block(c, &s->as.repeat.body, acc); return;
-    case STMT_FOR_NUM: ret_scan_block(c, &s->as.for_num.body, acc); return;
-    case STMT_FOR_GEN: ret_scan_block(c, &s->as.for_gen.body, acc); return;
-    default: return;
-    }
-}
-static void ret_scan_block(CG *c, const Block *b, NumTy *acc) {
-    for (size_t i = 0; i < b->count; i++) ret_scan_stmt(c, b->items[i], acc);
+typedef struct {
+    CG *c;
+    NumTy acc;
+} RetScan;
+static void ret_scan_visit(const Stmt *s, void *ctx) {
+    RetScan *r = ctx;
+    if (s->kind != STMT_RETURN) return;
+    r->acc = num_meet(r->acc, s->as.return_stmt.n_values == 1 ? expr_num_ty(r->c, s->as.return_stmt.values[0])
+                                                              : NT_ANY);
 }
 
 /* Single-value return type of fn in the current context, or NT_ANY when the
@@ -3479,14 +3353,13 @@ static void ret_scan_block(CG *c, const Block *b, NumTy *acc) {
  * numeric type. */
 static NumTy compute_ret_ty(CG *c, const LuaFunc *fn) {
     if (!block_always_returns(&fn->body)) return NT_ANY;
-    NumTy acc = NT_UNSET;
-    ret_scan_block(c, &fn->body, &acc);
-    return acc == NT_UNSET ? NT_ANY : acc; /* UNSET only if no returns at all */
+    RetScan r = {c, NT_UNSET};
+    walk_stmts(&fn->body, ret_scan_visit, &r);
+    return r.acc == NT_UNSET ? NT_ANY : r.acc; /* UNSET only if no returns at all */
 }
 
 /* Walk a body in the current context and, at each direct-call site, narrow the
  * callee's parameter types by meeting them with the argument types here. */
-static void infer_sites_block(CG *c, const Block *b, int *changed);
 static void infer_sites_expr(CG *c, const Expr *e, int *changed) {
     if (!e) return;
     switch (e->kind) {
@@ -3532,56 +3405,16 @@ static void infer_sites_expr(CG *c, const Expr *e, int *changed) {
     default: return; /* EXPR_FUNCTION bodies are walked on their own row */
     }
 }
-static void infer_sites_stmt(CG *c, const Stmt *s, int *changed) {
-    switch (s->kind) {
-    case STMT_LOCAL:
-        for (int i = 0; i < s->as.local.n_values; i++) infer_sites_expr(c, s->as.local.values[i], changed);
-        break;
-    case STMT_ASSIGN:
-        for (int i = 0; i < s->as.assign.n_targets; i++) {
-            AssignTarget *t = &s->as.assign.targets[i];
-            if (t->kind == TGT_INDEX) {
-                infer_sites_expr(c, t->as.index.table, changed);
-                infer_sites_expr(c, t->as.index.key, changed);
-            }
-        }
-        for (int i = 0; i < s->as.assign.n_values; i++) infer_sites_expr(c, s->as.assign.values[i], changed);
-        break;
-    case STMT_EXPR: infer_sites_expr(c, s->as.expr_stmt.expr, changed); break;
-    case STMT_RETURN:
-        for (int i = 0; i < s->as.return_stmt.n_values; i++) infer_sites_expr(c, s->as.return_stmt.values[i], changed);
-        break;
-    case STMT_IF:
-        for (size_t a = 0; a < s->as.if_stmt.narms; a++) {
-            infer_sites_expr(c, s->as.if_stmt.arms[a].cond, changed);
-            infer_sites_block(c, &s->as.if_stmt.arms[a].body, changed);
-        }
-        if (s->as.if_stmt.has_else) infer_sites_block(c, &s->as.if_stmt.else_body, changed);
-        break;
-    case STMT_WHILE:
-        infer_sites_expr(c, s->as.while_stmt.cond, changed);
-        infer_sites_block(c, &s->as.while_stmt.body, changed);
-        break;
-    case STMT_DO: infer_sites_block(c, &s->as.do_stmt.body, changed); break;
-    case STMT_REPEAT:
-        infer_sites_block(c, &s->as.repeat.body, changed);
-        infer_sites_expr(c, s->as.repeat.cond, changed);
-        break;
-    case STMT_FOR_NUM:
-        infer_sites_expr(c, s->as.for_num.start, changed);
-        infer_sites_expr(c, s->as.for_num.stop, changed);
-        if (s->as.for_num.step) infer_sites_expr(c, s->as.for_num.step, changed);
-        infer_sites_block(c, &s->as.for_num.body, changed);
-        break;
-    case STMT_FOR_GEN:
-        for (int i = 0; i < s->as.for_gen.n_exprs; i++) infer_sites_expr(c, s->as.for_gen.exprs[i], changed);
-        infer_sites_block(c, &s->as.for_gen.body, changed);
-        break;
-    default: break; /* STMT_LOCAL_FUNC body walked on its own row */
-    }
+typedef struct {
+    CG *c;
+    int *changed;
+} SiteInfer;
+static void infer_sites_visit(const Expr *e, void *ctx) {
+    SiteInfer *si = ctx;
+    infer_sites_expr(si->c, e, si->changed);
 }
 static void infer_sites_block(CG *c, const Block *b, int *changed) {
-    for (size_t i = 0; i < b->count; i++) infer_sites_stmt(c, b->items[i], changed);
+    walk_block_exprs(b, infer_sites_visit, &(SiteInfer){c, changed});
 }
 
 /* One fixpoint step for a single function/main body: rebuild its analysis
@@ -3644,14 +3477,12 @@ static void infer_signatures(CG *c, const ParseResult *pr) {
          * and never captured; others are pinned to NT_ANY. */
         int nl = fn->n_locals;
         unsigned char *reassigned = calloc(nl ? nl : 1, 1);
-        const LuaFunc **scratch = calloc(nl ? nl : 1, sizeof *scratch);
-        func_slot_walk(&fn->body, scratch, reassigned, nl);
+        walk_stmts(&fn->body, mark_reassigned_visit, &(Reassigned){reassigned, nl});
         for (int p = 0; p < fn->n_params; p++) {
             int pinned = reassigned[p] || (fn->captured && fn->captured[p]);
             sg->param_ty[p] = pinned ? NT_ANY : NT_UNSET; /* narrowed by sites */
         }
         free(reassigned);
-        free(scratch);
     }
 
     int changed = 1;
@@ -4999,73 +4830,50 @@ static void emit_block(CG *c, const Block *b, int depth) {
  * dispatch id is uniquely the id of its first label). On overflow this raises
  * a codegen error rather than dropping ids — a dropped id would leave its
  * $next_<id> local undeclared, producing invalid WAT. */
-static void collect_dispatch_ids(CG *c, const Block *b, int *out, int *n, int cap);
-static void collect_dispatch_ids_stmt(CG *c, const Stmt *s, int *out, int *n, int cap) {
-    switch (s->kind) {
-    case STMT_DO: collect_dispatch_ids(c, &s->as.do_stmt.body, out, n, cap); break;
-    case STMT_WHILE: collect_dispatch_ids(c, &s->as.while_stmt.body, out, n, cap); break;
-    case STMT_REPEAT: collect_dispatch_ids(c, &s->as.repeat.body, out, n, cap); break;
-    case STMT_FOR_NUM: collect_dispatch_ids(c, &s->as.for_num.body, out, n, cap); break;
-    case STMT_FOR_GEN: collect_dispatch_ids(c, &s->as.for_gen.body, out, n, cap); break;
-    case STMT_IF:
-        for (size_t i = 0; i < s->as.if_stmt.narms; i++)
-            collect_dispatch_ids(c, &s->as.if_stmt.arms[i].body, out, n, cap);
-        if (s->as.if_stmt.has_else)
-            collect_dispatch_ids(c, &s->as.if_stmt.else_body, out, n, cap);
-        break;
-    default: break;
-    }
-}
-static void collect_dispatch_ids(CG *c, const Block *b, int *out, int *n, int cap) {
+typedef struct {
+    CG *c;
+    int *out, *n, cap;
+} DispatchIds;
+static void collect_dispatch_ids_in(const Block *b, void *ctx) {
+    DispatchIds *d = ctx;
     /* Find the first label in this block (if any) — its id is the dispatch id. */
     for (size_t i = 0; i < b->count; i++) {
         const Stmt *st = b->items[i];
         if (st->kind == STMT_LABEL) {
-            if (*n >= cap) {
-                cg_error(c, "too many label-bearing blocks in one function");
+            if (*d->n >= d->cap) {
+                cg_error(d->c, "too many label-bearing blocks in one function");
                 return;
             }
-            out[(*n)++] = st->as.label.block_dispatch_id;
+            d->out[(*d->n)++] = st->as.label.block_dispatch_id;
             break;
         }
     }
-    for (size_t i = 0; i < b->count; i++) {
-        collect_dispatch_ids_stmt(c, b->items[i], out, n, cap);
-        if (!c->ok) return;
-    }
+    for (size_t i = 0; i < b->count && d->c->ok; i++) for_each_nested_block(b->items[i], collect_dispatch_ids_in, d);
+}
+static void collect_dispatch_ids(CG *c, const Block *b, int *out, int *n, int cap) {
+    collect_dispatch_ids_in(b, &(DispatchIds){c, out, n, cap});
 }
 
 /* Deepest nesting of numeric/generic for-loops in a block. Each for-loop
  * adds one level; other compound statements pass their inner depth through
  * unchanged (only for-loops own $for_* scratch). The result sizes the
  * per-level scratch declarations in the function prologue. */
+static void max_for_nesting_in(const Block *b, void *ctx);
 static int max_for_nesting(const Block *b) {
     int best = 0;
     if (!b) return 0;
     for (size_t i = 0; i < b->count; i++) {
         const Stmt *s = b->items[i];
         int d = 0;
-        switch (s->kind) {
-        case STMT_FOR_NUM: d = 1 + max_for_nesting(&s->as.for_num.body); break;
-        case STMT_FOR_GEN: d = 1 + max_for_nesting(&s->as.for_gen.body); break;
-        case STMT_WHILE: d = max_for_nesting(&s->as.while_stmt.body); break;
-        case STMT_REPEAT: d = max_for_nesting(&s->as.repeat.body); break;
-        case STMT_DO: d = max_for_nesting(&s->as.do_stmt.body); break;
-        case STMT_IF:
-            for (size_t a = 0; a < s->as.if_stmt.narms; a++) {
-                int da = max_for_nesting(&s->as.if_stmt.arms[a].body);
-                if (da > d) d = da;
-            }
-            if (s->as.if_stmt.has_else) {
-                int de = max_for_nesting(&s->as.if_stmt.else_body);
-                if (de > d) d = de;
-            }
-            break;
-        default: break;
-        }
+        for_each_nested_block(s, max_for_nesting_in, &d);
+        if (s->kind == STMT_FOR_NUM || s->kind == STMT_FOR_GEN) d++;
         if (d > best) best = d;
     }
     return best;
+}
+static void max_for_nesting_in(const Block *b, void *ctx) {
+    int *d = ctx, v = max_for_nesting(b);
+    if (v > *d) *d = v;
 }
 
 /* Emit the per-level $for_* scratch locals for a function body. */
