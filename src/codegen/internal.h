@@ -241,7 +241,14 @@ typedef struct {
 typedef struct {
     char t[48], i[48], f[48], b[48];     /* read expressions */
     char st[16], si[16], sf[16], sb[16]; /* write targets ("" for an immediate) */
+    int static_tag;                      /* an immediate's tag; 0 when known only at run time */
 } MCell;
+
+/* A cell's tag: which part holds the value. The prelude's $unbox_num and
+ * $box_num use the same encoding. */
+enum { TAG_BOXED = 0, /* not a number: the anyref */
+       TAG_INT = 1,
+       TAG_FLOAT = 2 };
 
 /* Longest constant string that is hoisted into a module global; longer
  * literals are allocated from $str_data at each evaluation. Bounded so an

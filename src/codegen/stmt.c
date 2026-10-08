@@ -209,7 +209,7 @@ static void emit_store_value_cell(CG *c, const Expr *v, const MCell *vc, int dep
         emit_linef(c, depth, "(local.set %s\n", vc->sf);
         emit_float_expr(c, v, depth + 1);
         emit_line(c, depth, ")\n");
-        emit_set_tag(c, vc, 2, depth);
+        emit_set_tag(c, vc, TAG_FLOAT, depth);
     } else {
         emit_maybe_lower(c, v, vc, depth);
     }

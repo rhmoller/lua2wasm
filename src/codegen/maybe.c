@@ -3,52 +3,47 @@
  * inline math builtins. */
 #include "internal.h"
 
-MCell mcell_slot(int s) {
-    MCell m;
-    snprintf(m.st, sizeof m.st, "$Lt%d", s);
-    snprintf(m.si, sizeof m.si, "$Li%d", s);
-    snprintf(m.sf, sizeof m.sf, "$Lf%d", s);
-    snprintf(m.sb, sizeof m.sb, "$L%d", s);
-    snprintf(m.t, sizeof m.t, "(local.get %s)", m.st);
-    snprintf(m.i, sizeof m.i, "(local.get %s)", m.si);
-    snprintf(m.f, sizeof m.f, "(local.get %s)", m.sf);
-    snprintf(m.b, sizeof m.b, "(local.get %s)", m.sb);
-    return m;
-}
-MCell mcell_tmp(int k) {
-    MCell m;
-    snprintf(m.st, sizeof m.st, "$mg%d", k);
-    snprintf(m.si, sizeof m.si, "$mi%d", k);
-    snprintf(m.sf, sizeof m.sf, "$mf%d", k);
-    snprintf(m.sb, sizeof m.sb, "$mt%d", k);
-    snprintf(m.t, sizeof m.t, "(local.get %s)", m.st);
-    snprintf(m.i, sizeof m.i, "(local.get %s)", m.si);
-    snprintf(m.f, sizeof m.f, "(local.get %s)", m.sf);
-    snprintf(m.b, sizeof m.b, "(local.get %s)", m.sb);
-    return m;
-}
-MCell mcell_imm_int(int64_t v) {
+/* A cell over four locals: <t><n> (the tag), <i><n>, <f><n> and <b><n>. */
+static MCell mcell_locals(const char *t, const char *i, const char *f, const char *b, int n) {
     MCell m = {0};
-    snprintf(m.t, sizeof m.t, "(i32.const 1)");
-    snprintf(m.i, sizeof m.i, "(i64.const %lld)", (long long)v);
+    snprintf(m.st, sizeof m.st, "%s%d", t, n);
+    snprintf(m.si, sizeof m.si, "%s%d", i, n);
+    snprintf(m.sf, sizeof m.sf, "%s%d", f, n);
+    snprintf(m.sb, sizeof m.sb, "%s%d", b, n);
+    snprintf(m.t, sizeof m.t, "(local.get %s)", m.st);
+    snprintf(m.i, sizeof m.i, "(local.get %s)", m.si);
+    snprintf(m.f, sizeof m.f, "(local.get %s)", m.sf);
+    snprintf(m.b, sizeof m.b, "(local.get %s)", m.sb);
+    return m;
+}
+/* Maybe slot s: $Lt<s> $Li<s> $Lf<s> $L<s>. */
+MCell mcell_slot(int s) { return mcell_locals("$Lt", "$Li", "$Lf", "$L", s); }
+/* Lowering temporary k: $mg<k> $mi<k> $mf<k> $mt<k>. */
+MCell mcell_tmp(int k) { return mcell_locals("$mg", "$mi", "$mf", "$mt", k); }
+
+/* An immediate of a fixed tag: constant parts, no write targets. */
+static MCell mcell_imm(int tag) {
+    MCell m = {.static_tag = tag};
+    snprintf(m.t, sizeof m.t, "(i32.const %d)", tag);
+    snprintf(m.i, sizeof m.i, "(i64.const 0)");
     snprintf(m.f, sizeof m.f, "(f64.const 0)");
     snprintf(m.b, sizeof m.b, "(ref.null any)");
     return m;
 }
-MCell mcell_imm_float(double v) {
-    MCell m = {0};
-    snprintf(m.t, sizeof m.t, "(i32.const 2)");
-    snprintf(m.i, sizeof m.i, "(i64.const 0)");
-    snprintf(m.f, sizeof m.f, "(f64.const %.17g)", v);
-    snprintf(m.b, sizeof m.b, "(ref.null any)");
+MCell mcell_imm_int(int64_t v) {
+    MCell m = mcell_imm(TAG_INT);
+    snprintf(m.i, sizeof m.i, "(i64.const %lld)", (long long)v);
     return m;
 }
+MCell mcell_imm_float(double v) {
+    MCell m = mcell_imm(TAG_FLOAT);
+    snprintf(m.f, sizeof m.f, "(f64.const %.17g)", v);
+    return m;
+}
+/* A provably int or float local, read in place. */
 MCell mcell_typed_local(int slot, int is_float) {
-    MCell m = {0};
-    snprintf(m.t, sizeof m.t, "(i32.const %d)", is_float ? 2 : 1);
-    snprintf(m.i, sizeof m.i, is_float ? "(i64.const 0)" : "(local.get $L%d)", slot);
-    snprintf(m.f, sizeof m.f, is_float ? "(local.get $L%d)" : "(f64.const 0)", slot);
-    snprintf(m.b, sizeof m.b, "(ref.null any)");
+    MCell m = mcell_imm(is_float ? TAG_FLOAT : TAG_INT);
+    snprintf(is_float ? m.f : m.i, sizeof m.i, "(local.get $L%d)", slot);
     return m;
 }
 
@@ -86,7 +81,7 @@ static void emit_maybe_generic2(CG *c, const char *helper, const MCell *a, const
     emit_maybe_cell_box(c, a, depth + 1);
     emit_maybe_cell_box(c, b, depth + 1);
     emit_line(c, depth, "))\n");
-    emit_set_tag(c, d, 0, depth);
+    emit_set_tag(c, d, TAG_BOXED, depth);
 }
 
 /* Evaluate the two operands of a lowered binop left to right into cells:
@@ -119,18 +114,18 @@ static void emit_maybe_arith(CG *c, BinOp op, const MCell *a, const MCell *b, co
     default: cg_error(c, "internal: emit_maybe_arith on a non-arithmetic op"); return;
     }
     emit_line(c, depth, "(if\n");
-    emit_both_tags(c, a, b, 1, depth + 1);
+    emit_both_tags(c, a, b, TAG_INT, depth + 1);
     emit_line(c, depth + 1, "(then\n");
     emit_indent(c, depth + 2);
     if (op == BIN_DIV) {
         wat_appendf(c->w, "(local.set %s (f64.div (f64.convert_i64_s %s) (f64.convert_i64_s %s)))\n", d->sf, a->i, b->i);
-        emit_set_tag(c, d, 2, depth + 2);
+        emit_set_tag(c, d, TAG_FLOAT, depth + 2);
     } else if (ifn) {
         wat_appendf(c->w, "(local.set %s (call %s %s %s))\n", d->si, ifn, a->i, b->i);
-        emit_set_tag(c, d, 1, depth + 2);
+        emit_set_tag(c, d, TAG_INT, depth + 2);
     } else {
         wat_appendf(c->w, "(local.set %s (%s %s %s))\n", d->si, iop, a->i, b->i);
-        emit_set_tag(c, d, 1, depth + 2);
+        emit_set_tag(c, d, TAG_INT, depth + 2);
     }
     emit_line(c, depth + 1, ")\n");
     emit_line(c, depth + 1, "(else\n");
@@ -141,7 +136,7 @@ static void emit_maybe_arith(CG *c, BinOp op, const MCell *a, const MCell *b, co
         emit_cell_f64(c, a, depth + 5);
         emit_cell_f64(c, b, depth + 5);
         emit_line(c, depth + 4, "))\n");
-        emit_set_tag(c, d, 2, depth + 4);
+        emit_set_tag(c, d, TAG_FLOAT, depth + 4);
         emit_line(c, depth + 3, ")\n");
         emit_line(c, depth + 3, "(else\n");
         emit_maybe_generic2(c, binop_helper(op), a, b, d, depth + 4);
@@ -155,17 +150,17 @@ static void emit_maybe_arith(CG *c, BinOp op, const MCell *a, const MCell *b, co
 static void emit_maybe_neg(CG *c, const MCell *a, const MCell *d, int depth) {
     emit_linef(c, depth, "(if (i32.eq %s (i32.const 1))\n", a->t);
     emit_linef(c, depth + 1, "(then (local.set %s (i64.sub (i64.const 0) %s))\n", d->si, a->i);
-    emit_set_tag(c, d, 1, depth + 2);
+    emit_set_tag(c, d, TAG_INT, depth + 2);
     emit_linef(c, depth + 1, ")\n");
     emit_linef(c, depth + 1, "(else (if (i32.eq %s (i32.const 2))\n", a->t);
     emit_linef(c, depth + 2, "(then (local.set %s (f64.neg %s))\n", d->sf, a->f);
-    emit_set_tag(c, d, 2, depth + 3);
+    emit_set_tag(c, d, TAG_FLOAT, depth + 3);
     emit_line(c, depth + 2, ")\n");
     emit_line(c, depth + 2, "(else\n");
     emit_linef(c, depth + 3, "(local.set %s (call $lua_neg\n", d->sb);
     emit_maybe_cell_box(c, a, depth + 4);
     emit_line(c, depth + 3, "))\n");
-    emit_set_tag(c, d, 0, depth + 3);
+    emit_set_tag(c, d, TAG_BOXED, depth + 3);
     emit_line(c, depth + 2, "))))\n");
 }
 
@@ -278,16 +273,16 @@ static void emit_maybe_math_call(CG *c, const Expr *e, MathBuiltin mk, const MCe
         emit_linef(c, depth + 2, "(local.set %s (f64.sqrt\n", d->sf);
         emit_cell_f64(c, &a, depth + 3);
         emit_line(c, depth + 2, "))\n");
-        emit_set_tag(c, d, 2, depth + 2);
+        emit_set_tag(c, d, TAG_FLOAT, depth + 2);
         break;
     case MB_ABS:
         emit_linef(c, depth + 2, "(if (i32.eq %s (i32.const 1))\n", a.t);
         emit_linef(c, depth + 3, "(then (local.set %s (select (i64.sub (i64.const 0) %s) %s (i64.lt_s %s (i64.const 0))))\n",
                    d->si, a.i, a.i, a.i);
-        emit_set_tag(c, d, 1, depth + 4);
+        emit_set_tag(c, d, TAG_INT, depth + 4);
         emit_line(c, depth + 3, ")\n");
         emit_linef(c, depth + 3, "(else (local.set %s (f64.abs %s))\n", d->sf, a.f);
-        emit_set_tag(c, d, 2, depth + 4);
+        emit_set_tag(c, d, TAG_FLOAT, depth + 4);
         emit_line(c, depth + 3, "))\n");
         break;
     case MB_FLOOR:
@@ -296,16 +291,16 @@ static void emit_maybe_math_call(CG *c, const Expr *e, MathBuiltin mk, const MCe
          * integer when it fits (reference pushnumint), else stays float. */
         emit_linef(c, depth + 2, "(if (i32.eq %s (i32.const 1))\n", a.t);
         emit_linef(c, depth + 3, "(then (local.set %s %s)\n", d->si, a.i);
-        emit_set_tag(c, d, 1, depth + 4);
+        emit_set_tag(c, d, TAG_INT, depth + 4);
         emit_line(c, depth + 3, ")\n");
         emit_linef(c, depth + 3, "(else (local.set %s (%s %s))\n", d->sf, mk == MB_FLOOR ? "f64.floor" : "f64.ceil", a.f);
         emit_linef(c, depth + 4, "(if (i32.and (f64.ge %s (f64.const -9223372036854775808)) (f64.lt %s (f64.const 9223372036854775808)))\n",
                    d->f, d->f);
         emit_linef(c, depth + 5, "(then (local.set %s (i64.trunc_f64_s %s))\n", d->si, d->f);
-        emit_set_tag(c, d, 1, depth + 6);
+        emit_set_tag(c, d, TAG_INT, depth + 6);
         emit_line(c, depth + 5, ")\n");
         emit_line(c, depth + 5, "(else\n");
-        emit_set_tag(c, d, 2, depth + 6);
+        emit_set_tag(c, d, TAG_FLOAT, depth + 6);
         emit_line(c, depth + 5, "))\n");
         emit_line(c, depth + 3, "))\n");
         break;
@@ -334,14 +329,14 @@ void emit_maybe_lower(CG *c, const Expr *e, const MCell *d, int depth) {
         emit_linef(c, depth, "(local.set %s\n", d->si);
         emit_int_expr(c, e, depth + 1);
         emit_line(c, depth, ")\n");
-        emit_set_tag(c, d, 1, depth);
+        emit_set_tag(c, d, TAG_INT, depth);
         return;
     }
     if (expr_is_float(c, e)) {
         emit_linef(c, depth, "(local.set %s\n", d->sf);
         emit_float_expr(c, e, depth + 1);
         emit_line(c, depth, ")\n");
-        emit_set_tag(c, d, 2, depth);
+        emit_set_tag(c, d, TAG_FLOAT, depth);
         return;
     }
     switch (e->kind) {
@@ -450,14 +445,6 @@ void emit_maybe_boxed(CG *c, const Expr *e, int depth) {
     c->mt_depth = k;
 }
 
-/* Static tag of a cell whose type is fixed at compile time (an immediate or
- * a typed local): 1 int, 2 float; 0 when only known at run time. */
-static int mcell_static_tag(const MCell *m) {
-    if (strcmp(m->t, "(i32.const 1)") == 0) return 1;
-    if (strcmp(m->t, "(i32.const 2)") == 0) return 2;
-    return 0;
-}
-
 /* The mixed int/float compare of cells a (lhs) and b (rhs), one int and one
  * float, as an i32: an f64 compare when the int side is an exactly
  * representable literal, else the exact helper. */
@@ -484,22 +471,22 @@ void emit_maybe_cmp_block(CG *c, const Expr *e, int depth) {
     emit_line(c, depth, "(block (result i32)\n");
     int k = emit_maybe_operands(c, e->as.binop.lhs, e->as.binop.rhs, &a, &b, depth + 1);
     emit_line(c, depth + 1, "(if (result i32)\n");
-    emit_both_tags(c, &a, &b, 1, depth + 2);
+    emit_both_tags(c, &a, &b, TAG_INT, depth + 2);
     emit_linef(c, depth + 2, "(then (%s %s %s))\n", op->i64, a.i, b.i);
     emit_line(c, depth + 2, "(else (if (result i32)\n");
-    emit_both_tags(c, &a, &b, 2, depth + 3);
+    emit_both_tags(c, &a, &b, TAG_FLOAT, depth + 3);
     emit_linef(c, depth + 3, "(then (%s %s %s))\n", op->f64, a.f, b.f);
     /* Both numeric with different tags: int vs float. A side whose tag is
      * static decides which way round; otherwise test at run time. */
-    int at = mcell_static_tag(&a), bt = mcell_static_tag(&b);
+    int at = a.static_tag, bt = b.static_tag;
     int mixed = !(at && bt && at == bt);
     if (mixed) {
         emit_linef(c, depth + 3, "(else (if (result i32) (i32.and (i32.ne %s (i32.const 0)) (i32.ne %s (i32.const 0)))\n",
                    a.t, b.t);
         emit_line(c, depth + 4, "(then\n");
-        if (at == 1 || bt == 2) {
+        if (at == TAG_INT || bt == TAG_FLOAT) {
             emit_mixed_cell_cmp(c, op, e, &a, &b, 1, depth + 5);
-        } else if (at == 2 || bt == 1) {
+        } else if (at == TAG_FLOAT || bt == TAG_INT) {
             emit_mixed_cell_cmp(c, op, e, &a, &b, 0, depth + 5);
         } else {
             emit_linef(c, depth + 5, "(if (result i32) (i32.eq %s (i32.const 1))\n", a.t);
