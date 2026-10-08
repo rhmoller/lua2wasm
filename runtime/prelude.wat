@@ -2213,16 +2213,12 @@
   ;; written inside it just clears the slot (no key moves, so a traversal that
   ;; clears fields as it goes is undisturbed), and deleting the last element
   ;; trims the trailing holes ($arr_trim), so $arr[$alen-1] is never nil and
-  ;; `#t` stays O(1). Returns 1 if handled (in-range store, or append +
-  ;; migrate); returns 0 to tell the caller to use the hash part (a sparse or
-  ;; out-of-range key, or an append that found the part mostly holes and
-  ;; demoted it). Shared by the boxed ($tab_set) and raw-key ($tab_set_ik)
-  ;; entry points. An append absorbs any now-contiguous integer keys sitting
-  ;; in the hash; the $arr_max cap keeps a runaway sequence (e.g. `a[i]=i` to
-  ;; math.huge) from tripping the engine's array-size limit with an
-  ;; uncatchable trap — it overflows into the hash instead.
+  ;; `#t` stays O(1). A key just past the end appends ($arr_append). Returns 1
+  ;; if handled; 0 tells the caller to use the hash part (a sparse or
+  ;; out-of-range key, or an append the array part declined). Shared by the
+  ;; boxed ($tab_set) and raw-key ($tab_set_ik) entry points.
   (func $tab_set_arr (param $t (ref $LuaTable)) (param $val i64) (param $v anyref) (result i32)
-    (local $alen i32) (local $arr (ref null $TArr)) (local $hv anyref)
+    (local $alen i32)
     (local.set $alen (struct.get $LuaTable $alen (local.get $t)))
     (if (i32.and (i64.ge_s (local.get $val) (i64.const 1))
                  (i64.le_s (local.get $val) (i64.extend_i32_s (local.get $alen))))
@@ -2233,44 +2229,51 @@
                      (i64.eq (local.get $val) (i64.extend_i32_s (local.get $alen))))
           (then (call $arr_trim (local.get $t))))
         (return (i32.const 1))))
-    (if (i32.and (i32.and (i64.eq (local.get $val)
-                                  (i64.add (i64.extend_i32_s (local.get $alen)) (i64.const 1)))
-                          (i32.lt_s (local.get $alen) (global.get $arr_max)))
-                 (i32.eqz (ref.is_null (local.get $v))))
-      (then
-        ;; Growing a part that is mostly holes (a queue's dead front, a
-        ;; thinned-out fill) would keep their memory alive forever: move the
-        ;; live entries to the hash instead. The scan is paid for by the copy
-        ;; the growth would have made.
-        (local.set $arr (struct.get $LuaTable $arr (local.get $t)))
-        (if (i32.eqz (ref.is_null (local.get $arr)))
-          (then (if (i32.ge_s (local.get $alen) (array.len (ref.as_non_null (local.get $arr))))
-            (then (if (i32.gt_s (i32.shl (call $arr_holes (local.get $t)) (i32.const 1)) (local.get $alen))
-              (then (call $tab_demote (local.get $t))
-                    (return (i32.const 0))))))))
-        (call $arr_ensure (local.get $t) (i32.add (local.get $alen) (i32.const 1)))
-        (array.set $TArr (ref.as_non_null (struct.get $LuaTable $arr (local.get $t)))
-          (local.get $alen) (local.get $v))
-        (local.set $alen (i32.add (local.get $alen) (i32.const 1)))
-        (struct.set $LuaTable $alen (local.get $t) (local.get $alen))
-        (loop $mig
-          (local.set $hv (if (result anyref) (i32.lt_s (local.get $alen) (global.get $arr_max))
-            (then (call $tab_get_hash (local.get $t)
-              (call $make_int (i64.add (i64.extend_i32_s (local.get $alen)) (i64.const 1)))))
-            (else (ref.null any))))
-          (if (i32.eqz (ref.is_null (local.get $hv)))
-            (then
-              (call $arr_ensure (local.get $t) (i32.add (local.get $alen) (i32.const 1)))
-              (array.set $TArr (ref.as_non_null (struct.get $LuaTable $arr (local.get $t)))
-                (local.get $alen) (local.get $hv))
-              (call $tab_set_hash (local.get $t)
-                (call $make_int (i64.add (i64.extend_i32_s (local.get $alen)) (i64.const 1)))
-                (ref.null any))
-              (local.set $alen (i32.add (local.get $alen) (i32.const 1)))
-              (struct.set $LuaTable $alen (local.get $t) (local.get $alen))
-              (br $mig))))
-        (return (i32.const 1))))
+    (if (i64.eq (local.get $val) (i64.add (i64.extend_i32_s (local.get $alen)) (i64.const 1)))
+      (then (return_call $arr_append (local.get $t) (local.get $v))))
     (i32.const 0))
+
+  ;; `t[#array part + 1] = v`: append to the array part, then absorb any
+  ;; integer keys sitting in the hash that now continue the sequence. Returns
+  ;; 0 (the store belongs in the hash part) for nil, at the $arr_max cap —
+  ;; which keeps a runaway sequence (e.g. `a[i]=i` to math.huge) from tripping
+  ;; the engine's array-size limit with an uncatchable trap — and when growing
+  ;; a part that is mostly holes: that moves its live entries to the hash
+  ;; instead, so a queue's dead front can't pin memory forever (the scan is
+  ;; paid for by the copy the growth would have made).
+  (func $arr_append (param $t (ref $LuaTable)) (param $v anyref) (result i32)
+    (local $alen i32) (local $arr (ref null $TArr)) (local $hv anyref)
+    (if (ref.is_null (local.get $v)) (then (return (i32.const 0))))
+    (local.set $alen (struct.get $LuaTable $alen (local.get $t)))
+    (if (i32.ge_s (local.get $alen) (global.get $arr_max)) (then (return (i32.const 0))))
+    (local.set $arr (struct.get $LuaTable $arr (local.get $t)))
+    (if (i32.eqz (ref.is_null (local.get $arr)))
+      (then (if (i32.ge_s (local.get $alen) (array.len (ref.as_non_null (local.get $arr))))
+        (then (if (i32.gt_s (i32.shl (call $arr_holes (local.get $t)) (i32.const 1)) (local.get $alen))
+          (then (call $tab_demote (local.get $t))
+                (return (i32.const 0))))))))
+    (call $arr_ensure (local.get $t) (i32.add (local.get $alen) (i32.const 1)))
+    (array.set $TArr (ref.as_non_null (struct.get $LuaTable $arr (local.get $t)))
+      (local.get $alen) (local.get $v))
+    (local.set $alen (i32.add (local.get $alen) (i32.const 1)))
+    (struct.set $LuaTable $alen (local.get $t) (local.get $alen))
+    (loop $mig
+      (local.set $hv (if (result anyref) (i32.lt_s (local.get $alen) (global.get $arr_max))
+        (then (call $tab_get_hash (local.get $t)
+          (call $make_int (i64.add (i64.extend_i32_s (local.get $alen)) (i64.const 1)))))
+        (else (ref.null any))))
+      (if (i32.eqz (ref.is_null (local.get $hv)))
+        (then
+          (call $arr_ensure (local.get $t) (i32.add (local.get $alen) (i32.const 1)))
+          (array.set $TArr (ref.as_non_null (struct.get $LuaTable $arr (local.get $t)))
+            (local.get $alen) (local.get $hv))
+          (call $tab_set_hash (local.get $t)
+            (call $make_int (i64.add (i64.extend_i32_s (local.get $alen)) (i64.const 1)))
+            (ref.null any))
+          (local.set $alen (i32.add (local.get $alen) (i32.const 1)))
+          (struct.set $LuaTable $alen (local.get $t) (local.get $alen))
+          (br $mig))))
+    (i32.const 1))
 
   ;; Drop trailing holes from the array part after its last element was
   ;; cleared, restoring "$arr[$alen-1] is not nil" (so $alen is a border).
@@ -2463,13 +2466,9 @@
                 (array.get $FArr (ref.as_non_null (struct.get $LuaTable $farr (local.get $t))) (local.get $i))
                 (ref.null any)
                 (return)))
-            ;; a hole: absent, so __index applies
-            (if (ref.is_null (local.get $v))
-              (then (local.set $v (call $tab_get_miss (local.get $t) (call $make_int (local.get $k)) (i32.const 64)))))
-            (call $unbox_num (local.get $v)) (local.get $v) (return)))
-        (local.set $v (call $tab_get (local.get $t) (call $make_int (local.get $k))))
-        (call $unbox_num (local.get $v)) (local.get $v) (return)))
-    (local.set $v (call $lua_index (local.get $tv) (call $make_int (local.get $k)) (local.get $line)))
+            (if (i32.eqz (ref.is_null (local.get $v)))
+              (then (call $unbox_num (local.get $v)) (local.get $v) (return)))))))
+    (local.set $v (call $lua_index_ik_slow (local.get $tv) (local.get $k) (local.get $line)))
     (call $unbox_num (local.get $v)) (local.get $v))
   (func $lua_index_mk_cell (param $tv anyref) (param $tag i32) (param $ki i64) (param $kf f64)
                            (param $kb anyref) (param $line i32) (result i32 i64 f64 anyref)
@@ -2499,29 +2498,30 @@
       (local.get $v)))
 
   ;; `t[k]` read with an unboxed integer key — the codegen entry point for
-  ;; `t[<int-typed>]`. An in-range array hit returns directly with no key
-  ;; boxing and no $as_arr_key (a hole is an absent key, so it goes to the
-  ;; __index chain); a miss boxes the key and defers to $tab_get (hash +
-  ;; __index). A non-table receiver defers to $lua_index (string lib / error).
+  ;; `t[<int-typed>]`. A value present in the array part returns directly,
+  ;; with no key boxing; everything else takes $lua_index_ik_slow.
   (func $lua_index_ik (param $tv anyref) (param $k i64) (param $line i32) (result anyref)
     (local $t (ref $LuaTable)) (local $v anyref)
     (if (ref.test (ref $LuaTable) (local.get $tv))
       (then
         (local.set $t (ref.cast (ref $LuaTable) (local.get $tv)))
         (if (i32.and (i64.ge_s (local.get $k) (i64.const 1))
-                     (i64.le_s (local.get $k)
-                       (i64.extend_i32_s (struct.get $LuaTable $alen (local.get $t)))))
+                     (i64.le_s (local.get $k) (i64.extend_i32_s (struct.get $LuaTable $alen (local.get $t)))))
           (then
-            (local.set $v (call $tval (array.get $TArr
-              (ref.as_non_null (struct.get $LuaTable $arr (local.get $t)))
-              (i32.wrap_i64 (i64.sub (local.get $k) (i64.const 1))))
-              (struct.get $LuaTable $farr (local.get $t))
-              (i32.wrap_i64 (i64.sub (local.get $k) (i64.const 1)))))
-            (if (i32.eqz (ref.is_null (local.get $v))) (then (return (local.get $v))))
-            ;; a hole: absent, so __index applies
-            (return (call $tab_get_miss (local.get $t) (call $make_int (local.get $k)) (i32.const 64)))))
-        (return (call $tab_get (local.get $t) (call $make_int (local.get $k))))))
+            (local.set $v (call $tval
+              (array.get $TArr (ref.as_non_null (struct.get $LuaTable $arr (local.get $t)))
+                               (i32.wrap_i64 (i64.sub (local.get $k) (i64.const 1))))
+              (struct.get $LuaTable $farr (local.get $t)) (i32.wrap_i64 (i64.sub (local.get $k) (i64.const 1)))))
+            (if (i32.eqz (ref.is_null (local.get $v))) (then (return (local.get $v))))))))
+    (return_call $lua_index_ik_slow (local.get $tv) (local.get $k) (local.get $line)))
+  ;; The rest of `t[k]`: a hole or a key outside the array part goes through
+  ;; $tab_get (hash part, then __index); a non-table receiver through
+  ;; $lua_index (string library / error).
+  (func $lua_index_ik_slow (param $tv anyref) (param $k i64) (param $line i32) (result anyref)
+    (if (ref.test (ref $LuaTable) (local.get $tv))
+      (then (return (call $tab_get (ref.cast (ref $LuaTable) (local.get $tv)) (call $make_int (local.get $k))))))
     (call $lua_index (local.get $tv) (call $make_int (local.get $k)) (local.get $line)))
+
 
   (func $tab_set_hash (param $t (ref $LuaTable)) (param $k anyref) (param $v anyref)
     (local $i i32) (local $full i32)
@@ -2919,8 +2919,6 @@
   ;; on the error path it's outer-pcall's responsibility to restore
   ;; depth to its pre-try value.
   (func $push_call_frame (param $line i32) (param $weight i32)
-    (local $lines (ref $LineArr)) (local $cap i32)
-    (local $new_cap i32) (local $new (ref $LineArr)) (local $weights (ref $LineArr))
     ;; Depth guard: raise a *catchable* "stack overflow" before deep non-tail
     ;; recursion exhausts the host's WASM call stack (which would be an
     ;; uncatchable trap). The cap sits below the trap point with headroom to
@@ -2931,32 +2929,27 @@
     (global.set $stack_cost (i32.add (global.get $stack_cost) (local.get $weight)))
     (if (i32.gt_s (global.get $stack_cost) (global.get $stack_budget))
       (then (call $throw_lit (i32.const 971) (i32.const 14))))   ;; "stack overflow"
-    (local.set $lines (ref.as_non_null (global.get $call_lines)))
-    (local.set $weights (ref.as_non_null (global.get $call_weights)))
-    (local.set $cap (array.len (local.get $lines)))
-    (if (i32.ge_s (global.get $call_depth) (local.get $cap))
-      (then
-        (local.set $new_cap (i32.mul (local.get $cap) (i32.const 2)))
-        (local.set $new
-          (array.new $LineArr (i32.const 0) (local.get $new_cap)))
-        (array.copy $LineArr $LineArr
-          (local.get $new) (i32.const 0)
-          (local.get $lines) (i32.const 0) (local.get $cap))
-        (global.set $call_lines (local.get $new))
-        (local.set $lines (local.get $new))
-        (local.set $new
-          (array.new $LineArr (i32.const 0) (local.get $new_cap)))
-        (array.copy $LineArr $LineArr
-          (local.get $new) (i32.const 0)
-          (local.get $weights) (i32.const 0) (local.get $cap))
-        (global.set $call_weights (local.get $new))
-        (local.set $weights (local.get $new))))
-    (array.set $LineArr (local.get $lines)
+    (if (i32.ge_s (global.get $call_depth) (array.len (ref.as_non_null (global.get $call_lines))))
+      (then (call $grow_call_frames)))
+    (array.set $LineArr (ref.as_non_null (global.get $call_lines))
       (global.get $call_depth) (local.get $line))
-    (array.set $LineArr (local.get $weights)
+    (array.set $LineArr (ref.as_non_null (global.get $call_weights))
       (global.get $call_depth) (local.get $weight))
     (global.set $call_depth
       (i32.add (global.get $call_depth) (i32.const 1))))
+  ;; Double the capacity of the call-frame line/weight stacks.
+  (func $grow_call_frames
+    (local $cap i32) (local $new (ref $LineArr))
+    (local.set $cap (array.len (ref.as_non_null (global.get $call_lines))))
+    (local.set $new (array.new $LineArr (i32.const 0) (i32.shl (local.get $cap) (i32.const 1))))
+    (array.copy $LineArr $LineArr (local.get $new) (i32.const 0)
+      (ref.as_non_null (global.get $call_lines)) (i32.const 0) (local.get $cap))
+    (global.set $call_lines (local.get $new))
+    (local.set $new (array.new $LineArr (i32.const 0) (i32.shl (local.get $cap) (i32.const 1))))
+    (array.copy $LineArr $LineArr (local.get $new) (i32.const 0)
+      (ref.as_non_null (global.get $call_weights)) (i32.const 0) (local.get $cap))
+    (global.set $call_weights (local.get $new)))
+
 
   (func $pop_call_frame
     (if (i32.gt_s (global.get $call_depth) (i32.const 0))
