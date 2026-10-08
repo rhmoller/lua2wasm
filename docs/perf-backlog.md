@@ -1,8 +1,9 @@
 # Performance backlog
 
-The remaining bottlenecks, ranked by expected payoff, with the evidence and a
-fix sketch for each; what has landed is under Done. Snapshot of 2026-10-08.
-Update it when an item lands or a measurement changes.
+Bottlenecks with the evidence and a fix sketch for each, what has landed
+(Done) and what was measured and set aside. Snapshot of 2026-10-09, after
+working through the list of 2026-10-08. Update it when an item lands or a
+measurement changes.
 
 ## Where we stand
 
@@ -13,19 +14,19 @@ and parallel GC threads; `wall` is the same run timed by the wall clock
 
 | bench | lua5.5 | lua2wasm | ratio | wall | wall ratio |
 |---|---:|---:|---:|---:|---:|
-| binarytrees | 0.353 | 0.116 | 0.33× | 0.088 | 0.25× |
-| fannkuch | 0.827 | 0.331 | 0.40× | 0.328 | 0.40× |
-| spectralnorm | 0.955 | 0.525 | 0.55× | 0.519 | 0.54× |
-| oo | 0.458 | 0.269 | 0.59× | 0.245 | 0.53× |
-| nbody_arr | 0.381 | 0.232 | 0.61× | 0.229 | 0.60× |
-| vectors | 1.083 | 0.696 | 0.64× | 0.601 | 0.55× |
-| particles | 0.594 | 0.455 | 0.77× | 0.418 | 0.70× |
-| tilemap | 0.290 | 0.235 | 0.81× | 0.179 | 0.62× |
-| nbody | 0.433 | 0.352 | 0.81× | 0.347 | 0.80× |
-| entities | 0.672 | 0.548 | 0.82× | 0.493 | 0.73× |
-| closures | 0.074 | 0.069 | 0.93× | 0.050 | 0.68× |
-| hashtab | 0.095 | 0.127 | 1.34× | 0.079 | 0.83× |
-| strings | 0.067 | 0.138 | 2.06× | 0.081 | 1.21× |
+| binarytrees | 0.355 | 0.113 | 0.32× | 0.087 | 0.25× |
+| fannkuch | 0.821 | 0.327 | 0.40× | 0.325 | 0.40× |
+| spectralnorm | 0.955 | 0.526 | 0.55× | 0.521 | 0.55× |
+| oo | 0.458 | 0.271 | 0.59× | 0.248 | 0.54× |
+| nbody_arr | 0.380 | 0.234 | 0.62× | 0.227 | 0.60× |
+| vectors | 1.081 | 0.668 | 0.62× | 0.621 | 0.57× |
+| particles | 0.586 | 0.453 | 0.77× | 0.416 | 0.71× |
+| tilemap | 0.289 | 0.226 | 0.78× | 0.179 | 0.62× |
+| nbody | 0.434 | 0.350 | 0.81× | 0.345 | 0.79× |
+| entities | 0.676 | 0.558 | 0.83× | 0.493 | 0.73× |
+| closures | 0.074 | 0.070 | 0.95× | 0.047 | 0.64× |
+| hashtab | 0.097 | 0.122 | 1.26× | 0.077 | 0.79× |
+| strings | 0.066 | 0.152 | 2.30× | 0.087 | 1.32× |
 
 ## Measuring
 
@@ -53,30 +54,50 @@ and parallel GC threads; `wall` is the same run timed by the wall clock
   removed), `--wasm-tiering-budget=N` (earlier tier-up), `--trace-gc`.
 - `grep` on the dev machine is ugrep: a `$` inside a pattern is an anchor, so
   use `grep -F` for WAT names like `$ol_2`.
+- An unrelated change can move a benchmark by 5–10% (binarytrees, vectors):
+  V8's inlining budget and tier-up timing shift with the module's function
+  indices and sizes. Before blaming or crediting a change, A/B it against the
+  previous commit with alternating runs on the wall clock, and diff the
+  generated user code and `INLINING=` traces. `ops.lua` times each
+  operation's third run, which can still start on baseline code if
+  optimization finished late: `s:byte(i)` reads 16 or 31 ms depending on the
+  build (16 alone).
 
 ## Backlog
 
-### 2. Strings and big integers allocate too much
+Nothing open: every item of the 2026-10-08 list has landed (under Done) or
+was measured and set aside (below). What remains between lua2wasm and
+lua5.5 on this suite is strings — 0.087 against 0.066 s by the wall clock,
+mostly `string.format`'s first run (32 ms cold, 11 warm) and the quadratic
+`acc = acc .. x` section (12 ms against 4–5: array copies and the large
+young-generation objects they leave).
 
-**Evidence.** GC is 29% of strings' profile and 18% of hashtab's. The cold
-`build` section of strings (`parts[#parts + 1] = word .. n`, 200k times)
-takes ~57 ms against 8 ms warm and 14 ms in lua5.5; with
-`--min-semi-space-size=64` it takes 27 ms — it is GC-bound (young-generation
-scavenges copying fresh strings that stay alive).
+## Measured and set aside
 
-**Causes.**
-- Every Lua string is two GC objects: the `$LuaString` struct and its
-  `(array i8)`.
-- A string made at run time is hashed (FNV over its bytes) when first used as
-  a key, and compared byte by byte with the stored key; reference Lua interns
-  short strings and compares pointers.
-- An integer from 2^30 up in a boxed place other than a captured local (a
-  table value, a maybe-typed cell boxed for a call) is a `$LuaInt` object.
+**One GC object per string** (from item 2). Allocating and keeping 200k
+short strings as a struct plus its byte array costs 7.2–8.0 ms against 6.2
+for the array alone (a standalone wasm loop): 5–8 ns per string, so at most
+~4 ms of strings' 87 ms (it makes ~500k strings) and ~1 ms of hashtab's —
+before paying for a 4-byte offset on every byte access and four byte loads
+per cached-hash read. Not worth rewriting the 360 prelude sites that touch
+`$LuaString`.
 
-**Fix ideas.** One object per string (the bytes array carrying the cached
-hash in a 4-byte header); possibly interning short run-time strings.
+**Interning short run-time strings** (from item 2). It would pay a hash and
+a table probe at every string creation for pointer-equality key compares;
+string-key access already runs at a third of lua5.5's time (`ops.lua`: 9
+against 26 ms), identity first and cached hashes after.
 
-**Verify.** strings, hashtab, tilemap, closures; the GC share in profiles.
+**Wide integers in table slots** (from item 2). An integer from 2^30 up
+stored in a table is still a `$LuaInt`; the float storage's marker scheme
+could carry it unboxed (a second marker, the i64 in the f64 slot). No
+benchmark stores such values in bulk; worth doing for code that keeps
+hashes or 64-bit state in arrays.
+
+**A node array for the hash part** (item 6, see Done): conflicts with
+shared shapes.
+
+**Every inner loop of an outlined loop in a function of its own** (item 8,
+see Done): cost fannkuch / particles 2% and up to 13% module size.
 
 ## Done
 

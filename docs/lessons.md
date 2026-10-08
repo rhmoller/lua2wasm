@@ -160,6 +160,29 @@ To see the decisions: build with names (`wasm-as --all-features -g`) and
 run `node --trace-wasm-inlining`; "not enough inlining budget" next to a
 hot callee is the signal.
 
+### Emit the fast path at the site instead of hoping V8 inlines the helper
+
+V8's inlining budget is per caller and small for big callers: an outlined
+frame loop of 5000 wire bytes got ~500 bytes of inlining, so its hottest
+table reads stayed calls. Probing the array part inline at each integer-key
+site, and calling the helper only on a miss, beat even an unlimited inlining
+budget (particles 0.68 → 0.46 s against 0.60). The same shape paid off for
+`#t`, appends and the generic for over ipairs/pairs. Watch the size: emitting
+a rarely-taken path (an inline append) at every store site cost fannkuch
+4.5% through its outer function's budget; keep such paths in a lean helper
+unless the site's shape says it is the common case (`t[#t + 1] = v`).
+
+### Measure a performance change against the previous commit, on the wall clock
+
+`os.clock()` is CPU time and includes V8's background compiler and GC
+threads (strings: 0.15 s CPU, 0.09 s wall). And an unrelated change moves
+benchmarks by 5–10%: inlining budgets and tier-up timing shift with function
+indices and module size (binarytrees lost 8% to a prelude change it never
+calls, through a flipped choice between two helpers competing for one
+budget). Build the previous commit into a scratch directory, alternate runs
+of both modules, compare medians by the wall clock, and diff the generated
+user code before believing a 3% difference either way.
+
 ### A loop in a run-once function stays on the baseline tier
 
 V8 has no on-stack replacement for wasm. A function is tiered up to
