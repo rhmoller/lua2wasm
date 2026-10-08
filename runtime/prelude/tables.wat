@@ -302,6 +302,9 @@
       (then
         (local.set $i (i31.get_s (ref.cast (ref i31) (local.get $v))))
         (return (i32.xor (local.get $i) (i32.shr_s (local.get $i) (i32.const 31))))))
+    (if (ref.test (ref $LuaTable) (local.get $v))
+      (then (return (i32.mul (struct.get $LuaTable $id (ref.cast (ref $LuaTable) (local.get $v)))
+                             (i32.const -1640531527)))))   ;; as in $lua_hash_other
     (return_call $lua_hash_other (local.get $v)))
   (func $lua_hash_other (param $v anyref) (result i32)
     (local $h i32) (local $bytes (ref null $LuaArr)) (local $i i32) (local $n i32)
@@ -496,7 +499,7 @@
   (func $tab_index_lookup_probe (param $t (ref $LuaTable)) (param $k anyref) (param $full i32) (result i32)
     (local $idx (ref $IArr)) (local $keys (ref $TArr))
     (local $mask i32) (local $h i32) (local $slot i32) (local $pos i32)
-    (local $is_str i32) (local $sk anyref)
+    (local $is_str i32) (local $by_value i32) (local $sk anyref)
     (local $sh (ref $Shape))
     (local.set $sh (struct.get $LuaTable $shape (local.get $t)))
     (local.set $idx (struct.get $Shape $idx (local.get $sh)))
@@ -504,6 +507,10 @@
     (local.set $mask (struct.get $Shape $mask (local.get $sh)))
     (local.set $h (i32.and (local.get $mask) (local.get $full)))
     (local.set $is_str (ref.test (ref $LuaString) (local.get $k)))
+    ;; Stored integer keys are normalized (an integral float to an integer, a
+    ;; small one to an i31), so only a wide integer or a float can equal a key
+    ;; that isn't the same object; anything else matches by identity alone.
+    (local.set $by_value (i32.or (ref.test (ref $LuaInt) (local.get $k)) (ref.test (ref $LuaFloat) (local.get $k))))
     (loop $probe
       (local.set $slot (array.get $IArr (local.get $idx) (local.get $h)))
       ;; 0 = empty -> key absent; <0 = tombstone -> keep probing; >0 = live.
@@ -525,9 +532,9 @@
                                   (local.get $full))
                   (then (if (call $str_eq (local.get $sk) (local.get $k))
                     (then (return (local.get $pos)))))))))
-            (else
-              (if (call $lua_eq_raw (local.get $sk) (local.get $k))
-                (then (return (local.get $pos))))))))
+            (else (if (local.get $by_value)
+              (then (if (call $lua_eq_raw (local.get $sk) (local.get $k))
+                (then (return (local.get $pos))))))))))
       (local.set $h (i32.and (local.get $mask)
         (i32.add (local.get $h) (i32.const 1))))
       (br $probe))

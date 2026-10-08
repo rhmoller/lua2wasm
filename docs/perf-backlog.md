@@ -78,18 +78,6 @@ hash in a 4-byte header); possibly interning short run-time strings.
 
 **Verify.** strings, hashtab, tilemap, closures; the GC share in profiles.
 
-### 6. The hash part's layout
-
-**Evidence.** hashtab: `$tab_index_lookup_h` 15%, `$tab_set_hash` and
-`$tab_insert_*` ~14%, `$tab_index_rebuild` 5%.
-
-**Cause.** An index of positions, a keys array and a values array: a lookup
-is three dependent loads, and growing rebuilds the whole index.
-
-**Fix.** A single node array (key, value, chain) as in reference Lua. Mind
-the shapes design ([note 23](design/23-table-shapes.md)): a table's key layout
-lives in its `$Shape`, shared between tables built alike.
-
 ## Done
 
 **Inline array-part paths** (was item 1). V8 inlines callees into a function
@@ -182,6 +170,20 @@ continue in a function of its own when it has more than a budget left: the
 first of six frames around a 2M-iteration loop 12.6 → 7.6 ms (later frames
 6.4). Splitting every inner loop cost fannkuch / particles 2% and up to 13%
 module size, so it is limited to that shape.
+
+**The hash part** (was item 6). Kept its layout — an index of positions
+over the shape's keys and the table's values — rather than reference Lua's
+node array (key, value, chain): a record's keys live in its `$Shape`, shared
+by every table built alike and the basis of the inline caches
+([note 23](design/23-table-shapes.md)), which an interleaved node array
+can't share. Measured against lua5.5 it was already level or ahead
+(`ops.lua`: string keys 9 against 27 ms, sparse integer keys 18 against 18;
+hashtab faster by the wall clock), with rebuilds at 6% and lookups ~10% of
+hashtab's profile. Two cheap fixes instead: the collision probe compares a
+small integer, table, boolean or function key by identity alone (stored
+integer keys are normalized, so only a wide integer or a float needs the
+value compare), and `$lua_hash` reaches table keys before the number tests.
+Sparse integer keys 18.2 → 17.1 ms, hashtab 0.083 → 0.080 s wall.
 
 **Warm-up, measured by the wall clock** (was item 3). bench.sh reports wall
 time next to `TIME`: much of what read as warm-up cost on the short
