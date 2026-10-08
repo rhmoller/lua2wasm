@@ -118,22 +118,51 @@ void emit_ix_get_cell(CG *c, const MCell *cell, const MCell *d, int line, int de
 
 /* `tb[k] = v`: overwrite a present array slot in place (a present key never
  * reaches __newindex, so the metatable doesn't matter); a nil `v`, an absent
- * slot or a key past the array part goes through the helper. `tb`, the key
- * and `v` must be local reads. */
+ * slot or a key past the array part goes through the helper, which appends
+ * at #array part + 1 itself when nothing else could see it. A key spelled
+ * `#t + 1` (k.append) appends inline too: when the table has no metatable,
+ * no hash keys to absorb and room in its array. `tb`, the key and `v` must
+ * be local reads. */
 void emit_ix_set(CG *c, const char *tb, IxKey k, const char *v, int depth) {
     int n = c->next_label++;
+    const char *ki = ix_key_i(k);
     emit_linef(c, depth, "(block $ixd%d\n", n);
     emit_linef(c, depth + 1, "(block $ixs%d\n", n);
-    emit_ix_probe(c, tb, k, n, depth + 2);
-    emit_linef(c, depth + 2, "(br_if $ixs%d (ref.is_null %s))\n", n, IX_SLOT);
+    if (k.cell && k.cell->static_tag != TAG_INT)
+        emit_linef(c, depth + 2, "(br_if $ixs%d (i32.ne %s (i32.const %d)))\n", n, k.cell->t, TAG_INT);
+    emit_linef(c, depth + 2, "(br_if $ixs%d (i32.eqz (ref.test (ref $LuaTable) %s)))\n", n, tb);
     emit_linef(c, depth + 2, "(br_if $ixs%d (ref.is_null %s))\n", n, v);
+    emit_linef(c, depth + 2, "(local.set $ix_tt (ref.cast (ref $LuaTable) %s))\n", tb);
+    emit_linef(c, depth + 2, "(local.set $ix_i (i32.wrap_i64 (i64.sub %s (i64.const 1))))\n", ki);
+    /* k - 1 < alen, unsigned (also rejects k < 1): overwrite a present slot */
+    emit_linef(c, depth + 2,
+               "(if (i64.lt_u (i64.sub %s (i64.const 1)) (i64.extend_i32_u (struct.get $LuaTable $alen (local.get "
+               "$ix_tt))))\n",
+               ki);
+    emit_linef(c, depth + 3, "(then (br_if $ixs%d (ref.is_null %s))\n", n, IX_SLOT);
+    emit_linef(c, depth + 4,
+               "(array.set $TArr (struct.get $LuaTable $arr (local.get $ix_tt)) (local.get $ix_i) %s) (br $ixd%d)))\n", v,
+               n);
+    if (!k.append) {
+        emit_linef(c, depth + 2, "(br $ixs%d))\n", n);
+        goto slow;
+    }
+    /* k - 1 == alen: append */
+    emit_linef(c, depth + 2,
+               "(br_if $ixs%d (i64.ne (i64.sub %s (i64.const 1)) (i64.extend_i32_u (struct.get $LuaTable $alen "
+               "(local.get $ix_tt)))))\n",
+               n, ki);
+    emit_linef(c, depth + 2, "(br_if $ixs%d (call $arr_append_blocked (local.get $ix_tt)))\n", n);
     emit_linef(c, depth + 2, "(array.set $TArr (struct.get $LuaTable $arr (local.get $ix_tt)) (local.get $ix_i) %s)\n",
                v);
+    emit_linef(c, depth + 2,
+               "(struct.set $LuaTable $alen (local.get $ix_tt) (i32.add (local.get $ix_i) (i32.const 1)))\n");
     emit_linef(c, depth + 2, "(br $ixd%d))\n", n);
+slow:
     if (k.cell)
         emit_linef(c, depth + 1, "(call $lua_tabset_mk %s %s %s %s %s %s))\n", tb, k.cell->t, k.cell->i, k.cell->f,
                    k.cell->b, v);
-    else emit_linef(c, depth + 1, "(call $lua_tabset_ik %s %s %s))\n", tb, k.i, v);
+    else emit_linef(c, depth + 1, "(call $lua_tabset_ik_miss %s %s %s))\n", tb, k.i, v);
 }
 
 /* `tb[k] = f` for an f64 `f` and an int key: a slot that already holds an
@@ -149,4 +178,29 @@ void emit_ix_set_f(CG *c, const char *tb, const char *ki, const char *f, int dep
                "(array.set $FArr (struct.get $LuaTable $farr (local.get $ix_tt)) (local.get $ix_i) %s)\n", f);
     emit_linef(c, depth + 2, "(br $ixd%d))\n", n);
     emit_linef(c, depth + 1, "(call $lua_tabset_ik_f %s %s %s))\n", tb, ki, f);
+}
+
+/* `#x` into cell `d`, with x on the stack: a table with no metatable and no
+ * hash keys is its array part's length (tag 1, no call); anything else goes
+ * through $lua_len (strings, __len, a border reaching into the hash part). */
+void emit_len_cell(CG *c, const MCell *d, int depth) {
+    int n = c->next_label++;
+    emit_line(c, depth, "local.set $ix_t\n");
+    emit_linef(c, depth, "(block $ixd%d\n", n);
+    emit_linef(c, depth + 1, "(block $ixs%d\n", n);
+    emit_linef(c, depth + 2, "(br_if $ixs%d (i32.eqz (ref.test (ref $LuaTable) (local.get $ix_t))))\n", n);
+    emit_line(c, depth + 2, "(local.set $ix_tt (ref.cast (ref $LuaTable) (local.get $ix_t)))\n");
+    emit_linef(c, depth + 2, "(br_if $ixs%d (i32.eqz (ref.is_null (struct.get $LuaTable $meta (local.get $ix_tt)))))\n",
+               n);
+    emit_linef(c, depth + 2, "(br_if $ixs%d (struct.get $Shape $n (struct.get $LuaTable $shape (local.get $ix_tt))))\n",
+               n);
+    emit_linef(c, depth + 2, "(local.set %s (i64.extend_i32_u (struct.get $LuaTable $alen (local.get $ix_tt))))\n",
+               d->si);
+    emit_linef(c, depth + 2, "(local.set %s (i32.const %d))\n", d->st, TAG_INT);
+    emit_linef(c, depth + 2, "(br $ixd%d))\n", n);
+    emit_linef(c, depth + 1, "(local.set %s (call $lua_len (local.get $ix_t)))\n", d->sb);
+    emit_linef(c, depth + 1, "(call $unbox_num %s)\n", d->b);
+    emit_linef(c, depth + 1, "local.set %s\n", d->sf);
+    emit_linef(c, depth + 1, "local.set %s\n", d->si);
+    emit_linef(c, depth + 1, "local.set %s)\n", d->st);
 }

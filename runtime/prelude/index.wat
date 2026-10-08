@@ -331,6 +331,22 @@
     (if (ref.is_null (struct.get $LuaTable $meta (local.get $t)))
       (then (call $tab_set_ik (local.get $t) (local.get $k) (local.get $v)) (return)))
     (call $lua_tabset (local.get $tv) (call $make_int (local.get $k)) (local.get $v)))
+;; The miss path of an inline `t[<int>] = v` (src/codegen/arrays.c): an
+  ;; append at #array part + 1 that nothing else could see goes straight in;
+  ;; anything else takes $lua_tabset_ik.
+  (func $lua_tabset_ik_miss (param $tv anyref) (param $k i64) (param $v anyref)
+    (local $t (ref $LuaTable)) (local $alen i32)
+    (if (i32.and (ref.test (ref $LuaTable) (local.get $tv)) (i32.eqz (ref.is_null (local.get $v))))
+      (then
+        (local.set $t (ref.cast (ref $LuaTable) (local.get $tv)))
+        (local.set $alen (struct.get $LuaTable $alen (local.get $t)))
+        (if (i64.eq (local.get $k) (i64.add (i64.extend_i32_u (local.get $alen)) (i64.const 1)))
+          (then (if (i32.eqz (call $arr_append_blocked (local.get $t)))
+            (then
+              (array.set $TArr (ref.as_non_null (struct.get $LuaTable $arr (local.get $t))) (local.get $alen) (local.get $v))
+              (struct.set $LuaTable $alen (local.get $t) (i32.add (local.get $alen) (i32.const 1)))
+              (return)))))))
+    (return_call $lua_tabset_ik (local.get $tv) (local.get $k) (local.get $v)))
   ;; `t.name = <f64>` (constant key). Mirrors $lua_tabset_sk's metatable rules.
   (func $lua_tabset_sk_f (param $tv anyref) (param $k (ref $LuaString)) (param $f f64)
     (local $t (ref $LuaTable)) (local $full i32) (local $i i32) (local $mt (ref null $LuaTable))

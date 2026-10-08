@@ -13,19 +13,19 @@ and parallel GC threads; `wall` is the same run timed by the wall clock
 
 | bench | lua5.5 | lua2wasm | ratio | wall | wall ratio |
 |---|---:|---:|---:|---:|---:|
-| binarytrees | 0.354 | 0.121 | 0.34× | 0.085 | 0.24× |
-| fannkuch | 0.822 | 0.338 | 0.41× | 0.334 | 0.41× |
-| spectralnorm | 0.949 | 0.533 | 0.56× | 0.524 | 0.55× |
-| oo | 0.461 | 0.264 | 0.57× | 0.248 | 0.54× |
-| nbody_arr | 0.388 | 0.239 | 0.62× | 0.233 | 0.60× |
-| vectors | 1.073 | 0.706 | 0.66× | 0.645 | 0.60× |
-| particles | 0.591 | 0.456 | 0.77× | 0.417 | 0.71× |
-| nbody | 0.434 | 0.350 | 0.81× | 0.345 | 0.79× |
-| entities | 0.673 | 0.551 | 0.82× | 0.497 | 0.74× |
-| tilemap | 0.284 | 0.244 | 0.86× | 0.185 | 0.65× |
-| closures | 0.074 | 0.083 | 1.12× | 0.056 | 0.76× |
-| hashtab | 0.095 | 0.135 | 1.42× | 0.081 | 0.85× |
-| strings | 0.068 | 0.157 | 2.31× | 0.086 | 1.26× |
+| binarytrees | 0.353 | 0.116 | 0.33× | 0.088 | 0.25× |
+| fannkuch | 0.827 | 0.331 | 0.40× | 0.328 | 0.40× |
+| spectralnorm | 0.955 | 0.525 | 0.55× | 0.519 | 0.54× |
+| oo | 0.458 | 0.269 | 0.59× | 0.245 | 0.53× |
+| nbody_arr | 0.381 | 0.232 | 0.61× | 0.229 | 0.60× |
+| vectors | 1.083 | 0.696 | 0.64× | 0.601 | 0.55× |
+| particles | 0.594 | 0.455 | 0.77× | 0.418 | 0.70× |
+| tilemap | 0.290 | 0.235 | 0.81× | 0.179 | 0.62× |
+| nbody | 0.433 | 0.352 | 0.81× | 0.347 | 0.80× |
+| entities | 0.672 | 0.548 | 0.82× | 0.493 | 0.73× |
+| closures | 0.074 | 0.069 | 0.93× | 0.050 | 0.68× |
+| hashtab | 0.095 | 0.127 | 1.34× | 0.079 | 0.83× |
+| strings | 0.067 | 0.138 | 2.06× | 0.081 | 1.21× |
 
 ## Measuring
 
@@ -89,19 +89,6 @@ is three dependent loads, and growing rebuilds the whole index.
 **Fix.** A single node array (key, value, chain) as in reference Lua. Mind
 the shapes design ([note 23](design/23-table-shapes.md)): a table's key layout
 lives in its `$Shape`, shared between tables built alike.
-
-### 7. Array append and `#t`
-
-**Evidence.** `ops.lua`: `t[#t + 1] = i` 26 ms against 15 in lua5.5;
-growing an array with `t[i] = i` 11.7 against 6.0. `$arr_append` is ~5% of
-closures and tilemap.
-
-**Cause.** `#t` goes through `$lua_len` (type dispatch, `__len` check) and
-`$tab_len`; the store goes through `$lua_tabset_ik` → `$tab_set_arr` →
-`$arr_append` (growth and demotion checks).
-
-**Fix.** Recognize `t[#t + 1] = v` in codegen and emit one append helper; a
-cheaper `#t` for tables without a metatable; revisit the growth policy.
 
 ### 8. What run-once loop outlining doesn't cover yet
 
@@ -180,6 +167,19 @@ capture buffer is reused across calls instead of allocated per match).
 `gmatch` 31.9 → 14.5 ms (lua5.5 13.7). Fixed on the way: `pairs` honours
 `__pairs` (its first four results), and `ipairs` indexes any value as
 `lua_geti` does (`ipairs("abc")` yields nothing).
+
+**Array append and `#t`** (was item 7). `t[#t + 1] = v` used to be
+`$lua_tabset(t, $lua_add($lua_len(t), 1), v)`, all boxed. Now `#x` is an
+opaque number to the maybe-typed lowering — read inline (the array part's
+length) for a table with no metatable and no hash keys — so `#t + 1` lowers,
+and a store whose key is a lowered tree takes the cell-keyed path. A key
+spelled `#t + 1` also appends inline when the table has no metatable, no
+hash keys to absorb and room in its array; other integer-key stores leave
+the append to `$lua_tabset_ik_miss`, which does the same before the full
+path (an inline append at every store site cost fannkuch 4.5%). `$tab_len`
+and `$arr_append` no longer probe the hash part for key `#t + 1` when the
+table has no hash keys. `ops.lua`: `t[#t + 1] = i` 28.2 → 7.7 ms (lua5.5
+14.6), `t[i] = i` 11.6 → 6.4 (5.8); closures 0.083 → 0.069 s.
 
 **Warm-up, measured by the wall clock** (was item 3). bench.sh reports wall
 time next to `TIME`: much of what read as warm-up cost on the short

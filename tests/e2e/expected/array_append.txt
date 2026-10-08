@@ -1,0 +1,13 @@
+append	1000	2	1000	2000
+grow	1000	1000
+newindex	3	1,2,3
+__len	x	0
+float len	y
+absorb	4	a	b	c	d
+with fields	5	5	1
+nil	2
+shrink	4	new
+string len	four
+bad	false
+floats	5	0.25	1.25	float
+field	4	1 4 9 16

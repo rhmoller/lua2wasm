@@ -727,6 +727,9 @@
       (local.get $alen) (local.get $v))
     (local.set $alen (i32.add (local.get $alen) (i32.const 1)))
     (struct.set $LuaTable $alen (local.get $t) (local.get $alen))
+    ;; nothing to absorb when the hash part has no keys
+    (if (i32.eqz (struct.get $Shape $n (struct.get $LuaTable $shape (local.get $t))))
+      (then (return (i32.const 1))))
     (loop $mig
       (local.set $hv (if (result anyref) (i32.lt_s (local.get $alen) (global.get $arr_max))
         (then (call $tab_get_hash (local.get $t)
@@ -744,6 +747,18 @@
           (struct.set $LuaTable $alen (local.get $t) (local.get $alen))
           (br $mig))))
     (i32.const 1))
+
+;; Whether an append to $t's array part must take $arr_append: a
+  ;; metatable (__newindex sees absent keys), integer keys in the hash part
+  ;; it could absorb, or no room left in the array. Codegen appends inline
+  ;; otherwise (src/codegen/arrays.c, emit_ix_set).
+  (func $arr_append_blocked (param $t (ref null $LuaTable)) (result i32)
+    (local $a (ref null $TArr))
+    (if (i32.eqz (ref.is_null (struct.get $LuaTable $meta (local.get $t)))) (then (return (i32.const 1))))
+    (if (struct.get $Shape $n (struct.get $LuaTable $shape (local.get $t))) (then (return (i32.const 1))))
+    (local.set $a (struct.get $LuaTable $arr (local.get $t)))
+    (if (ref.is_null (local.get $a)) (then (return (i32.const 1))))
+    (i32.ge_u (struct.get $LuaTable $alen (local.get $t)) (array.len (ref.as_non_null (local.get $a)))))
 
   ;; Drop trailing holes from the array part after its last element was
   ;; cleared, restoring "$arr[$alen-1] is not nil" (so $alen is a border).
@@ -976,7 +991,10 @@
   (func $tab_len (param $t (ref $LuaTable)) (result i32)
     (local $i i32) (local $alen i32)
     (local.set $alen (struct.get $LuaTable $alen (local.get $t)))
-    ;; Common case: the sequence lives entirely in the array part.
+    ;; Common case: the sequence lives entirely in the array part — always so
+    ;; when the hash part has no keys.
+    (if (i32.eqz (struct.get $Shape $n (struct.get $LuaTable $shape (local.get $t))))
+      (then (return (local.get $alen))))
     (if (ref.is_null (call $tab_get_hash (local.get $t)
           (call $make_int (i64.extend_i32_s (i32.add (local.get $alen) (i32.const 1))))))
       (then (return (local.get $alen))))

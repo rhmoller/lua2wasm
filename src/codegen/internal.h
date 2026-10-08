@@ -487,6 +487,7 @@ void ol_flush(CG *c);
 typedef struct {
     const char *i;
     const MCell *cell;
+    int append; /* spelled `#t + 1`: worth an inline append */
 } IxKey;
 void emit_ix_locals(WatBuilder *w);
 int emit_ix_get_open(CG *c, int depth);
@@ -494,6 +495,7 @@ void emit_ix_get_close(CG *c, int n, const MCell *cell, int line, int depth);
 void emit_ix_get_cell(CG *c, const MCell *cell, const MCell *d, int line, int depth);
 void emit_ix_set(CG *c, const char *tb, IxKey k, const char *v, int depth);
 void emit_ix_set_f(CG *c, const char *tb, const char *ki, const char *f, int depth);
+void emit_len_cell(CG *c, const MCell *d, int depth);
 
 /* ----- module.c ----- */
 const char *slab_ref(const char *text);

@@ -425,7 +425,10 @@ static int expr_has_opaque(CG *c, const Expr *e) {
     case EXPR_BINOP:
         if (!maybe_arith_op(e->as.binop.op) && !is_cmp_op(e->as.binop.op)) return 0;
         return expr_has_opaque(c, e->as.binop.lhs) || expr_has_opaque(c, e->as.binop.rhs);
-    case EXPR_UNOP: return e->as.unop.op == UN_NEG && expr_has_opaque(c, e->as.unop.operand);
+    case EXPR_UNOP:
+        /* `#x` is a number the runtime produces (a table's border, a
+         * string's length, or __len's result) */
+        return e->as.unop.op == UN_LEN || (e->as.unop.op == UN_NEG && expr_has_opaque(c, e->as.unop.operand));
     default: return 0;
     }
 }
@@ -441,7 +444,7 @@ static int expr_numeric_evidence(CG *c, const Expr *e) {
         if (maybe_arith_op(e->as.binop.op)) return 1;
         if (!is_cmp_op(e->as.binop.op)) return 0;
         return expr_numeric_evidence(c, e->as.binop.lhs) || expr_numeric_evidence(c, e->as.binop.rhs);
-    case EXPR_UNOP: return e->as.unop.op == UN_NEG;
+    case EXPR_UNOP: return e->as.unop.op == UN_NEG || e->as.unop.op == UN_LEN;
     case EXPR_CALL: return expr_is_int(c, e) || expr_is_float(c, e);
     default: return 0;
     }
@@ -656,7 +659,7 @@ int block_temp_need(CG *c, const Block *b) {
     TempNeed t = {.c = c, .m = 0};
     walk_block_exprs(b, temp_need_visit, &t);
     walk_stmts(b, multi_assign_need_visit, &t);
-    return t.m + 2; /* + the table and value cells of an unboxed store */
+    return t.m + 3; /* + the table, key and value cells of an unboxed store */
 }
 
 /* A candidate used numerically only as a table key pays a classification on

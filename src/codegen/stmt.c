@@ -228,12 +228,12 @@ typedef enum { SK_STR,
  * (`vb`, a boxed expression) takes the boxed setter. Every setter still
  * dispatches __newindex. */
 static void emit_index_store_from(CG *c, const char *tb, StoreKey kkind, const char *kb, const MCell *kc,
-                                  const MCell *vc, const char *vb, int depth) {
+                                  const MCell *vc, const char *vb, int append, int depth) {
     char box[256], icb[48], store[640];
     if (vc) snprintf(box, sizeof box, "(call $box_num %s %s %s %s)", vc->t, vc->i, vc->f, vc->b);
     else snprintf(box, sizeof box, "%s", vb);
     if (kkind == SK_INT || kkind == SK_MAYBE) { /* the array part written inline (arrays.c) */
-        IxKey k = kkind == SK_INT ? (IxKey){.i = kc->i} : (IxKey){.cell = kc};
+        IxKey k = kkind == SK_INT ? (IxKey){.i = kc->i, .append = append} : (IxKey){.cell = kc, .append = append};
         int d = depth;
         if (vc) {
             if (kkind == SK_MAYBE)
@@ -312,12 +312,24 @@ static void emit_local_init_close(CG *c, int slot, int depth) {
     emit_line(c, depth, slot_is_boxed(c, slot) ? "))\n" : ")\n");
 }
 
+/* A key spelled `#x + 1` (or `1 + #x`): the store is most likely an append. */
+static int key_is_append(const Expr *k) {
+    if (k->kind != EXPR_BINOP || k->as.binop.op != BIN_ADD) return 0;
+    const Expr *l = k->as.binop.lhs, *r = k->as.binop.rhs;
+    int llen = l->kind == EXPR_UNOP && l->as.unop.op == UN_LEN, rlen = r->kind == EXPR_UNOP && r->as.unop.op == UN_LEN;
+    int lone = l->kind == EXPR_INT && l->as.i_val == 1, rone = r->kind == EXPR_INT && r->as.i_val == 1;
+    return (llen && rone) || (lone && rlen);
+}
+
 /* `t[k] = v` where v is a lowered tree or a provably float expression and k
- * is a constant string, an int-typed expression or a maybe slot: evaluate
- * the table (Lua order: table, key, value), lower the value into a cell, and
- * store an f64 straight into the table's unboxed float storage when the
- * result is a float — no $LuaFloat allocation — else the boxed store.
- * Returns 0 (nothing emitted) when the shape doesn't qualify. */
+ * is a constant string, an int-typed expression or a maybe slot — or where k
+ * is itself a lowered arithmetic tree (`t[#t + 1] = v`): evaluate the table
+ * (Lua order: table, key, value), the key into a cell when lowered, the
+ * value into a cell when it lowers, and store an f64 straight into the
+ * table's unboxed float storage when the result is a float — no $LuaFloat
+ * allocation — else the boxed store; an int key, or a lowered one that came
+ * out an int, takes the inline array-part path. Returns 0 (nothing emitted)
+ * when the shape doesn't qualify. */
 static int emit_unboxed_index_store(CG *c, const AssignTarget *t, const Expr *v, int depth) {
     if (!c->opt_int || !c->cur_is_maybe) return 0;
     const Expr *key = t->as.index.key;
@@ -325,10 +337,13 @@ static int emit_unboxed_index_store(CG *c, const AssignTarget *t, const Expr *v,
     int kint = !kstr && expr_is_int(c, key);
     int kmaybe = !kstr && !kint && key->kind == EXPR_VAR && key->as.var.kind == VAR_LOCAL &&
                  slot_is_maybe(c, key->as.var.idx);
-    if (!(kstr || kint || kmaybe)) return 0;
-    if (!store_value_lowers(c, v)) return 0;
-    int k = mt_alloc(c, 2);
-    MCell tc = mcell_tmp(k), vc = mcell_tmp(k + 1);
+    int klow = !kstr && !kint && !kmaybe && key->kind == EXPR_BINOP && maybe_arith_op(key->as.binop.op) &&
+               expr_involves_maybe(c, key);
+    int lowers = store_value_lowers(c, v);
+    if (!(kstr || kint || kmaybe || klow)) return 0;
+    if (!lowers && !klow) return 0;
+    int k = mt_alloc(c, 3);
+    MCell tc = mcell_tmp(k), kl = mcell_tmp(k + 1), vc = mcell_tmp(k + 2);
     emit_linef(c, depth, "(local.set %s\n", tc.sb);
     emit_expr(c, t->as.index.table, depth + 1);
     emit_line(c, depth, ")\n");
@@ -336,14 +351,23 @@ static int emit_unboxed_index_store(CG *c, const AssignTarget *t, const Expr *v,
         emit_linef(c, depth, "(local.set %s\n", tc.si);
         emit_int_expr(c, key, depth + 1);
         emit_line(c, depth, ")\n");
+    } else if (klow) {
+        emit_maybe_lower(c, key, &kl, depth);
     }
-    emit_store_value_cell(c, v, &vc, depth);
+    if (lowers) {
+        emit_store_value_cell(c, v, &vc, depth);
+    } else {
+        emit_linef(c, depth, "(local.set %s\n", vc.sb);
+        emit_expr(c, v, depth + 1);
+        emit_line(c, depth, ")\n");
+    }
     char kb[160] = "";
     if (kstr) kstr_expr(c, key->as.s.bytes, key->as.s.len, kb, sizeof kb);
-    MCell kc = kmaybe ? mcell_slot(key->as.var.idx) : tc;
+    MCell kc = kmaybe ? mcell_slot(key->as.var.idx) : klow ? kl
+                                                           : tc;
     emit_index_store_from(c, tc.b, kstr ? SK_STR : kint ? SK_INT
                                                         : SK_MAYBE,
-                          kb, &kc, &vc, NULL, depth);
+                          kb, &kc, lowers ? &vc : NULL, vc.b, klow && key_is_append(key), depth);
     c->mt_depth = k;
     return 1;
 }
@@ -423,7 +447,7 @@ static int emit_assign_multi_cells(CG *c, const Stmt *s, int depth) {
             emit_target_close(c, t, depth);
         } else {
             emit_index_store_from(c, g[i].t.b, g[i].kkind, g[i].kb, &g[i].k, g[i].lowered ? &g[i].v : NULL,
-                                  g[i].v.b, depth);
+                                  g[i].v.b, 0, depth);
         }
     }
     free(g);

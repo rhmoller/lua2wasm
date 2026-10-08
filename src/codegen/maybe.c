@@ -401,6 +401,11 @@ void emit_maybe_lower(CG *c, const Expr *e, const MCell *d, int depth) {
         break;
     }
     case EXPR_UNOP:
+        if (e->as.unop.op == UN_LEN) {
+            emit_expr(c, e->as.unop.operand, depth);
+            emit_len_cell(c, d, depth);
+            return;
+        }
         if (e->as.unop.op == UN_NEG) {
             int k = c->mt_depth;
             MCell a;
