@@ -1,6 +1,8 @@
 # 23 — Table shapes and inline caches
 
-Status: in progress (2026-10).
+Status: implemented (2026-10). Constructor shapes and inline caches are
+gated by the default optimization level; `-O0` uses shared shapes but
+builds constructors incrementally and takes the uncached access paths.
 
 ## Problem
 

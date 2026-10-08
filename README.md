@@ -165,27 +165,28 @@ tables, and game-logic shapes — an entity system with class hierarchies and a
 state machine, a structure-of-arrays particle system, tile-map A* / flood
 fill, an immutable-vector math library) under `lua5.5`, `luajit` and
 lua2wasm, checks the outputs match, and prints the ratio to reference.
-Seconds, best of two, Node 24 on one machine:
+Seconds, best of three, Node 24 on one machine:
 
 | program (`bench/`) | reference `lua5.5` | lua2wasm | ratio |
 |--------------------|-------------------:|---------:|------:|
-| binarytrees        | 0.37 | **0.21** | 0.6× |
-| spectralnorm       | 0.89 | **0.67** | 0.75× |
+| binarytrees        | 0.36 | **0.17** | 0.5× |
+| spectralnorm       | 0.89 | **0.56** | 0.65× |
+| oo                 | 0.47 | **0.33** | 0.7× |
+| vectors            | 1.08 | **0.88** | 0.8× |
+| nbody              | 0.44 | **0.37** | 0.85× |
+| entities           | 0.68 | **0.65** | 0.95× |
+| tilemap            | 0.29 | **0.28** | 0.95× |
 | nbody_arr          | 0.38 | 0.39 | 1.0× |
-| nbody              | 0.44 | 0.46 | 1.05× |
-| tilemap            | 0.30 | 0.33 | 1.1× |
-| entities           | 0.69 | 0.82 | 1.2× |
-| oo                 | 0.47 | 0.57 | 1.25× |
-| vectors            | 1.09 | 1.38 | 1.25× |
-| fannkuch           | 0.83 | 1.13 | 1.4× |
-| closures           | 0.08 | 0.12 | 1.45× |
-| hashtab            | 0.10 | 0.16 | 1.5× |
-| particles          | 0.59 | 1.02 | 1.7× |
-| strings            | 0.07 | 0.24 | 3.5× |
+| fannkuch           | 0.83 | 1.12 | 1.35× |
+| hashtab            | 0.10 | 0.14 | 1.4× |
+| closures           | 0.08 | 0.11 | 1.4× |
+| particles          | 0.59 | 1.00 | 1.7× |
+| strings            | 0.07 | 0.19 | 2.8× |
 
-Allocation-heavy and float-array code runs faster than reference (the host GC
-is good); most of the rest sits between 1.0× and 1.5× of the C interpreter,
-with string processing the outlier. What closed the gap from the 6–10× the
+Allocation-heavy, float-array and OO code (classes, methods, small records)
+now runs at or ahead of reference (the host GC is good); integer-array and
+dictionary-heavy code sits within 1.4–1.7× of the C interpreter, with string
+processing the outlier. What closed the gap from the 6–10× the
 table-field and string-heavy programs started at:
 
 - **Constant strings are hoisted into module globals** with their hash
@@ -214,10 +215,22 @@ table-field and string-heavy programs started at:
   key (`local id = alive[i]; life[id]`) is maybe-typed; and multi-target
   stores (`px[id], py[id] = x, y`) go through the same unboxed setters as
   single stores instead of staging arrays.
+- **Shared table shapes and inline caches**
+  ([design note](docs/design/23-table-shapes.md)): tables built with the same
+  string keys in the same order share one immutable key layout, so a
+  constructor allocates just the table and its values, and every `t.name`
+  site and `obj:m()` call caches the layout it last saw — a field read is an
+  identity check plus a load, a method lookup five identity checks.
+- **Calls through closures pass arguments in registers**: every closure
+  carries a single-result entry taking up to four arguments, which method
+  calls, calls through tables and metamethods use instead of building
+  argument and result arrays.
+- **The array part allows holes**, like reference Lua's, so clearing
+  elements of a list never moves the whole array into the hash part.
 
-What remains is the table probe itself (struct loads plus a bounds check per
-array touched) and, for strings, host-side pattern matching and the
-per-operation allocation of results.
+What remains is integer-keyed array access through generic helpers, hash
+lookups for dynamic keys, and, for strings, per-operation allocation of
+results and host-side `%g` float rendering.
 
 What the pass does, all within the WasmGC model (no linear memory, no deopt):
 
