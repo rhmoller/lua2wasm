@@ -1,0 +1,11 @@
+%s	false	string
+%d	false	string
+%f	false	string
+%q	false	string
+%c	false	string
+%x	false	string
+%g	false	string
+%5.2s	false	string
+true
+true
+1 nil	false	nil

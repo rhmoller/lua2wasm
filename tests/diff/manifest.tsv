@@ -146,3 +146,4 @@ pass	table_shapes	shared key layouts never leak: diverging records, deletes, dic
 pass	table_ctor_shapes	constructors on cached layouts: nil/duplicate/computed keys, positional mix, splice, floats, growth
 pass	inline_caches	field/method inline caches never serve stale slots: shape changes, nil slots, compaction, method/metatable swaps
 pass	concat_chains	flattened .. chains: number conversion, __concat order, grouping, errors, evaluation order
+pass	format_missing_arg	string.format raises on a conversion with no argument (diff-fuzz find)

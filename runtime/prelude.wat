@@ -7922,6 +7922,10 @@
         (then (if (i32.ge_s (local.get $prec) (i32.const 0))
           (then (call $throw_lit (i32.const 416) (i32.const 14))))))
       (local.set $i (i32.add (local.get $j) (i32.const 1)))
+      ;; every conversion consumes an argument; running out is an error
+      ;; ("bad argument #n ... (no value)"), while an explicit nil is a value
+      (if (i32.ge_u (local.get $arg_idx) (array.len (local.get $args)))
+        (then (call $throw_lit (i32.const 620) (i32.const 14))))   ;; "value expected"
       (local.set $arg (call $args_at (local.get $args) (local.get $arg_idx)))
       (local.set $arg_idx (i32.add (local.get $arg_idx) (i32.const 1)))
       ;; %p: address form; %c: one byte; %s: tostring (honours __tostring)
