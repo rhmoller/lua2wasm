@@ -137,3 +137,4 @@ pass	format_c_int_rules	perf port: string.format integer/char/%s/%q conversions 
 pass	format_float_ties	perf: float rendering fast path (native toFixed/toPrecision off ties) agrees with exact ties-to-even path and C %g/%a rules
 pass	deep_recursion_heavy	frame-weight stack budget: heavy frames still raise a catchable "stack overflow"
 pass	for_num_limit	integer for-loop with any limit: floor/clip/skip, string coercion, NaN, bad-limit errors
+pass	cmp_mixed_int_float	unboxed int-vs-float compares stay exact (2^53, 2^63, NaN, both orders, literals)

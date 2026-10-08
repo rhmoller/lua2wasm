@@ -685,7 +685,7 @@
   ;; if it has no fractional part AND fits in signed i64; otherwise the
   ;; values are unequal by construction.
   (func $num_eq (param $a anyref) (param $b anyref) (result i32)
-    (local $fa f64) (local $fb f64) (local $ia i64) (local $ib i64)
+    (local $fa f64) (local $ia i64)
     (if (i32.and (call $is_int (local.get $a)) (call $is_int (local.get $b)))
       (then (return (i64.eq (call $as_int (local.get $a))
                             (call $as_int (local.get $b))))))
@@ -698,18 +698,7 @@
             (local.set $fa (call $as_float (local.get $b))))
       (else (local.set $ia (call $as_int (local.get $b)))
             (local.set $fa (call $as_float (local.get $a)))))
-    ;; NaN never equals anything (incl. itself).
-    (if (f64.ne (local.get $fa) (local.get $fa)) (then (return (i32.const 0))))
-    ;; Fractional part must be zero.
-    (if (f64.ne (local.get $fa) (f64.floor (local.get $fa)))
-      (then (return (i32.const 0))))
-    ;; Float must fit in signed-i64 range. Use ±2^63 bounds.
-    (if (i32.or
-          (f64.lt (local.get $fa) (f64.const -9223372036854775808.0))
-          (f64.ge (local.get $fa) (f64.const  9223372036854775808.0)))
-      (then (return (i32.const 0))))
-    (local.set $ib (i64.trunc_f64_s (local.get $fa)))
-    (i64.eq (local.get $ia) (local.get $ib)))
+    (call $int_eq_float (local.get $ia) (local.get $fa)))
 
   (func $str_eq (param $a anyref) (param $b anyref) (result i32)
     (local $sa (ref $LuaArr)) (local $sb (ref $LuaArr))
@@ -855,6 +844,28 @@
       (then (return (i32.const 0))))
     ;; f ≤ i iff ceil(f) ≤ i.
     (i64.le_s (i64.trunc_f64_s (f64.ceil (local.get $f))) (local.get $i)))
+
+  ;; Exact i == f: f must be integral and inside the i64 range (NaN fails the
+  ;; integral test, ±inf the range test).
+  (func $int_eq_float (param $i i64) (param $f f64) (result i32)
+    (if (f64.ne (local.get $f) (f64.floor (local.get $f))) (then (return (i32.const 0))))
+    (if (i32.or (f64.lt (local.get $f) (f64.const -9223372036854775808.0))
+                (f64.ge (local.get $f) (f64.const  9223372036854775808.0)))
+      (then (return (i32.const 0))))
+    (i64.eq (local.get $i) (i64.trunc_f64_s (local.get $f))))
+
+  ;; Operand-order counterparts of the above, so specialized comparisons pass
+  ;; their operands in source order whichever side is the integer.
+  (func $int_gt_float (param $i i64) (param $f f64) (result i32)
+    (call $float_lt_int (local.get $f) (local.get $i)))
+  (func $int_ge_float (param $i i64) (param $f f64) (result i32)
+    (call $float_le_int (local.get $f) (local.get $i)))
+  (func $float_gt_int (param $f f64) (param $i i64) (result i32)
+    (call $int_lt_float (local.get $i) (local.get $f)))
+  (func $float_ge_int (param $f f64) (param $i i64) (result i32)
+    (call $int_le_float (local.get $i) (local.get $f)))
+  (func $float_eq_int (param $f f64) (param $i i64) (result i32)
+    (call $int_eq_float (local.get $i) (local.get $f)))
 
   (func $num_lt (param $a anyref) (param $b anyref) (result i32)
     (if (i32.and (call $is_int (local.get $a)) (call $is_int (local.get $b)))

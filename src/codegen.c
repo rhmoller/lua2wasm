@@ -956,10 +956,40 @@ static const char *binop_helper(BinOp op) {
     }
 }
 
-/* A relational/equality binop with both operands the *same* unboxed numeric
- * type: 1 = both int (i64 compare), 2 = both float (f64 compare), 0 = neither.
- * Mixed int/float is left to the generic helper — Lua compares int vs float
- * exactly, which an f64 conversion would not preserve for large integers. */
+/* Index of a comparison operator in the iops/fops/mixed tables below. */
+static int cmp_op_index(BinOp op) {
+    switch (op) {
+    case BIN_LT: return 0;
+    case BIN_LE: return 1;
+    case BIN_GT: return 2;
+    case BIN_GE: return 3;
+    case BIN_EQ: return 4;
+    default: return 5; /* BIN_NEQ */
+    }
+}
+
+/* An integer literal that converts to f64 exactly (|v| <= 2^53), so comparing
+ * it with a float as two doubles gives Lua's exact int-vs-float answer. */
+static int expr_is_exact_f64_int_literal(const Expr *e) {
+    const int64_t lim = (int64_t)1 << 53;
+    return e->kind == EXPR_INT && e->as.i_val >= -lim && e->as.i_val <= lim;
+}
+
+/* Lua compares int vs float exactly, which converting the integer to f64 does
+ * not preserve beyond 2^53, so a mixed comparison calls these prelude helpers
+ * (operands in source order: int-left or float-left). `~=` is the negated
+ * `==` helper. */
+static const char *mixed_cmp_helper(int j, int int_left) {
+    static const char *il[] = {"$int_lt_float", "$int_le_float", "$int_gt_float",
+                               "$int_ge_float", "$int_eq_float", "$int_eq_float"};
+    static const char *fl[] = {"$float_lt_int", "$float_le_int", "$float_gt_int",
+                               "$float_ge_int", "$float_eq_int", "$float_eq_int"};
+    return int_left ? il[j] : fl[j];
+}
+
+/* A relational/equality binop with both operands unboxed numeric types:
+ * 1 = both int (i64 compare), 2 = both float (f64 compare), 3 = int vs float,
+ * 4 = float vs int (exact mixed compare), 0 = not both typed. */
 static int cmp_numeric_kind(CG *c, const Expr *e) {
     if (!c->opt_int || e->kind != EXPR_BINOP) return 0;
     switch (e->as.binop.op) {
@@ -974,21 +1004,43 @@ static int cmp_numeric_kind(CG *c, const Expr *e) {
     const Expr *l = e->as.binop.lhs, *r = e->as.binop.rhs;
     if (expr_is_int(c, l) && expr_is_int(c, r)) return 1;
     if (expr_is_float(c, l) && expr_is_float(c, r)) return 2;
+    if (expr_is_int(c, l) && expr_is_float(c, r)) return 3;
+    if (expr_is_float(c, l) && expr_is_int(c, r)) return 4;
     return 0;
 }
 
-/* Emit a same-type numeric comparison (cmp_numeric_kind != 0) as a raw i32. */
+/* Emit a typed numeric comparison (cmp_numeric_kind != 0) as a raw i32. */
 static void emit_cmp_i32(CG *c, const Expr *e, int depth, int kind) {
     static const char *iops[] = {"i64.lt_s", "i64.le_s", "i64.gt_s", "i64.ge_s", "i64.eq", "i64.ne"};
     static const char *fops[] = {"f64.lt", "f64.le", "f64.gt", "f64.ge", "f64.eq", "f64.ne"};
-    int j;
-    switch (e->as.binop.op) {
-    case BIN_LT: j = 0; break;
-    case BIN_LE: j = 1; break;
-    case BIN_GT: j = 2; break;
-    case BIN_GE: j = 3; break;
-    case BIN_EQ: j = 4; break;
-    default: j = 5; break; /* BIN_NEQ */
+    int j = cmp_op_index(e->as.binop.op);
+    const Expr *l = e->as.binop.lhs, *r = e->as.binop.rhs;
+    if (kind >= 3) {
+        int int_left = kind == 3;
+        if (expr_is_exact_f64_int_literal(int_left ? l : r)) {
+            emit_indent(c, depth);
+            wat_appendf(c->w, "(%s\n", fops[j]);
+            emit_num_as_f64(c, l, depth + 1);
+            emit_num_as_f64(c, r, depth + 1);
+        } else {
+            emit_indent(c, depth);
+            if (j == 5) wat_append(c->w, "(i32.eqz ");
+            wat_appendf(c->w, "(call %s\n", mixed_cmp_helper(j, int_left));
+            if (int_left) {
+                emit_int_expr(c, l, depth + 1);
+                emit_float_expr(c, r, depth + 1);
+            } else {
+                emit_float_expr(c, l, depth + 1);
+                emit_int_expr(c, r, depth + 1);
+            }
+            if (j == 5) {
+                emit_indent(c, depth);
+                wat_append(c->w, ")\n");
+            }
+        }
+        emit_indent(c, depth);
+        wat_append(c->w, ")\n");
+        return;
     }
     emit_indent(c, depth);
     wat_appendf(c->w, "(%s\n", kind == 1 ? iops[j] : fops[j]);
@@ -2959,21 +3011,39 @@ static void emit_maybe_boxed(CG *c, const Expr *e, int depth) {
     c->mt_depth = k;
 }
 
+/* Static tag of a cell whose type is fixed at compile time (an immediate or
+ * a typed local): 1 int, 2 float; 0 when only known at run time. */
+static int mcell_static_tag(const MCell *m) {
+    if (strcmp(m->t, "(i32.const 1)") == 0) return 1;
+    if (strcmp(m->t, "(i32.const 2)") == 0) return 2;
+    return 0;
+}
+
+/* The mixed int/float compare of cells a (lhs) and b (rhs), one int and one
+ * float, as an i32: an f64 compare when the int side is an exactly
+ * representable literal, else the exact helper. */
+static void emit_mixed_cell_cmp(CG *c, int j, const Expr *e, const MCell *a, const MCell *b, int int_left,
+                                int depth) {
+    static const char *fops[] = {"f64.lt", "f64.le", "f64.gt", "f64.ge", "f64.eq", "f64.ne"};
+    const MCell *ic = int_left ? a : b, *fc = int_left ? b : a;
+    emit_indent(c, depth);
+    if (expr_is_exact_f64_int_literal(int_left ? e->as.binop.lhs : e->as.binop.rhs)) {
+        if (int_left) wat_appendf(c->w, "(%s (f64.convert_i64_s %s) %s)\n", fops[j], ic->i, fc->f);
+        else wat_appendf(c->w, "(%s %s (f64.convert_i64_s %s))\n", fops[j], fc->f, ic->i);
+    } else {
+        wat_appendf(c->w, "%s(call %s %s %s)%s\n", j == 5 ? "(i32.eqz " : "", mixed_cmp_helper(j, int_left),
+                    int_left ? ic->i : fc->f, int_left ? fc->f : ic->i, j == 5 ? ")" : "");
+    }
+}
+
 /* A comparison involving an opaque operand, as `(block (result i32) …)`:
- * same-tag int or float compares inline; mixed int/float (Lua compares those
- * exactly) and everything else through the generic helper + $lua_truthy. */
+ * same-tag int or float compares inline, mixed int/float through the exact
+ * mixed compare, and everything else through the generic helper +
+ * $lua_truthy. */
 static void emit_maybe_cmp_block(CG *c, const Expr *e, int depth) {
     static const char *iops[] = {"i64.lt_s", "i64.le_s", "i64.gt_s", "i64.ge_s", "i64.eq", "i64.ne"};
     static const char *fops[] = {"f64.lt", "f64.le", "f64.gt", "f64.ge", "f64.eq", "f64.ne"};
-    int j;
-    switch (e->as.binop.op) {
-    case BIN_LT: j = 0; break;
-    case BIN_LE: j = 1; break;
-    case BIN_GT: j = 2; break;
-    case BIN_GE: j = 3; break;
-    case BIN_EQ: j = 4; break;
-    default: j = 5; break; /* BIN_NEQ */
-    }
+    int j = cmp_op_index(e->as.binop.op);
     MCell a, b;
     emit_indent(c, depth);
     wat_append(c->w, "(block (result i32)\n");
@@ -2988,12 +3058,44 @@ static void emit_maybe_cmp_block(CG *c, const Expr *e, int depth) {
     emit_both_tags(c, &a, &b, 2, depth + 3);
     emit_indent(c, depth + 3);
     wat_appendf(c->w, "(then (%s %s %s))\n", fops[j], a.f, b.f);
-    emit_indent(c, depth + 3);
+    /* Both numeric with different tags: int vs float. A side whose tag is
+     * static decides which way round; otherwise test at run time. */
+    int at = mcell_static_tag(&a), bt = mcell_static_tag(&b);
+    int mixed = !(at && bt && at == bt);
+    if (mixed) {
+        emit_indent(c, depth + 3);
+        wat_appendf(c->w, "(else (if (result i32) (i32.and (i32.ne %s (i32.const 0)) (i32.ne %s (i32.const 0)))\n",
+                    a.t, b.t);
+        emit_indent(c, depth + 4);
+        wat_append(c->w, "(then\n");
+        if (at == 1 || bt == 2) {
+            emit_mixed_cell_cmp(c, j, e, &a, &b, 1, depth + 5);
+        } else if (at == 2 || bt == 1) {
+            emit_mixed_cell_cmp(c, j, e, &a, &b, 0, depth + 5);
+        } else {
+            emit_indent(c, depth + 5);
+            wat_appendf(c->w, "(if (result i32) (i32.eq %s (i32.const 1))\n", a.t);
+            emit_indent(c, depth + 6);
+            wat_append(c->w, "(then\n");
+            emit_mixed_cell_cmp(c, j, e, &a, &b, 1, depth + 7);
+            emit_indent(c, depth + 6);
+            wat_append(c->w, ")\n");
+            emit_indent(c, depth + 6);
+            wat_append(c->w, "(else\n");
+            emit_mixed_cell_cmp(c, j, e, &a, &b, 0, depth + 7);
+            emit_indent(c, depth + 6);
+            wat_append(c->w, "))\n");
+        }
+        emit_indent(c, depth + 4);
+        wat_append(c->w, ")\n");
+    }
+    emit_indent(c, depth + 3 + mixed);
     wat_appendf(c->w, "(else (call $lua_truthy (call %s\n", binop_helper(e->as.binop.op));
-    emit_maybe_cell_box(c, &a, depth + 4);
-    emit_maybe_cell_box(c, &b, depth + 4);
-    emit_indent(c, depth + 3);
-    wat_append(c->w, "))))))\n"); /* call, call, else, if, else, if */
+    emit_maybe_cell_box(c, &a, depth + 4 + mixed);
+    emit_maybe_cell_box(c, &b, depth + 4 + mixed);
+    emit_indent(c, depth + 3 + mixed);
+    wat_append(c->w, mixed ? "))))))))\n" /* call, call, else, if(mixed), else, if, else, if */
+                           : "))))))\n"); /* call, call, else, if, else, if */
     emit_indent(c, depth);
     wat_append(c->w, ")\n");
     c->mt_depth = k;

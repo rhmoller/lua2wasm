@@ -4,6 +4,7 @@
 #include "../src/wat_builder.h"
 #include "../third_party/munit/munit.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static MunitResult test_emits_expected(const MunitParameter params[], void *fixture) {
@@ -186,6 +187,71 @@ static MunitResult test_pool_pointer_stability(const MunitParameter params[], vo
     return MUNIT_OK;
 }
 
+/* Compile `src` at the default optimization level and return a malloc'd copy
+ * of the `$main` function's text (prelude and user functions excluded), so a
+ * test can assert what the main chunk lowers to. */
+static char *main_func_wat(const char *src) {
+    TokenList t = lex(src);
+    NodePool pool; node_pool_init(&pool);
+    ParseResult r = parse(&t, &pool);
+    munit_assert_true(r.ok);
+    WatBuilder w; wat_init(&w);
+    char err[256] = {0};
+    int ok = codegen_module(&r, "test", 0, 1, 0, &w, err, sizeof(err));
+    if (!ok) munit_logf(MUNIT_LOG_ERROR, "codegen: %s", err);
+    munit_assert_true(ok);
+    const char *s = wat_cstr(&w);
+    const char *start = strstr(s, "(func $main (export \"main\")");
+    munit_assert_not_null(start);
+    const char *end = strstr(start, "\n  )");
+    munit_assert_not_null(end);
+    size_t n = (size_t)(end - start);
+    char *out = malloc(n + 1);
+    memcpy(out, start, n);
+    out[n] = '\0';
+    wat_free(&w);
+    node_pool_free(&pool);
+    tokenlist_free(&t);
+    return out;
+}
+
+/* A float compared with an integer literal (or a float-typed value with an
+ * int-typed one) is lowered to an unboxed compare: no generic $lua_lt/$lua_gt
+ * and no box_num of the operands. Lua compares int vs float exactly, so this
+ * is an f64 compare only when the literal is exactly representable. */
+static MunitResult test_mixed_compare_unboxed(const MunitParameter params[], void *fixture) {
+    (void)params; (void)fixture;
+    /* typed float local vs int literal / int-typed local */
+    char *m = main_func_wat("local x = 0.5\n"
+                            "for _ = 1, 3 do x = x * 1.5 end\n"
+                            "local n = 2\n"
+                            "if x > 1 then print(1) end\n"
+                            "if 0 <= x then print(2) end\n"
+                            "if x < n then print(3) end\n"
+                            "print(x == 1, x ~= n)\n");
+    munit_assert_null(strstr(m, "$lua_lt"));
+    munit_assert_null(strstr(m, "$lua_gt"));
+    munit_assert_null(strstr(m, "$lua_le"));
+    munit_assert_null(strstr(m, "$lua_ge"));
+    munit_assert_null(strstr(m, "$lua_eq"));
+    munit_assert_null(strstr(m, "$lua_neq"));
+    free(m);
+    /* maybe-typed local (from a table read) vs int literal: a float cell takes
+     * an inline f64 compare against the literal (the generic helper remains
+     * only for non-numeric cells) */
+    m = main_func_wat("local t = {1.5}\n"
+                      "local y = t[1] * 2\n"
+                      "if y > 600 then print(1) end\n"
+                      "if y < 0 then print(2) end\n"
+                      "if y == 9007199254740993 then print(3) end\n");
+    munit_assert_not_null(strstr(m, "(f64.convert_i64_s (i64.const 600)))"));
+    munit_assert_not_null(strstr(m, "(f64.convert_i64_s (i64.const 0)))"));
+    /* beyond 2^53 the exact helper is used instead */
+    munit_assert_not_null(strstr(m, "(call $float_eq_int"));
+    free(m);
+    return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
     { "/emits_expected",       test_emits_expected,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
     { "/boxed_fallback_o0",    test_emits_boxed_fallback_o0, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -193,6 +259,7 @@ static MunitTest tests[] = {
     { "/data_segment_dedups",  test_data_segment_dedups,    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
     { "/user_function",        test_user_function_emitted,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
     { "/pool_pointer_stability", test_pool_pointer_stability, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+    { "/mixed_compare_unboxed", test_mixed_compare_unboxed, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
     { NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 };
 
