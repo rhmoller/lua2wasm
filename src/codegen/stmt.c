@@ -750,6 +750,22 @@ static void emit_for_num_int(CG *c, const Stmt *s, int label, int depth) {
         emit_linef(c, depth, "(local.set $ifor_stop_%d)\n", fd);
     }
     ol_init_close(c, s, depth);
+    /* Directly inside an outlined loop, a loop with more iterations to go
+     * than the outlined function's budget continues in a function of its
+     * own, resumed past this setup (outline.c, ol_nested_candidate). */
+    int nested = codegen_loop_chunk > 0 && ol_nested_candidate(c, s);
+    if (nested) {
+        /* |stop - start| > the budget, unsigned: d + B > 2B */
+        char skip[48] = "(i32.const 1)";
+        if (!stop_int) snprintf(skip, sizeof skip, "(i32.eqz (local.get $for_skip_%d))", fd);
+        emit_linef(c, depth, "(if (i32.and %s (i64.gt_u (i64.add (i64.sub %s %s) (i64.const %d)) (i64.const %lld)))\n",
+                   skip, stop, var, codegen_loop_chunk, 2LL * codegen_loop_chunk);
+        emit_line(c, depth + 1, "(then\n");
+        if (!emit_outlined_resume(c, s, depth + 2)) cg_error(c, "internal: nested loop outlining failed");
+        emit_line(c, depth + 1, ")\n");
+        emit_line(c, depth + 1, "(else\n");
+        depth += 2;
+    }
     emit_linef(c, depth, "(block $brk_%d\n", label);
     if (!stop_int) {
         emit_linef(c, depth + 1, "(br_if $brk_%d (local.get $for_skip_%d))\n", label, fd);
@@ -768,6 +784,7 @@ static void emit_for_num_int(CG *c, const Stmt *s, int label, int depth) {
     emit_linef(c, depth + 2, "br $cont_%d\n", label);
     emit_line(c, depth + 1, ")\n");
     emit_line(c, depth, ")\n");
+    if (nested) emit_line(c, depth - 2, "))\n");
 }
 
 /* The generic loop over boxed control values: $for_prep settles the loop's

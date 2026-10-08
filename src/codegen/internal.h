@@ -226,7 +226,9 @@ typedef struct {
      * ol_pending until the enclosing function is complete. */
     const Stmt *ol_loop;
     int ol_active;
-    int n_outlined; /* $ol_N functions so far */
+    int ol_break_base; /* break_depth outside ol_loop */
+    int ol_resumed;    /* ol_loop is a nested loop's resumed copy (whose children stay inline) */
+    int n_outlined;    /* $ol_N functions so far */
     WatBuilder ol_pending;
     unsigned char *run_once; /* by func_idx: the function provably runs at most once */
     /* Int boxes (analysis.c, compute_ibox): captured locals held in an $IBox,
@@ -473,9 +475,11 @@ enum { OL_START = 0,     /* (passed in) the first call: run the loop's setup */
        OL_DONE = 2,      /* the loop finished (or broke out) */
        OL_RETURN = 3 };  /* a `return` inside it: return the value it handed back */
 int body_runs_once(const CG *c, const Body *b);
-void compute_run_once(CG *c, const ParseResult *pr);
+void compute_run_once(CG *c, const ParseResult *pr, int closed);
 const char *ol_ret_type(const CG *c);
 int emit_outlined_loop(CG *c, const Stmt *s, int depth);
+int ol_nested_candidate(CG *c, const Stmt *s);
+int emit_outlined_resume(CG *c, const Stmt *s, int depth);
 void ol_loop_header(CG *c, const Stmt *s, int depth);
 void ol_init_open(CG *c, const Stmt *s, int depth);
 void ol_init_close(CG *c, const Stmt *s, int depth);

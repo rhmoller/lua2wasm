@@ -59,15 +59,36 @@ int body_runs_once(const CG *c, const Body *b) {
 }
 
 /* ----- functions that run once -----
- * A function bound to a main-chunk local runs at most once when the local is
- * never reassigned (it has a binding), no closure captures it (so no other
- * function, the function itself included, can reach it), and the main chunk
- * mentions it exactly once: as the callee of a call outside any loop. A main
- * chunk with a goto is left alone — a backward goto is a loop too. */
+ * Starting from the main chunk, a body that runs once makes these run once:
+ *  - a function bound to one of its locals (never reassigned, so it has a
+ *    binding) that no closure captures (so nothing else, the function itself
+ *    included, can reach it), which the body mentions exactly once: as the
+ *    callee of a call outside any loop, or as the function pcall / xpcall is
+ *    handed there;
+ *  - a function literal handed to pcall / xpcall outside any loop;
+ *  - in the main chunk, a global function (`function main() ... end`) that it
+ *    defines and calls once, outside any loop, and no code mentions again.
+ * pcall / xpcall and globals count only in a globally closed program (no
+ * _G / _ENV / load / require reaches them by name) that never assigns the
+ * pcall / xpcall names. A body with a goto passes nothing on — a backward
+ * goto is a loop too. */
 typedef struct {
-    int *uses, *calls; /* per main slot: references; calls outside loops */
+    CG *c;
+    int *uses, *calls; /* per local slot: references; calls outside loops */
     int n, loops, has_goto;
+    int handoff;             /* pcall / xpcall are the builtins */
+    int *gdefs, *gcalls, ng; /* main only: per global, function definitions and calls outside loops */
+    const LuaFunc **gfunc;   /* the function a global's definition assigns */
+    const LuaFunc **found;   /* function literals handed to pcall / xpcall */
+    int n_found, cap_found;
 } OnceScan;
+
+/* Is `f` the pcall or xpcall builtin? */
+static int is_handoff(const Expr *f) {
+    if (f->kind != EXPR_VAR || f->as.var.kind != VAR_BUILTIN) return 0;
+    const char *n = builtin_name(f->as.var.idx);
+    return strcmp(n, "pcall") == 0 || strcmp(n, "xpcall") == 0;
+}
 
 static void once_expr(const Expr *e, void *ctx) {
     OnceScan *o = ctx;
@@ -75,8 +96,17 @@ static void once_expr(const Expr *e, void *ctx) {
         o->uses[e->as.var.idx]++;
     if (e->kind == EXPR_CALL && o->loops == 0) {
         const Expr *f = e->as.call.callee;
+        if (o->handoff && is_handoff(f) && e->as.call.nargs > 0) f = e->as.call.args[0];
         if (f->kind == EXPR_VAR && f->as.var.kind == VAR_LOCAL && f->as.var.idx >= 0 && f->as.var.idx < o->n)
             o->calls[f->as.var.idx]++;
+        if (f->kind == EXPR_VAR && f->as.var.kind == VAR_GLOBAL && o->gcalls && f->as.var.idx < o->ng)
+            o->gcalls[f->as.var.idx]++;
+        if (f->kind == EXPR_FUNCTION && f != e->as.call.callee) {
+            if (o->n_found == o->cap_found)
+                o->found = xrealloc(o->found, (size_t)(o->cap_found = o->cap_found ? 2 * o->cap_found : 4) *
+                                                  sizeof *o->found);
+            o->found[o->n_found++] = f->as.func_expr.func;
+        }
     }
     for_each_subexpr(e, once_expr, o);
 }
@@ -84,6 +114,16 @@ static void once_block(const Block *b, void *ctx);
 static void once_stmt(const Stmt *s, OnceScan *o) {
     int loop = stmt_is_loop(s);
     if (s->kind == STMT_GOTO) o->has_goto = 1;
+    /* `function g() ... end` for a global g: a definition */
+    if (s->kind == STMT_ASSIGN && o->gdefs && o->loops == 0 && s->as.assign.n_targets == 1 &&
+        s->as.assign.n_values == 1 && s->as.assign.targets[0].kind == TGT_VAR &&
+        s->as.assign.targets[0].as.var.kind == VAR_GLOBAL && s->as.assign.values[0]->kind == EXPR_FUNCTION) {
+        int g = s->as.assign.targets[0].as.var.idx;
+        if (g >= 0 && g < o->ng) {
+            o->gdefs[g]++;
+            o->gfunc[g] = s->as.assign.values[0]->as.func_expr.func;
+        }
+    }
     o->loops += loop; /* a loop's own expressions count as inside it */
     for_each_own_expr(s, once_expr, o);
     for_each_nested_block(s, once_block, o);
@@ -93,19 +133,98 @@ static void once_block(const Block *b, void *ctx) {
     for (size_t i = 0; i < b->count; i++) once_stmt(b->items[i], ctx);
 }
 
-void compute_run_once(CG *c, const ParseResult *pr) {
-    c->run_once = xcalloc(pr->funcs.count, 1);
-    if (!c->main_slot_func) return;
-    int n = pr->main_n_locals;
-    OnceScan o = {.uses = xcalloc((size_t)n, sizeof(int)), .calls = xcalloc((size_t)n, sizeof(int)), .n = n};
-    once_block(&pr->main_body, &o);
-    for (int s = 0; s < n && !o.has_goto; s++) {
-        const LuaFunc *fn = c->main_slot_func[s];
-        if (fn && !(pr->main_captured && pr->main_captured[s]) && o.uses[s] == 1 && o.calls[s] == 1)
-            c->run_once[fn->func_idx] = 1;
+/* Program-wide: how often each global is mentioned (read or assigned), and
+ * whether the pcall / xpcall names are ever assigned. */
+typedef struct {
+    int *mentions, ng;
+    int handoff_assigned;
+} GlobalScan;
+static void gscan_expr(const Expr *e, void *ctx) {
+    GlobalScan *g = ctx;
+    if (e->kind == EXPR_VAR && e->as.var.kind == VAR_GLOBAL && e->as.var.idx >= 0 && e->as.var.idx < g->ng)
+        g->mentions[e->as.var.idx]++;
+    if (e->kind == EXPR_FUNCTION) {
+        /* nested functions are scanned with the program's function list */
     }
+    for_each_subexpr(e, gscan_expr, g);
+}
+static void gscan_stmt(const Stmt *s, void *ctx) {
+    GlobalScan *g = ctx;
+    if (s->kind == STMT_ASSIGN)
+        for (int i = 0; i < s->as.assign.n_targets; i++) {
+            const AssignTarget *t = &s->as.assign.targets[i];
+            if (t->kind != TGT_VAR) continue;
+            if (t->as.var.kind == VAR_GLOBAL && t->as.var.idx >= 0 && t->as.var.idx < g->ng)
+                g->mentions[t->as.var.idx]++;
+            if (t->as.var.kind == VAR_BUILTIN) {
+                const char *n = builtin_name(t->as.var.idx);
+                if (strcmp(n, "pcall") == 0 || strcmp(n, "xpcall") == 0) g->handoff_assigned = 1;
+            }
+        }
+    for_each_own_expr(s, gscan_expr, g);
+}
+
+/* Mark what run-once body `fi` (-1: the main chunk) makes run once; returns
+ * how many functions it newly marked, appending them to `queue`. */
+static int once_body(CG *c, int fi, int closed, const GlobalScan *gs, int *queue, int *nq) {
+    const ParseResult *pr = c->pr;
+    const LuaFunc *fn = fi >= 0 ? pr->funcs.items[fi] : NULL;
+    const Block *body = fn ? &fn->body : &pr->main_body;
+    int n = fn ? fn->n_locals : pr->main_n_locals;
+    const unsigned char *captured = fn ? fn->captured : pr->main_captured;
+    const LuaFunc **slot_func = fi >= 0 ? (c->bind_slot ? c->bind_slot[fi] : NULL) : c->main_slot_func;
+    int ng = (int)pr->globals.count, main_globals = fi < 0 && closed;
+    OnceScan o = {.c = c,
+                  .uses = xcalloc((size_t)n + 1, sizeof(int)),
+                  .calls = xcalloc((size_t)n + 1, sizeof(int)),
+                  .n = n,
+                  .handoff = closed && !gs->handoff_assigned,
+                  .ng = ng};
+    if (main_globals) {
+        o.gdefs = xcalloc((size_t)ng + 1, sizeof(int));
+        o.gcalls = xcalloc((size_t)ng + 1, sizeof(int));
+        o.gfunc = xcalloc((size_t)ng + 1, sizeof *o.gfunc);
+    }
+    once_block(body, &o);
+    int marked = 0;
+#define MARK(F)                                 \
+    do {                                        \
+        const LuaFunc *f_ = (F);                \
+        if (f_ && !c->run_once[f_->func_idx]) { \
+            c->run_once[f_->func_idx] = 1;      \
+            queue[(*nq)++] = f_->func_idx;      \
+            marked++;                           \
+        }                                       \
+    } while (0)
+    if (!o.has_goto) {
+        for (int s = 0; s < n && slot_func; s++)
+            if (slot_func[s] && !(captured && captured[s]) && o.uses[s] == 1 && o.calls[s] == 1) MARK(slot_func[s]);
+        for (int i = 0; i < o.n_found; i++) MARK(o.found[i]);
+        if (main_globals)
+            for (int g = 0; g < ng; g++)
+                if (o.gdefs[g] == 1 && o.gcalls[g] == 1 && gs->mentions[g] == 2) MARK(o.gfunc[g]);
+    }
+#undef MARK
     free(o.uses);
     free(o.calls);
+    free(o.gdefs);
+    free(o.gcalls);
+    free(o.gfunc);
+    free(o.found);
+    return marked;
+}
+
+void compute_run_once(CG *c, const ParseResult *pr, int closed) {
+    int nf = (int)pr->funcs.count;
+    c->run_once = xcalloc((size_t)nf + 1, 1);
+    GlobalScan gs = {.mentions = xcalloc(pr->globals.count + 1, sizeof(int)), .ng = (int)pr->globals.count};
+    walk_stmts(&pr->main_body, gscan_stmt, &gs);
+    for (int f = 0; f < nf; f++) walk_stmts(&pr->funcs.items[f]->body, gscan_stmt, &gs);
+    int *queue = xcalloc((size_t)nf + 1, sizeof(int)), nq = 0;
+    once_body(c, -1, closed, &gs, queue, &nq);
+    for (int i = 0; i < nq; i++) once_body(c, queue[i], closed, &gs, queue, &nq);
+    free(queue);
+    free(gs.mentions);
 }
 
 /* The type of what a `return` inside an outlined loop hands back: the value
@@ -296,6 +415,10 @@ static void emit_loop_function(CG *c, const Stmt *s, int id, const LoopScan *sc,
     body_declare_locals_of(c, b, sc->ref, 0, pass_varargs);
     wat_append(w, "    (local $ol_budget i32) (local $ol_status i32)\n");
     if (rt) wat_appendf(w, "    (local $ol_ret %s)\n", rt);
+    /* the caller's side of a loop outlined inside this one */
+    const char *brt = ol_ret_type(c);
+    wat_append(w, "    (local $olc_st i32)\n");
+    if (brt) wat_appendf(w, "    (local $olc_ret %s)\n", brt);
 
     /* A placeholder box for each captured local the loop declares (the
      * validator wants a set before every get; see body_emit), then the
@@ -310,11 +433,17 @@ static void emit_loop_function(CG *c, const Stmt *s, int id, const LoopScan *sc,
 
     wat_append(w, "    (block $ol_exit\n"
                   "      (block $ol_suspend\n");
+    const Stmt *saved_loop = c->ol_loop;
+    int saved_active = c->ol_active, saved_base = c->ol_break_base, saved_resumed = c->ol_resumed;
+    c->ol_resumed = c->ol_active; /* outlined from inside another outlined loop */
     c->ol_active = 1;
     c->ol_loop = s;
+    c->ol_break_base = c->break_depth;
     emit_stmt(c, s, 4);
-    c->ol_active = 0;
-    c->ol_loop = NULL;
+    c->ol_active = saved_active;
+    c->ol_loop = saved_loop;
+    c->ol_break_base = saved_base;
+    c->ol_resumed = saved_resumed;
     wat_appendf(w,
                 "        (local.set $ol_status (i32.const %d))\n"
                 "        (br $ol_exit))\n"
@@ -329,8 +458,8 @@ static void emit_loop_function(CG *c, const Stmt *s, int id, const LoopScan *sc,
 /* The caller's side: call $ol_N until it is done, then return what a
  * `return` inside the loop returned. */
 static void emit_loop_call(CG *c, int id, const OlState *st, const char *rt, int pass_closure,
-                           int pass_varargs, int pass_tbc, int has_return, int depth) {
-    emit_linef(c, depth, "(local.set $olc_st (i32.const %d))\n", OL_START);
+                           int pass_varargs, int pass_tbc, int has_return, int start, int depth) {
+    emit_linef(c, depth, "(local.set $olc_st (i32.const %d))\n", start);
     emit_linef(c, depth, "(loop $ol_again_%d\n", id);
     emit_linef(c, depth + 1, "(call $ol_%d (local.get $olc_st)", id);
     for (int i = 0; i < st->n; i++) wat_appendf(c->w, " (local.get %s)", st->v[i].name);
@@ -345,14 +474,21 @@ static void emit_loop_call(CG *c, int id, const OlState *st, const char *rt, int
                OL_SUSPENDED);
     if (!has_return) return;
     emit_linef(c, depth, "(if (i32.eq (local.get $olc_st) (i32.const %d))\n", OL_RETURN);
-    if (!rt) emit_line(c, depth + 1, "(then (return)))\n");
+    if (c->ol_active) {
+        /* called from an outlined loop: hand the return on to its caller */
+        emit_linef(c, depth + 1, "(then %s(local.set $ol_status (i32.const %d)) (br $ol_exit)))\n",
+                   rt ? "(local.set $ol_ret (local.get $olc_ret)) " : "", OL_RETURN);
+    } else if (!rt) emit_line(c, depth + 1, "(then (return)))\n");
     else if (rt[0] == '(') emit_line(c, depth + 1, "(then (return (ref.as_non_null (local.get $olc_ret)))))\n");
     else emit_line(c, depth + 1, "(then (return (local.get $olc_ret))))\n");
 }
 
-int emit_outlined_loop(CG *c, const Stmt *s, int depth) {
+/* Outline loop s at `depth`: emit its function (to ol_pending) and the
+ * caller's side, starting with `start` (OL_START, or OL_SUSPENDED to resume a
+ * loop whose setup already ran here). Returns 0, emitting nothing, when s
+ * can't be outlined (a goto leaves it, or its state is too wide). */
+static int outline_loop(CG *c, const Stmt *s, int start, int depth) {
     const Body *b = c->cur_body;
-    if (!b || !b->outline || c->ol_active || c->break_depth != 0) return 0;
     LoopScan sc;
     OlState st = {0};
     if (!scan_loop(c, s, &sc)) {
@@ -377,10 +513,57 @@ int emit_outlined_loop(CG *c, const Stmt *s, int depth) {
     wat_append(&c->ol_pending, wat_cstr(&fn));
     wat_free(&fn);
 
-    emit_loop_call(c, id, &st, rt, pass_closure, pass_varargs, pass_tbc, sc.has_return, depth);
+    emit_loop_call(c, id, &st, rt, pass_closure, pass_varargs, pass_tbc, sc.has_return, start, depth);
     scan_free(&sc);
     return 1;
 }
+
+int emit_outlined_loop(CG *c, const Stmt *s, int depth) {
+    const Body *b = c->cur_body;
+    if (!b || !b->outline || c->ol_active || c->break_depth != 0) return 0;
+    return outline_loop(c, s, OL_START, depth);
+}
+
+/* Iterations of the outlined loop below which its first iteration is a large
+ * share of the run (see ol_nested_candidate). */
+#define OL_FEW_ITERATIONS 64
+
+/* Is loop s a numeric for with constant bounds and at most `few` iterations? */
+static int few_iterations(const Stmt *s, int64_t few) {
+    if (s->kind != STMT_FOR_NUM) return 0;
+    const Expr *a = s->as.for_num.start, *b = s->as.for_num.stop, *st = s->as.for_num.step;
+    if (a->kind != EXPR_INT || b->kind != EXPR_INT || (st && (st->kind != EXPR_INT || st->as.i_val == 0))) return 0;
+    int64_t step = st ? st->as.i_val : 1;
+    double trips = ((double)b->as.i_val - (double)a->as.i_val) / (double)step + 1;
+    return trips <= (double)few;
+}
+
+/* A loop directly inside the outlined loop (not deeper: each such loop is
+ * emitted twice) can continue in a function of its own once its setup has
+ * run here, when it has a long way to go (src/codegen/stmt.c,
+ * emit_for_num_int): an outer loop with few iterations around a long inner
+ * one then switches to optimized code within the first of them. Only an
+ * outlined numeric for with constant bounds and few iterations splits its
+ * inner loops: with many, the first iteration is a small share of the run,
+ * and the copy (module size) and the call site (the outer function's
+ * inlining budget) cost more than they bring — fannkuch and particles ran 2%
+ * slower with every inner loop split. Whether it can is the same question as
+ * for the outlined loop itself, asked without emitting anything. */
+int ol_nested_candidate(CG *c, const Stmt *s) {
+    /* the outlined loop's break label and s's own are pushed */
+    if (!c->ol_active || c->ol_resumed || s == c->ol_loop || c->break_depth != c->ol_break_base + 2) return 0;
+    if (!few_iterations(c->ol_loop, OL_FEW_ITERATIONS)) return 0;
+    LoopScan sc;
+    OlState st = {0};
+    int ok = scan_loop(c, s, &sc);
+    if (ok) {
+        loop_state(c, s, &sc, &st);
+        ok = !st.overflow;
+    }
+    scan_free(&sc);
+    return ok;
+}
+int emit_outlined_resume(CG *c, const Stmt *s, int depth) { return outline_loop(c, s, OL_SUSPENDED, depth); }
 
 /* The header of a loop being emitted into an outlined function: count down
  * the budget, and at the outlined loop's own header suspend once it has run

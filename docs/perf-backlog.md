@@ -90,16 +90,6 @@ is three dependent loads, and growing rebuilds the whole index.
 the shapes design ([note 23](design/23-table-shapes.md)): a table's key layout
 lives in its `$Shape`, shared between tables built alike.
 
-### 8. What run-once loop outlining doesn't cover yet
-
-- Loops in a callback that runs once (`pcall(function() ... end)`,
-  `xpcall(main, handler)`, a function handed to a runner) and in a global
-  `function main() ... end main()` aren't recognized; they stay on baseline
-  code (2–5× slower than warm). Detection: `compute_run_once` in
-  src/codegen/outline.c.
-- Only the outermost loop suspends: an outer loop with few iterations around
-  a long inner loop runs its first iterations unoptimized.
-
 ## Done
 
 **Inline array-part paths** (was item 1). V8 inlines callees into a function
@@ -180,6 +170,18 @@ path (an inline append at every store site cost fannkuch 4.5%). `$tab_len`
 and `$arr_append` no longer probe the hash part for key `#t + 1` when the
 table has no hash keys. `ops.lua`: `t[#t + 1] = i` 28.2 → 7.7 ms (lua5.5
 14.6), `t[i] = i` 11.6 → 6.4 (5.8); closures 0.083 → 0.069 s.
+
+**Run-once outlining, wider** (was item 8; [note 24](design/24-run-once-loops.md)).
+A function handed to `pcall` / `xpcall`, a global `function main() ... end`
+defined and called once (in a globally closed program), and a local function
+called once from any run-once body (not only the main chunk) now run once,
+so their loops are outlined: a 20M-iteration loop inside
+`pcall(function() ... end)` or `main()` 0.124 → 0.063 s. A numeric for
+directly inside an outlined numeric for with few constant iterations can
+continue in a function of its own when it has more than a budget left: the
+first of six frames around a 2M-iteration loop 12.6 → 7.6 ms (later frames
+6.4). Splitting every inner loop cost fannkuch / particles 2% and up to 13%
+module size, so it is limited to that shape.
 
 **Warm-up, measured by the wall clock** (was item 3). bench.sh reports wall
 time next to `TIME`: much of what read as warm-up cost on the short

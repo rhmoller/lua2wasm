@@ -1093,7 +1093,6 @@ int codegen_module(const ParseResult *pr, const char *src_name,
             free_signatures(&c);
             infer_signatures(&c, pr);
         }
-        compute_run_once(&c, pr);
     }
     strpool_add(&c.strs, LITERAL_PREFIX, LITERAL_PREFIX_LEN);
 
@@ -1129,6 +1128,9 @@ int codegen_module(const ParseResult *pr, const char *src_name,
         tree_shake = 0;
     }
     c.skip_runtime_init = !needs_runtime;
+    /* Which functions run once (outline.c): a global or a pcall'd function
+     * only counts when nothing can reach it by name at run time. */
+    if (c.opt_int) compute_run_once(&c, pr, !escaped && !embed_api);
     int effective_tree_shake = tree_shake || !escaped;
     if (!effective_tree_shake) {
         for (int i = 0; i < nb; i++) live[i] = 1;

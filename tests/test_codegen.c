@@ -421,14 +421,44 @@ static MunitResult test_run_once_loops(const MunitParameter params[], void *fixt
     codegen_loop_chunk = saved;
     munit_assert_int(count_of(m, "(func $ol_"), ==, 0);
     free(m);
-    /* a goto out of a loop keeps it inline; an inner loop goes with its outer
-     * one and only counts the budget down */
+    /* a goto out of a loop keeps it inline; an inner numeric for goes with its
+     * outer one (counting the budget down) and, past a trip-count check, can
+     * also continue in a function of its own, resumed after its setup */
     m = module_wat("for i = 1, 3 do if i == 2 then goto out end end\n::out::\n"
                    "local n = 0\nfor i = 1, 2 do for j = 1, 2 do n = n + j end end\nprint(n)\n",
                    1);
+    munit_assert_int(count_of(m, "(func $ol_"), ==, 2);
+    munit_assert_int(count_of(m, "(br_if $ol_suspend"), ==, 2);
+    munit_assert_int(count_of(m, "(local.set $ol_budget (i32.sub"), ==, 3);
+    munit_assert_not_null(strstr(m, "(local.set $olc_st (i32.const 1))"));
+    free(m);
+    /* only under an outlined for with few, constant iterations */
+    m = module_wat("local n = 0\nfor i = 1, 1000 do for j = 1, 2 do n = n + j end end\nprint(n)\n", 1);
     munit_assert_int(count_of(m, "(func $ol_"), ==, 1);
-    munit_assert_int(count_of(m, "(br_if $ol_suspend"), ==, 1);
-    munit_assert_int(count_of(m, "(local.set $ol_budget (i32.sub"), ==, 2);
+    free(m);
+    m = module_wat("local n, m = 0, 3\nfor i = 1, m do for j = 1, 2 do n = n + j end end\nprint(n)\n", 1);
+    munit_assert_int(count_of(m, "(func $ol_"), ==, 1);
+    free(m);
+    /* deeper loops are not split again */
+    m = module_wat("local n = 0\nfor i = 1, 2 do for j = 1, 2 do for k = 1, 2 do n = n + k end end end\nprint(n)\n", 1);
+    munit_assert_int(count_of(m, "(func $ol_"), ==, 2);
+    free(m);
+    /* a function handed to pcall, and a global function defined and called
+     * once, run once too */
+    m = module_wat("pcall(function() local s = 0 for i = 1, 10 do s = s + i end print(s) end)\n", 1);
+    munit_assert_int(count_of(m, "(func $ol_"), >, 0);
+    free(m);
+    m = module_wat("function main() local s = 0 for i = 1, 10 do s = s + i end print(s) end\nmain()\n", 1);
+    munit_assert_int(count_of(m, "(func $ol_"), >, 0);
+    free(m);
+    /* ... but not a global something can reach by name, or one called twice */
+    m = module_wat("function main() local s = 0 for i = 1, 10 do s = s + i end print(s) end\nmain()\n"
+                   "local g = _G\n",
+                   1);
+    munit_assert_int(count_of(m, "(func $ol_"), ==, 0);
+    free(m);
+    m = module_wat("function main() local s = 0 for i = 1, 10 do s = s + i end print(s) end\nmain() main()\n", 1);
+    munit_assert_int(count_of(m, "(func $ol_"), ==, 0);
     free(m);
     /* a local function called once: its loop is outlined (in each of its
      * entries), reaching upvalues through the closure, and a return inside it

@@ -1,0 +1,10 @@
+nested	1260000	210000	630000
+bounds	140000	140000	0
+break	140002	4	30000	120000
+return	3	69999
+pcall	true	2450035000
+pcall error	false	table	5000
+xpcall	true	70000
+xpcall error	false	handled
+main	-349993
+close	done	1

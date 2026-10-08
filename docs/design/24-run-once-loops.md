@@ -59,11 +59,28 @@ enclosing entry (a typed `i64`/`f64`, an `anyref`, or a result array). It is
 never a tail call, which costs nothing: a run-once function is not part of a
 recursion. A loop with a `goto` to a label outside it stays inline.
 
-**Which bodies.** The main chunk; and a local function that the main chunk
-mentions exactly once, as the callee of a call outside any loop, whose local
+**Which bodies.** The main chunk, and what a run-once body makes run once:
+a local function it mentions exactly once — as the callee of a call outside
+any loop, or as the function `pcall` / `xpcall` is handed there — whose local
 is never reassigned and never captured (so nothing else, the function itself
-included, can call it again). A main chunk with a `goto` is left alone,
-since a backward goto is a loop too.
+included, can call it again); a function literal handed to `pcall` /
+`xpcall` outside any loop; and, in the main chunk, a global
+`function main() ... end` that it defines and calls once outside any loop
+and nothing else mentions. The `pcall` and global cases need a globally
+closed program (no `_G` / `_ENV` / `load` / `require` reaching names at run
+time, no embedding API) that never assigns `pcall` / `xpcall`. A body with a
+`goto` passes nothing on, since a backward goto is a loop too.
+
+**Inner loops.** Only the outlined loop's header suspends, so an outer loop
+with few iterations around a long inner one would run its first iterations
+on baseline code. A numeric for directly inside an outlined numeric for with
+constant bounds and at most 64 iterations is therefore emitted twice: inline,
+and as a function of its own that the inline setup hands its state to
+(called with `OL_SUSPENDED`, so its own setup is skipped) when more than one
+budget of iterations is left. A `return` inside it is passed on as the outer
+function's `OL_RETURN`. Splitting every inner loop instead cost fannkuch and
+particles 2% (the copy grows the module, the call site the outer function)
+for nothing on their short inner loops.
 
 **Budget.** 65536 iterations per call (inner loops count), set by
 `codegen_loop_chunk` / `--loop-chunk=N`. Anything from 4K to 512K performs
@@ -88,8 +105,9 @@ whose loops are short can show slightly more CPU time while finishing sooner.
 
 ## Limits
 
-- Suspension happens only at the outlined (outermost) loop's header. An outer
-  loop with few iterations around a long inner loop runs its first iterations
-  on baseline code until the first return.
-- A global `function main() ... end`, or a function called once from another
-  run-once function, is not recognized.
+- An inner loop only gets a function of its own under an outer numeric for
+  with few constant iterations, and only one level down; a `while` or
+  `repeat` frame loop around a long inner loop runs its first iteration on
+  baseline code.
+- A function handed to a user-defined runner (anything but `pcall` /
+  `xpcall`) is not recognized as running once.

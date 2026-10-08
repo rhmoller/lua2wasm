@@ -141,3 +141,4 @@ builtin_fast_entries	tests/fixtures/builtin_fast_entries.lua
 table_ctor_list	tests/fixtures/table_ctor_list.lua
 for_gen_stepped	tests/fixtures/for_gen_stepped.lua
 array_append	tests/fixtures/array_append.lua
+outline_nested	tests/fixtures/outline_nested.lua
