@@ -754,45 +754,35 @@
       (br $search)))
     (array.new_fixed $ArgArr 1 (ref.null any)))
 
-  ;; string.gmatch iterator step. Upvalues: (s, pat, src_box, lastmatch_box).
+;; string.gmatch iterator step. Upvalues: (s, pat, src, lastmatch, caps).
   ;; Mirrors reference gmatch_aux: scan from src; accept a match only when
   ;; its end differs from the previous match's end ($lastmatch). That single
   ;; rule is what suppresses a spurious empty match immediately after another
   ;; match — e.g. ("a,b,,c"):gmatch("[^,]*") yields a,b,"",c, not a doubled
-  ;; sequence. $lastmatch starts at -1 (no previous match).
-  (func $builtin_string_gmatch_iter (type $LuaFn)
-    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
+  ;; sequence. $lastmatch starts at -1 (no previous match). $gmatch_next
+  ;; finds the next match and advances the state: the match's start and end
+  ;; (-1: no more matches) and its capture count, the captures in the
+  ;; iterator's own capture buffer (upvalue 4, reused from call to call).
+  (func $gmatch_next (param $self (ref $LuaClosure)) (result i32 i32 i32)
     (local $upvals (ref $UpvalArr))
     (local $sub (ref $LuaArr)) (local $pat (ref $LuaArr))
-    (local $n_sub i32) (local $n_pat i32)
-    (local $sp i32) (local $end i32) (local $ncaps i32) (local $lastmatch i32)
-    (local $caps (ref $CapArr)) (local $out (ref $ArgArr)) (local $i i32)
-    (local $whole (ref $LuaArr))
+    (local $n_sub i32) (local $sp i32) (local $end i32) (local $ncaps i32) (local $lastmatch i32)
     (local.set $upvals (struct.get $LuaClosure $upvals (local.get $self)))
-    (local.set $sub (struct.get $LuaString $bytes
-      (ref.cast (ref $LuaString)
-        (struct.get $Box $v
-          (array.get $UpvalArr (local.get $upvals) (i32.const 0))))))
+    (local.set $sub (call $gmatch_subject (local.get $self)))
     (local.set $pat (struct.get $LuaString $bytes
-      (ref.cast (ref $LuaString)
-        (struct.get $Box $v
-          (array.get $UpvalArr (local.get $upvals) (i32.const 1))))))
+      (ref.cast (ref $LuaString) (struct.get $Box $v (array.get $UpvalArr (local.get $upvals) (i32.const 1))))))
     (local.set $sp (i32.wrap_i64 (call $as_int
-      (struct.get $Box $v
-        (array.get $UpvalArr (local.get $upvals) (i32.const 2))))))
+      (struct.get $Box $v (array.get $UpvalArr (local.get $upvals) (i32.const 2))))))
     (local.set $lastmatch (i32.wrap_i64 (call $as_int
-      (struct.get $Box $v
-        (array.get $UpvalArr (local.get $upvals) (i32.const 3))))))
+      (struct.get $Box $v (array.get $UpvalArr (local.get $upvals) (i32.const 3))))))
     (local.set $n_sub (array.len (local.get $sub)))
-    (local.set $n_pat (array.len (local.get $pat)))
-    (local.set $caps (array.new $CapArr (i32.const 0) (i32.const 64)))
     ;; gmatch does not honour '^' as an anchor; $match_pat is given ppos 0.
     (block $search_done (loop $search
       (br_if $search_done (i32.gt_s (local.get $sp) (local.get $n_sub)))
       (call $match_pat
         (local.get $sub) (local.get $sp)
         (local.get $pat) (i32.const 0)
-        (local.get $caps) (i32.const 0))
+        (call $gmatch_caps (local.get $self)) (i32.const 0))
       (local.set $ncaps)
       (local.set $end)
       (if (i32.and (i32.ge_s (local.get $end) (i32.const 0))
@@ -805,32 +795,58 @@
           (struct.set $Box $v
             (array.get $UpvalArr (local.get $upvals) (i32.const 3))
             (call $make_int (i64.extend_i32_s (local.get $end))))
-          (if (i32.eqz (local.get $ncaps))
-            (then
-              (local.set $whole (array.new $LuaArr (i32.const 0)
-                (i32.sub (local.get $end) (local.get $sp))))
-              (array.copy $LuaArr $LuaArr
-                (local.get $whole) (i32.const 0)
-                (local.get $sub) (local.get $sp)
-                (i32.sub (local.get $end) (local.get $sp)))
-              (return (array.new_fixed $ArgArr 1
-                (struct.new $LuaString (local.get $whole) (i32.const 0))))))
-          (local.set $out (array.new $ArgArr (ref.null any) (local.get $ncaps)))
-          (local.set $i (i32.const 0))
-          (block $cdone (loop $cp
-            (br_if $cdone (i32.ge_s (local.get $i) (local.get $ncaps)))
-            (array.set $ArgArr (local.get $out) (local.get $i)
-              (call $cap_to_value (local.get $sub) (local.get $caps) (local.get $i)))
-            (local.set $i (i32.add (local.get $i) (i32.const 1)))
-            (br $cp)))
-          (return (local.get $out))))
+          (return (local.get $sp) (local.get $end) (local.get $ncaps))))
       (local.set $sp (i32.add (local.get $sp) (i32.const 1)))
       (br $search)))
-    (global.get $g_empty_args))
+    (i32.const 0) (i32.const -1) (i32.const 0))
+  (func $gmatch_subject (param $self (ref $LuaClosure)) (result (ref $LuaArr))
+    (struct.get $LuaString $bytes (ref.cast (ref $LuaString) (struct.get $Box $v
+      (array.get $UpvalArr (struct.get $LuaClosure $upvals (local.get $self)) (i32.const 0))))))
+  (func $gmatch_caps (param $self (ref $LuaClosure)) (result (ref $CapArr))
+    (ref.cast (ref $CapArr) (struct.get $Box $v
+      (array.get $UpvalArr (struct.get $LuaClosure $upvals (local.get $self)) (i32.const 4)))))
+  ;; A match without captures yields the whole match.
+  (func $gmatch_whole (param $sub (ref $LuaArr)) (param $sp i32) (param $end i32) (result anyref)
+    (local $whole (ref $LuaArr))
+    (local.set $whole (array.new $LuaArr (i32.const 0) (i32.sub (local.get $end) (local.get $sp))))
+    (array.copy $LuaArr $LuaArr
+      (local.get $whole) (i32.const 0)
+      (local.get $sub) (local.get $sp)
+      (i32.sub (local.get $end) (local.get $sp)))
+    (struct.new $LuaString (local.get $whole) (i32.const 0)))
+  ;; The generic entry: every capture.
+  (func $builtin_string_gmatch_iter (type $LuaFn)
+    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
+    (local $sp i32) (local $end i32) (local $ncaps i32) (local $out (ref $ArgArr)) (local $i i32)
+    (call $gmatch_next (local.get $self))
+    (local.set $ncaps) (local.set $end) (local.set $sp)
+    (if (i32.lt_s (local.get $end) (i32.const 0)) (then (return (global.get $g_empty_args))))
+    (if (i32.eqz (local.get $ncaps))
+      (then (return (array.new_fixed $ArgArr 1
+        (call $gmatch_whole (call $gmatch_subject (local.get $self)) (local.get $sp) (local.get $end))))))
+    (local.set $out (array.new $ArgArr (ref.null any) (local.get $ncaps)))
+    (block $cdone (loop $cp
+      (br_if $cdone (i32.ge_s (local.get $i) (local.get $ncaps)))
+      (array.set $ArgArr (local.get $out) (local.get $i)
+        (call $cap_to_value (call $gmatch_subject (local.get $self)) (call $gmatch_caps (local.get $self))
+                            (local.get $i)))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br $cp)))
+    (local.get $out))
+  ;; The fast entry: the first capture (or the whole match) only.
+  (func $builtin_string_gmatch_iter_f (type $LuaFn1) (param $self (ref $LuaClosure))
+    (param $a0 anyref) (param $a1 anyref) (param $a2 anyref) (param $a3 anyref) (param $n i32) (result anyref)
+    (local $sp i32) (local $end i32) (local $ncaps i32)
+    (call $gmatch_next (local.get $self))
+    (local.set $ncaps) (local.set $end) (local.set $sp)
+    (if (i32.lt_s (local.get $end) (i32.const 0)) (then (return (ref.null any))))
+    (if (i32.eqz (local.get $ncaps))
+      (then (return (call $gmatch_whole (call $gmatch_subject (local.get $self)) (local.get $sp) (local.get $end)))))
+    (call $cap_to_value (call $gmatch_subject (local.get $self)) (call $gmatch_caps (local.get $self)) (i32.const 0)))
 
-  ;; string.gmatch(s, pat [, init]) — returns an iterator closure with four
-  ;; upvalues (s, pat, src, lastmatch). src starts at init-1; lastmatch at -1
-  ;; (no previous match). Generic for drives it to completion.
+  ;; string.gmatch(s, pat [, init]) — returns an iterator closure with five
+  ;; upvalues (s, pat, src, lastmatch, caps). src starts at init-1;
+  ;; lastmatch at -1 (no previous match). Generic for drives it to completion.
   (func $builtin_string_gmatch (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
     (local $init i32) (local $nargs i32)
@@ -844,13 +860,14 @@
     (array.new_fixed $ArgArr 1
       (struct.new $LuaClosure
         (ref.func $builtin_string_gmatch_iter)
-        (array.new_fixed $UpvalArr 4
+        (array.new_fixed $UpvalArr 5
           (struct.new $Box (call $arg_string (call $args_at (local.get $args) (i32.const 0))))
           (struct.new $Box (call $arg_string (call $args_at (local.get $args) (i32.const 1))))
           (struct.new $Box (call $make_int
             (i64.extend_i32_s (i32.sub (local.get $init) (i32.const 1)))))
-          (struct.new $Box (call $make_int (i64.const -1)))) (i32.const 256)
-        (ref.func $fast_adapter))))
+          (struct.new $Box (call $make_int (i64.const -1)))
+          (struct.new $Box (array.new $CapArr (i32.const 0) (i32.const 64)))) (i32.const 256)
+        (ref.func $builtin_string_gmatch_iter_f))))
 
   ;; --- byte-builder for string.gsub output (step 7) ---
   (func $builder_new (result (ref $Builder))

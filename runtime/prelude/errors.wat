@@ -41,6 +41,13 @@
   ;; builtin's caller in user code. The frame stack is left intact on
   ;; throw paths (we skip pop), so this works wherever an internal
   ;; error needs to surface to user code.
+  ;; The source line of the innermost call: where an error raised inside a
+  ;; builtin is reported.
+  (func $top_line (result i32)
+    (if (result i32) (i32.gt_s (global.get $call_depth) (i32.const 0))
+      (then (array.get $LineArr (ref.as_non_null (global.get $call_lines))
+                                (i32.sub (global.get $call_depth) (i32.const 1))))
+      (else (i32.const 0))))
   (func $throw_at_top (param $msg (ref $LuaString))
     (local $idx i32) (local $err (ref $LuaString))
     (local.set $err (local.get $msg))

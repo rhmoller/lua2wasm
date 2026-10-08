@@ -510,22 +510,88 @@
       (call $tval (array.get $TArr (ref.as_non_null (local.get $vals)) (local.get $idx))
                   (struct.get $LuaTable $fvals (local.get $t)) (local.get $idx))))
 
+;; The generic for over `ipairs` / `pairs` without calling the iterator
+  ;; (src/codegen/stmt.c, emit_for_gen). $for_gen_mode picks the mode once
+  ;; per loop — 1: ipairs's iterator, from an integer (state[i] is the
+  ;; ordinary index, as in the iterator); 2: next over a table, from nil;
+  ;; 0: anything else, through the call protocol — and the starting
+  ;; position.
+  (func $for_gen_mode (param $iter anyref) (param $state anyref) (param $k anyref) (result i32 i64)
+    (local $f (ref $LuaClosure))
+    (if (i32.eqz (ref.test (ref $LuaClosure) (local.get $iter))) (then (return (i32.const 0) (i64.const 0))))
+    (local.set $f (ref.cast (ref $LuaClosure) (local.get $iter)))
+    (if (ref.eq (local.get $f) (global.get $g_builtin_ipairs_iter))
+      (then (if (call $is_int (local.get $k)) (then (return (i32.const 1) (call $as_int (local.get $k)))))))
+    (if (ref.eq (local.get $f) (global.get $g_builtin_next))
+      (then (if (i32.and (ref.is_null (local.get $k)) (ref.test (ref $LuaTable) (local.get $state)))
+        (then (return (i32.const 2) (i64.const 0))))))
+    (i32.const 0) (i64.const 0))
+
+  ;; One step of `next` by position instead of by key: $pos >= 0 is the next
+  ;; array slot to look at, -(j+1) the next hash position j. Returns the
+  ;; position after the entry found, its key and value; a nil key when the
+  ;; table is exhausted. The same entries in the same order as next(t, k)
+  ;; (whose key lookup finds the position this carries): deleting fields
+  ;; keeps positions, and adding one during a traversal is undefined in Lua.
+  (func $next_step (param $t (ref $LuaTable)) (param $pos i64) (result i64 anyref anyref)
+    (local $i i32) (local $n i32) (local $vals (ref null $TArr)) (local $v anyref)
+    (if (i64.ge_s (local.get $pos) (i64.const 0))
+      (then
+        (local.set $i (i32.wrap_i64 (local.get $pos)))
+        (block $array_done (loop $scan
+          (br_if $array_done (i32.ge_s (local.get $i) (struct.get $LuaTable $alen (local.get $t))))
+          (local.set $v (array.get $TArr (ref.as_non_null (struct.get $LuaTable $arr (local.get $t))) (local.get $i)))
+          (if (i32.eqz (ref.is_null (local.get $v)))
+            (then (return
+              (i64.extend_i32_u (i32.add (local.get $i) (i32.const 1)))
+              (ref.i31 (i32.add (local.get $i) (i32.const 1)))
+              (call $tval (local.get $v) (struct.get $LuaTable $farr (local.get $t)) (local.get $i)))))
+          (local.set $i (i32.add (local.get $i) (i32.const 1)))
+          (br $scan)))
+        (local.set $pos (i64.const -1))))
+    (local.set $i (i32.wrap_i64 (i64.sub (i64.const -1) (local.get $pos))))
+    (local.set $n (struct.get $Shape $n (struct.get $LuaTable $shape (local.get $t))))
+    (local.set $vals (struct.get $LuaTable $vals (local.get $t)))
+    (block $done (loop $scan
+      (br_if $done (i32.ge_s (local.get $i) (local.get $n)))
+      (local.set $v (array.get $TArr (ref.as_non_null (local.get $vals)) (local.get $i)))
+      (if (i32.eqz (ref.is_null (local.get $v)))
+        (then (return
+          (i64.sub (i64.const -2) (i64.extend_i32_u (local.get $i)))
+          (array.get $TArr (struct.get $Shape $keys (struct.get $LuaTable $shape (local.get $t))) (local.get $i))
+          (call $tval (local.get $v) (struct.get $LuaTable $fvals (local.get $t)) (local.get $i)))))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br $scan)))
+    (i64.const 0) (ref.null any) (ref.null any))
+
   (func $builtin_pairs (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
+    (local $mm anyref) (local $r (ref $ArgArr))
+    (call $need_arg (local.get $args) (i32.const 0))
+    ;; __pairs: its first four results.
+    (local.set $mm (call $get_metamethod (call $args_at (local.get $args) (i32.const 0))
+      (ref.as_non_null (global.get $g_mkey_pairs))))
+    (if (i32.eqz (ref.is_null (local.get $mm)))
+      (then
+        (local.set $r (call $lua_call_any (local.get $mm)
+          (array.new_fixed $ArgArr 1 (call $args_at (local.get $args) (i32.const 0))) (call $top_line)))
+        (return (array.new_fixed $ArgArr 4
+          (call $args_at (local.get $r) (i32.const 0)) (call $args_at (local.get $r) (i32.const 1))
+          (call $args_at (local.get $r) (i32.const 2)) (call $args_at (local.get $r) (i32.const 3))))))
     ;; Use the singleton next closure so `pairs(t) == pairs(t)` returns
     ;; the same iterator both times — same identity contract as ipairs.
-    (call $need_arg (local.get $args) (i32.const 0))
     (array.new_fixed $ArgArr 3
       (global.get $g_builtin_next)
       (call $args_at (local.get $args) (i32.const 0))
       (ref.null any)))
 
   ;; ipairs_iter: takes (t, prev_k) where prev_k is an int. Returns next int
-  ;; key and t[next_k], or empty when t[next_k] is nil.
+  ;; key and t[next_k], or empty when t[next_k] is nil. Like lua_geti, t can
+  ;; be any value that indexes (a string's is always nil).
   (func $builtin_ipairs_iter (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
-    (local $t (ref $LuaTable)) (local $k i64) (local $v anyref) (local $kref anyref)
-    (local.set $t (call $arg_table (call $args_at (local.get $args) (i32.const 0))))
+    (local $t anyref) (local $k i64) (local $v anyref) (local $kref anyref)
+    (local.set $t (call $args_at (local.get $args) (i32.const 0)))
     ;; prev_k may be a boxed $LuaInt when it doesn't fit in i31. Use
     ;; $as_int (which handles both reps) and i64 arithmetic so overflow
     ;; wraps the same way reference Lua does — nextvar.lua probes this
@@ -534,7 +600,7 @@
       (call $as_int (call $args_at (local.get $args) (i32.const 1)))
       (i64.const 1)))
     (local.set $kref (call $make_int (local.get $k)))
-    (local.set $v (call $tab_get (local.get $t) (local.get $kref)))
+    (local.set $v (call $lua_index_ik (local.get $t) (local.get $k) (call $top_line)))
     (if (ref.is_null (local.get $v))
       (then (return (global.get $g_empty_args))))
     (array.new_fixed $ArgArr 2 (local.get $kref) (local.get $v)))

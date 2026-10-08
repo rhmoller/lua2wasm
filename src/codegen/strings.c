@@ -159,6 +159,7 @@ static const struct {
     {"$g_mkey_bnot", "__bnot"},
     {"$g_mkey_concat", "__concat"},
     {"$g_mkey_len", "__len"},
+    {"$g_mkey_pairs", "__pairs"},
     {"$g_mkey_eq", "__eq"},
     {"$g_mkey_lt", "__lt"},
     {"$g_mkey_le", "__le"},

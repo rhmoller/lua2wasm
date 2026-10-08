@@ -268,6 +268,8 @@ static void loop_state(CG *c, const Stmt *s, const LoopScan *sc, OlState *st) {
         state_add(st, "anyref", "$for_iter_%d", fd);
         state_add(st, "anyref", "$for_state_%d", fd);
         state_add(st, "anyref", "$for_k_%d", fd);
+        state_add(st, "i32", "$for_mode_%d", fd);
+        state_add(st, "i64", "$for_pos_%d", fd);
     }
 }
 

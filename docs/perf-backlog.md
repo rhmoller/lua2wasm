@@ -13,19 +13,19 @@ and parallel GC threads; `wall` is the same run timed by the wall clock
 
 | bench | lua5.5 | lua2wasm | ratio | wall | wall ratio |
 |---|---:|---:|---:|---:|---:|
-| binarytrees | 0.359 | 0.121 | 0.34× | 0.086 | 0.24× |
-| fannkuch | 0.826 | 0.337 | 0.41× | 0.333 | 0.40× |
-| spectralnorm | 0.952 | 0.528 | 0.55× | 0.523 | 0.55× |
-| oo | 0.461 | 0.264 | 0.57× | 0.236 | 0.51× |
-| nbody_arr | 0.383 | 0.238 | 0.62× | 0.232 | 0.61× |
-| vectors | 1.078 | 0.680 | 0.63× | 0.599 | 0.56× |
-| particles | 0.585 | 0.454 | 0.78× | 0.420 | 0.72× |
-| nbody | 0.436 | 0.350 | 0.80× | 0.348 | 0.80× |
-| entities | 0.678 | 0.554 | 0.82× | 0.502 | 0.74× |
-| tilemap | 0.284 | 0.240 | 0.85× | 0.187 | 0.66× |
-| closures | 0.074 | 0.091 | 1.23× | 0.060 | 0.81× |
-| hashtab | 0.096 | 0.150 | 1.56× | 0.088 | 0.92× |
-| strings | 0.067 | 0.160 | 2.39× | 0.093 | 1.39× |
+| binarytrees | 0.354 | 0.121 | 0.34× | 0.085 | 0.24× |
+| fannkuch | 0.822 | 0.338 | 0.41× | 0.334 | 0.41× |
+| spectralnorm | 0.949 | 0.533 | 0.56× | 0.524 | 0.55× |
+| oo | 0.461 | 0.264 | 0.57× | 0.248 | 0.54× |
+| nbody_arr | 0.388 | 0.239 | 0.62× | 0.233 | 0.60× |
+| vectors | 1.073 | 0.706 | 0.66× | 0.645 | 0.60× |
+| particles | 0.591 | 0.456 | 0.77× | 0.417 | 0.71× |
+| nbody | 0.434 | 0.350 | 0.81× | 0.345 | 0.79× |
+| entities | 0.673 | 0.551 | 0.82× | 0.497 | 0.74× |
+| tilemap | 0.284 | 0.244 | 0.86× | 0.185 | 0.65× |
+| closures | 0.074 | 0.083 | 1.12× | 0.056 | 0.76× |
+| hashtab | 0.095 | 0.135 | 1.42× | 0.081 | 0.85× |
+| strings | 0.068 | 0.157 | 2.31× | 0.086 | 1.26× |
 
 ## Measuring
 
@@ -78,17 +78,6 @@ hash in a 4-byte header); possibly interning short run-time strings.
 
 **Verify.** strings, hashtab, tilemap, closures; the GC share in profiles.
 
-### 5. gmatch iteration
-
-**Evidence.** strings' `gmatch` section: 31 ms warm against 13.5 in lua5.5.
-
-**Cause.** Each match: the generic for calls the iterator through
-`$lua_call_any` with a fresh argument array and gets a result array back; the
-match is a new two-object string; `freq[w]` hashes it and compares bytes.
-
-**Fix.** A generic for with one loop variable could call through the fast
-entry (`$lua_call1`), and gmatch's iterator could have one; plus item 2.
-
 ### 6. The hash part's layout
 
 **Evidence.** hashtab: `$tab_index_lookup_h` 15%, `$tab_set_hash` and
@@ -123,9 +112,6 @@ cheaper `#t` for tables without a metatable; revisit the growth policy.
   src/codegen/outline.c.
 - Only the outermost loop suspends: an outer loop with few iterations around
   a long inner loop runs its first iterations unoptimized.
-- ipairs and pairs call the iterator through the generic protocol (argument
-  and result arrays per iteration): `ipairs` is 5× slower than a numeric for
-  over the same table (`iter.lua`), though still faster than lua5.5.
 
 ## Done
 
@@ -178,6 +164,22 @@ through `$arr_append` / `$arr_ensure`. Those two also crowded `$tab_new` out
 of V8's inlining budget in binarytrees' `BottomUpTree`, where the choice
 then flipped with function indices (an unrelated prelude change cost 8%).
 binarytrees 0.159 → 0.121 s (wall 0.116 → 0.086), tilemap 0.27 → 0.24.
+
+**The generic for without the call protocol** (was item 5, and item 8's
+iterator bullet). A generic for with one or two variables picks a mode once
+(`$for_gen_mode`): over `ipairs` it counts the index itself and reads `t[i]`
+through the inline array probe; over `next` (what `pairs` returns) it
+carries a position into the array part and then the hash part
+(`$next_step`) instead of looking the key up again each step — the same
+entries in the same order, since clearing fields keeps positions and adding
+one mid-traversal is undefined in Lua. Any other iterator is called; with one
+variable through its fast entry, which gmatch's iterator now has (its
+capture buffer is reused across calls instead of allocated per match).
+`iter.lua`: ipairs 18.8 → 4.1 ms (a numeric for: 4.3), pairs over an array
+17.5 → 4.5, over a hash 40.2 → 6.3 (lua5.5: 25, 23, 66); strings' warm
+`gmatch` 31.9 → 14.5 ms (lua5.5 13.7). Fixed on the way: `pairs` honours
+`__pairs` (its first four results), and `ipairs` indexes any value as
+`lua_geti` does (`ipairs("abc")` yields nothing).
 
 **Warm-up, measured by the wall clock** (was item 3). bench.sh reports wall
 time next to `TIME`: much of what read as warm-up cost on the short

@@ -857,7 +857,16 @@ static void emit_for_gen(CG *c, const Stmt *s, int depth) {
     snprintf(f_iter, sizeof f_iter, "$for_iter_%d", fd);
     snprintf(f_state, sizeof f_state, "$for_state_%d", fd);
     snprintf(f_k, sizeof f_k, "$for_k_%d", fd);
+    char f_v[24], f_mode[24], f_pos[24];
+    snprintf(f_v, sizeof f_v, "$for_v_%d", fd);
+    snprintf(f_mode, sizeof f_mode, "$for_mode_%d", fd);
+    snprintf(f_pos, sizeof f_pos, "$for_pos_%d", fd);
     int n_exprs = s->as.for_gen.n_exprs;
+    int n_names = s->as.for_gen.n_names;
+    /* One or two variables over ipairs / pairs step in place, without
+     * calling the iterator (see $for_gen_mode); any other iterator goes
+     * through the call protocol. */
+    int stepped = n_names <= 2;
     ol_init_open(c, s, depth);
     emit_line(c, depth, "(local.set $tmp_args\n");
     emit_args_array(c, s->as.for_gen.exprs, n_exprs, depth + 1);
@@ -896,48 +905,85 @@ static void emit_for_gen(CG *c, const Stmt *s, int depth) {
             wat_appendf(c->w, "(local.set $L%d (ref.null any))\n", li);
         }
     }
+
+    if (stepped) {
+        emit_linef(c, depth, "(call $for_gen_mode (local.get %s) (local.get %s) (local.get %s))\n", f_iter, f_state,
+                   f_k);
+        emit_linef(c, depth, "local.set %s\n", f_pos);
+        emit_linef(c, depth, "local.set %s\n", f_mode);
+    }
     ol_init_close(c, s, depth);
 
     emit_linef(c, depth, "(block $brk_%d\n", label);
     emit_linef(c, depth + 1, "(loop $cont_%d\n", label);
     ol_loop_header(c, s, depth + 2);
-    /* Call iter(state, k). The iterator can be any callable (a
-     * closure, or a table with __call) — go through $lua_call_any
-     * so a wrong type produces a typed error instead of a trap. */
-    emit_line(c, depth + 2, "(local.set $tmp_args\n");
-    emit_line(c, depth + 3, "(call $lua_call_any\n");
-    emit_linef(c, depth + 4, "(local.get %s)\n", f_iter);
-    emit_linef(c, depth + 4, "(array.new_fixed $ArgArr 2 (local.get %s) (local.get %s))\n", f_state, f_k);
-    emit_linef(c, depth + 4, "(i32.const %d)\n", s->line);
-    emit_line(c, depth + 3, ")\n");
-    emit_line(c, depth + 2, ")\n");
-    /* terminate if results[0] is nil */
-    emit_linef(c, depth + 2, "(br_if $brk_%d (ref.is_null "
-                             "(call $args_at (ref.as_non_null (local.get $tmp_args)) (i32.const 0))))\n",
-               label);
-    /* update k to results[0] */
-    emit_linef(c, depth + 2, "(local.set %s "
-                             "(call $args_at (ref.as_non_null (local.get $tmp_args)) (i32.const 0)))\n",
-               f_k);
+    int d = depth + 2;
+    if (stepped) {
+        /* ipairs: the next index and t[i], probed inline; nil ends the loop */
+        emit_linef(c, d, "(if (i32.eq (local.get %s) (i32.const 1))\n", f_mode);
+        emit_line(c, d + 1, "(then\n");
+        emit_linef(c, d + 2, "(local.set %s (i64.add (local.get %s) (i64.const 1)))\n", f_pos, f_pos);
+        emit_linef(c, d + 2, "(local.set %s\n", f_v);
+        if (c->opt_int) {
+            int n = emit_ix_get_open(c, d + 3);
+            emit_linef(c, d + 4, "(local.get %s) (local.get %s)\n", f_state, f_pos);
+            emit_ix_get_close(c, n, NULL, s->line, d + 3);
+        } else {
+            emit_linef(c, d + 3, "(call $lua_index_ik (local.get %s) (local.get %s) (i32.const %d))\n", f_state, f_pos,
+                       s->line);
+        }
+        emit_line(c, d + 2, ")\n");
+        emit_linef(c, d + 2, "(br_if $brk_%d (ref.is_null (local.get %s)))\n", label, f_v);
+        emit_linef(c, d + 2, "(local.set %s (call $make_int (local.get %s))))\n", f_k, f_pos);
+        /* next: the entry at the carried position */
+        emit_linef(c, d + 1, "(else (if (i32.eq (local.get %s) (i32.const 2))\n", f_mode);
+        emit_line(c, d + 2, "(then\n");
+        emit_linef(c, d + 3, "(call $next_step (ref.cast (ref $LuaTable) (local.get %s)) (local.get %s))\n", f_state,
+                   f_pos);
+        emit_linef(c, d + 3, "local.set %s\n", f_v);
+        emit_linef(c, d + 3, "local.set %s\n", f_k);
+        emit_linef(c, d + 3, "local.set %s\n", f_pos);
+        emit_linef(c, d + 3, "(br_if $brk_%d (ref.is_null (local.get %s))))\n", label, f_k);
+        emit_line(c, d + 2, "(else\n");
+        d += 3;
+    }
+    if (n_names == 1) {
+        /* One variable: the iterator's first result, through its fast entry. */
+        emit_linef(c, d, "(local.set %s (call $lua_call1 (local.get %s) (local.get %s) (local.get %s)"
+                         " (ref.null any) (ref.null any) (i32.const 2) (i32.const %d)))\n",
+                   f_k, f_iter, f_state, f_k, s->line);
+        emit_linef(c, d, "(br_if $brk_%d (ref.is_null (local.get %s)))\n", label, f_k);
+    } else {
+        /* Call iter(state, k). The iterator can be any callable (a closure,
+         * or a table with __call) — go through $lua_call_any so a wrong type
+         * produces a typed error instead of a trap. */
+        emit_line(c, d, "(local.set $tmp_args\n");
+        emit_line(c, d + 1, "(call $lua_call_any\n");
+        emit_linef(c, d + 2, "(local.get %s)\n", f_iter);
+        emit_linef(c, d + 2, "(array.new_fixed $ArgArr 2 (local.get %s) (local.get %s))\n", f_state, f_k);
+        emit_linef(c, d + 2, "(i32.const %d)\n", s->line);
+        emit_line(c, d + 1, ")\n");
+        emit_line(c, d, ")\n");
+        /* k = results[0]; nil ends the loop */
+        emit_linef(c, d, "(local.set %s (call $args_at (ref.as_non_null (local.get $tmp_args)) (i32.const 0)))\n",
+                   f_k);
+        emit_linef(c, d, "(br_if $brk_%d (ref.is_null (local.get %s)))\n", label, f_k);
+        if (stepped)
+            emit_linef(c, d, "(local.set %s (call $args_at (ref.as_non_null (local.get $tmp_args)) (i32.const 1)))\n",
+                       f_v);
+    }
+    if (stepped) emit_line(c, depth + 2, "))))\n"); /* else, if, else, if */
     /* Bind loop vars from results. A captured var gets a FRESH $Box
      * each iteration so closures over it see distinct values
      * (Lua 5.4+ semantics), rather than sharing one mutated cell. */
-    for (int i = 0; i < s->as.for_gen.n_names; i++) {
+    for (int i = 0; i < n_names; i++) {
         int li = s->as.for_gen.local_idxs[i];
-        emit_indent(c, depth + 2);
-        if (slot_is_boxed(c, li)) {
-            wat_appendf(c->w,
-                        "(local.set $L%d (struct.new $Box "
-                        "(call $args_at (ref.as_non_null (local.get $tmp_args)) "
-                        "(i32.const %d))))\n",
-                        li, i);
-        } else {
-            wat_appendf(c->w,
-                        "(local.set $L%d "
-                        "(call $args_at (ref.as_non_null (local.get $tmp_args)) "
-                        "(i32.const %d)))\n",
-                        li, i);
-        }
+        char src[96];
+        if (i == 0) snprintf(src, sizeof src, "(local.get %s)", f_k);
+        else if (stepped) snprintf(src, sizeof src, "(local.get %s)", f_v);
+        else snprintf(src, sizeof src, "(call $args_at (ref.as_non_null (local.get $tmp_args)) (i32.const %d))", i);
+        if (slot_is_boxed(c, li)) emit_linef(c, depth + 2, "(local.set $L%d (struct.new $Box %s))\n", li, src);
+        else emit_linef(c, depth + 2, "(local.set $L%d %s)\n", li, src);
     }
     /* body */
     c->for_depth++;
@@ -1516,9 +1562,15 @@ static void max_for_nesting_in(const Block *b, void *ctx) {
     if (v > *d) *d = v;
 }
 
-/* Emit the per-level $for_* scratch locals for a function body. */
+static void note_for_gen(const Stmt *s, void *ctx) {
+    if (s->kind == STMT_FOR_GEN) *(int *)ctx = 1;
+}
+
+/* Emit the per-level $for_* scratch locals for a function body (a generic
+ * for's stepping state only when the body has one). */
 static void emit_for_scratch_locals(WatBuilder *w, const Block *body) {
-    int levels = max_for_nesting(body);
+    int levels = max_for_nesting(body), gen = 0;
+    walk_stmts(body, note_for_gen, &gen);
     for (int d = 0; d < levels; d++) {
         wat_appendf(w,
                     "    (local $for_stop_%d anyref) (local $for_step_%d anyref)"
@@ -1529,6 +1581,8 @@ static void emit_for_scratch_locals(WatBuilder *w, const Block *body) {
                     "    (local $for_iter_%d anyref) (local $for_state_%d anyref)"
                     " (local $for_k_%d anyref)\n",
                     d, d, d);
+        if (gen)
+            wat_appendf(w, "    (local $for_v_%d anyref) (local $for_mode_%d i32) (local $for_pos_%d i64)\n", d, d, d);
     }
 }
 
