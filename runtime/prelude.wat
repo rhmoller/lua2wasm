@@ -1103,6 +1103,17 @@
       (then (return (call $bytes_of_lit (i32.const 2)))))             ;; table
     (call $bytes_of_lit (i32.const 3)))                               ;; function
 
+  ;; The basic type name of a value as a shared constant string ($g_tname_*,
+  ;; emitted by codegen with the metamethod keys): what type() returns.
+  (func $basic_type_name (param $v anyref) (result (ref $LuaString))
+    (if (ref.is_null (local.get $v)) (then (return (global.get $g_tname_nil))))
+    (if (ref.test (ref $LuaBool) (local.get $v)) (then (return (global.get $g_tname_boolean))))
+    (if (i32.or (call $is_int (local.get $v)) (call $is_float (local.get $v)))
+      (then (return (global.get $g_tname_number))))
+    (if (ref.test (ref $LuaString) (local.get $v)) (then (return (global.get $g_tname_string))))
+    (if (ref.test (ref $LuaTable) (local.get $v)) (then (return (global.get $g_tname_table))))
+    (global.get $g_tname_function))
+
   ;; Like $basic_type_bytes, but a table whose metatable carries a string
   ;; __name field uses that name instead — matching reference Lua's
   ;; luaT_objtypename (used by tostring and type-aware error messages).
@@ -4087,9 +4098,7 @@
             (i32.const 93) (i32.const 36)) (i32.const 0))))))
     ;; type() ignores __name (it reports the basic type); $objtypename, used
     ;; by tostring and error messages, is the __name-aware variant.
-    (array.new_fixed $ArgArr 1
-      (struct.new $LuaString
-        (call $basic_type_bytes (call $args_at (local.get $args) (i32.const 0))) (i32.const 0))))
+    (array.new_fixed $ArgArr 1 (call $basic_type_name (call $args_at (local.get $args) (i32.const 0)))))
 
   (func $builtin_tostring (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))

@@ -660,6 +660,15 @@ static const struct {
     {"$g_mkey_tostring", "__tostring"},
     {"$g_mkey_metatable", "__metatable"},
     {"$g_mkey_name", "__name"},
+    /* type() results ($basic_type_name): a literal type name in the program
+     * is the very string type() returns, so `type(x) == "number"` compares by
+     * identity and type() allocates nothing. */
+    {"$g_tname_nil", "nil"},
+    {"$g_tname_boolean", "boolean"},
+    {"$g_tname_number", "number"},
+    {"$g_tname_string", "string"},
+    {"$g_tname_table", "table"},
+    {"$g_tname_function", "function"},
 };
 #define N_MKEYS (sizeof(MKEYS) / sizeof(MKEYS[0]))
 

@@ -339,6 +339,19 @@ static MunitResult test_inline_caches(const MunitParameter params[], void *fixtu
     return MUNIT_OK;
 }
 
+/* type() returns preallocated name strings, and a literal type name in the
+ * program is that same object, so `type(x) == "number"` needs no allocation
+ * and compares by identity. */
+static MunitResult test_type_names_shared(const MunitParameter params[], void *fixture) {
+    (void)params; (void)fixture;
+    char *m = main_func_wat("local x = 1\n"
+                            "print(type(x) == \"number\", type(x) == \"table\")\n");
+    munit_assert_not_null(strstr(m, "$g_tname_number"));
+    munit_assert_not_null(strstr(m, "$g_tname_table"));
+    free(m);
+    return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
     { "/emits_expected",       test_emits_expected,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
     { "/boxed_fallback_o0",    test_emits_boxed_fallback_o0, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -351,6 +364,7 @@ static MunitTest tests[] = {
     { "/dynamic_call_fast",    test_dynamic_call_fast,      NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
     { "/ctor_shape",           test_ctor_shape,             NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
     { "/inline_caches",        test_inline_caches,          NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+    { "/type_names_shared",    test_type_names_shared,      NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
     { NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 };
 
