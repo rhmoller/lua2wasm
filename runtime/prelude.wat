@@ -314,6 +314,9 @@
   ;; (tag, i64, f64) triple — tag 1 int, 2 float, 0 anything else (the boxed
   ;; anyref stays the value). One ref.test chain per store instead of one per
   ;; use.
+  ;; Kept in one piece on purpose: splitting the boxed cases out behind a
+  ;; return_call (the fast/slow split used elsewhere) measured ~13% slower on
+  ;; binarytrees, where every call classifies its parameter here.
   (func $unbox_num (param $v anyref) (result i32 i64 f64)
     (if (ref.test (ref i31) (local.get $v))
       (then (return (i32.const 1)
@@ -327,6 +330,7 @@
       (then (return (i32.const 2) (i64.const 0)
                     (struct.get $LuaFloat $v (ref.cast (ref $LuaFloat) (local.get $v))))))
     (return (i32.const 0) (i64.const 0) (f64.const 0)))
+
 
   ;; The inverse: a maybe-typed triple back to a Lua value (allocates only for
   ;; a float or a wide int).
@@ -1501,18 +1505,16 @@
     (call $vals_reserve (local.get $t) (local.get $cap)))
 
 
-  ;; Hash any Lua value to an i32. The only requirement for correctness
-  ;; is that values that compare equal (via $lua_eq_raw) hash equally —
-  ;; specifically Lua's int↔float equivalence at integer values. We mix
-  ;; with a small FNV-style step so different types don't trivially
-  ;; collide at hash 0.
-  ;; Cached FNV-1a hash of a string (see the $hash field note on $LuaString).
-  ;; Codegen precomputes the same function for constant strings (kstr_hash in
-  ;; codegen.c) — keep the two in sync.
+  ;; Cached FNV-1a hash of a string (see the $hash field note on $LuaString):
+  ;; computed once by $str_hash_compute. Codegen precomputes the same function
+  ;; for constant strings (kstr_hash in codegen.c) — keep the two in sync.
   (func $str_hash (param $s (ref $LuaString)) (result i32)
-    (local $h i32) (local $bytes (ref $LuaArr)) (local $i i32) (local $n i32)
+    (local $h i32)
     (local.set $h (struct.get $LuaString $hash (local.get $s)))
     (if (local.get $h) (then (return (local.get $h))))
+    (return_call $str_hash_compute (local.get $s)))
+  (func $str_hash_compute (param $s (ref $LuaString)) (result i32)
+    (local $h i32) (local $bytes (ref $LuaArr)) (local $i i32) (local $n i32)
     (local.set $bytes (struct.get $LuaString $bytes (local.get $s)))
     (local.set $h (i32.const -2128831035)) ;; FNV offset basis
     (local.set $n (array.len (local.get $bytes)))
@@ -1527,7 +1529,23 @@
     (struct.set $LuaString $hash (local.get $s) (local.get $h))
     (local.get $h))
 
+
+  ;; Hash any Lua value to an i32. The only requirement for correctness
+  ;; is that values that compare equal (via $lua_eq_raw) hash equally —
+  ;; specifically Lua's int↔float equivalence at integer values. The usual
+  ;; keys come first: a string (its cached hash) and a small integer, hashed
+  ;; as the low ^ high words of its i64 like every integer; the rest is
+  ;; $lua_hash_other.
   (func $lua_hash (param $v anyref) (result i32)
+    (local $i i32)
+    (if (ref.test (ref $LuaString) (local.get $v))
+      (then (return_call $str_hash (ref.cast (ref $LuaString) (local.get $v)))))
+    (if (ref.test (ref i31) (local.get $v))
+      (then
+        (local.set $i (i31.get_s (ref.cast (ref i31) (local.get $v))))
+        (return (i32.xor (local.get $i) (i32.shr_s (local.get $i) (i32.const 31))))))
+    (return_call $lua_hash_other (local.get $v)))
+  (func $lua_hash_other (param $v anyref) (result i32)
     (local $h i32) (local $bytes (ref null $LuaArr)) (local $i i32) (local $n i32)
     (local $f f64)
     (if (ref.is_null (local.get $v)) (then (return (i32.const 0))))
@@ -1662,6 +1680,22 @@
   ;; dispatch: identity, then cached-hash gate, then bytes. A null index means
   ;; the hash part has never been populated.
   (func $tab_find_str (param $t (ref $LuaTable)) (param $k (ref $LuaString)) (param $full i32) (result i32)
+    (local $sh (ref $Shape)) (local $slot i32)
+    ;; Settle the common cases on the key's home slot: empty means absent;
+    ;; holding this very key object means found (constant keys are hoisted,
+    ;; so a store and a load usually pass the same object). Anything else
+    ;; walks the probe chain.
+    (local.set $sh (struct.get $LuaTable $shape (local.get $t)))
+    (local.set $slot (array.get $IArr (struct.get $Shape $idx (local.get $sh))
+      (i32.and (struct.get $Shape $mask (local.get $sh)) (local.get $full))))
+    (if (i32.eqz (local.get $slot)) (then (return (i32.const -1))))
+    (if (i32.gt_s (local.get $slot) (i32.const 0))
+      (then (if (ref.eq (ref.cast (ref null eq) (array.get $TArr (struct.get $Shape $keys (local.get $sh))
+                                                          (i32.sub (local.get $slot) (i32.const 1))))
+                        (local.get $k))
+        (then (return (i32.sub (local.get $slot) (i32.const 1)))))))
+    (return_call $tab_find_str_probe (local.get $t) (local.get $k) (local.get $full)))
+  (func $tab_find_str_probe (param $t (ref $LuaTable)) (param $k (ref $LuaString)) (param $full i32) (result i32)
     (local $idx (ref null $IArr)) (local $keys (ref $TArr)) (local $sh (ref $Shape))
     (local $mask i32) (local $h i32) (local $slot i32) (local $pos i32) (local $sk anyref)
     (local.set $sh (struct.get $LuaTable $shape (local.get $t)))
@@ -1688,6 +1722,20 @@
     (i32.const -1))
 
   (func $tab_index_lookup_h (param $t (ref $LuaTable)) (param $k anyref) (param $full i32) (result i32)
+    (local $sh (ref $Shape)) (local $slot i32)
+    ;; As $tab_find_str: an empty home slot or an identical key there settles
+    ;; it (identity covers small integers, tables and hoisted strings).
+    (local.set $sh (struct.get $LuaTable $shape (local.get $t)))
+    (local.set $slot (array.get $IArr (struct.get $Shape $idx (local.get $sh))
+      (i32.and (struct.get $Shape $mask (local.get $sh)) (local.get $full))))
+    (if (i32.eqz (local.get $slot)) (then (return (i32.const -1))))
+    (if (i32.gt_s (local.get $slot) (i32.const 0))
+      (then (if (ref.eq (ref.cast (ref null eq) (array.get $TArr (struct.get $Shape $keys (local.get $sh))
+                                                          (i32.sub (local.get $slot) (i32.const 1))))
+                        (ref.cast (ref null eq) (local.get $k)))
+        (then (return (i32.sub (local.get $slot) (i32.const 1)))))))
+    (return_call $tab_index_lookup_probe (local.get $t) (local.get $k) (local.get $full)))
+  (func $tab_index_lookup_probe (param $t (ref $LuaTable)) (param $k anyref) (param $full i32) (result i32)
     (local $idx (ref $IArr)) (local $keys (ref $TArr))
     (local $mask i32) (local $h i32) (local $slot i32) (local $pos i32)
     (local $is_str i32) (local $sk anyref)
@@ -3034,6 +3082,11 @@
           (struct.get $LuaClosure $fast (local.get $c))))
         (call $pop_call_frame)
         (return (local.get $r))))
+    (return_call $lua_call1_slow (local.get $f)
+      (local.get $a0) (local.get $a1) (local.get $a2) (local.get $a3) (local.get $n) (local.get $line)))
+  ;; A non-closure callee: __call, or the "attempt to call" error.
+  (func $lua_call1_slow (param $f anyref) (param $a0 anyref) (param $a1 anyref) (param $a2 anyref)
+                        (param $a3 anyref) (param $n i32) (param $line i32) (result anyref)
     (call $args_first (call $lua_call_any (local.get $f)
       (call $pack_args4 (local.get $a0) (local.get $a1) (local.get $a2) (local.get $a3) (local.get $n))
       (local.get $line))))
