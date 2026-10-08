@@ -987,58 +987,28 @@ static NumTy compute_ret_ty(CG *c, const LuaFunc *fn) {
 
 /* Walk a body in the current context and, at each direct-call site, narrow the
  * callee's parameter types by meeting them with the argument types here. */
-static void infer_sites_expr(CG *c, const Expr *e, int *changed) {
-    if (!e) return;
-    switch (e->kind) {
-    case EXPR_CALL: {
-        infer_sites_expr(c, e->as.call.callee, changed);
-        for (size_t i = 0; i < e->as.call.nargs; i++)
-            infer_sites_expr(c, e->as.call.args[i], changed);
-        const LuaFunc *K = direct_call_target(c, e);
-        if (K && K->func_idx >= 0 && K->func_idx < c->n_sigs) {
-            FuncSig *sg = &c->sigs[K->func_idx];
-            sg->has_site = 1;
-            for (size_t i = 0; i < e->as.call.nargs && (int)i < sg->n_params; i++) {
-                if (sg->param_ty[i] == NT_ANY) continue;
-                NumTy nw = num_meet(sg->param_ty[i], expr_num_ty(c, e->as.call.args[i]));
-                if (nw != sg->param_ty[i]) {
-                    sg->param_ty[i] = nw;
-                    *changed = 1;
-                }
-            }
-        }
-        return;
-    }
-    case EXPR_METHOD_CALL:
-        infer_sites_expr(c, e->as.method_call.recv, changed);
-        for (size_t i = 0; i < e->as.method_call.nargs; i++)
-            infer_sites_expr(c, e->as.method_call.args[i], changed);
-        return;
-    case EXPR_BINOP:
-        infer_sites_expr(c, e->as.binop.lhs, changed);
-        infer_sites_expr(c, e->as.binop.rhs, changed);
-        return;
-    case EXPR_UNOP: infer_sites_expr(c, e->as.unop.operand, changed); return;
-    case EXPR_INDEX:
-        infer_sites_expr(c, e->as.index.table, changed);
-        infer_sites_expr(c, e->as.index.key, changed);
-        return;
-    case EXPR_TABLE:
-        for (int i = 0; i < e->as.table_ctor.n_entries; i++) {
-            infer_sites_expr(c, e->as.table_ctor.entries[i].key, changed);
-            infer_sites_expr(c, e->as.table_ctor.entries[i].value, changed);
-        }
-        return;
-    default: return; /* EXPR_FUNCTION bodies are walked on their own row */
-    }
-}
 typedef struct {
     CG *c;
     int *changed;
 } SiteInfer;
+/* Meet each direct-call site's argument types into its callee's signature
+ * (sub-expressions first: their calls are sites too). */
 static void infer_sites_visit(const Expr *e, void *ctx) {
     SiteInfer *si = ctx;
-    infer_sites_expr(si->c, e, si->changed);
+    for_each_subexpr(e, infer_sites_visit, si); /* function bodies: walked on their own row */
+    if (e->kind != EXPR_CALL) return;
+    const LuaFunc *K = direct_call_target(si->c, e);
+    if (!K || K->func_idx < 0 || K->func_idx >= si->c->n_sigs) return;
+    FuncSig *sg = &si->c->sigs[K->func_idx];
+    sg->has_site = 1;
+    for (size_t i = 0; i < e->as.call.nargs && (int)i < sg->n_params; i++) {
+        if (sg->param_ty[i] == NT_ANY) continue;
+        NumTy nw = num_meet(sg->param_ty[i], expr_num_ty(si->c, e->as.call.args[i]));
+        if (nw != sg->param_ty[i]) {
+            sg->param_ty[i] = nw;
+            *si->changed = 1;
+        }
+    }
 }
 static void infer_sites_block(CG *c, const Block *b, int *changed) {
     walk_block_exprs(b, infer_sites_visit, &(SiteInfer){c, changed});

@@ -422,6 +422,7 @@ static int index_base_is_nonstring(const Expr *e) {
     }
 }
 
+static void ts_mark_expr_visit(const Expr *e, void *ctx);
 static void ts_mark_expr(LiveSet *L, const Expr *e) {
     if (!e) return;
     switch (e->kind) {
@@ -429,48 +430,26 @@ static void ts_mark_expr(LiveSet *L, const Expr *e) {
         if (var_escapes(e->as.var.kind, e->as.var.name, e->as.var.name_len)) L->escaped = 1;
         ts_mark_var(L, e->as.var.kind, e->as.var.idx);
         break;
-    case EXPR_CALL:
-        L->needs_runtime = 1; /* callee dispatch / __call */
-        ts_mark_expr(L, e->as.call.callee);
-        for (size_t i = 0; i < e->as.call.nargs; i++)
-            ts_mark_expr(L, e->as.call.args[i]);
-        break;
-    case EXPR_BINOP:
-        L->needs_runtime = 1; /* boxed helpers read metamethod-key globals */
-        ts_mark_expr(L, e->as.binop.lhs);
-        ts_mark_expr(L, e->as.binop.rhs);
-        break;
-    case EXPR_UNOP:
-        L->needs_runtime = 1;
-        ts_mark_expr(L, e->as.unop.operand);
-        break;
-    case EXPR_FUNCTION:
-        ts_mark_block(L, &e->as.func_expr.func->body);
-        break;
+    case EXPR_FUNCTION: ts_mark_block(L, &e->as.func_expr.func->body); break;
     case EXPR_INDEX:
         L->needs_runtime = 1; /* __index */
         if (!index_base_is_nonstring(e->as.index.table))
             L->uses_string_meta = 1; /* could be a field access on a string */
-        ts_mark_expr(L, e->as.index.table);
-        ts_mark_expr(L, e->as.index.key);
-        break;
-    case EXPR_TABLE:
-        L->needs_runtime = 1; /* allocates + __newindex on field set */
-        for (int i = 0; i < e->as.table_ctor.n_entries; i++) {
-            ts_mark_expr(L, e->as.table_ctor.entries[i].key);
-            ts_mark_expr(L, e->as.table_ctor.entries[i].value);
-        }
         break;
     case EXPR_METHOD_CALL:
         L->needs_runtime = 1; /* index + call */
         if (!index_base_is_nonstring(e->as.method_call.recv))
             L->uses_string_meta = 1; /* receiver could be a string */
-        ts_mark_expr(L, e->as.method_call.recv);
-        for (size_t i = 0; i < e->as.method_call.nargs; i++)
-            ts_mark_expr(L, e->as.method_call.args[i]);
+        break;
+    case EXPR_CALL:  /* callee dispatch / __call */
+    case EXPR_BINOP: /* boxed helpers read metamethod-key globals */
+    case EXPR_UNOP:
+    case EXPR_TABLE: /* allocates + __newindex on field set */
+        L->needs_runtime = 1;
         break;
     default: break; /* literals, vararg — no refs */
     }
+    for_each_subexpr(e, ts_mark_expr_visit, L);
 }
 
 static void ts_mark_expr_visit(const Expr *e, void *ctx) { ts_mark_expr(ctx, e); }
@@ -843,33 +822,11 @@ static void emit_require_bridge(CG *c, const unsigned char *gref) {
  * or indexed assignment and any table constructor. A write reachable only
  * through a builtin (rawset / table.insert / require) is not detected here; in
  * that case bootstrap_set is a small, rare overhead, not a correctness issue. */
-static int expr_writes_table(const Expr *e);
-static int exprs_write_table(Expr **es, size_t n) {
-    for (size_t i = 0; i < n; i++)
-        if (expr_writes_table(es[i])) return 1;
-    return 0;
-}
-static int expr_writes_table(const Expr *e) {
-    if (!e) return 0;
-    switch (e->kind) {
-    case EXPR_TABLE: return 1; /* a constructor writes the new table */
-    case EXPR_CALL:
-        return expr_writes_table(e->as.call.callee) ||
-               exprs_write_table(e->as.call.args, e->as.call.nargs);
-    case EXPR_METHOD_CALL:
-        return expr_writes_table(e->as.method_call.recv) ||
-               exprs_write_table(e->as.method_call.args, e->as.method_call.nargs);
-    case EXPR_BINOP:
-        return expr_writes_table(e->as.binop.lhs) || expr_writes_table(e->as.binop.rhs);
-    case EXPR_UNOP: return expr_writes_table(e->as.unop.operand);
-    case EXPR_INDEX:
-        return expr_writes_table(e->as.index.table) || expr_writes_table(e->as.index.key);
-    default: return 0; /* EXPR_FUNCTION bodies are visited via pr->funcs */
-    }
-}
 static void writes_table_expr(const Expr *e, void *ctx) {
     int *w = ctx;
-    if (!*w) *w = expr_writes_table(e);
+    if (*w) return;
+    if (e->kind == EXPR_TABLE) *w = 1;                /* a constructor writes the new table */
+    else for_each_subexpr(e, writes_table_expr, ctx); /* function bodies: via pr->funcs */
 }
 static void writes_table_stmt(const Stmt *s, void *ctx) {
     int *w = ctx;
