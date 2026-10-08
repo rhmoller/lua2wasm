@@ -134,3 +134,4 @@ close_repeat_until	tests/fixtures/close_repeat_until.lua
 close_for_iter	tests/fixtures/close_for_iter.lua
 string_keys	tests/fixtures/string_keys.lua
 maybe_typed	tests/fixtures/maybe_typed.lua
+array_inline	tests/fixtures/array_inline.lua

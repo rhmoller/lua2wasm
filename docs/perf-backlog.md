@@ -1,9 +1,8 @@
 # Performance backlog
 
 The remaining bottlenecks, ranked by expected payoff, with the evidence and a
-fix sketch for each. Snapshot of 2026-10-08 (after the run-once loop work,
-[design note 24](design/24-run-once-loops.md)). Update it when an item lands
-or a measurement changes.
+fix sketch for each; what has landed is under Done. Snapshot of 2026-10-08.
+Update it when an item lands or a measurement changes.
 
 ## Where we stand
 
@@ -11,19 +10,19 @@ Seconds (`TIME`, best of five) on one machine, Node 24:
 
 | bench | lua5.5 | lua2wasm | ratio |
 |---|---:|---:|---:|
-| binarytrees | 0.36 | 0.17 | 0.46× |
-| fannkuch | 0.83 | 0.45 | 0.55× |
+| fannkuch | 0.82 | 0.34 | 0.41× |
+| binarytrees | 0.35 | 0.15 | 0.42× |
+| spectralnorm | 0.95 | 0.54 | 0.57× |
 | oo | 0.46 | 0.28 | 0.60× |
-| spectralnorm | 0.89 | 0.54 | 0.61× |
-| vectors | 1.07 | 0.76 | 0.71× |
-| nbody | 0.44 | 0.36 | 0.80× |
-| entities | 0.68 | 0.58 | 0.85× |
-| nbody_arr | 0.38 | 0.35 | 0.92× |
-| tilemap | 0.29 | 0.29 | 1.00× |
-| particles | 0.59 | 0.68 | 1.15× |
-| closures | 0.08 | 0.09 | 1.20× |
-| hashtab | 0.10 | 0.15 | 1.51× |
-| strings | 0.07 | 0.17 | 2.49× |
+| nbody_arr | 0.38 | 0.24 | 0.63× |
+| vectors | 1.07 | 0.72 | 0.67× |
+| particles | 0.58 | 0.46 | 0.78× |
+| nbody | 0.43 | 0.35 | 0.80× |
+| entities | 0.67 | 0.58 | 0.87× |
+| tilemap | 0.28 | 0.28 | 0.99× |
+| closures | 0.07 | 0.09 | 1.20× |
+| hashtab | 0.10 | 0.15 | 1.52× |
+| strings | 0.07 | 0.18 | 2.71× |
 
 ## Measuring
 
@@ -52,32 +51,6 @@ Seconds (`TIME`, best of five) on one machine, Node 24:
   use `grep -F` for WAT names like `$ol_2`.
 
 ## Backlog
-
-### 1. Hot helpers aren't inlined into big functions
-
-**Evidence.** particles spends 58% of its time in three integer-key table
-helpers — `$lua_index_ik_cell` 35%, `$lua_tabset_ik_f` 18%,
-`$lua_index_mk_cell` 5% — all called from `$ol_2`, the outlined frame loop.
-`INLINING=ol_2 scripts/profile.sh bench/particles.lua` shows "not enough
-inlining budget" on every one of them: V8 caps a function's size after
-inlining at about 5000 (`--wasm-inlining-budget`) and at 3× its own size
-(`--wasm-inlining-factor`), and `$ol_2` is already 5049 bytes, so it gets
-about 500. With `--wasm-inlining-budget=50000` particles takes 600 ms instead
-of 693 (−13%); the other benchmarks don't move. That is a lower bound: an
-inline fast path also saves the call.
-
-**Fix.** Emit the array fast path at each integer-key site and call the
-helper only when it misses: a table without a metatable (or a read that hits
-a non-nil slot), the key within `1..$alen`, `array.get`/`array.set` (plus the
-`$g_fmark` marker / `$farr` check for unboxed floats). Sites: `emit_index_expr`
-(expr.c, `$lua_index_ik`), `emit_maybe_lower` (maybe.c, `$lua_index_ik_cell`,
-`$lua_index_mk_cell`), `emit_index_store_from` (stmt.c, `$lua_tabset_ik`,
-`$lua_tabset_ik_f`); helpers in runtime/prelude/index.wat. Keep the semantics
-of holes (a nil read falls through to `__index`), `__newindex` on absent keys
-and the trailing-hole trim on nil stores. Alternatively, or as well, outline a
-big outlined loop's own hot inner loops so each gets a budget of its own.
-
-**Verify.** particles, nbody_arr, fannkuch, tilemap; watch module size.
 
 ### 2. Strings and big integers allocate too much
 
@@ -187,6 +160,19 @@ cheaper `#t` for tables without a metatable; revisit the growth policy.
   over the same table (`iter.lua`), though still faster than lua5.5.
 
 ## Done
+
+**Inline array-part paths** (was item 1). V8 inlines callees into a function
+only until it has grown by a budget (about 5000 wire bytes, and 1.1× its own
+size past that), so a big function — particles' outlined frame loop, 5049
+bytes — kept its hottest table reads as calls ("not enough inlining budget"
+in `INLINING=ol_2`). Each integer-key read and write now probes the array part
+inline — table test, `1..#array part`, a hole or non-float value to the
+helper, `$g_fmark` → the f64 storage, a small int classified on the spot — and
+calls the helper only on a miss (src/codegen/arrays.c). particles 0.68 →
+0.46 s, fannkuch 0.45 → 0.34, nbody_arr 0.35 → 0.24, binarytrees 0.17 → 0.15;
+more than `--wasm-inlining-budget=50000` gave (0.60 on particles). Modules
+grow ~150 bytes per site (+1% over the e2e fixtures, +29% on nbody_arr);
+dropping the inline small-int case costs fannkuch 6%.
 
 Maybe-typed locals ([note 22](design/22-maybe-typed-locals.md)), table shapes
 and inline caches ([note 23](design/23-table-shapes.md)), run-once loop

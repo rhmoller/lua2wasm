@@ -392,7 +392,7 @@ const char *ic_new(CG *c, char *buf, size_t bufsz);
 void emit_string_literal(CG *c, const char *bytes, size_t len, int depth);
 void emit_global_key(CG *c, const char *name, size_t name_len);
 void emit_target_open(CG *c, const AssignTarget *t, int depth);
-void emit_target_close(CG *c, int depth);
+void emit_target_close(CG *c, const AssignTarget *t, int depth);
 const char *binop_helper(BinOp op);
 int is_cmp_op(BinOp op);
 const CmpOp *cmp_op(BinOp op);
@@ -457,6 +457,20 @@ void ol_loop_header(CG *c, const Stmt *s, int depth);
 void ol_init_open(CG *c, const Stmt *s, int depth);
 void ol_init_close(CG *c, const Stmt *s, int depth);
 void ol_flush(CG *c);
+
+/* ----- arrays.c ----- */
+/* An integer key for the inline array-part paths: an i64 read (`i`), or a
+ * maybe cell (`cell`) whose int tag the path checks first. */
+typedef struct {
+    const char *i;
+    const MCell *cell;
+} IxKey;
+void emit_ix_locals(WatBuilder *w);
+int emit_ix_get_open(CG *c, int depth);
+void emit_ix_get_close(CG *c, int n, const MCell *cell, int line, int depth);
+void emit_ix_get_cell(CG *c, const MCell *cell, const MCell *d, int line, int depth);
+void emit_ix_set(CG *c, const char *tb, IxKey k, const char *v, int depth);
+void emit_ix_set_f(CG *c, const char *tb, const char *ki, const char *f, int depth);
 
 /* ----- module.c ----- */
 const char *slab_ref(const char *text);

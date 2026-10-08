@@ -232,6 +232,25 @@ static void emit_index_store_from(CG *c, const char *tb, StoreKey kkind, const c
     char box[256], icb[48], store[640];
     if (vc) snprintf(box, sizeof box, "(call $box_num %s %s %s %s)", vc->t, vc->i, vc->f, vc->b);
     else snprintf(box, sizeof box, "%s", vb);
+    if (kkind == SK_INT || kkind == SK_MAYBE) { /* the array part written inline (arrays.c) */
+        IxKey k = kkind == SK_INT ? (IxKey){.i = kc->i} : (IxKey){.cell = kc};
+        int d = depth;
+        if (vc) {
+            if (kkind == SK_MAYBE)
+                emit_linef(c, depth, "(if (i32.and (i32.eq %s (i32.const 2)) (i32.eq %s (i32.const 1)))\n", vc->t,
+                           kc->t);
+            else emit_linef(c, depth, "(if (i32.eq %s (i32.const 2))\n", vc->t);
+            emit_line(c, depth + 1, "(then\n");
+            emit_ix_set_f(c, tb, kc->i, vc->f, depth + 2);
+            emit_line(c, depth + 1, ")\n");
+            emit_line(c, depth + 1, "(else\n");
+            d = depth + 2;
+        }
+        if (vc) emit_linef(c, d, "(local.set $ix_v %s)\n", box);
+        emit_ix_set(c, tb, k, vc ? "(local.get $ix_v)" : vb, d);
+        if (vc) emit_line(c, depth + 1, "))\n");
+        return;
+    }
     /* a constant-key store goes through one inline cache for both forms */
     const char *ic = kkind == SK_STR ? ic_new(c, icb, sizeof icb) : NULL;
     switch (kkind) {
@@ -239,22 +258,15 @@ static void emit_index_store_from(CG *c, const char *tb, StoreKey kkind, const c
         if (ic) snprintf(store, sizeof store, "(call $lua_tabset_ic %s %s %s %s)", ic, tb, kb, box);
         else snprintf(store, sizeof store, "(call $lua_tabset_sk %s %s %s)", tb, kb, box);
         break;
-    case SK_INT: snprintf(store, sizeof store, "(call $lua_tabset_ik %s %s %s)", tb, kc->i, box); break;
-    case SK_MAYBE:
-        snprintf(store, sizeof store, "(call $lua_tabset_mk %s %s %s %s %s %s)", tb, kc->t, kc->i, kc->f, kc->b, box);
-        break;
     default: snprintf(store, sizeof store, "(call $lua_tabset %s %s %s)", tb, kc->b, box); break;
     }
     if (!vc || kkind == SK_ANY) {
         emit_linef(c, depth, "%s\n", store);
         return;
     }
-    if (kkind == SK_MAYBE)
-        emit_linef(c, depth, "(if (i32.and (i32.eq %s (i32.const 2)) (i32.eq %s (i32.const 1)))\n", vc->t, kc->t);
-    else emit_linef(c, depth, "(if (i32.eq %s (i32.const 2))\n", vc->t);
-    if (kkind == SK_STR && ic) emit_linef(c, depth + 1, "(then (call $lua_tabset_ic_f %s %s %s %s))\n", ic, tb, kb, vc->f);
-    else if (kkind == SK_STR) emit_linef(c, depth + 1, "(then (call $lua_tabset_sk_f %s %s %s))\n", tb, kb, vc->f);
-    else emit_linef(c, depth + 1, "(then (call $lua_tabset_ik_f %s %s %s))\n", tb, kc->i, vc->f);
+    emit_linef(c, depth, "(if (i32.eq %s (i32.const 2))\n", vc->t);
+    if (ic) emit_linef(c, depth + 1, "(then (call $lua_tabset_ic_f %s %s %s %s))\n", ic, tb, kb, vc->f);
+    else emit_linef(c, depth + 1, "(then (call $lua_tabset_sk_f %s %s %s))\n", tb, kb, vc->f);
     emit_linef(c, depth + 1, "(else %s))\n", store);
 }
 
@@ -396,7 +408,7 @@ static int emit_assign_multi_cells(CG *c, const Stmt *s, int depth) {
         if (t->kind == TGT_VAR) {
             emit_target_open(c, t, depth);
             emit_linef(c, depth + 1, "%s\n", g[i].v.b);
-            emit_target_close(c, depth);
+            emit_target_close(c, t, depth);
         } else {
             emit_index_store_from(c, g[i].t.b, g[i].kkind, g[i].kb, &g[i].k, g[i].lowered ? &g[i].v : NULL,
                                   g[i].v.b, depth);
@@ -425,7 +437,7 @@ static void emit_assign(CG *c, const Stmt *s, int depth) {
          * the call's single-value entry). */
         emit_target_open(c, t, depth);
         emit_expr(c, s->as.assign.values[0], depth + 1);
-        emit_target_close(c, depth);
+        emit_target_close(c, t, depth);
         return;
     }
     if (emit_assign_multi_cells(c, s, depth)) return;
@@ -491,7 +503,7 @@ static void emit_assign(CG *c, const Stmt *s, int depth) {
         if (t->kind == TGT_VAR || !has_index) {
             emit_target_open(c, t, depth);
             emit_args_at(c, i, depth + 1);
-            emit_target_close(c, depth);
+            emit_target_close(c, t, depth);
         } else {
             /* index target: store via pre-evaluated table+key so
              * __newindex still fires (matches emit_target_open). */
@@ -1588,6 +1600,7 @@ void body_declare_locals_of(CG *c, const Body *b, const unsigned char *slots, in
                   "    (local $tmp_tab (ref null $LuaTable))\n"
                   "    (local $tmp_lhs_t (ref null $ArgArr))\n"
                   "    (local $tmp_lhs_k (ref null $ArgArr))\n");
+    if (c->opt_int) emit_ix_locals(w);
     if (fast) wat_append(w, "    (local $ta0 anyref) (local $ta1 anyref) (local $ta2 anyref) (local $ta3 anyref)\n");
     emit_tbc_locals(w, b->n_close > 0);
     emit_for_scratch_locals(w, b->body);

@@ -308,9 +308,10 @@
     (if (ref.is_null (local.get $mt)) (then (return (ref.null any))))
     (call $tab_get_str (ref.as_non_null (local.get $mt)) (local.get $key)))
 
-  ;; `t[k] = v` with __newindex dispatch and an unboxed integer key — the codegen
-  ;; entry point for `t[<int-typed>] = v`. No metatable -> raw set with the raw
-  ;; key (no boxing); otherwise fall back to the boxed-key setter for __newindex.
+  ;; `t[k] = v` with __newindex dispatch and an unboxed integer key — where
+  ;; `t[<int-typed>] = v` goes when the codegen's inline array-part write misses
+  ;; (src/codegen/arrays.c). No metatable -> raw set with the raw key (no
+  ;; boxing); otherwise fall back to the boxed-key setter for __newindex.
   (func $lua_tabset_ik (param $tv anyref) (param $k i64) (param $v anyref)
     (local $t (ref $LuaTable))
     (if (i32.eqz (ref.test (ref $LuaTable) (local.get $tv)))
@@ -344,8 +345,9 @@
       (then (call $tab_set_f_hash_str (local.get $t) (local.get $k) (local.get $full) (local.get $f))
             (return)))
     (call $lua_tabset (local.get $tv) (local.get $k) (call $make_float (local.get $f))))
-  ;; `t[<int>] = <f64>`: array part (marker + farr) when it lands there, else
-  ;; the hash part; a metatable defers to the generic setter.
+  ;; `t[<int>] = <f64>` (the miss path of the inline write): array part (marker
+  ;; + farr) when it lands there, else the hash part; a metatable defers to the
+  ;; generic setter.
   (func $lua_tabset_ik_f (param $tv anyref) (param $k i64) (param $f f64)
     (local $t (ref $LuaTable))
     (if (i32.eqz (ref.test (ref $LuaTable) (local.get $tv)))
@@ -408,6 +410,12 @@
               (then (call $unbox_num (local.get $v)) (local.get $v) (return)))))))
     (local.set $v (call $lua_index_ik_slow (local.get $tv) (local.get $k) (local.get $line)))
     (call $unbox_num (local.get $v)) (local.get $v))
+  ;; The slow path of an inline `t[<int>]` cell read (src/codegen/arrays.c):
+  ;; the codegen has already probed the array part.
+  (func $lua_index_ik_cell_slow (param $tv anyref) (param $k i64) (param $line i32) (result i32 i64 f64 anyref)
+    (local $v anyref)
+    (local.set $v (call $lua_index_ik_slow (local.get $tv) (local.get $k) (local.get $line)))
+    (call $unbox_num (local.get $v)) (local.get $v))
   (func $lua_index_mk_cell (param $tv anyref) (param $tag i32) (param $ki i64) (param $kf f64)
                            (param $kb anyref) (param $line i32) (result i32 i64 f64 anyref)
     (local $v anyref)
@@ -435,9 +443,10 @@
       (call $box_num (local.get $tag) (local.get $ki) (local.get $kf) (local.get $kb))
       (local.get $v)))
 
-  ;; `t[k]` read with an unboxed integer key — the codegen entry point for
-  ;; `t[<int-typed>]`. A value present in the array part returns directly,
-  ;; with no key boxing; everything else takes $lua_index_ik_slow.
+  ;; `t[k]` read with an unboxed integer key (the int case of $lua_index_mk;
+  ;; codegen probes the array part inline and calls $lua_index_ik_slow). A
+  ;; value present in the array part returns directly, with no key boxing;
+  ;; everything else takes $lua_index_ik_slow.
   (func $lua_index_ik (param $tv anyref) (param $k i64) (param $line i32) (result anyref)
     (local $t (ref $LuaTable)) (local $v anyref)
     (if (ref.test (ref $LuaTable) (local.get $tv))

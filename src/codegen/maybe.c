@@ -377,20 +377,19 @@ void emit_maybe_lower(CG *c, const Expr *e, const MCell *d, int depth) {
         int kint = !kstr && expr_is_int(c, key);
         int kmaybe = !kstr && !kint && key->kind == EXPR_VAR && key->as.var.kind == VAR_LOCAL &&
                      slot_is_maybe(c, key->as.var.idx);
-        if (kstr || kint || kmaybe) {
+        if (kint || kmaybe) { /* the array part probed inline (arrays.c) */
+            MCell kc = kmaybe ? mcell_slot(key->as.var.idx) : (MCell){0};
+            emit_expr(c, e->as.index.table, depth);
+            if (kint) emit_int_expr(c, key, depth);
+            emit_ix_get_cell(c, kmaybe ? &kc : NULL, d, e->line, depth);
+            return;
+        }
+        if (kstr) {
             char icb[48];
-            const char *ic = kstr ? ic_new(c, icb, sizeof icb) : NULL;
-            emit_line(c, depth, kstr ? (ic ? "(call $lua_index_ic_cell\n" : "(call $lua_index_sk_cell\n") : kint ? "(call $lua_index_ik_cell\n"
-                                                                                                                 : "(call $lua_index_mk_cell\n");
+            const char *ic = ic_new(c, icb, sizeof icb);
+            emit_line(c, depth, ic ? "(call $lua_index_ic_cell\n" : "(call $lua_index_sk_cell\n");
             emit_expr(c, e->as.index.table, depth + 1);
-            if (kstr) {
-                emit_string_literal(c, key->as.s.bytes, key->as.s.len, depth + 1);
-            } else if (kint) {
-                emit_int_expr(c, key, depth + 1);
-            } else {
-                MCell kc = mcell_slot(key->as.var.idx);
-                emit_linef(c, depth + 1, "%s %s %s %s\n", kc.t, kc.i, kc.f, kc.b);
-            }
+            emit_string_literal(c, key->as.s.bytes, key->as.s.len, depth + 1);
             emit_linef(c, depth + 1, "(i32.const %d)%s%s\n", e->line, ic ? " " : "", ic ? ic : "");
             emit_line(c, depth, ")\n");
             emit_linef(c, depth, "local.set %s\n", d->sb);

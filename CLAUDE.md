@@ -163,7 +163,7 @@ counterexample, **shrink it and check it in as a `tests/diff` case** (the
 | `src/parser.{c,h}`  | recursive-descent + Pratt; scope & upvalue analysis |
 | `src/ast.{c,h}`     | tagged-union AST, bump-allocator pool |
 | `src/codegen.h`     | the code generator's entry point, `codegen_module` |
-| `src/codegen/`      | the code generator (emits WAT via `WatBuilder`): `internal.h` (the `CG` context, shared types, cross-module API), `strings.c` (constant strings), `analysis.c` (slot analyses, bindings, signatures), `expr.c`, `maybe.c` (maybe-typed lowering), `stmt.c` (statements, function bodies), `outline.c` (run-once loops become resumable functions), `module.c` (module assembly; embeds `runtime/prelude/`) |
+| `src/codegen/`      | the code generator (emits WAT via `WatBuilder`): `internal.h` (the `CG` context, shared types, cross-module API), `strings.c` (constant strings), `analysis.c` (slot analyses, bindings, signatures), `expr.c`, `maybe.c` (maybe-typed lowering), `arrays.c` (inline array-part paths of integer-key reads/writes), `stmt.c` (statements, function bodies), `outline.c` (run-once loops become resumable functions), `module.c` (module assembly; embeds `runtime/prelude/`) |
 | `src/builtins.{c,h}`| single source of truth: builtin name → wasm symbol |
 | `src/wat_builder.{c,h}` | dynamic WAT string buffer |
 | `src/wat2wasm.{c,h}`| self-contained WAT→wasm binary assembler (lib + `wat2wasm` CLI) |

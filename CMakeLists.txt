@@ -20,6 +20,7 @@ set(COMPILER_SOURCES
     src/codegen/analysis.c
     src/codegen/expr.c
     src/codegen/maybe.c
+    src/codegen/arrays.c
     src/codegen/stmt.c
     src/codegen/outline.c
     src/codegen/module.c

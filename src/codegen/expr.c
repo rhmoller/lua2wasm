@@ -113,6 +113,16 @@ static void emit_box_ref(CG *c, VarKind kind, int idx, int depth) {
     }
 }
 
+/* Whether a store target `t[k] = v` takes the inline array-part path: 1 for
+ * an int-typed key, 2 for a maybe-typed local key, 0 otherwise. */
+static int target_int_key(CG *c, const AssignTarget *t) {
+    if (t->kind != TGT_INDEX) return 0;
+    const Expr *k = t->as.index.key;
+    if (k->kind == EXPR_STRING && k->as.s.len <= KSTR_MAX) return 0;
+    if (k->kind == EXPR_VAR && k->as.var.kind == VAR_LOCAL && slot_is_maybe(c, k->as.var.idx)) return 2;
+    return c->opt_int && expr_is_int(c, k) ? 1 : 0;
+}
+
 /* Open the "store to this target" expression. The caller must then emit the
  * value expression as a child, then call emit_target_close(). */
 void emit_target_open(CG *c, const AssignTarget *t, int depth) {
@@ -167,19 +177,12 @@ void emit_target_open(CG *c, const AssignTarget *t, int depth) {
         else wat_append(c->w, "(call $lua_tabset_sk\n");
         emit_expr(c, t->as.index.table, depth + 1);
         emit_string_literal(c, t->as.index.key->as.s.bytes, t->as.index.key->as.s.len, depth + 1);
-    } else if (t->as.index.key->kind == EXPR_VAR && t->as.index.key->as.var.kind == VAR_LOCAL &&
-               slot_is_maybe(c, t->as.index.key->as.var.idx)) {
-        MCell k = mcell_slot(t->as.index.key->as.var.idx);
-        emit_line(c, depth, "(call $lua_tabset_mk\n");
-        emit_expr(c, t->as.index.table, depth + 1);
-        emit_linef(c, depth + 1, "%s %s %s %s\n", k.t, k.i, k.f, k.b);
-    } else if (c->opt_int && expr_is_int(c, t->as.index.key)) {
-        /* Int-typed key: $lua_tabset_ik takes the raw i64 (no make_int /
-         * $as_arr_key) and still dispatches __newindex. The value is emitted
-         * by the caller between open and close. */
-        emit_line(c, depth, "(call $lua_tabset_ik\n");
-        emit_expr(c, t->as.index.table, depth + 1);
-        emit_int_expr(c, t->as.index.key, depth + 1);
+    } else if (target_int_key(c, t)) {
+        /* Int-typed or maybe-typed key: the table (and an int key) go on the
+         * stack, the caller emits the value, and emit_target_close stores
+         * through the inline array-part path (arrays.c). */
+        emit_expr(c, t->as.index.table, depth);
+        if (target_int_key(c, t) == 1) emit_int_expr(c, t->as.index.key, depth);
     } else {
         /* User-code assignment goes through \$lua_tabset so __newindex
          * has a chance to fire. Table constructors emit \$tab_set
@@ -189,10 +192,19 @@ void emit_target_open(CG *c, const AssignTarget *t, int depth) {
         emit_expr(c, t->as.index.key, depth + 1);
     }
 }
-/* Close an emit_target_open() expression. The target is the same one passed to
- * open, but every target shape closes with a single `)`, so it isn't needed. */
-void emit_target_close(CG *c, int depth) {
-    emit_line(c, depth, ")\n");
+/* Close an emit_target_open() expression (the same target). */
+void emit_target_close(CG *c, const AssignTarget *t, int depth) {
+    int ik = target_int_key(c, t);
+    if (!ik) {
+        emit_line(c, depth, ")\n");
+        return;
+    }
+    MCell kc = ik == 2 ? mcell_slot(t->as.index.key->as.var.idx) : (MCell){0};
+    emit_line(c, depth, "local.set $ix_v\n");
+    if (ik == 1) emit_line(c, depth, "local.set $ix_k\n");
+    emit_line(c, depth, "local.set $ix_t\n");
+    emit_ix_set(c, "(local.get $ix_t)", ik == 1 ? (IxKey){.i = "(local.get $ix_k)"} : (IxKey){.cell = &kc},
+                "(local.get $ix_v)", depth);
 }
 
 /* ----- binary / unary ops ----- */
@@ -844,8 +856,7 @@ static void emit_index_expr(CG *c, const Expr *e, int depth) {
      * (ref.cast (ref $LuaTable) …) so that strings transparently route
      * through the string library and other-typed receivers throw a
      * Lua-shaped error with a source line. For an int-typed key, the
-     * $lua_index_ik fast path takes the raw i64 (no make_int / $as_arr_key)
-     * and hits the array part directly. */
+     * array part is probed inline (arrays.c) with the raw i64. */
     if (e->as.index.key->kind == EXPR_STRING && e->as.index.key->as.s.len <= KSTR_MAX) {
         /* `t.name` / `t["lit"]`: the hoisted key global goes straight to the
          * hash part (strings never live in the array part), through the
@@ -861,21 +872,19 @@ static void emit_index_expr(CG *c, const Expr *e, int depth) {
     }
     if (e->as.index.key->kind == EXPR_VAR && e->as.index.key->as.var.kind == VAR_LOCAL &&
         slot_is_maybe(c, e->as.index.key->as.var.idx)) {
-        /* Maybe-typed key: the cell goes over unboxed; an int takes the
-         * array fast path, anything else boxes on the slow path. */
+        /* Maybe-typed key: the cell goes over unboxed; an int probes the
+         * array part inline, anything else boxes on the slow path. */
         MCell k = mcell_slot(e->as.index.key->as.var.idx);
-        emit_line(c, depth, "(call $lua_index_mk\n");
+        int n = emit_ix_get_open(c, depth);
         emit_expr(c, e->as.index.table, depth + 1);
-        emit_linef(c, depth + 1, "%s %s %s %s (i32.const %d)\n", k.t, k.i, k.f, k.b, e->line);
-        emit_line(c, depth, ")\n");
+        emit_ix_get_close(c, n, &k, e->line, depth);
         return;
     }
     if (c->opt_int && expr_is_int(c, e->as.index.key)) {
-        emit_line(c, depth, "(call $lua_index_ik\n");
+        int n = emit_ix_get_open(c, depth);
         emit_expr(c, e->as.index.table, depth + 1);
         emit_int_expr(c, e->as.index.key, depth + 1);
-        emit_linef(c, depth + 1, "(i32.const %d)\n", e->line);
-        emit_line(c, depth, ")\n");
+        emit_ix_get_close(c, n, NULL, e->line, depth);
         return;
     }
     emit_line(c, depth, "(call $lua_index\n");

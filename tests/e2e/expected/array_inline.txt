@@ -1,0 +1,13 @@
+holes	idx0 1 idx2 3 4 idx5 idx6
+newindex	11	99	31	40	2,4
+trim	4	16	nil
+sparse	4	36
+filled	6	25	36
+edges	true true true true true true	true
+chase	3 4 2 1 3 4
+mixed	a b str nil c
+floats	1.5	7.25	4.5	13.25	float
+string	nil	nil
+nil	false	true
+set nil	false	true
+nested	33 23 13
