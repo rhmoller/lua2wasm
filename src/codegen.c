@@ -278,6 +278,9 @@ typedef struct {
      * lowering temporaries in use at the current emission point; mt_max the
      * count declared for the function (a pre-pass upper bound). */
     const unsigned char *cur_is_maybe;
+    /* During compute_maybe_slots: candidates whose only numeric use is as a
+     * table key (see maybe_kill_stmt). */
+    const unsigned char *maybe_key_only;
     int mt_depth;
     int mt_max;
     /* Direct-call PoC (lever 3): cur_func_slot[s] != NULL means local slot s is
@@ -2259,9 +2262,13 @@ static void walk_block_exprs(const Block *b, ExprVisit fn, void *ctx) {
 }
 
 /* --- numeric-use analysis: which slots are read inside an arithmetic,
- * comparison or unary-minus tree (through such nodes only) --- */
+ * comparison or unary-minus tree (through such nodes only) [use], or directly
+ * as the key of a table read [key] — an integer key then reaches the array
+ * part unboxed through $lua_index_mk / $lua_tabset_mk, and a non-number one
+ * just stays boxed --- */
 typedef struct {
     unsigned char *use;
+    unsigned char *key;
     int n;
 } NumUse;
 static void numuse_expr(const Expr *e, NumUse *u, int in_arith);
@@ -2293,7 +2300,10 @@ static void numuse_expr(const Expr *e, NumUse *u, int in_arith) {
         return;
     case EXPR_INDEX:
         numuse_child(e->as.index.table, u);
-        numuse_child(e->as.index.key, u);
+        if (e->as.index.key->kind == EXPR_VAR && e->as.index.key->as.var.kind == VAR_LOCAL &&
+            e->as.index.key->as.var.idx >= 0 && e->as.index.key->as.var.idx < u->n)
+            u->key[e->as.index.key->as.var.idx] = 1;
+        else numuse_child(e->as.index.key, u);
         return;
     case EXPR_TABLE:
         for (int i = 0; i < e->as.table_ctor.n_entries; i++) {
@@ -2414,10 +2424,62 @@ static void temp_need_visit(const Expr *e, void *ctx) {
     int v = 1 + expr_temp_need(t->c, e);
     if (v > t->m) t->m = v;
 }
+/* emit_assign_multi_cells holds a table and a key cell per index target and a
+ * value cell per value while it evaluates the next sub-expression above them. */
+static int multi_assign_temp_need(CG *c, const Block *b);
+static int multi_assign_stmt_need(CG *c, const Stmt *s) {
+    int m = 0, v;
+    switch (s->kind) {
+    case STMT_ASSIGN: {
+        int nt = s->as.assign.n_targets, nv = s->as.assign.n_values;
+        if (nt < 2 || nv != nt) return 0;
+        int live = nv, sub = 0;
+        for (int i = 0; i < nt; i++) {
+            const AssignTarget *t = &s->as.assign.targets[i];
+            if (t->kind == TGT_VAR) continue;
+            live += 2;
+            if ((v = 1 + expr_temp_need(c, t->as.index.table)) > sub) sub = v;
+            if ((v = 1 + expr_temp_need(c, t->as.index.key)) > sub) sub = v;
+        }
+        for (int i = 0; i < nv; i++)
+            if ((v = 1 + expr_temp_need(c, s->as.assign.values[i])) > sub) sub = v;
+        return live + sub;
+    }
+    case STMT_IF:
+        for (size_t a = 0; a < s->as.if_stmt.narms; a++)
+            if ((v = multi_assign_temp_need(c, &s->as.if_stmt.arms[a].body)) > m) m = v;
+        if (s->as.if_stmt.has_else && (v = multi_assign_temp_need(c, &s->as.if_stmt.else_body)) > m) m = v;
+        return m;
+    case STMT_WHILE: return multi_assign_temp_need(c, &s->as.while_stmt.body);
+    case STMT_DO: return multi_assign_temp_need(c, &s->as.do_stmt.body);
+    case STMT_REPEAT: return multi_assign_temp_need(c, &s->as.repeat.body);
+    case STMT_FOR_NUM: return multi_assign_temp_need(c, &s->as.for_num.body);
+    case STMT_FOR_GEN: return multi_assign_temp_need(c, &s->as.for_gen.body);
+    default: return 0;
+    }
+}
+static int multi_assign_temp_need(CG *c, const Block *b) {
+    int m = 0, v;
+    for (size_t i = 0; i < b->count; i++)
+        if ((v = multi_assign_stmt_need(c, b->items[i])) > m) m = v;
+    return m;
+}
 static int block_temp_need(CG *c, const Block *b) {
     TempNeed t = {.c = c, .m = 0};
     walk_block_exprs(b, temp_need_visit, &t);
+    int m = multi_assign_temp_need(c, b);
+    if (m > t.m) t.m = m;
     return t.m + 2; /* + the table and value cells of an unboxed store */
+}
+
+/* A candidate used numerically only as a table key pays a classification on
+ * every store, which is only worth it when the stored values are likely
+ * numbers: a call result (`local k = key(x, y)`) is more often a string key,
+ * so such a store disqualifies it; a table read (`local id = alive[i]`) or
+ * arithmetic keeps it. */
+static int key_store_ok(const CG *c, int slot, const Expr *v) {
+    if (!c->maybe_key_only || slot < 0 || slot >= c->cur_n_locals || !c->maybe_key_only[slot]) return 1;
+    return v->kind != EXPR_CALL && v->kind != EXPR_METHOD_CALL && v->kind != EXPR_VARARG;
 }
 
 /* --- kill rules: a candidate survives only if every store to it is a single
@@ -2446,7 +2508,9 @@ static void maybe_kill_stmt(CG *c, const Stmt *s, unsigned char *out, int *chang
             /* A leading value, or a trailing call whose FIRST value lands on
              * exactly the last name (`local m = sqrt(x)`): a single store. */
             int single = j < n_lead || (last_call && j == nv - 1 && nn == nv);
-            if (single && expr_numeric_plausible(s->as.local.values[j])) continue;
+            if (single && key_store_ok(c, slot, s->as.local.values[j]) &&
+                expr_numeric_plausible(s->as.local.values[j]))
+                continue;
             KILLM(slot);
         }
         break;
@@ -2456,7 +2520,9 @@ static void maybe_kill_stmt(CG *c, const Stmt *s, unsigned char *out, int *chang
         for (int j = 0; j < nt; j++) {
             AssignTarget *t = &s->as.assign.targets[j];
             if (t->kind != TGT_VAR || t->as.var.kind != VAR_LOCAL) continue;
-            if (nt == 1 && nv == 1 && expr_numeric_plausible(s->as.assign.values[0])) continue;
+            if (nt == 1 && nv == 1 && key_store_ok(c, t->as.var.idx, s->as.assign.values[0]) &&
+                expr_numeric_plausible(s->as.assign.values[0]))
+                continue;
             KILLM(t->as.var.idx);
         }
         break;
@@ -2492,22 +2558,29 @@ static void maybe_kill_block(CG *c, const Block *b, unsigned char *out, int *cha
  * then the kill fixpoint over stores. Returns whether any slot survived. */
 static int compute_maybe_slots(CG *c, const Block *body, int n_locals, int n_params,
                                const unsigned char *captured, unsigned char *out) {
-    NumUse u = {.use = calloc(n_locals ? n_locals : 1, 1), .n = n_locals};
+    NumUse u = {.use = calloc(n_locals ? n_locals : 1, 1), .key = calloc(n_locals ? n_locals : 1, 1), .n = n_locals};
     walk_block_exprs(body, numuse_visit, &u);
+    /* Parameters are candidates too (classified at entry), but not on key use
+     * alone: classifying on every call doesn't pay for a single unboxed key
+     * (e.g. a sort comparator's `py[a] < py[b]`). A local's store is the
+     * table read itself, which the cell reader classifies for free. */
     for (int i = 0; i < n_locals; i++) {
         out[i] = !(captured && captured[i]) &&
                  !(c->cur_is_int && c->cur_is_int[i]) && !(c->cur_is_float && c->cur_is_float[i]) &&
-                 u.use[i];
+                 (u.use[i] || (u.key[i] && i >= n_params));
     }
-    (void)n_params; /* parameters are candidates too: classified at entry */
+    for (int i = 0; i < n_locals; i++) u.key[i] = u.key[i] && !u.use[i];
     free(u.use);
     int saved_n = c->cur_n_locals;
     c->cur_n_locals = n_locals;
+    c->maybe_key_only = u.key;
     int changed = 1;
     while (changed) {
         changed = 0;
         maybe_kill_block(c, body, out, &changed);
     }
+    c->maybe_key_only = NULL;
+    free(u.key);
     c->cur_n_locals = saved_n;
     int any = 0;
     for (int i = 0; i < n_locals; i++) any |= out[i];
@@ -3672,6 +3745,79 @@ static void emit_args_at(CG *c, int idx, int depth) {
 
 /* ----- statement arms (split out of emit_stmt) ----- */
 
+/* Whether a stored value is worth lowering into a cell, so that a float
+ * result can go to a table's unboxed float storage: a provable float, an
+ * arithmetic tree over an opaque operand, a maybe slot, or an inline math
+ * call. A bare table read or ordinary call is a boxed value already — passing
+ * it through the plain store is cheaper than classifying and re-boxing it. */
+static int store_value_lowers(CG *c, const Expr *v) {
+    if (expr_is_float(c, v)) return 1;
+    switch (v->kind) {
+    case EXPR_BINOP:
+    case EXPR_UNOP: return expr_involves_maybe(c, v);
+    case EXPR_VAR: return v->as.var.kind == VAR_LOCAL && slot_is_maybe(c, v->as.var.idx);
+    case EXPR_CALL:
+        return v->as.call.nargs == 1 && !is_multival_tail(v->as.call.args[0]) &&
+               callee_math_kind(c, v->as.call.callee) != MB_NONE;
+    default: return 0;
+    }
+}
+
+/* Lower a store's value into cell `vc`: a provable float straight into the f64
+ * part, anything else through the maybe lowering. */
+static void emit_store_value_cell(CG *c, const Expr *v, const MCell *vc, int depth) {
+    if (expr_is_float(c, v)) {
+        emit_indent(c, depth);
+        wat_appendf(c->w, "(local.set %s\n", vc->sf);
+        emit_float_expr(c, v, depth + 1);
+        emit_indent(c, depth);
+        wat_append(c->w, ")\n");
+        emit_set_tag(c, vc, 2, depth);
+    } else {
+        emit_maybe_lower(c, v, vc, depth);
+    }
+}
+
+/* How an index store's key is held: a constant string (the hoisted global
+ * `kb`), an i64 (kc.i), a maybe cell (kc), or a boxed value (kc.b). */
+enum { SK_STR,
+       SK_INT,
+       SK_MAYBE,
+       SK_ANY };
+
+/* The store `tb[key] = value` with the table, key and value already
+ * evaluated. A lowered value (vc a cell) that is a float goes to the unboxed
+ * `_f` setter when the key allows it, else the value is boxed; a plain value
+ * (`vb`, a boxed expression) takes the boxed setter. Every setter still
+ * dispatches __newindex. */
+static void emit_index_store_from(CG *c, const char *tb, int kkind, const char *kb, const MCell *kc,
+                                  const MCell *vc, const char *vb, int depth) {
+    char box[256];
+    if (vc) snprintf(box, sizeof box, "(call $box_num %s %s %s %s)", vc->t, vc->i, vc->f, vc->b);
+    else snprintf(box, sizeof box, "%s", vb);
+    emit_indent(c, depth);
+    if (vc && kkind != SK_ANY) {
+        if (kkind == SK_MAYBE)
+            wat_appendf(c->w, "(if (i32.and (i32.eq %s (i32.const 2)) (i32.eq %s (i32.const 1)))\n", vc->t, kc->t);
+        else wat_appendf(c->w, "(if (i32.eq %s (i32.const 2))\n", vc->t);
+        emit_indent(c, depth + 1);
+        if (kkind == SK_STR) wat_appendf(c->w, "(then (call $lua_tabset_sk_f %s %s %s))\n", tb, kb, vc->f);
+        else wat_appendf(c->w, "(then (call $lua_tabset_ik_f %s %s %s))\n", tb, kc->i, vc->f);
+        emit_indent(c, depth + 1);
+        wat_append(c->w, "(else ");
+        depth = 0; /* the boxed store below continues this line */
+    }
+    switch (kkind) {
+    case SK_STR: wat_appendf(c->w, "(call $lua_tabset_sk %s %s %s)", tb, kb, box); break;
+    case SK_INT: wat_appendf(c->w, "(call $lua_tabset_ik %s %s %s)", tb, kc->i, box); break;
+    case SK_MAYBE:
+        wat_appendf(c->w, "(call $lua_tabset_mk %s %s %s %s %s %s)", tb, kc->t, kc->i, kc->f, kc->b, box);
+        break;
+    default: wat_appendf(c->w, "(call $lua_tabset %s %s %s)", tb, kc->b, box); break;
+    }
+    wat_append(c->w, vc && kkind != SK_ANY ? "))\n" : "\n");
+}
+
 /* `t[k] = v` where v is a lowered tree or a provably float expression and k
  * is a constant string, an int-typed expression or a maybe slot: evaluate
  * the table (Lua order: table, key, value), lower the value into a cell, and
@@ -3686,25 +3832,7 @@ static int emit_unboxed_index_store(CG *c, const AssignTarget *t, const Expr *v,
     int kmaybe = !kstr && !kint && key->kind == EXPR_VAR && key->as.var.kind == VAR_LOCAL &&
                  slot_is_maybe(c, key->as.var.idx);
     if (!(kstr || kint || kmaybe)) return 0;
-    /* Only values that can actually yield an unboxed float: a provable float,
-     * an arithmetic tree, a maybe slot, or an inline math call. A bare table
-     * read or ordinary call is a boxed value already — passing it through
-     * the plain store is cheaper than classifying and re-boxing it. */
-    int vfloat = expr_is_float(c, v);
-    int lowered = 0;
-    if (!vfloat) {
-        switch (v->kind) {
-        case EXPR_BINOP:
-        case EXPR_UNOP: lowered = expr_involves_maybe(c, v); break;
-        case EXPR_VAR: lowered = v->as.var.kind == VAR_LOCAL && slot_is_maybe(c, v->as.var.idx); break;
-        case EXPR_CALL:
-            lowered = v->as.call.nargs == 1 && !is_multival_tail(v->as.call.args[0]) &&
-                      callee_math_kind(c, v->as.call.callee) != MB_NONE;
-            break;
-        default: break;
-        }
-    }
-    if (!vfloat && !lowered) return 0;
+    if (!store_value_lowers(c, v)) return 0;
     int k = mt_alloc(c, 2);
     MCell tc = mcell_tmp(k), vc = mcell_tmp(k + 1);
     emit_indent(c, depth);
@@ -3719,35 +3847,106 @@ static int emit_unboxed_index_store(CG *c, const AssignTarget *t, const Expr *v,
         emit_indent(c, depth);
         wat_append(c->w, ")\n");
     }
-    if (vfloat) {
-        emit_indent(c, depth);
-        wat_appendf(c->w, "(local.set %s\n", vc.sf);
-        emit_float_expr(c, v, depth + 1);
-        emit_indent(c, depth);
-        wat_append(c->w, ")\n");
-        emit_set_tag(c, &vc, 2, depth);
-    } else {
-        emit_maybe_lower(c, v, &vc, depth);
-    }
-    char kb[160];
+    emit_store_value_cell(c, v, &vc, depth);
+    char kb[160] = "";
     if (kstr) kstr_expr(c, key->as.s.bytes, key->as.s.len, kb, sizeof kb);
     MCell kc = kmaybe ? mcell_slot(key->as.var.idx) : tc;
-    emit_indent(c, depth);
-    if (kmaybe)
-        wat_appendf(c->w, "(if (i32.and (i32.eq %s (i32.const 2)) (i32.eq %s (i32.const 1)))\n", vc.t, kc.t);
-    else
-        wat_appendf(c->w, "(if (i32.eq %s (i32.const 2))\n", vc.t);
-    emit_indent(c, depth + 1);
-    if (kstr) wat_appendf(c->w, "(then (call $lua_tabset_sk_f %s %s %s))\n", tc.b, kb, vc.f);
-    else wat_appendf(c->w, "(then (call $lua_tabset_ik_f %s %s %s))\n", tc.b, kc.i, vc.f);
-    emit_indent(c, depth + 1);
-    if (kstr) wat_appendf(c->w, "(else (call $lua_tabset_sk %s %s\n", tc.b, kb);
-    else if (kint) wat_appendf(c->w, "(else (call $lua_tabset_ik %s %s\n", tc.b, kc.i);
-    else wat_appendf(c->w, "(else (call $lua_tabset_mk %s %s %s %s %s\n", tc.b, kc.t, kc.i, kc.f, kc.b);
-    emit_maybe_cell_box(c, &vc, depth + 2);
-    emit_indent(c, depth + 1);
-    wat_append(c->w, ")))\n");
+    emit_index_store_from(c, tc.b, kstr ? SK_STR : kint ? SK_INT
+                                                        : SK_MAYBE,
+                          kb, &kc, &vc, NULL, depth);
     c->mt_depth = k;
+    return 1;
+}
+
+/* Multi-assignment `t1[k1], x, t2[k2] = v1, v2, v3` with one value per target,
+ * through lowering temporaries instead of the $ArgArr path: every target's
+ * table and key is evaluated (left to right) into a cell, then every value —
+ * lowered when it can yield an unboxed float — and finally the stores run
+ * right to left (so a repeated target keeps its leftmost value, as in
+ * reference Lua). Keys are snapshotted, so `t[i], i = 1, 2` indexes with the
+ * old i. Index stores take the same constant-string / int / maybe-key and
+ * unboxed-float setters as a single store. Returns 0 when not applicable. */
+static int emit_assign_multi_cells(CG *c, const Stmt *s, int depth) {
+    int nt = s->as.assign.n_targets;
+    if (!c->opt_int || nt < 2 || s->as.assign.n_values != nt) return 0;
+    for (int i = 0; i < nt; i++) {
+        const AssignTarget *t = &s->as.assign.targets[i];
+        if (t->kind == TGT_VAR && t->as.var.kind == VAR_LOCAL && slot_is_maybe(c, t->as.var.idx)) return 0;
+    }
+    int k0 = c->mt_depth;
+    /* per target: table, key and value cells, key kind, value lowered?, key string */
+    struct {
+        MCell t, k, v;
+        int kkind, lowered;
+        char kb[160];
+    } *g = xmalloc((size_t)nt * sizeof *g);
+    for (int i = 0; i < nt; i++) {
+        const AssignTarget *t = &s->as.assign.targets[i];
+        g[i].kb[0] = '\0';
+        if (t->kind == TGT_VAR) continue;
+        const Expr *key = t->as.index.key;
+        g[i].t = mcell_tmp(mt_alloc(c, 1));
+        emit_indent(c, depth);
+        wat_appendf(c->w, "(local.set %s\n", g[i].t.sb);
+        emit_expr(c, t->as.index.table, depth + 1);
+        emit_indent(c, depth);
+        wat_append(c->w, ")\n");
+        if (key->kind == EXPR_STRING && key->as.s.len <= KSTR_MAX) {
+            g[i].kkind = SK_STR;
+            kstr_expr(c, key->as.s.bytes, key->as.s.len, g[i].kb, sizeof g[i].kb);
+            continue;
+        }
+        g[i].k = mcell_tmp(mt_alloc(c, 1));
+        if (expr_is_int(c, key)) {
+            g[i].kkind = SK_INT;
+            emit_indent(c, depth);
+            wat_appendf(c->w, "(local.set %s\n", g[i].k.si);
+            emit_int_expr(c, key, depth + 1);
+            emit_indent(c, depth);
+            wat_append(c->w, ")\n");
+        } else if (key->kind == EXPR_VAR && key->as.var.kind == VAR_LOCAL && slot_is_maybe(c, key->as.var.idx)) {
+            g[i].kkind = SK_MAYBE;
+            MCell ks = mcell_slot(key->as.var.idx);
+            emit_indent(c, depth);
+            wat_appendf(c->w, "(local.set %s %s) (local.set %s %s) (local.set %s %s) (local.set %s %s)\n",
+                        g[i].k.st, ks.t, g[i].k.si, ks.i, g[i].k.sf, ks.f, g[i].k.sb, ks.b);
+        } else {
+            g[i].kkind = SK_ANY;
+            emit_indent(c, depth);
+            wat_appendf(c->w, "(local.set %s\n", g[i].k.sb);
+            emit_expr(c, key, depth + 1);
+            emit_indent(c, depth);
+            wat_append(c->w, ")\n");
+        }
+    }
+    for (int i = 0; i < nt; i++) {
+        const Expr *v = s->as.assign.values[i];
+        g[i].v = mcell_tmp(mt_alloc(c, 1));
+        g[i].lowered = s->as.assign.targets[i].kind == TGT_INDEX && store_value_lowers(c, v);
+        if (g[i].lowered) {
+            emit_store_value_cell(c, v, &g[i].v, depth);
+        } else {
+            emit_indent(c, depth);
+            wat_appendf(c->w, "(local.set %s\n", g[i].v.sb);
+            emit_expr(c, v, depth + 1);
+            emit_indent(c, depth);
+            wat_append(c->w, ")\n");
+        }
+    }
+    for (int i = nt - 1; i >= 0; i--) {
+        const AssignTarget *t = &s->as.assign.targets[i];
+        if (t->kind == TGT_VAR) {
+            emit_target_open(c, t, depth);
+            emit_indent(c, depth + 1);
+            wat_appendf(c->w, "%s\n", g[i].v.b);
+            emit_target_close(c, depth);
+        } else {
+            emit_index_store_from(c, g[i].t.b, g[i].kkind, g[i].kb, &g[i].k, g[i].lowered ? &g[i].v : NULL,
+                                  g[i].v.b, depth);
+        }
+    }
+    free(g);
+    c->mt_depth = k0;
     return 1;
 }
 
@@ -3800,6 +3999,7 @@ static void emit_assign(CG *c, const Stmt *s, int depth) {
         emit_target_close(c, depth);
         return;
     }
+    if (emit_assign_multi_cells(c, s, depth)) return;
     /* Multi-target. Lua evaluates every LHS table/key sub-expression
      * and every RHS value *before* any store, then stores right-to-
      * left (so a repeated target keeps its leftmost value, matching

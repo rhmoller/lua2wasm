@@ -252,6 +252,37 @@ static MunitResult test_mixed_compare_unboxed(const MunitParameter params[], voi
     return MUNIT_OK;
 }
 
+/* A local used only as a table key (`local id = alive[i]; life[id]`) is
+ * maybe-typed, so the reads and writes through it take the unboxed-key entry
+ * points instead of the generic $lua_index / $lua_tabset. */
+static MunitResult test_key_local_maybe_typed(const MunitParameter params[], void *fixture) {
+    (void)params; (void)fixture;
+    char *m = main_func_wat("local alive, life = {1, 2}, {0.5, 1.5}\n"
+                            "for i = 1, #alive do\n"
+                            "  local id = alive[i]\n"
+                            "  life[id] = life[id] - 0.25\n"
+                            "end\n");
+    munit_assert_null(strstr(m, "(call $lua_index\n"));
+    munit_assert_null(strstr(m, "(call $lua_tabset\n"));
+    munit_assert_not_null(strstr(m, "$lua_index_mk"));
+    free(m);
+    /* ...including through a multi-target store into captured tables, which
+     * goes through lowering temporaries (no $ArgArr staging, no generic set) */
+    m = main_func_wat("local px, py = {0.5}, {1.5}\n"
+                      "local function f() return px, py end\n"
+                      "local ids = {1}\n"
+                      "for i = 1, #ids do\n"
+                      "  local id = ids[i]\n"
+                      "  local x = px[id] * 2\n"
+                      "  px[id], py[id] = x, x + py[id]\n"
+                      "end\n");
+    munit_assert_null(strstr(m, "(local.set $tmp_lhs_t"));
+    munit_assert_null(strstr(m, "(call $lua_tabset\n"));
+    munit_assert_not_null(strstr(m, "$lua_tabset_ik_f"));
+    free(m);
+    return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
     { "/emits_expected",       test_emits_expected,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
     { "/boxed_fallback_o0",    test_emits_boxed_fallback_o0, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -260,6 +291,7 @@ static MunitTest tests[] = {
     { "/user_function",        test_user_function_emitted,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
     { "/pool_pointer_stability", test_pool_pointer_stability, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
     { "/mixed_compare_unboxed", test_mixed_compare_unboxed, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+    { "/key_local_maybe_typed", test_key_local_maybe_typed, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
     { NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 };
 

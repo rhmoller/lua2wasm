@@ -1,0 +1,26 @@
+1	integer	true	true
+2	integer	true	true
+3	float	true	true
+4	float	true	true
+5	string	true	true
+6	string	true	true
+7	boolean	true	true
+8	float	false	NaN key
+9	float	true	true
+10	float	true	true
+11	integer	true	true
+1	1
+2	2
+3	3
+4	4
+5	5
+6	6
+7	7
+8	nil
+9	9
+10	10
+11	11
+entries	10	3	9	6	2
+nil	false	table index is nil
+5	2.5	8.5	2.5 4.0 5.5 7.0 8.5
+get 7,set 7,get s,set s	2	1

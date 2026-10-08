@@ -1,0 +1,13 @@
+1.0 1.5 0.5 0	-2 -3 -1 0	-2.0 -4.5 -0.5 0	2 3 1 0
+float	integer	4
+a	nil	2
+b	nil	3
+1	2
+x	z	2
+ta,ka,tb,kb,va,vb	10	20
+2=2.5 x=s 1=1.5	1.5	s	2.5
+30 20 10
+1	4	5
+4	5
+false	table index is nil
+false	true

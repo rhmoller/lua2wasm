@@ -138,3 +138,5 @@ pass	format_float_ties	perf: float rendering fast path (native toFixed/toPrecisi
 pass	deep_recursion_heavy	frame-weight stack budget: heavy frames still raise a catchable "stack overflow"
 pass	for_num_limit	integer for-loop with any limit: floor/clip/skip, string coercion, NaN, bad-limit errors
 pass	cmp_mixed_int_float	unboxed int-vs-float compares stay exact (2^53, 2^63, NaN, both orders, literals)
+pass	index_key_local	key-only locals (maybe-typed keys): normalization, NaN/nil, array part, __index/__newindex
+pass	multi_assign_index	multi-target index stores: order, key snapshot, leftmost wins, __newindex, unboxed floats
