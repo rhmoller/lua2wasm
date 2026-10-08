@@ -3582,47 +3582,45 @@ static void emit_store_value_cell(CG *c, const Expr *v, const MCell *vc, int dep
 
 /* How an index store's key is held: a constant string (the hoisted global
  * `kb`), an i64 (kc.i), a maybe cell (kc), or a boxed value (kc.b). */
-enum { SK_STR,
-       SK_INT,
-       SK_MAYBE,
-       SK_ANY };
+typedef enum { SK_STR,
+               SK_INT,
+               SK_MAYBE,
+               SK_ANY } StoreKey;
 
 /* The store `tb[key] = value` with the table, key and value already
  * evaluated. A lowered value (vc a cell) that is a float goes to the unboxed
  * `_f` setter when the key allows it, else the value is boxed; a plain value
  * (`vb`, a boxed expression) takes the boxed setter. Every setter still
  * dispatches __newindex. */
-static void emit_index_store_from(CG *c, const char *tb, int kkind, const char *kb, const MCell *kc,
+static void emit_index_store_from(CG *c, const char *tb, StoreKey kkind, const char *kb, const MCell *kc,
                                   const MCell *vc, const char *vb, int depth) {
-    char box[256], icb[48];
+    char box[256], icb[48], store[640];
     if (vc) snprintf(box, sizeof box, "(call $box_num %s %s %s %s)", vc->t, vc->i, vc->f, vc->b);
     else snprintf(box, sizeof box, "%s", vb);
     /* a constant-key store goes through one inline cache for both forms */
     const char *ic = kkind == SK_STR ? ic_new(c, icb, sizeof icb) : NULL;
-    emit_indent(c, depth);
-    if (vc && kkind != SK_ANY) {
-        if (kkind == SK_MAYBE)
-            wat_appendf(c->w, "(if (i32.and (i32.eq %s (i32.const 2)) (i32.eq %s (i32.const 1)))\n", vc->t, kc->t);
-        else wat_appendf(c->w, "(if (i32.eq %s (i32.const 2))\n", vc->t);
-        emit_indent(c, depth + 1);
-        if (kkind == SK_STR && ic) wat_appendf(c->w, "(then (call $lua_tabset_ic_f %s %s %s %s))\n", ic, tb, kb, vc->f);
-        else if (kkind == SK_STR) wat_appendf(c->w, "(then (call $lua_tabset_sk_f %s %s %s))\n", tb, kb, vc->f);
-        else wat_appendf(c->w, "(then (call $lua_tabset_ik_f %s %s %s))\n", tb, kc->i, vc->f);
-        emit_line(c, depth + 1, "(else ");
-        depth = 0; /* the boxed store below continues this line */
-    }
     switch (kkind) {
     case SK_STR:
-        if (ic) wat_appendf(c->w, "(call $lua_tabset_ic %s %s %s %s)", ic, tb, kb, box);
-        else wat_appendf(c->w, "(call $lua_tabset_sk %s %s %s)", tb, kb, box);
+        if (ic) snprintf(store, sizeof store, "(call $lua_tabset_ic %s %s %s %s)", ic, tb, kb, box);
+        else snprintf(store, sizeof store, "(call $lua_tabset_sk %s %s %s)", tb, kb, box);
         break;
-    case SK_INT: wat_appendf(c->w, "(call $lua_tabset_ik %s %s %s)", tb, kc->i, box); break;
+    case SK_INT: snprintf(store, sizeof store, "(call $lua_tabset_ik %s %s %s)", tb, kc->i, box); break;
     case SK_MAYBE:
-        wat_appendf(c->w, "(call $lua_tabset_mk %s %s %s %s %s %s)", tb, kc->t, kc->i, kc->f, kc->b, box);
+        snprintf(store, sizeof store, "(call $lua_tabset_mk %s %s %s %s %s %s)", tb, kc->t, kc->i, kc->f, kc->b, box);
         break;
-    default: wat_appendf(c->w, "(call $lua_tabset %s %s %s)", tb, kc->b, box); break;
+    default: snprintf(store, sizeof store, "(call $lua_tabset %s %s %s)", tb, kc->b, box); break;
     }
-    wat_append(c->w, vc && kkind != SK_ANY ? "))\n" : "\n");
+    if (!vc || kkind == SK_ANY) {
+        emit_linef(c, depth, "%s\n", store);
+        return;
+    }
+    if (kkind == SK_MAYBE)
+        emit_linef(c, depth, "(if (i32.and (i32.eq %s (i32.const 2)) (i32.eq %s (i32.const 1)))\n", vc->t, kc->t);
+    else emit_linef(c, depth, "(if (i32.eq %s (i32.const 2))\n", vc->t);
+    if (kkind == SK_STR && ic) emit_linef(c, depth + 1, "(then (call $lua_tabset_ic_f %s %s %s %s))\n", ic, tb, kb, vc->f);
+    else if (kkind == SK_STR) emit_linef(c, depth + 1, "(then (call $lua_tabset_sk_f %s %s %s))\n", tb, kb, vc->f);
+    else emit_linef(c, depth + 1, "(then (call $lua_tabset_ik_f %s %s %s))\n", tb, kc->i, vc->f);
+    emit_linef(c, depth + 1, "(else %s))\n", store);
 }
 
 /* `t[k] = v` where v is a lowered tree or a provably float expression and k
@@ -3680,7 +3678,8 @@ static int emit_assign_multi_cells(CG *c, const Stmt *s, int depth) {
     /* per target: table, key and value cells, key kind, value lowered?, key string */
     struct {
         MCell t, k, v;
-        int kkind, lowered;
+        StoreKey kkind;
+        int lowered;
         char kb[160];
     } *g = xmalloc((size_t)nt * sizeof *g);
     for (int i = 0; i < nt; i++) {
