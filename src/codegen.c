@@ -1335,112 +1335,30 @@ static int fn_has_fast_entry(const CG *c, const LuaFunc *fn) {
     return c->opt_int && fn->n_params <= FAST_MAX_ARGS;
 }
 
-/* The number of fast-entry arguments of a call/method call (the receiver
+/* A call's or method call's own argument list (a method call's receiver is
+ * not part of it). */
+static void call_arg_list(const Expr *e, Expr *const **args, size_t *n) {
+    if (e->kind == EXPR_METHOD_CALL) {
+        *args = e->as.method_call.args;
+        *n = e->as.method_call.nargs;
+    } else {
+        *args = e->as.call.args;
+        *n = e->as.call.nargs;
+    }
+}
+
+/* The number of fast-entry arguments of a call or method call (the receiver
  * counts), or -1 when it can't use the fast entry: too many, or a trailing
  * multi-value argument whose length is only known at run time. */
 static int fast_call_nargs(const CG *c, const Expr *e) {
-    if (!c->opt_int) return -1;
+    if (!c->opt_int || (e->kind != EXPR_CALL && e->kind != EXPR_METHOD_CALL)) return -1;
     Expr *const *args;
     size_t na;
-    int extra;
-    if (e->kind == EXPR_CALL) {
-        args = e->as.call.args;
-        na = e->as.call.nargs;
-        extra = 0;
-    } else if (e->kind == EXPR_METHOD_CALL) {
-        args = e->as.method_call.args;
-        na = e->as.method_call.nargs;
-        extra = 1;
-    } else {
-        return -1;
-    }
-    if (na + extra > FAST_MAX_ARGS) return -1;
+    call_arg_list(e, &args, &na);
+    size_t n = na + (e->kind == EXPR_METHOD_CALL);
+    if (n > FAST_MAX_ARGS) return -1;
     if (na > 0 && is_multival_tail(args[na - 1])) return -1;
-    return (int)na + extra;
-}
-
-static void emit_method_lookup(CG *c, const char *method, size_t method_len, int line, int depth);
-
-/* A single-result call through $lua_call1 (the callee's $fast entry): the
- * callee, then the arguments in order, nil-padded to four, plus the count.
- * A method call parks its receiver in $tmp_any for the lookup and passes it
- * as the first argument; it is read before the other arguments are evaluated,
- * so an argument that is itself a method call may reuse $tmp_any. Callers
- * check fast_call_nargs first. */
-static void emit_fast_call(CG *c, const Expr *e, int depth) {
-    int n = fast_call_nargs(c, e);
-    Expr *const *args;
-    size_t na;
-    if (e->kind == EXPR_METHOD_CALL) {
-        emit_line(c, depth, "(local.set $tmp_any\n");
-        emit_expr(c, e->as.method_call.recv, depth + 1);
-        emit_line(c, depth, ")\n");
-        emit_line(c, depth, "(call $lua_call1\n");
-        emit_method_lookup(c, e->as.method_call.method, e->as.method_call.method_len, e->line, depth + 1);
-        emit_line(c, depth + 1, "(local.get $tmp_any)\n");
-        args = e->as.method_call.args;
-        na = e->as.method_call.nargs;
-    } else {
-        emit_line(c, depth, "(call $lua_call1\n");
-        emit_expr(c, e->as.call.callee, depth + 1);
-        args = e->as.call.args;
-        na = e->as.call.nargs;
-    }
-    for (size_t i = 0; i < na; i++) emit_expr(c, args[i], depth + 1);
-    for (int i = n; i < FAST_MAX_ARGS; i++) {
-        emit_line(c, depth + 1, "(ref.null any)\n");
-    }
-    emit_linef(c, depth + 1, "(i32.const %d) (i32.const %d)\n", n, e->line);
-    emit_line(c, depth, ")\n");
-}
-
-/* `return f(args)` / `return obj:m(args)` inside a $user_N_f body, when the
- * call fits the fast entry: a proper tail call through the callee's $fast,
- * replacing the top frame like the generic tail dispatch. The callee and the
- * arguments are evaluated first, in order, into $tmp_callee / $ta0..$ta3. A
- * callee that isn't a closure (__call, or an error) takes $lua_call1. */
-static void emit_fast_tail_call(CG *c, const Expr *e, int depth) {
-    int n = fast_call_nargs(c, e);
-    Expr *const *args;
-    size_t na;
-    int k = 0;
-    if (e->kind == EXPR_METHOD_CALL) {
-        emit_line(c, depth, "(local.set $tmp_any\n");
-        emit_expr(c, e->as.method_call.recv, depth + 1);
-        emit_line(c, depth, ")\n");
-        emit_line(c, depth, "(local.set $tmp_callee\n");
-        emit_method_lookup(c, e->as.method_call.method, e->as.method_call.method_len, e->line, depth + 1);
-        emit_line(c, depth, ")\n");
-        emit_line(c, depth, "(local.set $ta0 (local.get $tmp_any))\n");
-        k = 1;
-        args = e->as.method_call.args;
-        na = e->as.method_call.nargs;
-    } else {
-        emit_line(c, depth, "(local.set $tmp_callee\n");
-        emit_expr(c, e->as.call.callee, depth + 1);
-        emit_line(c, depth, ")\n");
-        args = e->as.call.args;
-        na = e->as.call.nargs;
-    }
-    for (size_t i = 0; i < na; i++, k++) {
-        emit_linef(c, depth, "(local.set $ta%d\n", k);
-        emit_expr(c, args[i], depth + 1);
-        emit_line(c, depth, ")\n");
-    }
-    char argv[160];
-    int off = 0;
-    for (int i = 0; i < FAST_MAX_ARGS; i++)
-        off += snprintf(argv + off, sizeof argv - (size_t)off, i < n ? " (local.get $ta%d)" : " (ref.null any)", i);
-    emit_line(c, depth, "(if (ref.test (ref $LuaClosure) (local.get $tmp_callee))\n");
-    emit_line(c, depth + 1, "(then\n");
-    emit_line(c, depth + 2, "(local.set $tmp_clo (ref.cast (ref $LuaClosure) (local.get $tmp_callee)))\n");
-    emit_linef(c, depth + 2, "(call $replace_top_call_frame (i32.const %d) "
-                             "(struct.get $LuaClosure $weight (ref.as_non_null (local.get $tmp_clo))))\n",
-               e->line);
-    emit_linef(c, depth + 2, "(return_call_ref $LuaFn1 (ref.as_non_null (local.get $tmp_clo))%s (i32.const %d)\n", argv, n);
-    emit_line(c, depth + 3, "(struct.get $LuaClosure $fast (ref.as_non_null (local.get $tmp_clo))))))\n");
-    emit_linef(c, depth, "(return (call $lua_call1 (local.get $tmp_callee)%s (i32.const %d) (i32.const %d)))\n", argv, n,
-               e->line);
+    return (int)n;
 }
 
 /* Build a (ref $ArgArr) from a sequence of argument expressions, splicing
@@ -1470,6 +1388,16 @@ static void emit_args_array(CG *c, Expr **args, size_t nargs, int depth) {
     emit_line(c, depth, ")\n");
 }
 
+/* A method call `obj:m(...)` evaluates obj once, into $tmp_any, where the
+ * method lookup and the argument list read it. Both read it before any
+ * argument is evaluated, so an argument that is itself a method call may
+ * reuse $tmp_any. */
+static void emit_park_receiver(CG *c, const Expr *e, int depth) {
+    emit_line(c, depth, "(local.set $tmp_any\n");
+    emit_expr(c, e->as.method_call.recv, depth + 1);
+    emit_line(c, depth, ")\n");
+}
+
 /* Look up `obj:m` via $lua_index_sk (constant string key; routes strings
  * through the string library). The receiver must already be parked in
  * $tmp_any. Emits, at `depth`:
@@ -1492,6 +1420,14 @@ static void emit_method_lookup(CG *c, const char *method, size_t method_len, int
         emit_linef(c, depth + 1, "(global.get $mic_%d)\n", mic);
     }
     emit_line(c, depth, ")\n");
+}
+
+/* The value a call calls: a call's callee expression, or a method call's
+ * method looked up on the parked receiver. */
+static void emit_callee(CG *c, const Expr *e, int depth) {
+    if (e->kind == EXPR_METHOD_CALL)
+        emit_method_lookup(c, e->as.method_call.method, e->as.method_call.method_len, e->line, depth);
+    else emit_expr(c, e->as.call.callee, depth);
 }
 
 /* Emit the method-call argument array [recv] ++ method-args, at `depth`:
@@ -1517,24 +1453,14 @@ static void emit_method_args_array(CG *c, const Expr *e, int depth) {
     emit_line(c, depth, ")\n");
 }
 
-/* Emit a call returning (ref $ArgArr) — the full multi-value result. */
+/* A call's arguments as an $ArgArr (a method call's with its receiver first). */
+static void emit_call_args_array(CG *c, const Expr *e, int depth) {
+    if (e->kind == EXPR_METHOD_CALL) emit_method_args_array(c, e, depth);
+    else emit_args_array(c, e->as.call.args, e->as.call.nargs, depth);
+}
+
+/* A call returning (ref $ArgArr) — the full multi-value result. */
 static void emit_call_array(CG *c, const Expr *e, int depth) {
-    if (e->kind == EXPR_METHOD_CALL) {
-        /* obj:m(args). Evaluate receiver once into $tmp_any, look up the
-         * method via $lua_index (which redirects strings through the
-         * `string` library), then call with receiver prepended. */
-        emit_line(c, depth, "(local.set $tmp_any\n");
-        emit_expr(c, e->as.method_call.recv, depth + 1);
-        emit_line(c, depth, ")\n");
-        emit_line(c, depth, "(call $lua_call_any\n");
-        emit_method_lookup(c, e->as.method_call.method, e->as.method_call.method_len,
-                           e->line, depth + 1);
-        /* args = [recv] ++ method args */
-        emit_method_args_array(c, e, depth + 1);
-        emit_linef(c, depth + 1, "(i32.const %d)\n", e->line);
-        emit_line(c, depth, ")\n");
-        return;
-    }
     const LuaFunc *dt = direct_call_target(c, e);
     if (dt && direct_args_typed_ok(c, e, dt)) {
         /* Direct-args call: pass the closure + (typed) args to $user_N_da,
@@ -1550,14 +1476,34 @@ static void emit_call_array(CG *c, const Expr *e, int depth) {
         emit_line(c, depth, ")\n");
         return;
     }
+    if (e->kind == EXPR_METHOD_CALL) emit_park_receiver(c, e, depth);
     emit_line(c, depth, "(call $lua_call_any\n");
-    emit_expr(c, e->as.call.callee, depth + 1);
-    emit_args_array(c, e->as.call.args, e->as.call.nargs, depth + 1);
+    emit_callee(c, e, depth + 1);
+    emit_call_args_array(c, e, depth + 1);
     emit_linef(c, depth + 1, "(i32.const %d)\n", e->line);
     emit_line(c, depth, ")\n");
 }
 
-/* In expression context we want a single anyref; wrap with $args_first. */
+/* A single-result call through $lua_call1 (the callee's $fast entry): the
+ * callee, then the arguments in order — a method call's receiver first —
+ * nil-padded to four, plus the count. Callers check fast_call_nargs first. */
+static void emit_fast_call(CG *c, const Expr *e, int depth) {
+    int n = fast_call_nargs(c, e);
+    Expr *const *args;
+    size_t na;
+    call_arg_list(e, &args, &na);
+    if (e->kind == EXPR_METHOD_CALL) emit_park_receiver(c, e, depth);
+    emit_line(c, depth, "(call $lua_call1\n");
+    emit_callee(c, e, depth + 1);
+    if (e->kind == EXPR_METHOD_CALL) emit_line(c, depth + 1, "(local.get $tmp_any)\n");
+    for (size_t i = 0; i < na; i++) emit_expr(c, args[i], depth + 1);
+    for (int i = n; i < FAST_MAX_ARGS; i++) emit_line(c, depth + 1, "(ref.null any)\n");
+    emit_linef(c, depth + 1, "(i32.const %d) (i32.const %d)\n", n, e->line);
+    emit_line(c, depth, ")\n");
+}
+
+/* A call in single-value context: the direct single-result entry, the fast
+ * entry, or the full call with its first result taken. */
 static void emit_call(CG *c, const Expr *e, int depth) {
     const LuaFunc *dt = direct_call_target(c, e);
     if (dt && direct_args_typed_ok(c, e, dt)) {
@@ -1577,71 +1523,81 @@ static void emit_call(CG *c, const Expr *e, int depth) {
     emit_line(c, depth, ")\n");
 }
 
-/* Tail-call dispatch shared by the regular and method forms. Assumes the
- * callee value is in $tmp_callee and the argument array in $tmp_args. Fast
- * path: a real closure -> return_call_ref, so deep recursion runs in
- * constant wasm stack. Slow path: fall through to $lua_call_any (which
- * walks __call metamethods and throws a typed error for non-callables);
- * TCO is lost there, which is fine for a metamethod hop. */
-static void emit_tail_dispatch(CG *c, int line, int depth) {
-    /* Fast path: real closure -> return_call_ref. Update the top frame
-     * line so error()/traceback see this site instead of the (now-defunct)
-     * caller's. */
+/* ----- tail calls -----
+ * `return f(args)` / `return obj:m(args)` lowers to a return_call_ref, so
+ * deep recursion doesn't grow the wasm call stack. */
+
+/* Evaluate a tail call's callee into $tmp_callee — not $tmp_any, which a
+ * method call among the arguments reuses for its receiver while the
+ * arguments are evaluated. */
+static void emit_tail_callee(CG *c, const Expr *e, int depth) {
+    if (e->kind == EXPR_METHOD_CALL) emit_park_receiver(c, e, depth);
+    emit_line(c, depth, "(local.set $tmp_callee\n");
+    emit_callee(c, e, depth + 1);
+    emit_line(c, depth, ")\n");
+}
+
+/* The end of a tail call whose callee is in $tmp_callee. A closure takes over
+ * the caller's frame — its line becomes this call site's, so error() and
+ * tracebacks see it — and is entered with `entry_call`, a return_call_ref.
+ * Anything else (a __call table, a non-callable) takes `slow_call`, an
+ * ordinary call that walks __call or raises: losing TCO for a metamethod hop
+ * is fine. */
+static void emit_tail_dispatch(CG *c, int line, const char *entry_call, const char *slow_call, int depth) {
     emit_line(c, depth, "(if (ref.test (ref $LuaClosure) (local.get $tmp_callee))\n");
     emit_line(c, depth + 1, "(then\n");
     emit_line(c, depth + 2, "(local.set $tmp_clo (ref.cast (ref $LuaClosure) (local.get $tmp_callee)))\n");
-    emit_linef(c, depth + 2, "(call $replace_top_call_frame (i32.const %d) "
-                             "(struct.get $LuaClosure $weight (ref.as_non_null (local.get $tmp_clo))))\n",
+    emit_linef(c, depth + 2,
+               "(call $replace_top_call_frame (i32.const %d) "
+               "(struct.get $LuaClosure $weight (ref.as_non_null (local.get $tmp_clo))))\n",
                line);
-    emit_line(c, depth + 2, "(return_call_ref $LuaFn\n");
-    emit_line(c, depth + 3, "(ref.as_non_null (local.get $tmp_clo))\n");
-    emit_line(c, depth + 3, "(ref.as_non_null (local.get $tmp_args))\n");
-    emit_line(c, depth + 3, "(struct.get $LuaClosure $code (ref.as_non_null (local.get $tmp_clo))))))\n");
-    /* Slow path: __call walk / typed error. */
-    emit_linef(c, depth, "(return (call $lua_call_any (local.get $tmp_callee) "
-                         "(ref.as_non_null (local.get $tmp_args)) (i32.const %d)))\n",
-               line);
+    emit_linef(c, depth + 2, "%s))\n", entry_call);
+    emit_linef(c, depth, "(return %s)\n", slow_call);
 }
 
-/* `return obj:m(args)` — the method-call tail form. Mirrors emit_call_array's
- * method branch (receiver once into $tmp_any; method via $lua_index; args =
- * [recv] ++ method args), but parks the callee/args in $tmp_callee/$tmp_args
- * and hands off to emit_tail_dispatch so it gets the same TCO as a plain
- * `return f(args)`. The receiver is read into the [recv] fixed array before
- * the method args are evaluated, so an arg that itself reuses $tmp_any can't
- * clobber it. */
-static void emit_tail_method_call(CG *c, const Expr *e, int depth) {
-    emit_line(c, depth, "(local.set $tmp_any\n");
-    emit_expr(c, e->as.method_call.recv, depth + 1);
-    emit_line(c, depth, ")\n");
-    emit_line(c, depth, "(local.set $tmp_callee\n");
-    emit_method_lookup(c, e->as.method_call.method, e->as.method_call.method_len,
-                       e->line, depth + 1);
-    emit_line(c, depth, ")\n");
-    emit_line(c, depth, "(local.set $tmp_args\n");
-    emit_method_args_array(c, e, depth + 1);
-    emit_line(c, depth, ")\n");
-    emit_tail_dispatch(c, e->line, depth);
-}
-
-/* Tail call: `return f(args)` / `return obj:m(args)` lowers to a
- * return_call_ref so deep recursion doesn't grow the wasm call stack. */
+/* A tail call through the callee's $code: the arguments as an array. */
 static void emit_tail_call(CG *c, const Expr *e, int depth) {
-    if (e->kind == EXPR_METHOD_CALL) {
-        emit_tail_method_call(c, e, depth);
-        return;
-    }
-    /* Stash the callee in its own local: $tmp_any can't be used here because
-     * a method-call argument (e.g. `f(s:gmatch(...))`) reuses $tmp_any for
-     * its receiver while we build the args array below, which would clobber
-     * the callee. */
-    emit_line(c, depth, "(local.set $tmp_callee\n");
-    emit_expr(c, e->as.call.callee, depth + 1);
-    emit_line(c, depth, ")\n");
+    emit_tail_callee(c, e, depth);
     emit_line(c, depth, "(local.set $tmp_args\n");
-    emit_args_array(c, e->as.call.args, e->as.call.nargs, depth + 1);
+    emit_call_args_array(c, e, depth + 1);
     emit_line(c, depth, ")\n");
-    emit_tail_dispatch(c, e->line, depth);
+    char slow[160];
+    snprintf(slow, sizeof slow,
+             "(call $lua_call_any (local.get $tmp_callee) (ref.as_non_null (local.get $tmp_args)) (i32.const %d))",
+             e->line);
+    emit_tail_dispatch(c, e->line,
+                       "(return_call_ref $LuaFn (ref.as_non_null (local.get $tmp_clo)) "
+                       "(ref.as_non_null (local.get $tmp_args)) "
+                       "(struct.get $LuaClosure $code (ref.as_non_null (local.get $tmp_clo))))",
+                       slow, depth);
+}
+
+/* A tail call inside a $user_N_f body that fits the fast entry: through the
+ * callee's $fast, the arguments evaluated in order into $ta0..$ta3 (a method
+ * call's receiver first). */
+static void emit_fast_tail_call(CG *c, const Expr *e, int depth) {
+    int n = fast_call_nargs(c, e), k = 0;
+    Expr *const *args;
+    size_t na;
+    call_arg_list(e, &args, &na);
+    emit_tail_callee(c, e, depth);
+    if (e->kind == EXPR_METHOD_CALL) emit_line(c, depth, "(local.set $ta0 (local.get $tmp_any))\n"), k = 1;
+    for (size_t i = 0; i < na; i++, k++) {
+        emit_linef(c, depth, "(local.set $ta%d\n", k);
+        emit_expr(c, args[i], depth + 1);
+        emit_line(c, depth, ")\n");
+    }
+    char regs[160], entry[384], slow[256];
+    int off = 0;
+    for (int i = 0; i < FAST_MAX_ARGS; i++)
+        off += snprintf(regs + off, sizeof regs - (size_t)off, i < n ? " (local.get $ta%d)" : " (ref.null any)", i);
+    snprintf(entry, sizeof entry,
+             "(return_call_ref $LuaFn1 (ref.as_non_null (local.get $tmp_clo))%s (i32.const %d) "
+             "(struct.get $LuaClosure $fast (ref.as_non_null (local.get $tmp_clo))))",
+             regs, n);
+    snprintf(slow, sizeof slow, "(call $lua_call1 (local.get $tmp_callee)%s (i32.const %d) (i32.const %d))", regs, n,
+             e->line);
+    emit_tail_dispatch(c, e->line, entry, slow, depth);
 }
 
 /* ----- function expression: build a closure -----
