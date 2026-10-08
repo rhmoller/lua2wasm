@@ -15,9 +15,11 @@
 //   node scripts/diff-fuzz.mjs --count 5000
 //   node scripts/diff-fuzz.mjs --seed 12345     # reproduce one program (prints it, runs it)
 //   node scripts/diff-fuzz.mjs --phase tables   # numeric|format|patterns|tables|all (default all)
+//   node scripts/diff-fuzz.mjs --phase loops    # top-level loops (not part of all)
 //   node scripts/diff-fuzz.mjs --emit NAME      # on first divergence, write a tests/diff case
 //   node scripts/diff-fuzz.mjs --progress 10    # status line to stderr every 10s (default 5; 0 off)
 //   LUA_REF=lua5.4 node scripts/diff-fuzz.mjs   # override the reference interpreter
+//   L2W_FLAGS=--loop-chunk=1 node scripts/diff-fuzz.mjs   # extra compiler flags
 
 import { execFileSync } from "node:child_process";
 import { writeFileSync, mkdtempSync, appendFileSync, existsSync } from "node:fs";
@@ -28,6 +30,8 @@ import { fileURLToPath } from "node:url";
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(SCRIPT_DIR, "..");
 const L2W = join(ROOT, "build/lua2wasm");
+// Extra compiler flags, e.g. L2W_FLAGS=--loop-chunk=1 (as for bench.sh).
+const L2W_FLAGS = (process.env.L2W_FLAGS || "").split(/\s+/).filter(Boolean);
 const HOST = join(ROOT, "runtime/host.mjs");
 const LUA = process.env.LUA_REF || "lua5.5";
 const WORK = mkdtempSync(join(tmpdir(), "lua2wasm-fuzz-"));
@@ -300,8 +304,43 @@ function genTableProgram(rng) {
     }
 }
 
+// Whole programs whose loops sit at the top level of the main chunk, where the
+// compiler outlines them into functions that suspend and resume (run with
+// L2W_FLAGS=--loop-chunk=1 to suspend on every iteration): random bounds and
+// steps (integer, float, negative, empty, near maxinteger), nesting, break.
+function genTopLoop(rng, depth) {
+    const v = `i${depth}`;
+    let body = `cnt = cnt + 1 acc = acc + ${v}`;
+    if (depth < 2 && rng.int(3) === 0) body += "\n" + genTopLoop(rng, depth + 1);
+    if (rng.int(4) === 0) body += ` if cnt > ${rng.pick(["3", "7", "20"])} then break end`;
+    switch (rng.int(5)) {
+        case 0: {
+            const a = rng.pick(["1", "0", "-2", "3", "1.5", "10"]);
+            const b = rng.pick(["5", "10", "3", "0", "-1", "4.5"]);
+            const st = rng.pick(["1", "2", "-1", "1.5", "-0.5", "3", "-2"]);
+            return `for ${v} = ${a}, ${b}, ${st} do ${body} end\n`;
+        }
+        case 1:
+            return `for ${v} = math.maxinteger - ${rng.pick(["1", "4"])}, math.maxinteger, `
+                + `${rng.pick(["1", "2"])} do ${body.replace(`acc = acc + ${v}`, "acc = acc + 1")} end\n`;
+        case 2:
+            return `do local ${v} = 0 while ${v} < ${rng.pick(["3", "5", "0"])} do ${v} = ${v} + 1 ${body} end end\n`;
+        case 3:
+            return `do local ${v} = 0 repeat ${v} = ${v} + ${rng.pick(["1", "2"])} ${body} `
+                + `until ${v} >= ${rng.pick(["1", "4", "6"])} end\n`;
+        default:
+            return `for _, ${v} in ipairs({${rng.pick(["1, 2, 3", "5", "", "2.5, 1"])}}) do ${body} end\n`;
+    }
+}
+function genLoopsProgram(rng) {
+    let s = "local acc, cnt = 0, 0\n";
+    for (let i = 1 + rng.int(3); i > 0; i--) s += genTopLoop(rng, 0);
+    return s + "print(acc, cnt, math.type(acc))\n";
+}
+
 function genExpr(rng) {
     const depth = 2 + rng.int(3);
+    if (PHASE === "loops") return genLoopsProgram(rng);
     if (PHASE === "patterns") return genPatternExpr(rng);
     if (PHASE === "tables") return genTableProgram(rng);
     if (PHASE === "numeric") return genNum(rng, depth);
@@ -320,6 +359,7 @@ function genExpr(rng) {
 // `tup` collapses multi-return (find/match/gsub) into one comparable string and
 // is unused by the numeric/format phases.
 function wrap(exprSrc) {
+    if (PHASE === "loops") return exprSrc; // already a whole program
     return `local function tup(...)\n`
         + `  local t = {}\n`
         + `  for i = 1, select("#", ...) do t[i] = tostring((select(i, ...))) end\n`
@@ -337,7 +377,7 @@ const norm = (s) => s.replace(/\n$/, "").replace(/-nan/g, "nan");
 function runOurs(luaPath) {
     const wasm = join(WORK, "p.wasm");
     try {
-        execFileSync(L2W, [luaPath, "-o", wasm], { stdio: ["ignore", "ignore", "pipe"], timeout: TIMEOUT_MS });
+        execFileSync(L2W, [luaPath, ...L2W_FLAGS, "-o", wasm], { stdio: ["ignore", "ignore", "pipe"], timeout: TIMEOUT_MS });
     } catch (e) {
         return { cls: "compile-fail", out: (e.stderr || "").toString().trim() };
     }

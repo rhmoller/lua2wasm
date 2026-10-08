@@ -17,6 +17,8 @@
 #   scripts/diff-test.sh                      # check (repo defaults)
 #   scripts/diff-test.sh BIN SRC_DIR BUILD    # check (CTest-style args)
 #   scripts/diff-test.sh --regen              # rewrite goldens from lua5.5
+#   L2W_FLAGS=--loop-chunk=1 scripts/diff-test.sh   # extra compiler flags
+#                                             # (DIFF_WORK_DIR: scratch dir)
 #
 # Exit status: 0 if every `pass` case matches and no `xfail` case has started
 # matching; non-zero otherwise.
@@ -34,6 +36,8 @@ fi
 BIN="${1:-$ROOT/build/lua2wasm}"
 SRC_DIR="${2:-$ROOT}"
 BUILD_DIR="${3:-$ROOT/build}"
+# Scratch .wat/.wasm files go here (a run with other L2W_FLAGS uses its own).
+WORK_DIR="${DIFF_WORK_DIR:-$BUILD_DIR}"
 
 CASES_DIR="$SRC_DIR/tests/diff/cases"
 EXPECTED_DIR="$SRC_DIR/tests/diff/expected"
@@ -73,13 +77,16 @@ fi
 
 run_l2w() {
     local lua="$1" base="$2"
-    local wat="$BUILD_DIR/diff_$base.wat" wasm="$BUILD_DIR/diff_$base.wasm"
-    if ! "$BIN" "$lua" -o "$wat" >/dev/null 2>&1; then echo "<compile-fail>"; return; fi
+    local wat="$WORK_DIR/diff_$base.wat" wasm="$WORK_DIR/diff_$base.wasm"
+    # shellcheck disable=SC2086  # L2W_FLAGS: extra compiler flags, word-split
+    if ! "$BIN" "$lua" ${L2W_FLAGS:-} -o "$wat" >/dev/null 2>&1; then echo "<compile-fail>"; return; fi
     if ! "$BUILD_DIR/wat2wasm" -o "$wasm" "$wat" >/dev/null 2>&1; then
         echo "<assemble-fail>"; return
     fi
     node --experimental-wasm-exnref "$HOST" "$wasm" 2>&1
 }
+
+mkdir -p "$WORK_DIR"
 
 fail=0
 n_pass_ok=0 n_pass_bad=0 n_xfail=0 n_xpass=0

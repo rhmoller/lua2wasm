@@ -312,6 +312,7 @@ static void emit_user_function(CG *c, const LuaFunc *fn, FnEntry entry) {
      * entry is only ever called by name, so it needs no elem declare. */
     if (fast) wat_appendf(w, "  (elem declare func $user_%d_f)\n", fn->func_idx);
     else if (!direct) wat_appendf(w, "  (elem declare func $user_%d)\n", fn->func_idx);
+    ol_flush(c);
 }
 
 /* Emit `$main`, the top-level chunk: locals (boxed/unboxed per escape
@@ -337,6 +338,7 @@ static void emit_main_chunk(CG *c) {
     body_emit(c, &b);
     body_end(c, &b);
     wat_append(c->w, "  )\n");
+    ol_flush(c);
 }
 
 /* ----- tree-shaking ----- */
@@ -1112,6 +1114,7 @@ int codegen_module(const ParseResult *pr, const char *src_name,
     }
 
     CG c = {.w = out, .pr = pr, .ok = 1};
+    wat_init(&c.ol_pending);
     /* Numeric/call specialization is on by default (opt >= 1); -O0 selects the
      * boxed fallback. Behaviour is identical either way — only code shape and
      * speed differ — so goldens are shared across levels. */
@@ -1123,6 +1126,7 @@ int codegen_module(const ParseResult *pr, const char *src_name,
         c.n_sigs = (int)pr->funcs.count;
         compute_func_bindings(&c, pr);
         infer_signatures(&c, pr);
+        compute_run_once(&c, pr);
     }
     strpool_add(&c.strs, LITERAL_PREFIX, LITERAL_PREFIX_LEN);
 
@@ -1203,5 +1207,7 @@ int codegen_module(const ParseResult *pr, const char *src_name,
     free(gref);
     free_func_bindings(&c);
     free_signatures(&c);
+    wat_free(&c.ol_pending);
+    free(c.run_once);
     return c.ok;
 }

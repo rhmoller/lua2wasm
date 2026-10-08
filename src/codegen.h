@@ -25,6 +25,12 @@
  * $g_globals populated (i.e. it disables tree-shaking and the skip-runtime-init
  * optimization for this module). Off by default; opt-in via the CLI's
  * --embed-api. See examples/embed/. */
+/* Iterations an outlined loop of a run-once body (the main chunk) runs per
+ * call before returning, so the engine can switch to optimized code (see
+ * src/codegen/outline.c); 0 keeps such loops inline. A tuning and testing
+ * knob: the CLI's --loop-chunk=N sets it. */
+extern int codegen_loop_chunk;
+
 int codegen_module(const ParseResult *pr, const char *src_name,
                    int tree_shake, int opt, int embed_api, WatBuilder *out,
                    char *errbuf, size_t errbuf_len);

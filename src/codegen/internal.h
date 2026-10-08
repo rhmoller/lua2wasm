@@ -217,13 +217,25 @@ typedef struct {
      * nothing it can reach), so $main omits the `(call $stdlib_init)` and DCE
      * cascade-drops the runtime. Set from compute_live_set's needs_runtime. */
     int skip_runtime_init;
+    /* The body being emitted (body_begin .. body_end). */
+    const struct Body *cur_body;
+    /* Run-once loop outlining (outline.c). While the function of an outlined
+     * loop is emitted, ol_active is set and ol_loop is that loop: it resumes
+     * and suspends, the loops inside it count down the chunk budget, and a
+     * `return` hands its value to the caller. The finished functions wait in
+     * ol_pending until the enclosing function is complete. */
+    const Stmt *ol_loop;
+    int ol_active;
+    int n_outlined; /* $ol_N functions so far */
+    WatBuilder ol_pending;
+    unsigned char *run_once; /* by func_idx: the function provably runs at most once */
     char err[256];
     int ok;
 } CG;
 
 /* A function body being compiled — one wasm entry of a Lua function, or the
  * main chunk (see body_begin in stmt.c). */
-typedef struct {
+typedef struct Body {
     const Block *body;
     int n_locals, n_params;
     const unsigned char *captured;            /* escape analysis: slots held in a $Box */
@@ -231,7 +243,25 @@ typedef struct {
     const LuaFunc **func_slot, **upval_func;  /* direct-call binding maps */
     unsigned char *isint, *isfloat, *ismaybe; /* slot analyses (NULL at -O0) */
     int n_close;                              /* to-be-closed locals */
+    int is_vararg;
+    int outline; /* runs once: its outermost loops become resumable functions (outline.c) */
 } Body;
+
+/* How a body keeps local slot i: the wasm local(s) body_declare_locals gives it. */
+typedef enum {
+    REP_ANY,   /* $L<i> anyref */
+    REP_BOX,   /* $L<i> (ref $Box): captured by a closure */
+    REP_I64,   /* $L<i> i64: integer-typed */
+    REP_F64,   /* $L<i> f64: float-typed */
+    REP_MAYBE, /* $L<i> anyref + $Lt<i> i32 + $Li<i> i64 + $Lf<i> f64 */
+} SlotRep;
+static inline SlotRep slot_rep(const Body *b, int i) {
+    if (b->isint && b->isint[i]) return REP_I64;
+    if (b->isfloat && b->isfloat[i]) return REP_F64;
+    if (b->ismaybe && b->ismaybe[i]) return REP_MAYBE;
+    if (b->captured && b->captured[i]) return REP_BOX;
+    return REP_ANY;
+}
 
 /* A cell is the four-part view of a maybe value used by the lowering: read
  * expressions for tag / i64 / f64 / boxed, plus the local names to write when
@@ -279,6 +309,10 @@ typedef enum { MB_NONE = 0,
                MB_CEIL } MathBuiltin;
 
 /* ----- helpers every module uses ----- */
+
+static inline int stmt_is_loop(const Stmt *s) {
+    return s->kind == STMT_WHILE || s->kind == STMT_REPEAT || s->kind == STMT_FOR_NUM || s->kind == STMT_FOR_GEN;
+}
 
 /* True iff the local at this slot index must be allocated as a $Box. */
 static inline int slot_is_boxed(const CG *c, int slot) {
@@ -329,6 +363,7 @@ void emit_mkey_globals(CG *c);
 void for_each_nested_block(const Stmt *s, BlockVisit fn, void *ctx);
 void walk_stmts(const Block *b, StmtVisit fn, void *ctx);
 void for_each_own_expr(const Stmt *s, ExprVisit fn, void *ctx);
+void for_each_subexpr(const Expr *e, ExprVisit fn, void *ctx);
 int slot_is_int(const CG *c, int slot);
 int expr_is_int(CG *c, const Expr *e);
 int slot_is_float(const CG *c, int slot);
@@ -400,11 +435,28 @@ void emit_maybe_boxed(CG *c, const Expr *e, int depth);
 void emit_maybe_cmp_block(CG *c, const Expr *e, int depth);
 
 /* ----- stmt.c ----- */
+void emit_stmt(CG *c, const Stmt *s, int depth);
 Body function_body(const CG *c, const LuaFunc *fn);
 void body_begin(CG *c, Body *b, const NumTy *param_seed);
 void body_declare_locals(CG *c, const Body *b, int fast, int vararg);
+void body_declare_locals_of(CG *c, const Body *b, const unsigned char *slots, int fast, int vararg);
 void body_emit(CG *c, const Body *b);
 void body_end(CG *c, Body *b);
+
+/* ----- outline.c ----- */
+/* What a call to an outlined loop's function reports. */
+enum { OL_START = 0,     /* (passed in) the first call: run the loop's setup */
+       OL_SUSPENDED = 1, /* the budget ran out: call again to carry on */
+       OL_DONE = 2,      /* the loop finished (or broke out) */
+       OL_RETURN = 3 };  /* a `return` inside it: return the value it handed back */
+int body_runs_once(const CG *c, const Body *b);
+void compute_run_once(CG *c, const ParseResult *pr);
+const char *ol_ret_type(const CG *c);
+int emit_outlined_loop(CG *c, const Stmt *s, int depth);
+void ol_loop_header(CG *c, const Stmt *s, int depth);
+void ol_init_open(CG *c, const Stmt *s, int depth);
+void ol_init_close(CG *c, const Stmt *s, int depth);
+void ol_flush(CG *c);
 
 /* ----- module.c ----- */
 const char *slab_ref(const char *text);

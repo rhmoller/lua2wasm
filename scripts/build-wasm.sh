@@ -33,6 +33,7 @@ APP_SRC=(
     src/codegen/expr.c
     src/codegen/maybe.c
     src/codegen/stmt.c
+    src/codegen/outline.c
     src/codegen/module.c
     src/builtins.c
     src/xalloc.c

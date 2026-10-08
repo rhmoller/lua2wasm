@@ -121,6 +121,9 @@ int main(int argc, char **argv) {
             embed_api = 1;
         } else if (strcmp(argv[i], "--no-dce") == 0) {
             no_dce = 1;
+        } else if (strncmp(argv[i], "--loop-chunk=", 13) == 0) {
+            /* Testing/tuning: iterations per call of an outlined loop. */
+            codegen_loop_chunk = atoi(argv[i] + 13);
         } else if (argv[i][0] == '-' && argv[i][1] == 'O') {
             /* -O0 selects the boxed fallback; -O / -O<n>=1.. enable
              * specialization (the default). Only the on/off distinction

@@ -165,27 +165,27 @@ tables, and game-logic shapes — an entity system with class hierarchies and a
 state machine, a structure-of-arrays particle system, tile-map A* / flood
 fill, an immutable-vector math library) under `lua5.5`, `luajit` and
 lua2wasm, checks the outputs match, and prints the ratio to reference.
-Seconds, best of three, Node 24 on one machine:
+Seconds, best of five, Node 24 on one machine:
 
 | program (`bench/`) | reference `lua5.5` | lua2wasm | ratio |
 |--------------------|-------------------:|---------:|------:|
-| binarytrees        | 0.36 | **0.17** | 0.5× |
-| spectralnorm       | 0.89 | **0.56** | 0.65× |
-| oo                 | 0.47 | **0.33** | 0.7× |
-| vectors            | 1.08 | **0.88** | 0.8× |
-| nbody              | 0.44 | **0.37** | 0.85× |
-| entities           | 0.68 | **0.65** | 0.95× |
-| tilemap            | 0.29 | **0.28** | 0.95× |
-| nbody_arr          | 0.38 | 0.39 | 1.0× |
-| fannkuch           | 0.83 | 1.12 | 1.35× |
-| hashtab            | 0.10 | 0.14 | 1.4× |
-| closures           | 0.08 | 0.11 | 1.4× |
-| particles          | 0.59 | 1.00 | 1.7× |
-| strings            | 0.07 | 0.19 | 2.8× |
+| binarytrees        | 0.36 | **0.17** | 0.45× |
+| fannkuch           | 0.83 | **0.45** | 0.55× |
+| oo                 | 0.46 | **0.28** | 0.6× |
+| spectralnorm       | 0.89 | **0.54** | 0.6× |
+| vectors            | 1.07 | **0.76** | 0.7× |
+| nbody              | 0.44 | **0.36** | 0.8× |
+| entities           | 0.68 | **0.58** | 0.85× |
+| nbody_arr          | 0.38 | **0.35** | 0.9× |
+| tilemap            | 0.29 | 0.29 | 1.0× |
+| particles          | 0.59 | 0.68 | 1.15× |
+| closures           | 0.08 | 0.09 | 1.2× |
+| hashtab            | 0.10 | 0.15 | 1.5× |
+| strings            | 0.07 | 0.17 | 2.5× |
 
 Allocation-heavy, float-array and OO code (classes, methods, small records)
 now runs at or ahead of reference (the host GC is good); integer-array and
-dictionary-heavy code sits within 1.4–1.7× of the C interpreter, with string
+dictionary-heavy code sits within 1.15–1.5× of the C interpreter, with string
 processing the outlier. What closed the gap from the 6–10× the
 table-field and string-heavy programs started at:
 
@@ -227,6 +227,13 @@ table-field and string-heavy programs started at:
   argument and result arrays.
 - **The array part allows holes**, like reference Lua's, so clearing
   elements of a list never moves the whole array into the hash part.
+- **Loops in code that runs once get optimized too**
+  ([design note](docs/design/24-run-once-loops.md)): V8 switches a wasm
+  function to optimized code only for its next call, so the main chunk's
+  loops — and those of a function the chunk calls once — would stay on
+  baseline code for their whole life. Each becomes a function of its own that
+  returns every 64K iterations and is called again: fannkuch runs 2.2×
+  faster, particles 1.35×.
 
 What remains is integer-keyed array access through generic helpers, hash
 lookups for dynamic keys, and, for strings, per-operation allocation of

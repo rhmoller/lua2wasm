@@ -84,6 +84,37 @@ void for_each_own_expr(const Stmt *s, ExprVisit fn, void *ctx) {
     }
 }
 
+/* Call fn on each direct sub-expression of e, in evaluation order. A function
+ * literal's body is not entered: it is analysed as a function of its own. */
+void for_each_subexpr(const Expr *e, ExprVisit fn, void *ctx) {
+    switch (e->kind) {
+    case EXPR_CALL:
+        fn(e->as.call.callee, ctx);
+        for (size_t i = 0; i < e->as.call.nargs; i++) fn(e->as.call.args[i], ctx);
+        break;
+    case EXPR_METHOD_CALL:
+        fn(e->as.method_call.recv, ctx);
+        for (size_t i = 0; i < e->as.method_call.nargs; i++) fn(e->as.method_call.args[i], ctx);
+        break;
+    case EXPR_BINOP:
+        fn(e->as.binop.lhs, ctx);
+        fn(e->as.binop.rhs, ctx);
+        break;
+    case EXPR_UNOP: fn(e->as.unop.operand, ctx); break;
+    case EXPR_INDEX:
+        fn(e->as.index.table, ctx);
+        fn(e->as.index.key, ctx);
+        break;
+    case EXPR_TABLE:
+        for (int i = 0; i < e->as.table_ctor.n_entries; i++) {
+            if (e->as.table_ctor.entries[i].key) fn(e->as.table_ctor.entries[i].key, ctx);
+            fn(e->as.table_ctor.entries[i].value, ctx);
+        }
+        break;
+    default: break;
+    }
+}
+
 typedef struct {
     ExprVisit fn;
     void *ctx;

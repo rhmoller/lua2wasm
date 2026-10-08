@@ -547,6 +547,19 @@ static void emit_return_values(CG *c, Expr **values, int n, int depth) {
 static void emit_return(CG *c, const Stmt *s, int depth) {
     Expr **values = s->as.return_stmt.values;
     int n_values = s->as.return_stmt.n_values;
+    if (c->ol_active) {
+        /* Inside an outlined loop's function: close what is open, park the
+         * result in $ol_ret and leave with status RETURN; the caller returns
+         * it (outline.c). Never a tail call — the callee runs before the
+         * enclosing function returns, as it would after a close. */
+        if (c->in_main) emit_values_dropped(c, values, 0, n_values, depth);
+        else emit_return_values(c, values, n_values, depth);
+        if (c->close_count > 0) emit_close_upto(c, 0, "(ref.null any)", depth);
+        if (!c->in_main) emit_line(c, depth, "(local.set $ol_ret)\n");
+        emit_linef(c, depth, "(local.set $ol_status (i32.const %d))\n", OL_RETURN);
+        emit_line(c, depth, "(br $ol_exit)\n");
+        return;
+    }
     if (c->in_main) {
         /* $main is exported with no result, so the chunk's return
          * value can't be surfaced to the host — but we still have
@@ -661,6 +674,7 @@ static void emit_for_num_int(CG *c, const Stmt *s, int label, int depth) {
     snprintf(var, sizeof var, "(local.get $L%d)", slot);
     snprintf(stop, sizeof stop, "(local.get $ifor_stop_%d)", fd);
     snprintf(next, sizeof next, "(local.get $ifor_next_%d)", fd);
+    ol_init_open(c, s, depth);
     emit_linef(c, depth, "(local.set $L%d\n", slot);
     emit_int_expr(c, s->as.for_num.start, depth + 1);
     emit_line(c, depth, ")\n");
@@ -686,11 +700,13 @@ static void emit_for_num_int(CG *c, const Stmt *s, int label, int depth) {
         emit_linef(c, depth, "(local.set $for_skip_%d)\n", fd);
         emit_linef(c, depth, "(local.set $ifor_stop_%d)\n", fd);
     }
+    ol_init_close(c, s, depth);
     emit_linef(c, depth, "(block $brk_%d\n", label);
     if (!stop_int) {
         emit_linef(c, depth + 1, "(br_if $brk_%d (local.get $for_skip_%d))\n", label, fd);
     }
     emit_linef(c, depth + 1, "(loop $cont_%d\n", label);
+    ol_loop_header(c, s, depth + 2);
     /* Exit when the counter has passed the limit. */
     emit_int_for_exit(c, label, sign, step_s, "gt_s", "lt_s", var, stop, depth + 2);
     c->for_depth++;
@@ -725,6 +741,7 @@ static void emit_for_num_boxed(CG *c, const Stmt *s, int label, int depth) {
      * variable is a new local per iteration, so closures capture
      * distinct values). When it isn't captured the slot holds the
      * value directly and doubles as the counter. */
+    ol_init_open(c, s, depth);
     emit_indent(c, depth);
     if (boxed) {
         wat_appendf(c->w, "(local.set %s\n", f_cur);
@@ -757,12 +774,14 @@ static void emit_for_num_boxed(CG *c, const Stmt *s, int label, int depth) {
                counter_loc, f_stop, f_step, s->line);
     emit_linef(c, depth, "(local.set %s) (local.set %s) (local.set %s) (local.set %s)\n", f_skip, f_step, f_stop,
                counter_loc);
+    ol_init_close(c, s, depth);
     char load_buf[80];
     snprintf(load_buf, sizeof(load_buf), "(local.get %s)", counter_loc);
 
     emit_linef(c, depth, "(block $brk_%d\n", label);
     emit_linef(c, depth + 1, "(br_if $brk_%d (local.get %s))\n", label, f_skip);
     emit_linef(c, depth + 1, "(loop $cont_%d\n", label);
+    ol_loop_header(c, s, depth + 2);
     /* Fresh per-iteration binding for a captured control variable. */
     if (boxed) {
         emit_linef(c, depth + 2, "(local.set $L%d (struct.new $Box %s))\n", slot, load_buf);
@@ -814,6 +833,7 @@ static void emit_for_gen(CG *c, const Stmt *s, int depth) {
     snprintf(f_state, sizeof f_state, "$for_state_%d", fd);
     snprintf(f_k, sizeof f_k, "$for_k_%d", fd);
     int n_exprs = s->as.for_gen.n_exprs;
+    ol_init_open(c, s, depth);
     emit_line(c, depth, "(local.set $tmp_args\n");
     emit_args_array(c, s->as.for_gen.exprs, n_exprs, depth + 1);
     emit_line(c, depth, ")\n");
@@ -851,9 +871,11 @@ static void emit_for_gen(CG *c, const Stmt *s, int depth) {
             wat_appendf(c->w, "(local.set $L%d (ref.null any))\n", li);
         }
     }
+    ol_init_close(c, s, depth);
 
     emit_linef(c, depth, "(block $brk_%d\n", label);
     emit_linef(c, depth + 1, "(loop $cont_%d\n", label);
+    ol_loop_header(c, s, depth + 2);
     /* Call iter(state, k). The iterator can be any callable (a
      * closure, or a table with __call) — go through $lua_call_any
      * so a wrong type produces a typed error instead of a trap. */
@@ -1011,6 +1033,7 @@ static void emit_while(CG *c, const Stmt *s, int depth) {
     if (!push_break_label(c, label)) return;
     emit_linef(c, depth, "(block $brk_%d\n", label);
     emit_linef(c, depth + 1, "(loop $cont_%d\n", label);
+    ol_loop_header(c, s, depth + 2);
     emit_truthy(c, s->as.while_stmt.cond, depth + 2);
     emit_line(c, depth + 2, "i32.eqz\n");
     emit_linef(c, depth + 2, "br_if $brk_%d\n", label);
@@ -1026,6 +1049,7 @@ static void emit_repeat(CG *c, const Stmt *s, int depth) {
     if (!push_break_label(c, label)) return;
     emit_linef(c, depth, "(block $brk_%d\n", label);
     emit_linef(c, depth + 1, "(loop $cont_%d\n", label);
+    ol_loop_header(c, s, depth + 2);
     /* A <close> var declared in the body stays in scope for the until
      * condition and is closed AFTER it (Lua §3.3.5). Emit the body
      * statements directly (emit_block would close at the body's end),
@@ -1154,8 +1178,9 @@ static void emit_local_func(CG *c, const Stmt *s, int depth) {
     }
 }
 
-static void emit_stmt(CG *c, const Stmt *s, int depth) {
+void emit_stmt(CG *c, const Stmt *s, int depth) {
     if (!c->ok) return;
+    if (stmt_is_loop(s) && emit_outlined_loop(c, s, depth)) return;
     switch (s->kind) {
     case STMT_LOCAL: emit_local_stmt(c, s, depth); break;
     case STMT_ASSIGN: emit_assign(c, s, depth); break;
@@ -1491,6 +1516,7 @@ Body function_body(const CG *c, const LuaFunc *fn) {
         .func_idx = fn->func_idx,
         .func_slot = c->bind_slot ? c->bind_slot[fn->func_idx] : NULL,
         .upval_func = c->bind_upval ? c->bind_upval[fn->func_idx] : NULL,
+        .is_vararg = fn->is_vararg,
     };
 }
 
@@ -1529,26 +1555,27 @@ void body_begin(CG *c, Body *b, const NumTy *param_seed) {
     la_close_bases(b->body, 0);
     la_block(c, b->body, NULL);
     b->n_close = count_fn_close(b->body);
+    b->outline = body_runs_once(c, b);
+    c->cur_body = b;
 }
 
 /* Declare the body's wasm locals: one per slot (typed, maybe-typed, boxed or
  * plain), the lowering temporaries, the call and assignment scratch, the fast
  * entry's argument registers, the to-be-closed and for-loop bookkeeping, the
  * vararg array, and one dispatch index per label-bearing block. */
-void body_declare_locals(CG *c, const Body *b, int fast, int vararg) {
+void body_declare_locals_of(CG *c, const Body *b, const unsigned char *slots, int fast, int vararg) {
     WatBuilder *w = c->w;
     for (int i = 0; i < b->n_locals; i++) {
-        if (b->isint && b->isint[i]) {
-            wat_appendf(w, "    (local $L%d i64)\n", i);
-        } else if (b->isfloat && b->isfloat[i]) {
-            wat_appendf(w, "    (local $L%d f64)\n", i);
-        } else if (b->ismaybe && b->ismaybe[i]) {
+        if (slots && !slots[i]) continue;
+        switch (slot_rep(b, i)) {
+        case REP_I64: wat_appendf(w, "    (local $L%d i64)\n", i); break;
+        case REP_F64: wat_appendf(w, "    (local $L%d f64)\n", i); break;
+        case REP_MAYBE:
             wat_appendf(w, "    (local $L%d anyref) (local $Lt%d i32) (local $Li%d i64) (local $Lf%d f64)\n",
                         i, i, i, i);
-        } else if (b->captured && b->captured[i]) {
-            wat_appendf(w, "    (local $L%d (ref $Box))\n", i);
-        } else {
-            wat_appendf(w, "    (local $L%d anyref)\n", i);
+            break;
+        case REP_BOX: wat_appendf(w, "    (local $L%d (ref $Box))\n", i); break;
+        case REP_ANY: wat_appendf(w, "    (local $L%d anyref)\n", i); break;
         }
     }
     for (int k = 0; k < c->mt_max; k++)
@@ -1581,6 +1608,17 @@ void body_declare_locals(CG *c, const Body *b, int fast, int vararg) {
     for (int i = 0; i < n; i++) wat_appendf(w, "    (local $next_%d i32)\n", bids[i]);
 }
 
+void body_declare_locals(CG *c, const Body *b, int fast, int vararg) {
+    body_declare_locals_of(c, b, NULL, fast, vararg);
+    /* The caller's side of an outlined loop: its status, and what a `return`
+     * inside it hands back. */
+    if (b->outline) {
+        const char *rt = ol_ret_type(c);
+        wat_append(c->w, "    (local $olc_st i32)\n");
+        if (rt) wat_appendf(c->w, "    (local $olc_ret %s)\n", rt);
+    }
+}
+
 /* Box the captured locals, set up the to-be-closed bookkeeping and emit the
  * statements (after the parameters are bound). */
 void body_emit(CG *c, const Body *b) {
@@ -1608,4 +1646,5 @@ void body_end(CG *c, Body *b) {
     c->cur_func_idx = -1;
     c->cur_func_slot = c->cur_upval_func = NULL;
     c->mt_max = c->mt_depth = 0;
+    c->cur_body = NULL;
 }

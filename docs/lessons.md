@@ -167,8 +167,12 @@ TurboFan for its *next* call, so a long loop in a function that runs once
 — the main chunk, or a `main()` called once — runs on Liftoff for its whole
 life: ~2.5x slower than the same loop in a function called repeatedly.
 `--no-liftoff` is not the cure (it loses the call-count feedback TurboFan
-inlines by, and spectralnorm/oo/nbody got slower). Keep it in mind when
-reading benchmark profiles: hot code in `$main` is unoptimized code.
+inlines by, and spectralnorm/oo/nbody got slower). The compiler now moves
+such loops into functions that return every 64K iterations and are called
+again ([design note](design/24-run-once-loops.md)); fannkuch got 2.2x
+faster. When measuring a fix like it, hand-written Lua is a poor model: moving a
+loop body into a Lua function also boxes every local it touches, which
+hid most of the gain in the first experiment.
 
 ### Cascade fixes when fixing a fundamental
 

@@ -80,6 +80,12 @@ fallback. The two are behaviour-identical (goldens are shared), so the e2e
 suite runs each fixture both ways: the default loop exercises the specialized
 path, a `-O0` loop (`test_e2e_o0_*`) guards the fallback.
 
+Loops of run-once code (the main chunk, a local function it calls once) are
+outlined into functions that return every 64K iterations so V8 can switch them
+to optimized code (`src/codegen/outline.c`, design note 24). A third e2e loop
+(`test_e2e_chunk1_*`) and `test_diff_reference_chunk1` rerun everything with
+`--loop-chunk=1`, so every such loop suspends and resumes on every iteration.
+
 ## The phase rule — *if you can't print it, you didn't build it*
 
 New language features land behind an end-to-end fixture **before** parser syntax:
@@ -154,7 +160,7 @@ counterexample, **shrink it and check it in as a `tests/diff` case** (the
 | `src/parser.{c,h}`  | recursive-descent + Pratt; scope & upvalue analysis |
 | `src/ast.{c,h}`     | tagged-union AST, bump-allocator pool |
 | `src/codegen.h`     | the code generator's entry point, `codegen_module` |
-| `src/codegen/`      | the code generator (emits WAT via `WatBuilder`): `internal.h` (the `CG` context, shared types, cross-module API), `strings.c` (constant strings), `analysis.c` (slot analyses, bindings, signatures), `expr.c`, `maybe.c` (maybe-typed lowering), `stmt.c` (statements, function bodies), `module.c` (module assembly; embeds `runtime/prelude/`) |
+| `src/codegen/`      | the code generator (emits WAT via `WatBuilder`): `internal.h` (the `CG` context, shared types, cross-module API), `strings.c` (constant strings), `analysis.c` (slot analyses, bindings, signatures), `expr.c`, `maybe.c` (maybe-typed lowering), `stmt.c` (statements, function bodies), `outline.c` (run-once loops become resumable functions), `module.c` (module assembly; embeds `runtime/prelude/`) |
 | `src/builtins.{c,h}`| single source of truth: builtin name → wasm symbol |
 | `src/wat_builder.{c,h}` | dynamic WAT string buffer |
 | `src/wat2wasm.{c,h}`| self-contained WAT→wasm binary assembler (lib + `wat2wasm` CLI) |

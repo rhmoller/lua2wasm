@@ -188,8 +188,9 @@ static MunitResult test_pool_pointer_stability(const MunitParameter params[], vo
 }
 
 /* Compile `src` at the default optimization level and return a malloc'd copy
- * of the `$main` function's text (prelude and user functions excluded), so a
- * test can assert what the main chunk lowers to. */
+ * of the `$main` function's text and of the functions its loops were outlined
+ * into (prelude and user functions excluded), so a test can assert what the
+ * main chunk lowers to. */
 static char *main_func_wat(const char *src) {
     TokenList t = lex(src);
     NodePool pool; node_pool_init(&pool);
@@ -205,6 +206,10 @@ static char *main_func_wat(const char *src) {
     munit_assert_not_null(start);
     const char *end = strstr(start, "\n  )");
     munit_assert_not_null(end);
+    /* The main chunk's code includes the functions its loops were outlined
+     * into ($ol_N, right after $main). */
+    static const char OL[] = "\n  )\n  (func $ol_";
+    while (strncmp(end, OL, sizeof OL - 1) == 0) end = strstr(end + 4, "\n  )");
     size_t n = (size_t)(end - start);
     char *out = malloc(n + 1);
     memcpy(out, start, n);
@@ -367,6 +372,89 @@ static MunitResult test_concat_flatten(const MunitParameter params[], void *fixt
     return MUNIT_OK;
 }
 
+/* Compile `src` at optimization level `opt`; a malloc'd copy of the module's
+ * whole WAT. */
+static char *module_wat(const char *src, int opt) {
+    TokenList t = lex(src);
+    NodePool pool; node_pool_init(&pool);
+    ParseResult r = parse(&t, &pool);
+    munit_assert_true(r.ok);
+    WatBuilder w; wat_init(&w);
+    char err[256] = {0};
+    int ok = codegen_module(&r, "test", 0, opt, 0, &w, err, sizeof(err));
+    if (!ok) munit_logf(MUNIT_LOG_ERROR, "codegen: %s", err);
+    munit_assert_true(ok);
+    char *out = strdup(wat_cstr(&w));
+    wat_free(&w);
+    parse_result_free(&r);
+    node_pool_free(&pool);
+    tokenlist_free(&t);
+    return out;
+}
+
+static int count_of(const char *s, const char *needle) {
+    int n = 0;
+    for (const char *p = strstr(s, needle); p; p = strstr(p + 1, needle)) n++;
+    return n;
+}
+
+/* The main chunk's outermost loops, and those of a local function it calls
+ * exactly once outside any loop, run in functions of their own ($ol_N) that
+ * the caller calls until they report the loop done (src/codegen/outline.c). */
+static MunitResult test_run_once_loops(const MunitParameter params[], void *fixture) {
+    (void)params; (void)fixture;
+    const char *loop = "local s = 0\nfor i = 1, 10 do s = s + i end\nprint(s)\n";
+    char *m = module_wat(loop, 1);
+    munit_assert_int(count_of(m, "(func $ol_"), ==, 1);
+    /* only the first call runs the loop's setup; the header suspends */
+    munit_assert_not_null(strstr(m, "(if (i32.eqz (local.get $olp_resume)) (then"));
+    munit_assert_not_null(strstr(m, "(br_if $ol_suspend (i32.lt_s (local.get $ol_budget) (i32.const 0)))"));
+    munit_assert_not_null(strstr(m, "(call $ol_0 (local.get $olc_st)"));
+    free(m);
+    /* -O0 and a zero budget keep loops inline */
+    m = module_wat(loop, 0);
+    munit_assert_int(count_of(m, "(func $ol_"), ==, 0);
+    free(m);
+    int saved = codegen_loop_chunk;
+    codegen_loop_chunk = 0;
+    m = module_wat(loop, 1);
+    codegen_loop_chunk = saved;
+    munit_assert_int(count_of(m, "(func $ol_"), ==, 0);
+    free(m);
+    /* a goto out of a loop keeps it inline; an inner loop goes with its outer
+     * one and only counts the budget down */
+    m = module_wat("for i = 1, 3 do if i == 2 then goto out end end\n::out::\n"
+                   "local n = 0\nfor i = 1, 2 do for j = 1, 2 do n = n + j end end\nprint(n)\n",
+                   1);
+    munit_assert_int(count_of(m, "(func $ol_"), ==, 1);
+    munit_assert_int(count_of(m, "(br_if $ol_suspend"), ==, 1);
+    munit_assert_int(count_of(m, "(local.set $ol_budget (i32.sub"), ==, 2);
+    free(m);
+    /* a local function called once: its loop is outlined (in each of its
+     * entries), reaching upvalues through the closure, and a return inside it
+     * comes back through the caller */
+    m = module_wat("local k = 2\n"
+                   "local function f(n) for i = 1, n do if i * k > n then return i end end return 0 end\n"
+                   "print(f(50))\n",
+                   1);
+    munit_assert_int(count_of(m, "(func $ol_"), >, 0);
+    munit_assert_not_null(strstr(m, "(param $closure (ref $LuaClosure))"));
+    munit_assert_not_null(strstr(m, "(local.set $ol_status (i32.const 3))"));
+    free(m);
+    /* ... but not when it is called twice, or from a loop */
+    m = module_wat("local function f(n) local s = 0 for i = 1, n do s = s + i end return s end\n"
+                   "print(f(10), f(20))\n",
+                   1);
+    munit_assert_int(count_of(m, "(func $ol_"), ==, 0);
+    free(m);
+    m = module_wat("local function f(n) local s = 0 for i = 1, n do s = s + i end return s end\n"
+                   "local t = 0\nwhile t < 1 do t = t + f(3) end\nprint(t)\n",
+                   1);
+    munit_assert_int(count_of(m, "(func $ol_"), ==, 1); /* the main chunk's own loop */
+    free(m);
+    return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
     { "/emits_expected",       test_emits_expected,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
     { "/boxed_fallback_o0",    test_emits_boxed_fallback_o0, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -381,6 +469,7 @@ static MunitTest tests[] = {
     { "/inline_caches",        test_inline_caches,          NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
     { "/type_names_shared",    test_type_names_shared,      NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
     { "/concat_flatten",       test_concat_flatten,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+    { "/run_once_loops",       test_run_once_loops,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
     { NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 };
 

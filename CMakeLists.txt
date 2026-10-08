@@ -21,6 +21,7 @@ set(COMPILER_SOURCES
     src/codegen/expr.c
     src/codegen/maybe.c
     src/codegen/stmt.c
+    src/codegen/outline.c
     src/codegen/module.c
     src/builtins.c
     src/xalloc.c
@@ -140,6 +141,24 @@ foreach(_row ${_e2e_rows})
         COMMAND bash ${CMAKE_SOURCE_DIR}/tests/e2e/run.sh
                 $<TARGET_FILE:lua2wasm> ${CMAKE_SOURCE_DIR} ${CMAKE_BINARY_DIR}
                 o0_${_e2e_name} ${_e2e_fixture} ${_e2e_name} -O0)
+endforeach()
+
+# Resume pass: the main chunk's loops run in functions of their own that
+# return every so many iterations and are called again (src/codegen/outline.c).
+# With a budget of one iteration every iteration suspends and resumes, which
+# must not change any output.
+foreach(_row ${_e2e_rows})
+    if(_row MATCHES "^#" OR _row STREQUAL "")
+        continue()
+    endif()
+    string(REPLACE "\t" ";" _parts "${_row}")
+    list(GET _parts 0 _e2e_name)
+    list(GET _parts 1 _e2e_fixture)
+    add_test(
+        NAME test_e2e_chunk1_${_e2e_name}
+        COMMAND bash ${CMAKE_SOURCE_DIR}/tests/e2e/run.sh
+                $<TARGET_FILE:lua2wasm> ${CMAKE_SOURCE_DIR} ${CMAKE_BINARY_DIR}
+                chunk1_${_e2e_name} ${_e2e_fixture} ${_e2e_name} --loop-chunk=1)
 endforeach()
 
 # E2E tests that need custom drivers (stdin, stderr capture, -m modules,
@@ -319,6 +338,17 @@ add_test(
 add_test(
     NAME test_diff_reference
     COMMAND bash ${CMAKE_SOURCE_DIR}/scripts/diff-test.sh
+            $<TARGET_FILE:lua2wasm>
+            ${CMAKE_SOURCE_DIR}
+            ${CMAKE_BINARY_DIR}
+)
+# The same cases with a loop budget of one iteration: every loop the main
+# chunk outlines (src/codegen/outline.c) suspends and resumes on every
+# iteration, which must stay unobservable.
+add_test(
+    NAME test_diff_reference_chunk1
+    COMMAND ${CMAKE_COMMAND} -E env L2W_FLAGS=--loop-chunk=1 DIFF_WORK_DIR=${CMAKE_BINARY_DIR}/diff_chunk1
+            bash ${CMAKE_SOURCE_DIR}/scripts/diff-test.sh
             $<TARGET_FILE:lua2wasm>
             ${CMAKE_SOURCE_DIR}
             ${CMAKE_BINARY_DIR}

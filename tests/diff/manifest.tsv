@@ -149,3 +149,5 @@ pass	concat_chains	flattened .. chains: number conversion, __concat order, group
 pass	format_missing_arg	string.format raises on a conversion with no argument (diff-fuzz find)
 pass	format_fixed	%.Nf rendered in wasm matches printf exactly: property sweep over values/precisions/flags + edge cases
 pass	global_decl_direct_call	a direct call whose only site is a global declaration value compiles
+pass	run_once_loops	main-chunk loops outlined into resumable functions: every loop kind, break/goto/return, captured state, <close>, long runs
+pass	run_once_functions	loops of a function called once run resumably: returns through every entry kind, upvalues, varargs, <close>
