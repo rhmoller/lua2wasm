@@ -33,5 +33,6 @@ print(r[k1], r[k2])         -- first second
 t[50] = nil
 print(t[50], t[51], t[100]) -- nil 510 1000
 
--- Length after some deletes — the array-border rule.
-print(#t)                   -- 49 (first nil seen at index 50)
+-- Length after some deletes — the array-border rule: 49 and 100 are both
+-- borders; the hole leaves the array part intact, so (like reference Lua) 100.
+print(#t)                   -- 100

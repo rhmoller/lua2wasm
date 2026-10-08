@@ -180,14 +180,12 @@ Seconds, best of two, Node 24 on one machine:
 | fannkuch           | 0.83 | 1.13 | 1.4× |
 | closures           | 0.08 | 0.12 | 1.45× |
 | hashtab            | 0.10 | 0.16 | 1.5× |
-| particles          | 0.59 | 1.28 | 2.2× |
+| particles          | 0.59 | 1.02 | 1.7× |
 | strings            | 0.07 | 0.24 | 3.5× |
 
 Allocation-heavy and float-array code runs faster than reference (the host GC
-is good); most of the rest sits between 1.0× and 1.5× of the C interpreter.
-The outliers are string processing and `particles`, whose per-frame list
-compaction punches holes in the strictly dense array part (each one spills
-the array into the hash part). What closed the gap from the 6–10× the
+is good); most of the rest sits between 1.0× and 1.5× of the C interpreter,
+with string processing the outlier. What closed the gap from the 6–10× the
 table-field and string-heavy programs started at:
 
 - **Constant strings are hoisted into module globals** with their hash
@@ -238,8 +236,9 @@ What the pass does, all within the WasmGC model (no linear memory, no deopt):
   over a direct call with no allocation.
 
 Independently, tables use a **hybrid array + hash representation** (always on,
-not gated): integer keys `1..n` live in a dense array part for O(1) sequential
-access, with everything else in an open-addressing hash — the same shape
+not gated): integer keys `1..n` live in an array part for O(1) access — holes
+allowed, as in reference Lua, so clearing an element never reshuffles the
+table — with everything else in an open-addressing hash — the same shape
 reference Lua uses. Genuinely dynamic table values still box, so a `sum += t[i]`
 loop stays a few times off reference; numeric scalar code is where the model
 shines.

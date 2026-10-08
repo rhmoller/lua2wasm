@@ -38,7 +38,7 @@ print(#t)             -- 2
 
 -- delete by assigning nil
 t[1] = nil
-print(#t)             -- 0  (no border at all since t[1] is nil)
+print(#t)             -- 2  (a border: t[2] set, t[3] nil; 0 is one too — reference Lua says 2)
 print(t[2])           -- two
 
 -- nested tables
