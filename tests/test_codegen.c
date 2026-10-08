@@ -283,6 +283,25 @@ static MunitResult test_key_local_maybe_typed(const MunitParameter params[], voi
     return MUNIT_OK;
 }
 
+/* A single-value call whose callee is only known at run time (a method, a
+ * function read from a table, a parameter) goes through the closure's fast
+ * entry: arguments in registers, one result, no $ArgArr built either side. */
+static MunitResult test_dynamic_call_fast(const MunitParameter params[], void *fixture) {
+    (void)params; (void)fixture;
+    char *m = main_func_wat("local O = {}\n"
+                            "function O.get(self, k) return self[k] end\n"
+                            "local o = {x = 1, get = O.get}\n"
+                            "local v = o:get(\"x\")\n"
+                            "local w = O.get(o, \"x\")\n"
+                            "o:get(\"x\")\n"
+                            "print(v, w)\n");
+    munit_assert_not_null(strstr(m, "$lua_call1"));
+    munit_assert_null(strstr(m, "array.new_fixed $ArgArr"));
+    munit_assert_null(strstr(m, "$args_first"));
+    free(m);
+    return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
     { "/emits_expected",       test_emits_expected,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
     { "/boxed_fallback_o0",    test_emits_boxed_fallback_o0, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -292,6 +311,7 @@ static MunitTest tests[] = {
     { "/pool_pointer_stability", test_pool_pointer_stability, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
     { "/mixed_compare_unboxed", test_mixed_compare_unboxed, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
     { "/key_local_maybe_typed", test_key_local_maybe_typed, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+    { "/dynamic_call_fast",    test_dynamic_call_fast,      NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
     { NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 };
 

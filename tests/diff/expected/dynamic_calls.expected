@@ -1,0 +1,18 @@
+10	11	11	16	15
+1	nil	nil	0	1
+11	1,2,3
+zero	5	8	0	3	6
+a	0	5
+0	1	2	4	5
+42	0
+false	true
+false	true
+bottom	mbottom	2	15
+false	71: boom
+false	74: at bottom
+false	true
+(4,6)	(-1,-2)	true	true	false	2	(1,2)|(3,4)
+a!	1!	42
+9 7 5 3 1
+A.B.C.
+called	true	called	called	called

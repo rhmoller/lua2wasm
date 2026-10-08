@@ -37,10 +37,21 @@
                                    (field $upvals (ref $UpvalArr))
                                    ;; estimated wasm frame bytes of $code, for
                                    ;; the stack-budget guard in $push_call_frame
-                                   (field $weight i32))))
+                                   (field $weight i32)
+                                   ;; single-result entry: see $LuaFn1
+                                   (field $fast (ref $LuaFn1)))))
     (type $LuaFn (func (param (ref $LuaClosure))
                        (param (ref $ArgArr))
-                       (result (ref $ArgArr)))))
+                       (result (ref $ArgArr))))
+    ;; The fast entry for a call that wants one result and passes at most
+    ;; four arguments: arguments in a0..a3 (unused ones nil) plus their
+    ;; count, the first result returned directly — no $ArgArr either side.
+    ;; A user function with <= 4 parameters gets its own body for it
+    ;; ($user_N_f); everything else (builtins, wider functions) gets
+    ;; $fast_adapter, which packs the arguments for $code.
+    (type $LuaFn1 (func (param (ref $LuaClosure))
+                        (param anyref anyref anyref anyref) (param i32)
+                        (result anyref))))
   ;; --- table type ---
   ;; The table keeps an insertion-ordered dense pair of arrays (keys/vals)
   ;; so iteration stays simple and `next` is well-defined. Lookups go
@@ -332,9 +343,7 @@
       (then (local.set $mm (call $get_metamethod (local.get $b) (local.get $key)))))
     (if (ref.is_null (local.get $mm))
       (then (call $throw_lit (i32.const 208) (i32.const 29))))   ;; "attempt to perform arithmetic"
-    (call $args_first (call $lua_call
-      (ref.cast (ref $LuaClosure) (local.get $mm))
-      (array.new_fixed $ArgArr 2 (local.get $a) (local.get $b)))))
+    (call $call_mm1 (local.get $mm) (local.get $a) (local.get $b) (ref.null any) (i32.const 2)))
 
   (func $lua_add (param $a anyref) (param $b anyref) (result anyref)
     (local $ca anyref) (local $cb anyref)
@@ -625,9 +634,7 @@
       (ref.as_non_null (global.get $g_mkey_bnot))))
     (if (ref.is_null (local.get $mm))
       (then (call $throw_lit (i32.const 208) (i32.const 29))))   ;; "attempt to perform arithmetic"
-    (call $args_first (call $lua_call
-      (ref.cast (ref $LuaClosure) (local.get $mm))
-      (array.new_fixed $ArgArr 2 (local.get $a) (local.get $a)))))
+    (call $call_mm1 (local.get $mm) (local.get $a) (local.get $a) (ref.null any) (i32.const 2)))
 
   (func $lua_neg (param $a anyref) (result anyref)
     (local $mm anyref) (local $ca anyref)
@@ -642,9 +649,7 @@
     (if (ref.is_null (local.get $mm))
       (then (call $throw_lit (i32.const 208) (i32.const 29))))   ;; "attempt to perform arithmetic"
     ;; Per spec the metamethod is called with (a, a) for backward-compat.
-    (call $args_first (call $lua_call
-      (ref.cast (ref $LuaClosure) (local.get $mm))
-      (array.new_fixed $ArgArr 2 (local.get $a) (local.get $a)))))
+    (call $call_mm1 (local.get $mm) (local.get $a) (local.get $a) (ref.null any) (i32.const 2)))
 
 
   (func $lua_not (param $a anyref) (result anyref)
@@ -667,16 +672,12 @@
         (if (ref.is_null (local.get $mm))
           (then (return (call $make_int (i64.extend_i32_s
             (call $tab_len (ref.cast (ref $LuaTable) (local.get $a))))))))
-        (return (call $args_first (call $lua_call
-          (ref.cast (ref $LuaClosure) (local.get $mm))
-          (array.new_fixed $ArgArr 1 (local.get $a)))))))
+        (return (call $call_mm1 (local.get $mm) (local.get $a) (ref.null any) (ref.null any) (i32.const 1)))))
     (local.set $mm (call $get_metamethod (local.get $a)
       (ref.as_non_null (global.get $g_mkey_len))))
     (if (ref.is_null (local.get $mm))
       (then (call $throw_lit (i32.const 237) (i32.const 24))))   ;; "attempt to index a value" (closest available)
-    (call $args_first (call $lua_call
-      (ref.cast (ref $LuaClosure) (local.get $mm))
-      (array.new_fixed $ArgArr 1 (local.get $a)))))
+    (call $call_mm1 (local.get $mm) (local.get $a) (ref.null any) (ref.null any) (i32.const 1)))
 
   ;; --- comparison ---
   ;; Equality on the numeric type pair. The mixed int-vs-float case can't
@@ -760,9 +761,8 @@
         (if (ref.is_null (local.get $mm))
           (then (return (ref.eq (ref.cast (ref null eq) (local.get $a))
                                  (ref.cast (ref null eq) (local.get $b))))))
-        (return (call $lua_truthy (call $args_first (call $lua_call
-          (ref.cast (ref $LuaClosure) (local.get $mm))
-          (array.new_fixed $ArgArr 2 (local.get $a) (local.get $b))))))))
+        (return (call $lua_truthy
+          (call $call_mm1 (local.get $mm) (local.get $a) (local.get $b) (ref.null any) (i32.const 2))))))
     ;; Any other matched ref types (closures, etc.): identity via ref.eq.
     (if (i32.and (ref.test (ref eq) (local.get $a))
                  (ref.test (ref eq) (local.get $b)))
@@ -930,9 +930,8 @@
       (then (local.set $mm (call $get_metamethod (local.get $b) (local.get $key)))))
     (if (ref.is_null (local.get $mm))
       (then (call $throw_compare_error (local.get $a) (local.get $b)) (unreachable)))
-    (call $lua_truthy (call $args_first (call $lua_call
-      (ref.cast (ref $LuaClosure) (local.get $mm))
-      (array.new_fixed $ArgArr 2 (local.get $a) (local.get $b))))))
+    (call $lua_truthy
+      (call $call_mm1 (local.get $mm) (local.get $a) (local.get $b) (ref.null any) (i32.const 2))))
 
   ;; Reference luaG_ordererror: "attempt to compare two <T> values" when both
   ;; operands share a type name, else "attempt to compare <T1> with <T2>".
@@ -1109,9 +1108,8 @@
       (ref.as_non_null (global.get $g_mkey_tostring))))
     (if (i32.eqz (ref.is_null (local.get $mm)))
       (then
-        (local.set $r (call $args_first (call $lua_call
-          (ref.cast (ref $LuaClosure) (local.get $mm))
-          (array.new_fixed $ArgArr 1 (local.get $v)))))
+        (local.set $r
+          (call $call_mm1 (local.get $mm) (local.get $v) (ref.null any) (ref.null any) (i32.const 1)))
         (if (i32.eqz (ref.test (ref $LuaString) (local.get $r)))
           (then (throw $LuaError (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 508) (i32.const 33)) (i32.const 0)))))
         (return (ref.cast (ref $LuaString) (local.get $r)))))
@@ -1652,9 +1650,7 @@
                                     (i32.sub (local.get $depth) (i32.const 1))))))
     (if (ref.test (ref $LuaClosure) (local.get $idx))
       (then (return
-        (call $args_first (call $lua_call
-          (ref.cast (ref $LuaClosure) (local.get $idx))
-          (array.new_fixed $ArgArr 2 (local.get $t) (local.get $k)))))))
+        (call $call_mm1 (local.get $idx) (local.get $t) (local.get $k) (ref.null any) (i32.const 2)))))
     (ref.null any))
 
   ;; `t.name` / `t["lit"]` read with a compile-time constant string key — the
@@ -1714,9 +1710,7 @@
                                         (i32.sub (local.get $depth) (i32.const 1))))))
     (if (ref.test (ref $LuaClosure) (local.get $idx))
       (then (return
-        (call $args_first (call $lua_call
-          (ref.cast (ref $LuaClosure) (local.get $idx))
-          (array.new_fixed $ArgArr 2 (local.get $t) (local.get $k)))))))
+        (call $call_mm1 (local.get $idx) (local.get $t) (local.get $k) (ref.null any) (i32.const 2)))))
     (ref.null any))
 
   ;; `t.name = v` with a constant string key: no metatable means a plain hash
@@ -2373,9 +2367,7 @@
       ;; Function form: call __newindex(t, k, val) and we're done.
       (if (ref.test (ref $LuaClosure) (local.get $mm))
         (then
-          (drop (call $lua_call (ref.cast (ref $LuaClosure) (local.get $mm))
-                  (array.new_fixed $ArgArr 3
-                    (local.get $v) (local.get $k) (local.get $val))))
+          (drop (call $call_mm1 (local.get $mm) (local.get $v) (local.get $k) (local.get $val) (i32.const 3)))
           (br $exit)))
       ;; Table form: continue with $v = mm. Cycle cap matches __index.
       (local.set $v (local.get $mm))
@@ -2679,6 +2671,60 @@
       (local.get $args)
       (struct.get $LuaClosure $code (local.get $closure))))
 
+  ;; The first $n of a0..a3 as an argument array.
+  (func $pack_args4 (param $a0 anyref) (param $a1 anyref) (param $a2 anyref) (param $a3 anyref)
+                    (param $n i32) (result (ref $ArgArr))
+    (block $b0 (block $b1 (block $b2 (block $b3 (block $b4
+      (br_table $b0 $b1 $b2 $b3 $b4 (local.get $n)))
+      (return (array.new_fixed $ArgArr 4 (local.get $a0) (local.get $a1) (local.get $a2) (local.get $a3))))
+      (return (array.new_fixed $ArgArr 3 (local.get $a0) (local.get $a1) (local.get $a2))))
+      (return (array.new_fixed $ArgArr 2 (local.get $a0) (local.get $a1))))
+      (return (array.new_fixed $ArgArr 1 (local.get $a0))))
+    (global.get $g_empty_args))
+
+  ;; The `...` of a fast-entry call: a{from}..a{n-1}.
+  (func $varargs_tail4 (param $a0 anyref) (param $a1 anyref) (param $a2 anyref) (param $a3 anyref)
+                       (param $from i32) (param $n i32) (result (ref $ArgArr))
+    (local $all (ref $ArgArr))
+    (if (i32.ge_s (local.get $from) (local.get $n)) (then (return (global.get $g_empty_args))))
+    (if (i32.eqz (local.get $from))
+      (then (return (call $pack_args4 (local.get $a0) (local.get $a1) (local.get $a2) (local.get $a3)
+                                      (local.get $n)))))
+    (local.set $all (call $pack_args4 (local.get $a0) (local.get $a1) (local.get $a2) (local.get $a3)
+                                      (local.get $n)))
+    (call $args_slice (local.get $all) (local.get $from)))
+
+  ;; $LuaFn1 for closures without a body of their own (builtins, functions
+  ;; with more than four parameters): pack the arguments, call $code, keep
+  ;; the first result.
+  (func $fast_adapter (type $LuaFn1) (param $c (ref $LuaClosure))
+                      (param $a0 anyref) (param $a1 anyref) (param $a2 anyref) (param $a3 anyref)
+                      (param $n i32) (result anyref)
+    (call $args_first (call_ref $LuaFn (local.get $c)
+      (call $pack_args4 (local.get $a0) (local.get $a1) (local.get $a2) (local.get $a3) (local.get $n))
+      (struct.get $LuaClosure $code (local.get $c)))))
+  (elem declare func $fast_adapter)
+
+  ;; Call `f` with $n (<= 4) arguments for one result: the $lua_call_any of
+  ;; single-value call sites. A closure goes through its fast entry with the
+  ;; same frame bookkeeping; anything else (__call, a non-callable) takes the
+  ;; generic path.
+  (func $lua_call1 (param $f anyref) (param $a0 anyref) (param $a1 anyref) (param $a2 anyref)
+                   (param $a3 anyref) (param $n i32) (param $line i32) (result anyref)
+    (local $c (ref $LuaClosure)) (local $r anyref)
+    (if (ref.test (ref $LuaClosure) (local.get $f))
+      (then
+        (local.set $c (ref.cast (ref $LuaClosure) (local.get $f)))
+        (call $push_call_frame (local.get $line) (struct.get $LuaClosure $weight (local.get $c)))
+        (local.set $r (call_ref $LuaFn1 (local.get $c)
+          (local.get $a0) (local.get $a1) (local.get $a2) (local.get $a3) (local.get $n)
+          (struct.get $LuaClosure $fast (local.get $c))))
+        (call $pop_call_frame)
+        (return (local.get $r))))
+    (call $args_first (call $lua_call_any (local.get $f)
+      (call $pack_args4 (local.get $a0) (local.get $a1) (local.get $a2) (local.get $a3) (local.get $n))
+      (local.get $line))))
+
   ;; Call any Lua value as a function, walking __call metamethods. Throws
   ;; a Lua-shaped "attempt to call a non-function value" $LuaError if
   ;; the chain bottoms out on a non-callable. A small iteration cap
@@ -2688,6 +2734,23 @@
   ;; stack so error() / debug.traceback can report it. Popped on normal
   ;; return; left elevated on the throw paths so the enclosing pcall
   ;; can restore $call_depth.
+  ;; A metamethod or library callback called for one result, with $n (<= 3)
+  ;; arguments and no call frame of its own (like $lua_call): a closure goes
+  ;; through its fast entry; anything else — a callable table — through
+  ;; $lua_call_any (which walks __call and raises for a non-callable).
+  (func $call_mm1 (param $f anyref) (param $a0 anyref) (param $a1 anyref) (param $a2 anyref)
+                  (param $n i32) (result anyref)
+    (local $c (ref $LuaClosure))
+    (if (ref.test (ref $LuaClosure) (local.get $f))
+      (then
+        (local.set $c (ref.cast (ref $LuaClosure) (local.get $f)))
+        (return (call_ref $LuaFn1 (local.get $c)
+          (local.get $a0) (local.get $a1) (local.get $a2) (ref.null any) (local.get $n)
+          (struct.get $LuaClosure $fast (local.get $c))))))
+    (call $args_first (call $lua_call_any (local.get $f)
+      (call $pack_args4 (local.get $a0) (local.get $a1) (local.get $a2) (ref.null any) (local.get $n))
+      (i32.const 0))))
+
   (func $lua_call_any (param $v anyref) (param $args (ref $ArgArr))
                       (param $line i32) (result (ref $ArgArr))
     (local $mm anyref) (local $i i32) (local $r (ref $ArgArr))
@@ -5190,9 +5253,7 @@
     (if (result i32) (ref.is_null (local.get $cmp))
       (then (call $lua_lt_raw (local.get $a) (local.get $b)))
       (else (call $lua_truthy
-        (call $args_first
-          (call $lua_call (ref.as_non_null (local.get $cmp))
-            (array.new_fixed $ArgArr 2 (local.get $a) (local.get $b))))))))
+        (call $call_mm1 (local.get $cmp) (local.get $a) (local.get $b) (ref.null any) (i32.const 2))))))
 
   ;; Hoare partition of a[lo..up] around the pivot at a[up-1] (placed there by
   ;; $qsort's median-of-3). Returns the pivot's final index. Faithful to
@@ -5764,7 +5825,8 @@
       ;; Inline closure for the iter — drops $g_builtin_utf8_codes_iter
       ;; from the live set when utf8.codes is unreferenced.
       (struct.new $LuaClosure
-        (ref.func $builtin_utf8_codes_iter) (global.get $g_empty_upvals) (i32.const 256))
+        (ref.func $builtin_utf8_codes_iter) (global.get $g_empty_upvals) (i32.const 256)
+        (ref.func $fast_adapter))
       (call $args_at (local.get $args) (i32.const 0))
       (ref.i31 (i32.const 0))))
 
@@ -6831,7 +6893,8 @@
           (struct.new $Box (call $arg_string (call $args_at (local.get $args) (i32.const 1))))
           (struct.new $Box (call $make_int
             (i64.extend_i32_s (i32.sub (local.get $init) (i32.const 1)))))
-          (struct.new $Box (call $make_int (i64.const -1)))) (i32.const 256))))
+          (struct.new $Box (call $make_int (i64.const -1)))) (i32.const 256)
+        (ref.func $fast_adapter))))
 
   ;; --- byte-builder for string.gsub output (step 7) ---
   (func $builder_new (result (ref $Builder))

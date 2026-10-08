@@ -141,3 +141,4 @@ pass	cmp_mixed_int_float	unboxed int-vs-float compares stay exact (2^53, 2^63, N
 pass	index_key_local	key-only locals (maybe-typed keys): normalization, NaN/nil, array part, __index/__newindex
 pass	multi_assign_index	multi-target index stores: order, key snapshot, leftmost wins, __newindex, unboxed floats
 pass	array_holes	nil holes in the array part: reads/__index, __newindex, traversal clearing, borders, table lib, queue/stack
+pass	dynamic_calls	single-value dynamic calls: arity adjust, varargs, truncation, __call, tail calls, error levels, metamethods

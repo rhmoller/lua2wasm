@@ -34,8 +34,13 @@
  *   $Box       = struct { mut anyref v }     -- shared mutable cell
  *   $ArgArr    = array (mut anyref)
  *   $UpvalArr  = array (mut (ref $Box))
- *   $LuaFn     = func ((ref $LuaClosure) (ref $ArgArr)) -> anyref
- *   $LuaClosure = struct { (ref $LuaFn) code, (ref $UpvalArr) upvals }
+ *   $LuaFn     = func ((ref $LuaClosure) (ref $ArgArr)) -> (ref $ArgArr)
+ *   $LuaFn1    = func ((ref $LuaClosure) anyref x4, i32 nargs) -> anyref
+ *   $LuaClosure = struct { (ref $LuaFn) code, (ref $UpvalArr) upvals,
+ *                          i32 weight, (ref $LuaFn1) fast }
+ *
+ * $code takes and returns argument arrays (any arity, all results); $fast is
+ * the entry for single-result calls with at most FAST_MAX_ARGS arguments.
  *
  * Locals (and parameters) captured by an inner closure are stored in $Box
  * cells so the box can be shared and stay mutable; the parser's escape
@@ -288,7 +293,8 @@ typedef struct {
      * function), so a call f(args) of matching arity can skip the $ArgArr and
      * invoke the function's direct-args entry $user_N_da. */
     const LuaFunc **cur_func_slot;
-    int ret_single;   /* emitting a $user_N_da1 body: return one value */
+    int ret_single;   /* emitting a $user_N_da1 / $user_N_f body: return one value */
+    int fast_body;    /* emitting a $user_N_f body: tail calls go through $fast */
     NumTy cur_ret_ty; /* result type of the $user_N_da1 body being emitted */
     /* Whole-program inferred signatures, indexed by func_idx (opt_int only). */
     FuncSig *sigs;
@@ -1276,6 +1282,151 @@ static void emit_typed_direct_call1(CG *c, const Expr *e, const LuaFunc *K, int 
     wat_append(c->w, ")\n");
 }
 
+/* Single-result calls with at most this many arguments (a method call's
+ * receiver included) use the closure's $fast entry ($LuaFn1). */
+#define FAST_MAX_ARGS 4
+
+/* Whether `fn` gets a $user_N_f body: the specializer is on and its named
+ * parameters fit the fast entry's argument registers. Other closures use
+ * $fast_adapter. */
+static int fn_has_fast_entry(const CG *c, const LuaFunc *fn) {
+    return c->opt_int && fn->n_params <= FAST_MAX_ARGS;
+}
+
+/* The number of fast-entry arguments of a call/method call (the receiver
+ * counts), or -1 when it can't use the fast entry: too many, or a trailing
+ * multi-value argument whose length is only known at run time. */
+static int fast_call_nargs(const CG *c, const Expr *e) {
+    if (!c->opt_int) return -1;
+    Expr *const *args;
+    size_t na;
+    int extra;
+    if (e->kind == EXPR_CALL) {
+        args = e->as.call.args;
+        na = e->as.call.nargs;
+        extra = 0;
+    } else if (e->kind == EXPR_METHOD_CALL) {
+        args = e->as.method_call.args;
+        na = e->as.method_call.nargs;
+        extra = 1;
+    } else {
+        return -1;
+    }
+    if (na + extra > FAST_MAX_ARGS) return -1;
+    if (na > 0 && is_multival_tail(args[na - 1])) return -1;
+    return (int)na + extra;
+}
+
+static void emit_method_lookup(CG *c, const char *method, size_t method_len, int line, int depth);
+
+/* A single-result call through $lua_call1 (the callee's $fast entry): the
+ * callee, then the arguments in order, nil-padded to four, plus the count.
+ * A method call parks its receiver in $tmp_any for the lookup and passes it
+ * as the first argument; it is read before the other arguments are evaluated,
+ * so an argument that is itself a method call may reuse $tmp_any. Callers
+ * check fast_call_nargs first. */
+static void emit_fast_call(CG *c, const Expr *e, int depth) {
+    int n = fast_call_nargs(c, e);
+    Expr *const *args;
+    size_t na;
+    if (e->kind == EXPR_METHOD_CALL) {
+        emit_indent(c, depth);
+        wat_append(c->w, "(local.set $tmp_any\n");
+        emit_expr(c, e->as.method_call.recv, depth + 1);
+        emit_indent(c, depth);
+        wat_append(c->w, ")\n");
+        emit_indent(c, depth);
+        wat_append(c->w, "(call $lua_call1\n");
+        emit_method_lookup(c, e->as.method_call.method, e->as.method_call.method_len, e->line, depth + 1);
+        emit_indent(c, depth + 1);
+        wat_append(c->w, "(local.get $tmp_any)\n");
+        args = e->as.method_call.args;
+        na = e->as.method_call.nargs;
+    } else {
+        emit_indent(c, depth);
+        wat_append(c->w, "(call $lua_call1\n");
+        emit_expr(c, e->as.call.callee, depth + 1);
+        args = e->as.call.args;
+        na = e->as.call.nargs;
+    }
+    for (size_t i = 0; i < na; i++) emit_expr(c, args[i], depth + 1);
+    for (int i = n; i < FAST_MAX_ARGS; i++) {
+        emit_indent(c, depth + 1);
+        wat_append(c->w, "(ref.null any)\n");
+    }
+    emit_indent(c, depth + 1);
+    wat_appendf(c->w, "(i32.const %d) (i32.const %d)\n", n, e->line);
+    emit_indent(c, depth);
+    wat_append(c->w, ")\n");
+}
+
+/* `return f(args)` / `return obj:m(args)` inside a $user_N_f body, when the
+ * call fits the fast entry: a proper tail call through the callee's $fast,
+ * replacing the top frame like the generic tail dispatch. The callee and the
+ * arguments are evaluated first, in order, into $tmp_callee / $ta0..$ta3. A
+ * callee that isn't a closure (__call, or an error) takes $lua_call1. */
+static void emit_fast_tail_call(CG *c, const Expr *e, int depth) {
+    int n = fast_call_nargs(c, e);
+    Expr *const *args;
+    size_t na;
+    int k = 0;
+    if (e->kind == EXPR_METHOD_CALL) {
+        emit_indent(c, depth);
+        wat_append(c->w, "(local.set $tmp_any\n");
+        emit_expr(c, e->as.method_call.recv, depth + 1);
+        emit_indent(c, depth);
+        wat_append(c->w, ")\n");
+        emit_indent(c, depth);
+        wat_append(c->w, "(local.set $tmp_callee\n");
+        emit_method_lookup(c, e->as.method_call.method, e->as.method_call.method_len, e->line, depth + 1);
+        emit_indent(c, depth);
+        wat_append(c->w, ")\n");
+        emit_indent(c, depth);
+        wat_append(c->w, "(local.set $ta0 (local.get $tmp_any))\n");
+        k = 1;
+        args = e->as.method_call.args;
+        na = e->as.method_call.nargs;
+    } else {
+        emit_indent(c, depth);
+        wat_append(c->w, "(local.set $tmp_callee\n");
+        emit_expr(c, e->as.call.callee, depth + 1);
+        emit_indent(c, depth);
+        wat_append(c->w, ")\n");
+        args = e->as.call.args;
+        na = e->as.call.nargs;
+    }
+    for (size_t i = 0; i < na; i++, k++) {
+        emit_indent(c, depth);
+        wat_appendf(c->w, "(local.set $ta%d\n", k);
+        emit_expr(c, args[i], depth + 1);
+        emit_indent(c, depth);
+        wat_append(c->w, ")\n");
+    }
+    char argv[160];
+    int off = 0;
+    for (int i = 0; i < FAST_MAX_ARGS; i++)
+        off += snprintf(argv + off, sizeof argv - (size_t)off, i < n ? " (local.get $ta%d)" : " (ref.null any)", i);
+    emit_indent(c, depth);
+    wat_append(c->w, "(if (ref.test (ref $LuaClosure) (local.get $tmp_callee))\n");
+    emit_indent(c, depth + 1);
+    wat_append(c->w, "(then\n");
+    emit_indent(c, depth + 2);
+    wat_append(c->w, "(local.set $tmp_clo (ref.cast (ref $LuaClosure) (local.get $tmp_callee)))\n");
+    emit_indent(c, depth + 2);
+    wat_appendf(c->w,
+                "(call $replace_top_call_frame (i32.const %d) "
+                "(struct.get $LuaClosure $weight (ref.as_non_null (local.get $tmp_clo))))\n",
+                e->line);
+    emit_indent(c, depth + 2);
+    wat_appendf(c->w,
+                "(return_call_ref $LuaFn1 (ref.as_non_null (local.get $tmp_clo))%s (i32.const %d)\n", argv, n);
+    emit_indent(c, depth + 3);
+    wat_append(c->w, "(struct.get $LuaClosure $fast (ref.as_non_null (local.get $tmp_clo))))))\n");
+    emit_indent(c, depth);
+    wat_appendf(c->w, "(return (call $lua_call1 (local.get $tmp_callee)%s (i32.const %d) (i32.const %d)))\n", argv, n,
+                e->line);
+}
+
 /* Build a (ref $ArgArr) from a sequence of argument expressions, splicing
  * the trailing expression's full multi-value result if it is a call or `...`. */
 static void emit_args_array(CG *c, Expr **args, size_t nargs, int depth) {
@@ -1423,6 +1574,10 @@ static void emit_call(CG *c, const Expr *e, int depth) {
         emit_typed_direct_call1(c, e, dt, depth);
         return;
     }
+    if (fast_call_nargs(c, e) >= 0) {
+        emit_fast_call(c, e, depth);
+        return;
+    }
     emit_indent(c, depth);
     wat_append(c->w, "(call $args_first\n");
     emit_call_array(c, e, depth + 1);
@@ -1544,6 +1699,9 @@ static void emit_function_expr(CG *c, const LuaFunc *fn, int depth) {
     }
     emit_indent(c, depth + 1);
     wat_appendf(c->w, "(i32.const %d)\n", fn_frame_weight(c, fn));
+    emit_indent(c, depth + 1);
+    if (fn_has_fast_entry(c, fn)) wat_appendf(c->w, "(ref.func $user_%d_f)\n", fn->func_idx);
+    else wat_append(c->w, "(ref.func $fast_adapter)\n");
     emit_indent(c, depth);
     wat_append(c->w, ")\n");
 }
@@ -3717,7 +3875,12 @@ static void emit_expr(CG *c, const Expr *e, int depth) {
     case EXPR_INDEX: emit_index_expr(c, e, depth); break;
     case EXPR_TABLE: emit_table_ctor(c, e, depth); break;
     case EXPR_METHOD_CALL: {
-        /* Single-value context: wrap in $args_first. */
+        /* Single-value context: the fast entry when the call fits it, else
+         * the full call wrapped in $args_first. */
+        if (fast_call_nargs(c, e) >= 0) {
+            emit_fast_call(c, e, depth);
+            break;
+        }
         emit_indent(c, depth);
         wat_append(c->w, "(call $args_first\n");
         emit_call_array(c, e, depth + 1);
@@ -3953,15 +4116,11 @@ static int emit_assign_multi_cells(CG *c, const Stmt *s, int depth) {
 static void emit_assign(CG *c, const Stmt *s, int depth) {
     int n_targets = s->as.assign.n_targets;
     int n_values = s->as.assign.n_values;
-    int last_call = (n_values > 0 &&
-                     is_multival_tail(s->as.assign.values[n_values - 1]));
     /* Fast path only for exactly one target and one value. With a longer
      * value list (`a = 5, g()`) the extra values must still be evaluated
      * left-to-right for their side effects; fall through to the general
      * path, which builds the full value array and stores target[0] from
-     * it. (Routing such a case here previously fed values[0] to
-     * emit_multival_array under a `last_call` flag computed over the *last*
-     * value, crashing on the wrong union member.) */
+     * it. */
     if (n_targets == 1 && n_values == 1) {
         AssignTarget *t = &s->as.assign.targets[0];
         if (t->kind == TGT_VAR && t->as.var.kind == VAR_LOCAL && slot_is_int(c, t->as.var.idx)) {
@@ -3984,18 +4143,11 @@ static void emit_assign(CG *c, const Stmt *s, int depth) {
             emit_maybe_store(c, t->as.var.idx, s->as.assign.values[0], depth);
             return;
         }
-        if (t->kind == TGT_INDEX && !last_call && emit_unboxed_index_store(c, t, s->as.assign.values[0], depth))
-            return;
+        if (t->kind == TGT_INDEX && emit_unboxed_index_store(c, t, s->as.assign.values[0], depth)) return;
+        /* A lone call / `...` value supplies its first value (emit_expr takes
+         * the call's single-value entry). */
         emit_target_open(c, t, depth);
-        if (last_call) {
-            emit_indent(c, depth + 1);
-            wat_append(c->w, "(call $args_first\n");
-            emit_multival_array(c, s->as.assign.values[0], depth + 2);
-            emit_indent(c, depth + 1);
-            wat_append(c->w, ")\n");
-        } else {
-            emit_expr(c, s->as.assign.values[0], depth + 1);
-        }
+        emit_expr(c, s->as.assign.values[0], depth + 1);
         emit_target_close(c, depth);
         return;
     }
@@ -4156,6 +4308,15 @@ static void emit_return(CG *c, const Stmt *s, int depth) {
         }
         emit_indent(c, depth);
         wat_append(c->w, "return\n");
+        return;
+    }
+    if (c->fast_body && n_values == 1 && !s->as.return_stmt.values[0]->paren &&
+        fast_call_nargs(c, s->as.return_stmt.values[0]) >= 0) {
+        /* A $user_N_f body's tail call that fits the fast entry stays a
+         * proper tail call; wider ones fall to the single-value code below
+         * (an ordinary call — the callee's generic body keeps its own tail
+         * calls proper, so the stack stays bounded). */
+        emit_fast_tail_call(c, s->as.return_stmt.values[0], depth);
         return;
     }
     if (c->ret_single) {
@@ -4567,7 +4728,11 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
     case STMT_LOCAL: {
         int n_names = s->as.local.n_names;
         int n_values = s->as.local.n_values;
-        int last_call = (n_values > 0 &&
+        /* A trailing call / `...` only spreads when names remain after it;
+         * otherwise only its first value (or none) is used, so it is a
+         * single value like the rest (`local x = f()` takes the call's
+         * single-value entry). */
+        int last_call = (n_values > 0 && n_names > n_values &&
                          is_multival_tail(s->as.local.values[n_values - 1]));
         /* Count of leading single-valued source expressions: everything but
          * a trailing multivalue tail. Lua evaluates the value list strictly
@@ -4620,11 +4785,7 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
          *    no name consumes it). Spread slots are never int/float-
          *    specialized (the analysis only specializes single literal/int
          *    initializers), so the boxed/anyref path covers them. */
-        if (last_call && n_names == n_values && slot_is_maybe(c, s->as.local.local_idxs[n_names - 1])) {
-            /* `local m = f(x)`: only the call's first value is consumed, by a
-             * maybe slot — a single store, no result-array spread. */
-            emit_maybe_store(c, s->as.local.local_idxs[n_names - 1], s->as.local.values[n_values - 1], depth);
-        } else if (last_call) {
+        if (last_call) {
             emit_indent(c, depth);
             wat_append(c->w, "(local.set $tmp_args\n");
             emit_multival_array(c, s->as.local.values[n_values - 1], depth + 1);
@@ -4686,12 +4847,19 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
         emit_assign(c, s, depth);
         break;
 
-    case STMT_EXPR:
-        /* Call as statement: get array, drop it. */
-        emit_call_array(c, s->as.expr_stmt.expr, depth);
+    case STMT_EXPR: {
+        /* Call as statement: its results are dropped, so a direct call takes
+         * the single-value entry and a dynamic one the fast entry when they
+         * apply; otherwise get the result array and drop it. */
+        const Expr *ce = s->as.expr_stmt.expr;
+        const LuaFunc *dt = ce->kind == EXPR_CALL ? direct_call_target(c, ce) : NULL;
+        if (dt && direct_args_typed_ok(c, ce, dt)) emit_typed_direct_call1(c, ce, dt, depth);
+        else if (fast_call_nargs(c, ce) >= 0) emit_fast_call(c, ce, depth);
+        else emit_call_array(c, ce, depth);
         emit_indent(c, depth);
         wat_append(c->w, "drop\n");
         break;
+    }
 
     case STMT_DO:
         emit_block(c, &s->as.do_stmt.body, depth);
@@ -5412,7 +5580,7 @@ static int fn_frame_weight(CG *c, const LuaFunc *fn) {
     return 8 * locals + 300;
 }
 
-static void emit_user_function(CG *c, const LuaFunc *fn, int direct, int ret_single) {
+static void emit_user_function(CG *c, const LuaFunc *fn, int direct, int ret_single, int fast) {
     WatBuilder *w = c->w;
     const FuncSig *sg = (c->opt_int && fn->func_idx >= 0 && fn->func_idx < c->n_sigs)
                             ? &c->sigs[fn->func_idx]
@@ -5433,6 +5601,14 @@ static void emit_user_function(CG *c, const LuaFunc *fn, int direct, int ret_sin
                         num_wat_ty(param_seed ? param_seed[i] : NT_ANY));
         if (ret_single) wat_appendf(w, " (result %s)\n", num_wat_ty(ret_ty));
         else wat_append(w, " (result (ref $ArgArr))\n");
+    } else if (fast) {
+        /* Fast entry ($LuaFn1): arguments in $a0..$a3, $nargs of them; one
+         * result. Parameters are untyped, like the generic entry. */
+        wat_appendf(w,
+                    "  (func $user_%d_f (type $LuaFn1) (param $closure (ref $LuaClosure)) "
+                    "(param $a0 anyref) (param $a1 anyref) (param $a2 anyref) (param $a3 anyref) "
+                    "(param $nargs i32) (result anyref)\n",
+                    fn->func_idx);
     } else {
         wat_appendf(w,
                     "  (func $user_%d (type $LuaFn) "
@@ -5512,6 +5688,7 @@ static void emit_user_function(CG *c, const LuaFunc *fn, int direct, int ret_sin
     wat_append(w, "    (local $tmp_tab (ref null $LuaTable))\n");
     wat_append(w, "    (local $tmp_lhs_t (ref null $ArgArr))\n");
     wat_append(w, "    (local $tmp_lhs_k (ref null $ArgArr))\n");
+    if (fast) wat_append(w, "    (local $ta0 anyref) (local $ta1 anyref) (local $ta2 anyref) (local $ta3 anyref)\n");
     int fn_n_close = count_fn_close(&fn->body);
     emit_tbc_locals(w, fn_n_close > 0);
     emit_for_scratch_locals(w, &fn->body);
@@ -5538,12 +5715,13 @@ static void emit_user_function(CG *c, const LuaFunc *fn, int direct, int ret_sin
         }
     }
 
-    /* Param extraction: from args[i] (normal) or the direct $pi param. */
+    /* Param extraction: from args[i] (normal), the direct $pi param, or the
+     * fast entry's $ai register (nil when the call passed fewer). */
     for (int i = 0; i < fn->n_params; i++) {
         char src[64];
-        int sn = direct
-                     ? snprintf(src, sizeof src, "(local.get $p%d)", i)
-                     : snprintf(src, sizeof src, "(call $args_at (local.get $args) (i32.const %d))", i);
+        int sn = direct ? snprintf(src, sizeof src, "(local.get $p%d)", i)
+                 : fast ? snprintf(src, sizeof src, "(local.get $a%d)", i)
+                        : snprintf(src, sizeof src, "(call $args_at (local.get $args) (i32.const %d))", i);
         if (sn < 0 || (size_t)sn >= sizeof src) {
             cg_error(c, "param-extraction expression too long");
             return;
@@ -5558,7 +5736,12 @@ static void emit_user_function(CG *c, const LuaFunc *fn, int direct, int ret_sin
                         "    local.set $Lf%d\n    local.set $Li%d\n    local.set $Lt%d\n",
                         i, i, i, i);
     }
-    if (fn->is_vararg) {
+    if (fn->is_vararg && fast) {
+        wat_appendf(w,
+                    "    (local.set $varargs (call $varargs_tail4 (local.get $a0) (local.get $a1) "
+                    "(local.get $a2) (local.get $a3) (i32.const %d) (local.get $nargs)))\n",
+                    fn->n_params);
+    } else if (fn->is_vararg) {
         wat_appendf(w,
                     "    (local.set $varargs (call $args_slice "
                     "(local.get $args) (i32.const %d)))\n",
@@ -5580,21 +5763,23 @@ static void emit_user_function(CG *c, const LuaFunc *fn, int direct, int ret_sin
     if (fn_n_close > 0) emit_tbc_init(w, fn_n_close);
 
     int was_in_main = c->in_main;
-    int prev_ret_single = c->ret_single;
+    int prev_ret_single = c->ret_single, prev_fast_body = c->fast_body;
     NumTy prev_ret_ty = c->cur_ret_ty;
     c->in_main = 0;
-    c->ret_single = ret_single;
+    c->ret_single = ret_single || fast;
+    c->fast_body = fast;
     c->cur_ret_ty = ret_ty;
     if (c->ok) emit_close_body(c, &fn->body, fn_n_close > 0, 2);
     c->next_label_id = saved_next_id_pre;
     c->in_main = was_in_main;
     c->ret_single = prev_ret_single;
+    c->fast_body = prev_fast_body;
     c->cur_ret_ty = prev_ret_ty;
 
     /* Default trailing fall-through value. A numeric ret_ty implies the body
      * always returns (block_always_returns), so this default is dead but must
      * still type-check; otherwise it is nil / the empty results array. */
-    if (ret_single)
+    if (ret_single || fast)
         wat_appendf(w, "    %s\n", ret_ty == NT_INT ? "(i64.const 0)" : ret_ty == NT_FLOAT ? "(f64.const 0)"
                                                                                            : "(ref.null any)");
     else
@@ -5603,8 +5788,8 @@ static void emit_user_function(CG *c, const LuaFunc *fn, int direct, int ret_sin
 
     /* Declare so the funcref is usable in const init / closures. The direct
      * entry is only ever called by name, so it needs no elem declare. */
-    if (!direct)
-        wat_appendf(w, "  (elem declare func $user_%d)\n", fn->func_idx);
+    if (fast) wat_appendf(w, "  (elem declare func $user_%d_f)\n", fn->func_idx);
+    else if (!direct) wat_appendf(w, "  (elem declare func $user_%d)\n", fn->func_idx);
 
     c->cur_captured = prev_captured;
     c->cur_n_locals = prev_n_locals;
@@ -6509,7 +6694,8 @@ int codegen_module(const ParseResult *pr, const char *src_name,
         if (!live[i]) continue;
         wat_appendf(out,
                     "  (global $g_%s (ref $LuaClosure)\n"
-                    "    (struct.new $LuaClosure (ref.func %s) (global.get $g_empty_upvals) (i32.const 256)))\n",
+                    "    (struct.new $LuaClosure (ref.func %s) (global.get $g_empty_upvals) (i32.const 256)\n"
+                    "      (ref.func $fast_adapter)))\n",
                     builtin_func_name(i) + 1, builtin_func_name(i));
     }
 
@@ -6583,15 +6769,16 @@ int codegen_module(const ParseResult *pr, const char *src_name,
     wat_append(out, "  ;; --- user functions ---\n");
 
     for (size_t i = 0; i < pr->funcs.count; i++) {
-        emit_user_function(&c, pr->funcs.items[i], 0, 0);
+        emit_user_function(&c, pr->funcs.items[i], 0, 0, 0);
+        if (fn_has_fast_entry(&c, pr->funcs.items[i])) emit_user_function(&c, pr->funcs.items[i], 0, 0, 1);
         /* Direct-call fast entries (non-vararg only): _da returns the result
          * array (multi-value call contexts), _da1 returns a single value
          * (single-value contexts — no result-array allocation). Emitted only
          * when some direct-call site actually targets this function (has_site),
          * otherwise they would be dead code. */
         if (c.opt_int && !pr->funcs.items[i]->is_vararg && c.sigs[i].has_site) {
-            emit_user_function(&c, pr->funcs.items[i], 1, 0);
-            emit_user_function(&c, pr->funcs.items[i], 1, 1);
+            emit_user_function(&c, pr->funcs.items[i], 1, 0, 0);
+            emit_user_function(&c, pr->funcs.items[i], 1, 1, 0);
         }
         if (!c.ok) break;
     }
