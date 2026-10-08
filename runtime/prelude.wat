@@ -100,6 +100,20 @@
       (field $fvals (mut (ref null $FArr)))
       (field $farr  (mut (ref null $FArr)))))))
 
+  ;; Inline caches for constant-key access sites (docs/design/23): codegen
+  ;; gives every `t.name` read/write site an $IC and every `obj:m(...)` site a
+  ;; $MIC, held in an immutable module global. $pos is valid for $shape: a
+  ;; shape's key positions never change (a compaction installs a new $Shape),
+  ;; so "table.shape == cached shape" proves the key sits at $pos.
+  (type $IC (struct (field $shape (mut (ref null $Shape))) (field $pos (mut i32))))
+  (type $MIC (struct
+    (field $s1 (mut (ref null $Shape)))      ;; a receiver shape lacking the key (shared)
+    (field $ms (mut (ref null $Shape)))      ;; the metatable's shape ...
+    (field $mp (mut i32))                    ;; ... and "__index"'s position in it
+    (field $c  (mut (ref null $LuaTable)))   ;; the __index table
+    (field $cs (mut (ref null $Shape)))      ;; its shape ...
+    (field $cp (mut i32))))                  ;; ... and the method's position in it
+
   (import "host" "print" (func $host_print (param anyref)))
   (import "host" "write_raw" (func $host_write_raw (param anyref)))
   ;; Stable, distinct per-object id for the address form of tostring / %p on
@@ -1567,11 +1581,12 @@
           (array.set $TArr (ref.as_non_null (local.get $vals)) (local.get $i) (ref.null any))
           (local.set $i (i32.add (local.get $i) (i32.const 1)))
           (br $clp)))))
-    (struct.set $Shape $idx  (local.get $sh) (local.get $idx))
-    (struct.set $Shape $mask (local.get $sh) (local.get $mask))
-    (struct.set $Shape $n    (local.get $sh) (local.get $j))
-    ;; A fresh index has no tombstones: occupied slots == live entries.
-    (struct.set $Shape $used (local.get $sh) (local.get $j)))
+    ;; Compaction moved keys, so the table gets a new shape object: a cached
+    ;; (shape, position) for the old one must not match it any more. A fresh
+    ;; index has no tombstones: occupied slots == live entries.
+    (struct.set $LuaTable $shape (local.get $t)
+      (struct.new $Shape (local.get $keys) (local.get $idx) (local.get $mask)
+        (local.get $j) (local.get $j) (ref.null $TArr) (ref.null $ShapeArr))))
 
 
   ;; Probe the hash index for a key. Returns position in keys[] (>=0)
@@ -1838,6 +1853,160 @@
             (if (i32.eqz (ref.is_null (local.get $v))) (then (return (local.get $v))))))
         (return (call $tab_get_miss_str (local.get $t) (local.get $k) (local.get $full) (i32.const 64)))))
     (call $lua_index (local.get $tv) (local.get $k) (local.get $line)))
+
+  ;; --- inline-cached constant-key access ---
+  ;; `t.name` read: when the table's shape is the site's cached shape the
+  ;; value is at the cached position; anything else (another shape, a nil
+  ;; value, a non-table) takes $lua_index_ic_miss, which refills the cache.
+  (func $lua_index_ic (param $tv anyref) (param $k (ref $LuaString)) (param $line i32) (param $ic (ref $IC))
+                      (result anyref)
+    (local $t (ref $LuaTable)) (local $v anyref) (local $pos i32)
+    (if (ref.test (ref $LuaTable) (local.get $tv))
+      (then
+        (local.set $t (ref.cast (ref $LuaTable) (local.get $tv)))
+        (if (ref.eq (struct.get $LuaTable $shape (local.get $t)) (struct.get $IC $shape (local.get $ic)))
+          (then
+            (local.set $pos (struct.get $IC $pos (local.get $ic)))
+            (local.set $v (array.get $TArr (ref.as_non_null (struct.get $LuaTable $vals (local.get $t)))
+                                           (local.get $pos)))
+            (if (ref.test (ref $FMark) (local.get $v))
+              (then (return (call $make_float (array.get $FArr
+                (ref.as_non_null (struct.get $LuaTable $fvals (local.get $t))) (local.get $pos))))))
+            (if (i32.eqz (ref.is_null (local.get $v))) (then (return (local.get $v))))))))
+    (return_call $lua_index_ic_miss (local.get $tv) (local.get $k) (local.get $line) (local.get $ic)))
+  ;; Cache the key's position for the table's shape (a key present with a nil
+  ;; value is cached too: the hit path treats nil as a miss), then do the
+  ;; ordinary lookup.
+  (func $ic_fill (param $tv anyref) (param $k (ref $LuaString)) (param $ic (ref $IC))
+    (local $t (ref $LuaTable)) (local $i i32)
+    (if (i32.eqz (ref.test (ref $LuaTable) (local.get $tv))) (then (return)))
+    (local.set $t (ref.cast (ref $LuaTable) (local.get $tv)))
+    (local.set $i (call $tab_find_str (local.get $t) (local.get $k) (struct.get $LuaString $hash (local.get $k))))
+    (if (i32.lt_s (local.get $i) (i32.const 0)) (then (return)))
+    (struct.set $IC $shape (local.get $ic) (struct.get $LuaTable $shape (local.get $t)))
+    (struct.set $IC $pos (local.get $ic) (local.get $i)))
+  (func $lua_index_ic_miss (param $tv anyref) (param $k (ref $LuaString)) (param $line i32) (param $ic (ref $IC))
+                           (result anyref)
+    (call $ic_fill (local.get $tv) (local.get $k) (local.get $ic))
+    (call $lua_index_sk (local.get $tv) (local.get $k) (local.get $line)))
+
+  ;; The maybe-typed cell form of $lua_index_ic (see $lua_index_sk_cell).
+  (func $lua_index_ic_cell (param $tv anyref) (param $k (ref $LuaString)) (param $line i32) (param $ic (ref $IC))
+                           (result i32 i64 f64 anyref)
+    (local $t (ref $LuaTable)) (local $v anyref) (local $pos i32)
+    (if (ref.test (ref $LuaTable) (local.get $tv))
+      (then
+        (local.set $t (ref.cast (ref $LuaTable) (local.get $tv)))
+        (if (ref.eq (struct.get $LuaTable $shape (local.get $t)) (struct.get $IC $shape (local.get $ic)))
+          (then
+            (local.set $pos (struct.get $IC $pos (local.get $ic)))
+            (local.set $v (array.get $TArr (ref.as_non_null (struct.get $LuaTable $vals (local.get $t)))
+                                           (local.get $pos)))
+            (if (ref.test (ref $FMark) (local.get $v))
+              (then
+                (i32.const 2) (i64.const 0)
+                (array.get $FArr (ref.as_non_null (struct.get $LuaTable $fvals (local.get $t))) (local.get $pos))
+                (ref.null any)
+                (return)))
+            (if (i32.eqz (ref.is_null (local.get $v)))
+              (then (call $unbox_num (local.get $v)) (local.get $v) (return)))))))
+    (call $ic_fill (local.get $tv) (local.get $k) (local.get $ic))
+    (return_call $lua_index_sk_cell (local.get $tv) (local.get $k) (local.get $line)))
+
+  ;; `t.name = v`: at the cached position a present key — or any key when
+  ;; the table has no metatable — is a raw overwrite (nil deletes). An absent
+  ;; key under a metatable (__newindex), another shape or a new key takes the
+  ;; ordinary setter.
+  (func $lua_tabset_ic (param $ic (ref $IC)) (param $tv anyref) (param $k (ref $LuaString)) (param $v anyref)
+    (local $t (ref $LuaTable)) (local $pos i32) (local $vals (ref $TArr))
+    (if (ref.test (ref $LuaTable) (local.get $tv))
+      (then
+        (local.set $t (ref.cast (ref $LuaTable) (local.get $tv)))
+        (if (ref.eq (struct.get $LuaTable $shape (local.get $t)) (struct.get $IC $shape (local.get $ic)))
+          (then
+            (local.set $pos (struct.get $IC $pos (local.get $ic)))
+            (local.set $vals (ref.as_non_null (struct.get $LuaTable $vals (local.get $t))))
+            (if (ref.is_null (struct.get $LuaTable $meta (local.get $t)))
+              (then (array.set $TArr (local.get $vals) (local.get $pos) (local.get $v)) (return)))
+            (if (i32.eqz (ref.is_null (array.get $TArr (local.get $vals) (local.get $pos))))
+              (then (array.set $TArr (local.get $vals) (local.get $pos) (local.get $v)) (return)))))))
+    (call $ic_fill (local.get $tv) (local.get $k) (local.get $ic))
+    (call $lua_tabset_sk (local.get $tv) (local.get $k) (local.get $v)))
+  (func $lua_tabset_ic_f (param $ic (ref $IC)) (param $tv anyref) (param $k (ref $LuaString)) (param $f f64)
+    (local $t (ref $LuaTable)) (local $pos i32) (local $vals (ref $TArr))
+    (if (ref.test (ref $LuaTable) (local.get $tv))
+      (then
+        (local.set $t (ref.cast (ref $LuaTable) (local.get $tv)))
+        (if (ref.eq (struct.get $LuaTable $shape (local.get $t)) (struct.get $IC $shape (local.get $ic)))
+          (then
+            (local.set $pos (struct.get $IC $pos (local.get $ic)))
+            (local.set $vals (ref.as_non_null (struct.get $LuaTable $vals (local.get $t))))
+            (if (i32.or (ref.is_null (struct.get $LuaTable $meta (local.get $t)))
+                        (i32.eqz (ref.is_null (array.get $TArr (local.get $vals) (local.get $pos)))))
+              (then
+                (array.set $TArr (local.get $vals) (local.get $pos) (global.get $g_fmark))
+                (array.set $FArr (call $fvals_ensure (local.get $t)) (local.get $pos) (local.get $f))
+                (return)))))))
+    (call $ic_fill (local.get $tv) (local.get $k) (local.get $ic))
+    (call $lua_tabset_sk_f (local.get $tv) (local.get $k) (local.get $f)))
+
+  ;; `obj:m` method lookup. The cached case is the usual class pattern: the
+  ;; receiver's (shared) shape lacks the key, its metatable has __index at a
+  ;; cached position, that slot still holds the cached class table, and the
+  ;; class's shape has the method at a cached position. Five identity checks
+  ;; instead of three hash probes; anything else takes $lua_method_ic_miss.
+  (func $lua_method_ic (param $tv anyref) (param $k (ref $LuaString)) (param $line i32) (param $ic (ref $MIC))
+                       (result anyref)
+    (local $t (ref $LuaTable)) (local $m (ref null $LuaTable)) (local $c (ref $LuaTable)) (local $v anyref)
+    (block $miss
+      (br_if $miss (i32.eqz (ref.test (ref $LuaTable) (local.get $tv))))
+      (local.set $t (ref.cast (ref $LuaTable) (local.get $tv)))
+      (br_if $miss (i32.eqz (ref.eq (struct.get $LuaTable $shape (local.get $t)) (struct.get $MIC $s1 (local.get $ic)))))
+      (local.set $m (struct.get $LuaTable $meta (local.get $t)))
+      (br_if $miss (ref.is_null (local.get $m)))
+      (br_if $miss (i32.eqz (ref.eq (struct.get $LuaTable $shape (ref.as_non_null (local.get $m)))
+                                    (struct.get $MIC $ms (local.get $ic)))))
+      (br_if $miss (i32.eqz (ref.eq
+        (ref.cast (ref null eq) (array.get $TArr (ref.as_non_null (struct.get $LuaTable $vals (ref.as_non_null (local.get $m))))
+                                                 (struct.get $MIC $mp (local.get $ic))))
+        (struct.get $MIC $c (local.get $ic)))))
+      (local.set $c (ref.as_non_null (struct.get $MIC $c (local.get $ic))))
+      (br_if $miss (i32.eqz (ref.eq (struct.get $LuaTable $shape (local.get $c)) (struct.get $MIC $cs (local.get $ic)))))
+      (local.set $v (array.get $TArr (ref.as_non_null (struct.get $LuaTable $vals (local.get $c)))
+                                     (struct.get $MIC $cp (local.get $ic))))
+      (br_if $miss (ref.is_null (local.get $v)))
+      (br_if $miss (ref.test (ref $FMark) (local.get $v)))
+      (return (local.get $v)))
+    (return_call $lua_method_ic_miss (local.get $tv) (local.get $k) (local.get $line) (local.get $ic)))
+  (func $lua_method_ic_miss (param $tv anyref) (param $k (ref $LuaString)) (param $line i32) (param $ic (ref $MIC))
+                            (result anyref)
+    (local $t (ref $LuaTable)) (local $m (ref $LuaTable)) (local $c (ref $LuaTable)) (local $full i32)
+    (local $mp i32) (local $cp i32) (local $iv anyref)
+    (block $nocache
+      (br_if $nocache (i32.eqz (ref.test (ref $LuaTable) (local.get $tv))))
+      (local.set $t (ref.cast (ref $LuaTable) (local.get $tv)))
+      ;; absence is a property of a shared shape only (an owned one can grow)
+      (br_if $nocache (struct.get $LuaTable $own (local.get $t)))
+      (local.set $full (struct.get $LuaString $hash (local.get $k)))
+      (br_if $nocache (i32.ge_s (call $tab_find_str (local.get $t) (local.get $k) (local.get $full)) (i32.const 0)))
+      (br_if $nocache (ref.is_null (struct.get $LuaTable $meta (local.get $t))))
+      (local.set $m (ref.as_non_null (struct.get $LuaTable $meta (local.get $t))))
+      (local.set $mp (call $tab_find_str (local.get $m) (ref.as_non_null (global.get $g_mkey_index))
+                                         (struct.get $LuaString $hash (ref.as_non_null (global.get $g_mkey_index)))))
+      (br_if $nocache (i32.lt_s (local.get $mp) (i32.const 0)))
+      (local.set $iv (array.get $TArr (ref.as_non_null (struct.get $LuaTable $vals (local.get $m))) (local.get $mp)))
+      (br_if $nocache (i32.eqz (ref.test (ref $LuaTable) (local.get $iv))))
+      (local.set $c (ref.cast (ref $LuaTable) (local.get $iv)))
+      (local.set $cp (call $tab_find_str (local.get $c) (local.get $k) (local.get $full)))
+      (br_if $nocache (i32.lt_s (local.get $cp) (i32.const 0)))
+      (br_if $nocache (ref.is_null (array.get $TArr (ref.as_non_null (struct.get $LuaTable $vals (local.get $c))) (local.get $cp))))
+      (struct.set $MIC $s1 (local.get $ic) (struct.get $LuaTable $shape (local.get $t)))
+      (struct.set $MIC $ms (local.get $ic) (struct.get $LuaTable $shape (local.get $m)))
+      (struct.set $MIC $mp (local.get $ic) (local.get $mp))
+      (struct.set $MIC $c  (local.get $ic) (local.get $c))
+      (struct.set $MIC $cs (local.get $ic) (struct.get $LuaTable $shape (local.get $c)))
+      (struct.set $MIC $cp (local.get $ic) (local.get $cp)))
+    (call $lua_index_sk (local.get $tv) (local.get $k) (local.get $line)))
 
   ;; $tab_get_miss for a string key with known hash: the method-dispatch path
   ;; (instance miss -> class via __index), every probe string-specialized.
@@ -2364,8 +2533,10 @@
     (local.set $sh (struct.get $LuaTable $shape (local.get $t)))
     (if (i32.ge_u (i32.shl (i32.add (struct.get $Shape $used (local.get $sh)) (i32.const 1)) (i32.const 1))
                   (i32.add (struct.get $Shape $mask (local.get $sh)) (i32.const 1)))
-      (then (call $tab_index_rebuild (local.get $t))))
-    ;; (a rebuild may have compacted deleted entries, lowering the append position)
+      (then
+        (call $tab_index_rebuild (local.get $t))
+        ;; (compaction may have lowered the append position, under a new shape)
+        (local.set $sh (struct.get $LuaTable $shape (local.get $t)))))
     (local.set $n (struct.get $Shape $n (local.get $sh)))
     (local.set $keys (struct.get $Shape $keys (local.get $sh)))
     (if (i32.ge_s (local.get $n) (array.len (local.get $keys)))

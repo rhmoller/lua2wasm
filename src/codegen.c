@@ -296,6 +296,8 @@ typedef struct {
     int ret_single;    /* emitting a $user_N_da1 / $user_N_f body: return one value */
     int fast_body;     /* emitting a $user_N_f body: tail calls go through $fast */
     int n_ctor_shapes; /* table-constructor sites with a cached shape ($cshape_N) */
+    int n_ics;         /* constant-key access sites with an inline cache ($ic_N) */
+    int n_mics;        /* method-call sites with an inline cache ($mic_N) */
     NumTy cur_ret_ty;  /* result type of the $user_N_da1 body being emitted */
     /* Whole-program inferred signatures, indexed by func_idx (opt_int only). */
     FuncSig *sigs;
@@ -702,6 +704,15 @@ static const char *kstr_expr(CG *c, const char *bytes, size_t len, char *buf, si
     return buf;
 }
 
+/* A fresh inline cache for a constant-key access site, as the expression
+ * passing it (`(global.get $ic_N)`), or NULL when the specializer is off
+ * (-O0 keeps the uncached setters/getters). */
+static const char *ic_new(CG *c, char *buf, size_t bufsz) {
+    if (!c->opt_int) return NULL;
+    snprintf(buf, bufsz, "(global.get $ic_%d)", c->n_ics++);
+    return buf;
+}
+
 /* Emit a constant string as one folded line indented to `depth`. */
 static void emit_string_literal(CG *c, const char *bytes, size_t len, int depth) {
     char eb[160];
@@ -900,9 +911,13 @@ static void emit_target_open(CG *c, const AssignTarget *t, int depth) {
         }
     } else if (t->as.index.key->kind == EXPR_STRING && t->as.index.key->as.s.len <= KSTR_MAX) {
         /* Constant string key: $lua_tabset_sk stores to the hash part directly
-         * when there is no metatable, else dispatches __newindex. */
+         * when there is no metatable, else dispatches __newindex; the
+         * inline-cached $lua_tabset_ic first tries the site's cached slot. */
+        char icb[48];
+        const char *ic = ic_new(c, icb, sizeof icb);
         emit_indent(c, depth);
-        wat_append(c->w, "(call $lua_tabset_sk\n");
+        if (ic) wat_appendf(c->w, "(call $lua_tabset_ic %s\n", ic);
+        else wat_append(c->w, "(call $lua_tabset_sk\n");
         emit_expr(c, t->as.index.table, depth + 1);
         emit_string_literal(c, t->as.index.key->as.s.bytes, t->as.index.key->as.s.len, depth + 1);
     } else if (t->as.index.key->kind == EXPR_VAR && t->as.index.key->as.var.kind == VAR_LOCAL &&
@@ -1472,13 +1487,21 @@ static void emit_method_lookup(CG *c, const char *method, size_t method_len, int
                                int depth) {
     emit_indent(c, depth);
     /* $lua_index_sk reads the key's precomputed hash, so it is only for hoisted
-     * constants; a name too long to hoist takes the generic lookup. */
-    wat_append(c->w, method_len <= KSTR_MAX ? "(call $lua_index_sk\n" : "(call $lua_index\n");
+     * constants; a name too long to hoist takes the generic lookup. With the
+     * specializer on, a hoisted name gets a method inline cache. */
+    int mic = c->opt_int && method_len <= KSTR_MAX ? c->n_mics++ : -1;
+    wat_append(c->w, mic >= 0                 ? "(call $lua_method_ic\n"
+                     : method_len <= KSTR_MAX ? "(call $lua_index_sk\n"
+                                              : "(call $lua_index\n");
     emit_indent(c, depth + 1);
     wat_append(c->w, "(local.get $tmp_any)\n");
     emit_string_literal(c, method, method_len, depth + 1);
     emit_indent(c, depth + 1);
     wat_appendf(c->w, "(i32.const %d)\n", line);
+    if (mic >= 0) {
+        emit_indent(c, depth + 1);
+        wat_appendf(c->w, "(global.get $mic_%d)\n", mic);
+    }
     emit_indent(c, depth);
     wat_append(c->w, ")\n");
 }
@@ -1717,13 +1740,16 @@ static void emit_index_expr(CG *c, const Expr *e, int depth) {
      * and hits the array part directly. */
     if (e->as.index.key->kind == EXPR_STRING && e->as.index.key->as.s.len <= KSTR_MAX) {
         /* `t.name` / `t["lit"]`: the hoisted key global goes straight to the
-         * hash part (strings never live in the array part). */
+         * hash part (strings never live in the array part), through the
+         * site's inline cache when the specializer is on. */
+        char icb[48];
+        const char *ic = ic_new(c, icb, sizeof icb);
         emit_indent(c, depth);
-        wat_append(c->w, "(call $lua_index_sk\n");
+        wat_append(c->w, ic ? "(call $lua_index_ic\n" : "(call $lua_index_sk\n");
         emit_expr(c, e->as.index.table, depth + 1);
         emit_string_literal(c, e->as.index.key->as.s.bytes, e->as.index.key->as.s.len, depth + 1);
         emit_indent(c, depth + 1);
-        wat_appendf(c->w, "(i32.const %d)\n", e->line);
+        wat_appendf(c->w, "(i32.const %d)%s%s\n", e->line, ic ? " " : "", ic ? ic : "");
         emit_indent(c, depth);
         wat_append(c->w, ")\n");
         return;
@@ -3221,9 +3247,12 @@ static void emit_maybe_lower(CG *c, const Expr *e, const MCell *d, int depth) {
         int kmaybe = !kstr && !kint && key->kind == EXPR_VAR && key->as.var.kind == VAR_LOCAL &&
                      slot_is_maybe(c, key->as.var.idx);
         if (kstr || kint || kmaybe) {
+            char icb[48];
+            const char *ic = kstr ? ic_new(c, icb, sizeof icb) : NULL;
             emit_indent(c, depth);
-            wat_append(c->w, kstr ? "(call $lua_index_sk_cell\n" : kint ? "(call $lua_index_ik_cell\n"
-                                                                        : "(call $lua_index_mk_cell\n");
+            wat_append(c->w, kstr   ? (ic ? "(call $lua_index_ic_cell\n" : "(call $lua_index_sk_cell\n")
+                             : kint ? "(call $lua_index_ik_cell\n"
+                                    : "(call $lua_index_mk_cell\n");
             emit_expr(c, e->as.index.table, depth + 1);
             if (kstr) {
                 emit_string_literal(c, key->as.s.bytes, key->as.s.len, depth + 1);
@@ -3235,7 +3264,7 @@ static void emit_maybe_lower(CG *c, const Expr *e, const MCell *d, int depth) {
                 wat_appendf(c->w, "%s %s %s %s\n", kc.t, kc.i, kc.f, kc.b);
             }
             emit_indent(c, depth + 1);
-            wat_appendf(c->w, "(i32.const %d)\n", e->line);
+            wat_appendf(c->w, "(i32.const %d)%s%s\n", e->line, ic ? " " : "", ic ? ic : "");
             emit_indent(c, depth);
             wat_append(c->w, ")\n");
             emit_indent(c, depth);
@@ -4015,23 +4044,29 @@ enum { SK_STR,
  * dispatches __newindex. */
 static void emit_index_store_from(CG *c, const char *tb, int kkind, const char *kb, const MCell *kc,
                                   const MCell *vc, const char *vb, int depth) {
-    char box[256];
+    char box[256], icb[48];
     if (vc) snprintf(box, sizeof box, "(call $box_num %s %s %s %s)", vc->t, vc->i, vc->f, vc->b);
     else snprintf(box, sizeof box, "%s", vb);
+    /* a constant-key store goes through one inline cache for both forms */
+    const char *ic = kkind == SK_STR ? ic_new(c, icb, sizeof icb) : NULL;
     emit_indent(c, depth);
     if (vc && kkind != SK_ANY) {
         if (kkind == SK_MAYBE)
             wat_appendf(c->w, "(if (i32.and (i32.eq %s (i32.const 2)) (i32.eq %s (i32.const 1)))\n", vc->t, kc->t);
         else wat_appendf(c->w, "(if (i32.eq %s (i32.const 2))\n", vc->t);
         emit_indent(c, depth + 1);
-        if (kkind == SK_STR) wat_appendf(c->w, "(then (call $lua_tabset_sk_f %s %s %s))\n", tb, kb, vc->f);
+        if (kkind == SK_STR && ic) wat_appendf(c->w, "(then (call $lua_tabset_ic_f %s %s %s %s))\n", ic, tb, kb, vc->f);
+        else if (kkind == SK_STR) wat_appendf(c->w, "(then (call $lua_tabset_sk_f %s %s %s))\n", tb, kb, vc->f);
         else wat_appendf(c->w, "(then (call $lua_tabset_ik_f %s %s %s))\n", tb, kc->i, vc->f);
         emit_indent(c, depth + 1);
         wat_append(c->w, "(else ");
         depth = 0; /* the boxed store below continues this line */
     }
     switch (kkind) {
-    case SK_STR: wat_appendf(c->w, "(call $lua_tabset_sk %s %s %s)", tb, kb, box); break;
+    case SK_STR:
+        if (ic) wat_appendf(c->w, "(call $lua_tabset_ic %s %s %s %s)", ic, tb, kb, box);
+        else wat_appendf(c->w, "(call $lua_tabset_sk %s %s %s)", tb, kb, box);
+        break;
     case SK_INT: wat_appendf(c->w, "(call $lua_tabset_ik %s %s %s)", tb, kc->i, box); break;
     case SK_MAYBE:
         wat_appendf(c->w, "(call $lua_tabset_mk %s %s %s %s %s %s)", tb, kc->t, kc->i, kc->f, kc->b, box);
@@ -6850,6 +6885,13 @@ int codegen_module(const ParseResult *pr, const char *src_name,
     emit_kstr_globals(&c);
     for (int i = 0; i < c.n_ctor_shapes; i++)
         wat_appendf(out, "  (global $cshape_%d (mut (ref null $Shape)) (ref.null $Shape))\n", i);
+    for (int i = 0; i < c.n_ics; i++)
+        wat_appendf(out, "  (global $ic_%d (ref $IC) (struct.new $IC (ref.null $Shape) (i32.const 0)))\n", i);
+    for (int i = 0; i < c.n_mics; i++)
+        wat_appendf(out,
+                    "  (global $mic_%d (ref $MIC) (struct.new $MIC (ref.null $Shape) (ref.null $Shape) (i32.const 0)"
+                    " (ref.null $LuaTable) (ref.null $Shape) (i32.const 0)))\n",
+                    i);
     emit_data_segment(&c);
 
     wat_append(out, ")\n");

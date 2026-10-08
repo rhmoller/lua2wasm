@@ -322,6 +322,23 @@ static MunitResult test_ctor_shape(const MunitParameter params[], void *fixture)
     return MUNIT_OK;
 }
 
+/* Constant-key reads/writes and method lookups go through per-site inline
+ * caches ($ic_N / $mic_N) at the default optimization level. */
+static MunitResult test_inline_caches(const MunitParameter params[], void *fixture) {
+    (void)params; (void)fixture;
+    char *m = main_func_wat("local o = {x = 1}\n"
+                            "o.x = o.x + 1\n"
+                            "o.y = 'a'\n"
+                            "print(o:get())\n");
+    munit_assert_not_null(strstr(m, "$lua_index_ic"));
+    munit_assert_not_null(strstr(m, "$lua_tabset_ic"));
+    munit_assert_not_null(strstr(m, "$lua_method_ic"));
+    munit_assert_null(strstr(m, "$lua_index_sk"));
+    munit_assert_null(strstr(m, "$lua_tabset_sk"));
+    free(m);
+    return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
     { "/emits_expected",       test_emits_expected,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
     { "/boxed_fallback_o0",    test_emits_boxed_fallback_o0, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -333,6 +350,7 @@ static MunitTest tests[] = {
     { "/key_local_maybe_typed", test_key_local_maybe_typed, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
     { "/dynamic_call_fast",    test_dynamic_call_fast,      NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
     { "/ctor_shape",           test_ctor_shape,             NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+    { "/inline_caches",        test_inline_caches,          NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
     { NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 };
 

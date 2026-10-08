@@ -144,3 +144,4 @@ pass	array_holes	nil holes in the array part: reads/__index, __newindex, travers
 pass	dynamic_calls	single-value dynamic calls: arity adjust, varargs, truncation, __call, tail calls, error levels, metamethods
 pass	table_shapes	shared key layouts never leak: diverging records, deletes, dictionary mode, mixed keys, float fields, metatables, churn
 pass	table_ctor_shapes	constructors on cached layouts: nil/duplicate/computed keys, positional mix, splice, floats, growth
+pass	inline_caches	field/method inline caches never serve stale slots: shape changes, nil slots, compaction, method/metatable swaps
