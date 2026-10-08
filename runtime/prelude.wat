@@ -1017,38 +1017,30 @@
 
   ;; --- string conversion + concat ---
   (func $int_to_bytes (param $v i64) (result (ref $LuaArr))
-    (local $neg i32)
-    (local $tmp (ref $LuaArr)) (local $n i32)
-    (local $out (ref $LuaArr))
-    (local $i i32) (local $j i32) (local $d i32) (local $total i32)
+    (local $neg i32) (local $u i64) (local $n i32) (local $out (ref $LuaArr)) (local $i i32)
+    ;; Magnitude as unsigned (so mininteger's negation is exact), its digit
+    ;; count, then the digits written backwards into the one result array.
+    (local.set $u (local.get $v))
     (if (i64.lt_s (local.get $v) (i64.const 0))
       (then
         (local.set $neg (i32.const 1))
-        (local.set $v (i64.sub (i64.const 0) (local.get $v)))))
-    (local.set $tmp (array.new $LuaArr (i32.const 0) (i32.const 21)))
-    (loop $lp
-      (local.set $d (i32.wrap_i64 (i64.rem_u (local.get $v) (i64.const 10))))
-      (local.set $v (i64.div_u (local.get $v) (i64.const 10)))
-      (array.set $LuaArr (local.get $tmp) (local.get $n)
-        (i32.add (local.get $d) (i32.const 48)))
+        (local.set $u (i64.sub (i64.const 0) (local.get $v)))))
+    (local.set $n (i32.const 1))
+    (block $counted (loop $cnt
+      (br_if $counted (i64.lt_u (local.get $u) (i64.const 10)))
+      (local.set $u (i64.div_u (local.get $u) (i64.const 10)))
       (local.set $n (i32.add (local.get $n) (i32.const 1)))
-      (br_if $lp (i64.ne (local.get $v) (i64.const 0))))
-    (local.set $total (local.get $n))
-    (if (local.get $neg)
-      (then (local.set $total (i32.add (local.get $total) (i32.const 1)))))
-    (local.set $out (array.new $LuaArr (i32.const 0) (local.get $total)))
-    (if (local.get $neg)
-      (then
-        (array.set $LuaArr (local.get $out) (i32.const 0) (i32.const 45))
-        (local.set $j (i32.const 1))))
-    (local.set $i (i32.sub (local.get $n) (i32.const 1)))
-    (block $done (loop $cp
-      (br_if $done (i32.lt_s (local.get $i) (i32.const 0)))
-      (array.set $LuaArr (local.get $out) (local.get $j)
-        (array.get_u $LuaArr (local.get $tmp) (local.get $i)))
-      (local.set $j (i32.add (local.get $j) (i32.const 1)))
+      (br $cnt)))
+    (local.set $out (array.new $LuaArr (i32.const 45) (i32.add (local.get $n) (local.get $neg))))
+    (local.set $u (if (result i64) (local.get $neg)
+      (then (i64.sub (i64.const 0) (local.get $v))) (else (local.get $v))))
+    (local.set $i (i32.sub (i32.add (local.get $n) (local.get $neg)) (i32.const 1)))
+    (loop $lp
+      (array.set $LuaArr (local.get $out) (local.get $i)
+        (i32.add (i32.wrap_i64 (i64.rem_u (local.get $u) (i64.const 10))) (i32.const 48)))
+      (local.set $u (i64.div_u (local.get $u) (i64.const 10)))
       (local.set $i (i32.sub (local.get $i) (i32.const 1)))
-      (br $cp)))
+      (br_if $lp (i64.ne (local.get $u) (i64.const 0))))
     (local.get $out))
 
   ;; Float-to-bytes via host_fmt kind=6 (Lua tostring style: "1.0" for
@@ -1228,6 +1220,64 @@
     (array.copy $LuaArr $LuaArr
       (local.get $out) (local.get $na)
       (local.get $sb)  (i32.const 0) (local.get $nb))
+    (struct.new $LuaString (local.get $out) (i32.const 0)))
+
+  ;; `a .. b .. c` / `a .. b .. c .. d` in one allocation: codegen flattens a
+  ;; right-nested chain, whose operands are already evaluated left to right.
+  ;; When one isn't a string or number the chain is concatenated pairwise from
+  ;; the right, as reference Lua does, so __concat sees the same calls.
+  (func $lua_concat3 (param $a anyref) (param $b anyref) (param $c anyref) (result anyref)
+    (local $sa (ref $LuaArr)) (local $sb (ref $LuaArr)) (local $sc (ref $LuaArr))
+    (local $out (ref $LuaArr)) (local $n i64)
+    (if (i32.eqz (i32.and (call $is_concatable (local.get $a))
+                          (i32.and (call $is_concatable (local.get $b)) (call $is_concatable (local.get $c)))))
+      (then (return (call $lua_concat (local.get $a) (call $lua_concat (local.get $b) (local.get $c))))))
+    (local.set $sa (call $concat_bytes (local.get $a)))
+    (local.set $sb (call $concat_bytes (local.get $b)))
+    (local.set $sc (call $concat_bytes (local.get $c)))
+    (local.set $n (i64.add (i64.extend_i32_u (array.len (local.get $sa)))
+                  (i64.add (i64.extend_i32_u (array.len (local.get $sb)))
+                           (i64.extend_i32_u (array.len (local.get $sc))))))
+    (if (i64.gt_u (local.get $n) (i64.const 2147483647))
+      (then (call $throw_lit (i32.const 297) (i32.const 9))))     ;; "too large"
+    (local.set $out (array.new $LuaArr (i32.const 0) (i32.wrap_i64 (local.get $n))))
+    (array.copy $LuaArr $LuaArr (local.get $out) (i32.const 0)
+      (local.get $sa) (i32.const 0) (array.len (local.get $sa)))
+    (array.copy $LuaArr $LuaArr (local.get $out) (array.len (local.get $sa))
+      (local.get $sb) (i32.const 0) (array.len (local.get $sb)))
+    (array.copy $LuaArr $LuaArr (local.get $out)
+      (i32.add (array.len (local.get $sa)) (array.len (local.get $sb)))
+      (local.get $sc) (i32.const 0) (array.len (local.get $sc)))
+    (struct.new $LuaString (local.get $out) (i32.const 0)))
+  (func $lua_concat4 (param $a anyref) (param $b anyref) (param $c anyref) (param $d anyref) (result anyref)
+    (local $sa (ref $LuaArr)) (local $sb (ref $LuaArr)) (local $sc (ref $LuaArr)) (local $sd (ref $LuaArr))
+    (local $out (ref $LuaArr)) (local $n i64) (local $p i32)
+    (if (i32.eqz (i32.and (i32.and (call $is_concatable (local.get $a)) (call $is_concatable (local.get $b)))
+                          (i32.and (call $is_concatable (local.get $c)) (call $is_concatable (local.get $d)))))
+      (then (return (call $lua_concat (local.get $a)
+        (call $lua_concat (local.get $b) (call $lua_concat (local.get $c) (local.get $d)))))))
+    (local.set $sa (call $concat_bytes (local.get $a)))
+    (local.set $sb (call $concat_bytes (local.get $b)))
+    (local.set $sc (call $concat_bytes (local.get $c)))
+    (local.set $sd (call $concat_bytes (local.get $d)))
+    (local.set $n (i64.add (i64.add (i64.extend_i32_u (array.len (local.get $sa)))
+                                    (i64.extend_i32_u (array.len (local.get $sb))))
+                           (i64.add (i64.extend_i32_u (array.len (local.get $sc)))
+                                    (i64.extend_i32_u (array.len (local.get $sd))))))
+    (if (i64.gt_u (local.get $n) (i64.const 2147483647))
+      (then (call $throw_lit (i32.const 297) (i32.const 9))))     ;; "too large"
+    (local.set $out (array.new $LuaArr (i32.const 0) (i32.wrap_i64 (local.get $n))))
+    (array.copy $LuaArr $LuaArr (local.get $out) (i32.const 0)
+      (local.get $sa) (i32.const 0) (array.len (local.get $sa)))
+    (local.set $p (array.len (local.get $sa)))
+    (array.copy $LuaArr $LuaArr (local.get $out) (local.get $p)
+      (local.get $sb) (i32.const 0) (array.len (local.get $sb)))
+    (local.set $p (i32.add (local.get $p) (array.len (local.get $sb))))
+    (array.copy $LuaArr $LuaArr (local.get $out) (local.get $p)
+      (local.get $sc) (i32.const 0) (array.len (local.get $sc)))
+    (local.set $p (i32.add (local.get $p) (array.len (local.get $sc))))
+    (array.copy $LuaArr $LuaArr (local.get $out) (local.get $p)
+      (local.get $sd) (i32.const 0) (array.len (local.get $sd)))
     (struct.new $LuaString (local.get $out) (i32.const 0)))
 
   ;; --- tables (open-addressing hash index over dense key/value arrays) ---

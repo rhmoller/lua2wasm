@@ -1106,6 +1106,19 @@ static void emit_truthy(CG *c, const Expr *e, int depth) {
     wat_append(c->w, "(call $lua_truthy)\n");
 }
 
+/* Concatenate `parts[0..k)` (already in source order): up to four at once
+ * ($lua_concat / 3 / 4), a longer chain as its first three plus the rest. */
+static void emit_concat_parts(CG *c, const Expr *const *parts, int k, int depth) {
+    emit_indent(c, depth);
+    wat_append(c->w, k == 2 ? "(call $lua_concat\n" : k == 3 ? "(call $lua_concat3\n"
+                                                             : "(call $lua_concat4\n");
+    int direct = k <= 4 ? k : 3;
+    for (int i = 0; i < direct; i++) emit_expr(c, parts[i], depth + 1);
+    if (k > 4) emit_concat_parts(c, parts + 3, k - 3, depth + 1);
+    emit_indent(c, depth);
+    wat_append(c->w, ")\n");
+}
+
 static void emit_binop(CG *c, const Expr *e, int depth) {
     BinOp op = e->as.binop.op;
     if (op == BIN_AND || op == BIN_OR) {
@@ -1169,6 +1182,23 @@ static void emit_binop(CG *c, const Expr *e, int depth) {
         emit_cmp_i32(c, e, depth + 1, ck);
         emit_indent(c, depth);
         wat_append(c->w, ")\n");
+        return;
+    }
+    if (op == BIN_CONCAT) {
+        /* `a .. b .. c ...` parses right-nested; flatten the unparenthesized
+         * right spine so the whole chain is built in one allocation. (A
+         * parenthesized `(a .. b) .. c` keeps its grouping: with __concat
+         * the order of the pairwise calls is observable.) */
+        const Expr *parts[64];
+        int k = 0;
+        const Expr *cur = e;
+        while (cur->kind == EXPR_BINOP && cur->as.binop.op == BIN_CONCAT && (cur == e || !cur->paren) &&
+               k < 63) {
+            parts[k++] = cur->as.binop.lhs;
+            cur = cur->as.binop.rhs;
+        }
+        parts[k++] = cur;
+        emit_concat_parts(c, parts, k, depth);
         return;
     }
     const char *helper = binop_helper(op);

@@ -352,6 +352,21 @@ static MunitResult test_type_names_shared(const MunitParameter params[], void *f
     return MUNIT_OK;
 }
 
+/* A right-nested `..` chain is built by one n-ary concatenation; a
+ * parenthesized left operand keeps its own pairwise concatenation. */
+static MunitResult test_concat_flatten(const MunitParameter params[], void *fixture) {
+    (void)params; (void)fixture;
+    char *m = main_func_wat("local a, b = 'x', 'y'\n"
+                            "print(a .. b .. a .. b)\n");
+    munit_assert_not_null(strstr(m, "$lua_concat4"));
+    free(m);
+    m = main_func_wat("local a, b = 'x', 'y'\n"
+                      "print((a .. b) .. a)\n");
+    munit_assert_null(strstr(m, "$lua_concat3"));
+    free(m);
+    return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
     { "/emits_expected",       test_emits_expected,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
     { "/boxed_fallback_o0",    test_emits_boxed_fallback_o0, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -365,6 +380,7 @@ static MunitTest tests[] = {
     { "/ctor_shape",           test_ctor_shape,             NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
     { "/inline_caches",        test_inline_caches,          NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
     { "/type_names_shared",    test_type_names_shared,      NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+    { "/concat_flatten",       test_concat_flatten,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
     { NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 };
 
