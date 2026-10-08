@@ -217,7 +217,7 @@ This project will be considered "complete enough" when:
 - New language features land behind an end-to-end fixture before they land
   as syntax in the parser. "If you can't print it, you didn't build it."
 - The runtime prelude is `runtime/prelude.wat` — hand-written WAT, embedded
-  into the compiler via C23 `#embed`. Editing it re-links `codegen.c`.
+  into the compiler via C23 `#embed`. Editing it re-links `src/codegen/module.c`.
 - Phase boundaries are commitments to the *user*, not handcuffs. If a small
   feature obviously belongs with the current phase, it lands in the current
   phase.

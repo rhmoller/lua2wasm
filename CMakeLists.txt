@@ -16,19 +16,24 @@ set(COMPILER_SOURCES
     src/lexer.c
     src/parser.c
     src/wat_builder.c
-    src/codegen.c
+    src/codegen/strings.c
+    src/codegen/analysis.c
+    src/codegen/expr.c
+    src/codegen/maybe.c
+    src/codegen/stmt.c
+    src/codegen/module.c
     src/builtins.c
     src/xalloc.c
 )
 
 add_library(lua2wasm_core STATIC ${COMPILER_SOURCES})
 target_include_directories(lua2wasm_core PUBLIC src)
-# `#embed "prelude.wat"` in codegen.c — clang's #embed search uses its own
+# `#embed "prelude.wat"` in codegen/module.c — clang's #embed search uses its own
 # --embed-dir= flag, not -I. Point it at runtime/ so both the native build and
 # the freestanding wasm build (scripts/build-wasm.sh) find it.
 target_compile_options(lua2wasm_core PRIVATE --embed-dir=${CMAKE_SOURCE_DIR}/runtime)
 # Re-link when the embedded prelude changes.
-set_source_files_properties(src/codegen.c PROPERTIES
+set_source_files_properties(src/codegen/module.c PROPERTIES
     OBJECT_DEPENDS ${CMAKE_SOURCE_DIR}/runtime/prelude.wat)
 
 # wat2wasm: a standalone WAT -> wasm binary assembler. Self-contained (no
@@ -326,11 +331,12 @@ add_test(
 find_program(CLANG_FORMAT NAMES clang-format)
 if(CLANG_FORMAT)
     file(GLOB FORMAT_SOURCES CONFIGURE_DEPENDS
-        ${CMAKE_SOURCE_DIR}/src/*.c ${CMAKE_SOURCE_DIR}/src/*.h)
+        ${CMAKE_SOURCE_DIR}/src/*.c ${CMAKE_SOURCE_DIR}/src/*.h
+        ${CMAKE_SOURCE_DIR}/src/codegen/*.c ${CMAKE_SOURCE_DIR}/src/codegen/*.h)
     add_custom_target(format
         COMMAND ${CLANG_FORMAT} -i ${FORMAT_SOURCES}
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-        COMMENT "clang-format -i src/*.{c,h}")
+        COMMENT "clang-format -i src/*.{c,h} src/codegen/*.{c,h}")
     add_custom_target(format-check
         COMMAND ${CLANG_FORMAT} --dry-run -Werror ${FORMAT_SOURCES}
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}

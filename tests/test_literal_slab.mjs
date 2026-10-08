@@ -1,7 +1,7 @@
 // node --test: every literal the runtime prelude addresses by absolute offset
 // into the $str_data slab — the `(i32.const off) (i32.const len)` operands of
 // $throw_lit / $throw_lit_at / $for_error and of `array.new_data … $str_data`
-// — must lie inside one entry of LITERAL_SLAB in src/codegen.c. The slab's own
+// — must lie inside one entry of LITERAL_SLAB in src/codegen/module.c. The slab's own
 // consistency (offsets contiguous, bytes matching LITERAL_PREFIX) is checked
 // by verify_literal_slab at compile time; this closes the other side: an edit
 // that shifts the slab under an offset the prelude still uses.
@@ -11,7 +11,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
-const codegen = readFileSync(`${root}src/codegen.c`, "utf8");
+const codegen = readFileSync(`${root}src/codegen/module.c`, "utf8");
 const prelude = readFileSync(`${root}runtime/prelude.wat`, "utf8");
 
 function slabEntries() {

@@ -285,7 +285,7 @@ Before opening the prelude for a new milestone, jot down:
 
 4. **Integration points.** Which files? `runtime/prelude.wat` always;
    `src/builtins.c` (registration); `runtime/host.mjs` (if a host
-   helper); `src/codegen.c` (if a new global or pre-declared name);
+   helper); `src/codegen/` (if a new global or pre-declared name);
    `src/parser.c` (if a new implicit global like `utf8`).
 
 5. **Name-clash check.** New library entry whose Lua name matches an

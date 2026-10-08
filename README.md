@@ -469,7 +469,8 @@ flowchart LR
 | `src/lexer.{c,h}`        | Hand-written lexer for the full Lua 5.5 lexical surface                                          |
 | `src/parser.{c,h}`       | Recursive-descent + Pratt expressions; scope and upvalue analysis                                |
 | `src/ast.{c,h}`          | Tagged-union AST with a bump-allocator pool                                                      |
-| `src/codegen.{c,h}`      | Emits WAT to a `WatBuilder`; embeds a static runtime prelude                                     |
+| `src/codegen.h`          | The code generator's entry point (`codegen_module`)                                              |
+| `src/codegen/`           | The code generator: emits WAT to a `WatBuilder` (analyses, expressions, statements, module assembly); embeds the runtime prelude |
 | `src/builtins.{c,h}`     | Single source of truth for builtin names → wasm function symbols                                 |
 | `src/wat_builder.{c,h}`  | Dynamic string buffer for WAT emission                                                            |
 | `src/wat2wasm.{c,h}`     | Self-contained WAT→wasm binary assembler (library + standalone `wat2wasm` CLI; no Binaryen)      |

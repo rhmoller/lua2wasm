@@ -22,3 +22,10 @@ void *xrealloc(void *p, size_t n) {
     if (!q) die_oom("realloc", n);
     return q;
 }
+
+void *xcalloc(size_t n, size_t size) {
+    if (n == 0) n = 1;
+    void *p = calloc(n, size);
+    if (!p) die_oom("calloc", n * size);
+    return p;
+}

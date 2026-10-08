@@ -1,4 +1,4 @@
-;; Auto-extracted from codegen.c. Edit here; codegen.c #embeds it.
+;; The runtime prelude: src/codegen/module.c #embeds it into every module.
   ;; --- value-rep types ---
   (type $LuaArr    (array (mut i8)))
   ;; $hash caches the FNV-1a hash of $bytes (0 = not yet computed; a computed
@@ -1507,7 +1507,7 @@
 
   ;; Cached FNV-1a hash of a string (see the $hash field note on $LuaString):
   ;; computed once by $str_hash_compute. Codegen precomputes the same function
-  ;; for constant strings (kstr_hash in codegen.c) — keep the two in sync.
+  ;; for constant strings (kstr_hash in src/codegen/strings.c) — keep the two in sync.
   (func $str_hash (param $s (ref $LuaString)) (result i32)
     (local $h i32)
     (local.set $h (struct.get $LuaString $hash (local.get $s)))
@@ -3696,8 +3696,8 @@
   ;; fs_read_num). $fmt_buf is the shared landing buffer for both, capped
   ;; at 16384 bytes; "a" and large N-byte reads chunk through it so a file
   ;; bigger than the buffer doesn't overrun it. The 16384 here must match
-  ;; LUA_FMT_BUF_CAP (codegen.c, which allocates $fmt_buf) and FMT_BUF_CAP
-  ;; (host-bindings.mjs).
+  ;; LUA_FMT_BUF_CAP (src/codegen/internal.h; codegen_module allocates
+  ;; $fmt_buf) and FMT_BUF_CAP (host-bindings.mjs).
 
   (func $read_src_bytes (param $fd i32) (param $mode i32) (param $count i32) (result i32)
     (if (result i32) (i32.lt_s (local.get $fd) (i32.const 0))

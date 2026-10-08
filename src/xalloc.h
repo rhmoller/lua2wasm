@@ -10,5 +10,7 @@
  * recovery strategy later (e.g. setjmp/longjmp out to the CLI). */
 void *xmalloc(size_t n);
 void *xrealloc(void *p, size_t n);
+/* Zeroed array of `n` elements (at least one, so n == 0 is fine). */
+void *xcalloc(size_t n, size_t size);
 
 #endif
