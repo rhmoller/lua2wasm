@@ -63,7 +63,7 @@ fi
 TARGET=(--target=wasm32-unknown-unknown -ffreestanding -nostdlib -mexception-handling)
 SJLJ=(-mllvm -wasm-enable-sjlj)
 INCLUDE=(-Isrc -Isrc/freestanding/include)
-# #embed "prelude.wat" in codegen/module.c resolves against --embed-dir, not -I.
+# #embed "prelude/*.wat" in codegen/module.c resolves against --embed-dir, not -I.
 EMBED=(--embed-dir=runtime)
 
 OBJ="$OUT/obj"

@@ -241,7 +241,7 @@ in `wasm-as` because the extra close ended the module early.
   per-line-depth awk:
 
   ```sh
-  awk '/^  \(func \$NAME/,/^  \(func \$NEXT/' prelude.wat \
+  awk '/^  \(func \$NAME/,/^  \(func \$NEXT/' runtime/prelude/FILE.wat \
     | awk '{for(i=1;i<=length;i++){c=substr($0,i,1);if(c=="(")d++;else if(c==")")d--}print d,$0}'
   ```
 
@@ -283,7 +283,7 @@ Before opening the prelude for a new milestone, jot down:
    `call_ref`? `try_table`? `array.new_data` from a strpool slot?
    `i31ref` for small ints? Pick deliberately.
 
-4. **Integration points.** Which files? `runtime/prelude.wat` always;
+4. **Integration points.** Which files? `runtime/prelude/` always;
    `src/builtins.c` (registration); `runtime/host.mjs` (if a host
    helper); `src/codegen/` (if a new global or pre-declared name);
    `src/parser.c` (if a new implicit global like `utf8`).

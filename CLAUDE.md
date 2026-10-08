@@ -134,8 +134,11 @@ counterexample, **shrink it and check it in as a `tests/diff` case** (the
 - C23, four-space indents, enforced by clang-format (`.clang-format`). Run
   `cmake --build build --target format` (or enable `.githooks/pre-commit` via
   `git config core.hooksPath .githooks`). Keep `-Wall -Wextra -Wpedantic` clean.
-- The runtime prelude is `runtime/prelude.wat`, embedded via C23 `#embed` — edit
-  it as WAT, not as a C string. Editing it re-links `src/codegen/module.c`.
+- The runtime prelude is `runtime/prelude/*.wat` (one file per topic: types, host
+  imports, operators, tables, indexing, calls, errors, each library, ...),
+  embedded via C23 `#embed` in the order `src/codegen/module.c` lists — edit it
+  as WAT, not as a C string. A new file must be added to that list. Editing any
+  of them re-links `src/codegen/module.c`.
 - Reuse codegen helpers (`emit_args_array`, etc.) over re-open-coding multi-value
   patterns.
 - Error messages: match reference Lua **semantically**, not 1:1 on text/chunk-name.
@@ -151,13 +154,14 @@ counterexample, **shrink it and check it in as a `tests/diff` case** (the
 | `src/parser.{c,h}`  | recursive-descent + Pratt; scope & upvalue analysis |
 | `src/ast.{c,h}`     | tagged-union AST, bump-allocator pool |
 | `src/codegen.h`     | the code generator's entry point, `codegen_module` |
-| `src/codegen/`      | the code generator (emits WAT via `WatBuilder`): `internal.h` (the `CG` context, shared types, cross-module API), `strings.c` (constant strings), `analysis.c` (slot analyses, bindings, signatures), `expr.c`, `maybe.c` (maybe-typed lowering), `stmt.c` (statements, function bodies), `module.c` (module assembly; embeds `runtime/prelude.wat`) |
+| `src/codegen/`      | the code generator (emits WAT via `WatBuilder`): `internal.h` (the `CG` context, shared types, cross-module API), `strings.c` (constant strings), `analysis.c` (slot analyses, bindings, signatures), `expr.c`, `maybe.c` (maybe-typed lowering), `stmt.c` (statements, function bodies), `module.c` (module assembly; embeds `runtime/prelude/`) |
 | `src/builtins.{c,h}`| single source of truth: builtin name → wasm symbol |
 | `src/wat_builder.{c,h}` | dynamic WAT string buffer |
 | `src/wat2wasm.{c,h}`| self-contained WAT→wasm binary assembler (lib + `wat2wasm` CLI) |
 | `src/xalloc.{c,h}`  | OOM-aborting malloc/realloc wrappers used across the compiler |
 | `src/wasm_entry.c`  | `export_name` shim for the freestanding wasm build (playground / embed) |
 | `src/freestanding/` | minimal libc for that build: mem/str/ctype, allocator, vsnprintf, vendored dtoa + Wasm-EH setjmp shim |
+| `runtime/prelude/`  | the runtime, as hand-written WAT embedded into every module |
 | `runtime/host.mjs`  | reference host that runs a compiled module |
 | `runtime/lua2wasm-wasm.mjs` | host glue for the freestanding compiler module |
 | `runtime/playground.html` | in-browser editor + compile + run (plain-clang wasm, no Emscripten) |

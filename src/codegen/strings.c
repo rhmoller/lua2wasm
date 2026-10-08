@@ -121,7 +121,7 @@ void strpool_free(StrPool *p) {
     p->idx = NULL;
 }
 
-/* FNV-1a 32-bit — the same function as $str_hash in runtime/prelude.wat
+/* FNV-1a 32-bit — the same function as $str_hash in runtime/prelude/tables.wat
  * (0 is stored as 1 there, so mirror that). A constant's hash is baked into
  * its global so the runtime never has to compute it. */
 int32_t kstr_hash(const char *bytes, size_t len) {

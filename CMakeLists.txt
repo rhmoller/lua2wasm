@@ -28,13 +28,14 @@ set(COMPILER_SOURCES
 
 add_library(lua2wasm_core STATIC ${COMPILER_SOURCES})
 target_include_directories(lua2wasm_core PUBLIC src)
-# `#embed "prelude.wat"` in codegen/module.c — clang's #embed search uses its own
+# `#embed "prelude/*.wat"` in codegen/module.c — clang's #embed search uses its own
 # --embed-dir= flag, not -I. Point it at runtime/ so both the native build and
 # the freestanding wasm build (scripts/build-wasm.sh) find it.
 target_compile_options(lua2wasm_core PRIVATE --embed-dir=${CMAKE_SOURCE_DIR}/runtime)
 # Re-link when the embedded prelude changes.
+file(GLOB PRELUDE_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/runtime/prelude/*.wat)
 set_source_files_properties(src/codegen/module.c PROPERTIES
-    OBJECT_DEPENDS ${CMAKE_SOURCE_DIR}/runtime/prelude.wat)
+    OBJECT_DEPENDS "${PRELUDE_SOURCES}")
 
 # wat2wasm: a standalone WAT -> wasm binary assembler. Self-contained (no
 # dependency on lua2wasm_core or the runtime), so it links cleanly into both

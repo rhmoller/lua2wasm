@@ -6,7 +6,7 @@ Testing/
 *.wasm
 *.wat
 # The embedded runtime prelude is checked-in source, not a build artifact.
-!runtime/prelude.wat
+!runtime/prelude/*.wat
 .botface/
 .claude/worktrees/
 .playwright-mcp/

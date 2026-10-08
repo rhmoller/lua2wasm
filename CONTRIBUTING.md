@@ -52,8 +52,9 @@ in the same commit.
   `cmake --build build --target format` before committing, or enable the
   bundled hook once with `git config core.hooksPath .githooks`. Hand-aligned
   data tables are fenced with `/* clang-format off */` — leave those fences in.
-- The runtime prelude lives in `runtime/prelude.wat` and is embedded
-  via C23 `#embed`. Edit it as WAT, not as a C string.
+- The runtime prelude lives in `runtime/prelude/*.wat` (one file per topic)
+  and is embedded via C23 `#embed`; `src/codegen/module.c` lists the files.
+  Edit it as WAT, not as a C string.
 - Codegen helpers like `emit_args_array` exist to be reused — prefer
   them over open-coding the same multi-value pattern again.
 - No emoji in source or commit messages unless asked.

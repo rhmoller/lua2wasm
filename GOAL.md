@@ -52,7 +52,7 @@ project's signature constraint:
   output keeps everything debuggable; a self-contained WAT→wasm assembler
   (`src/wat2wasm.c`) turns it into a binary module with no external toolchain.
 - **Static prelude.** Runtime helpers (`$lua_add`, `$lua_eq`, `$lua_concat`,
-  string conversion, …) are written as WAT in `runtime/prelude.wat` and
+  string conversion, …) are written as WAT in `runtime/prelude/*.wat` and
   embedded via C23 `#embed`. They are *not* generated per program.
 - **Value representation locked early.** See the table in README. New value
   kinds get added; existing ones do not change shape.
@@ -216,7 +216,7 @@ This project will be considered "complete enough" when:
   *Status* section in the README, and a tagged commit.
 - New language features land behind an end-to-end fixture before they land
   as syntax in the parser. "If you can't print it, you didn't build it."
-- The runtime prelude is `runtime/prelude.wat` — hand-written WAT, embedded
+- The runtime prelude is `runtime/prelude/*.wat` — hand-written WAT, embedded
   into the compiler via C23 `#embed`. Editing it re-links `src/codegen/module.c`.
 - Phase boundaries are commitments to the *user*, not handcuffs. If a small
   feature obviously belongs with the current phase, it lands in the current

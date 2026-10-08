@@ -6,7 +6,7 @@
 
 /* Size of the shared $fmt_buf scratch array (bytes). The runtime chunks
  * large reads/formats through it, so three sites must agree on this number:
- * the allocation in codegen_module, the chunk bounds in runtime/prelude.wat, and
+ * the allocation in codegen_module, the chunk bounds in runtime/prelude/io.wat, and
  * FMT_BUF_CAP in runtime/host-bindings.mjs. */
 #define LUA_FMT_BUF_CAP 16384
 
@@ -14,12 +14,55 @@
  * Static prelude
  * ============================================================ */
 
+/* The runtime, emitted at the head of every module: the .wat files under
+ * runtime/prelude/, one per topic. The types come first and the host imports
+ * second (wasm wants imports before definitions); the rest could come in any
+ * order. */
 static const char PRELUDE[] = {
-#embed "prelude.wat"
-    , '\0'};
+#embed "prelude/types.wat"
+    ,
+#embed "prelude/host.wat"
+    ,
+#embed "prelude/values.wat"
+    ,
+#embed "prelude/arith.wat"
+    ,
+#embed "prelude/tostring.wat"
+    ,
+#embed "prelude/tables.wat"
+    ,
+#embed "prelude/index.wat"
+    ,
+#embed "prelude/control.wat"
+    ,
+#embed "prelude/calls.wat"
+    ,
+#embed "prelude/errors.wat"
+    ,
+#embed "prelude/baselib.wat"
+    ,
+#embed "prelude/io.wat"
+    ,
+#embed "prelude/debug.wat"
+    ,
+#embed "prelude/os.wat"
+    ,
+#embed "prelude/math.wat"
+    ,
+#embed "prelude/tablib.wat"
+    ,
+#embed "prelude/utf8.wat"
+    ,
+#embed "prelude/patterns.wat"
+    ,
+#embed "prelude/string.wat"
+    ,
+#embed "prelude/exports.wat"
+    ,
+    '\0'};
 
 /* The first LITERAL_PREFIX_LEN bytes of $str_data are reserved error
- * messages and field names that prelude.wat addresses by *absolute* offset
+ * messages and field names that the prelude addresses by *absolute* offset
  * (e.g. `$throw_lit (i32.const 430) (i32.const 25)`). The byte map lives in
  * LITERAL_SLAB below; verify_literal_slab() checks that LITERAL_PREFIX and
  * that map agree, so an edit to one without the other fails the build
@@ -30,7 +73,7 @@ static_assert(sizeof(LITERAL_PREFIX) - 1 == LITERAL_PREFIX_LEN,
               "LITERAL_PREFIX_LEN must match the byte length of LITERAL_PREFIX");
 
 /* Executable form of the slab map. Each row is the absolute offset baked
- * into prelude.wat and the bytes that must live there. Offsets are
+ * into the prelude and the bytes that must live there. Offsets are
  * contiguous (each = previous offset + previous length); the trailing
  * comment names the prelude consumer. */
 static const struct {
@@ -953,7 +996,7 @@ int codegen_module(const ParseResult *pr, const char *src_name,
     if (slab_err) {
         snprintf(err, errlen,
                  "codegen: literal slab drift at \"%s\" — LITERAL_PREFIX and "
-                 "the prelude.wat offset map disagree",
+                 "the prelude's offset map disagree",
                  slab_err);
         return 0;
     }

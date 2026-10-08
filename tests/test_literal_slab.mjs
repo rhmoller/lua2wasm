@@ -7,12 +7,16 @@
 // that shifts the slab under an offset the prelude still uses.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const codegen = readFileSync(`${root}src/codegen/module.c`, "utf8");
-const prelude = readFileSync(`${root}runtime/prelude.wat`, "utf8");
+const preludeDir = `${root}runtime/prelude/`;
+const prelude = readdirSync(preludeDir)
+    .filter(f => f.endsWith(".wat"))
+    .map(f => readFileSync(preludeDir + f, "utf8"))
+    .join("\n");
 
 function slabEntries() {
     const start = codegen.indexOf("LITERAL_SLAB[] = {");

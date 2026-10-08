@@ -476,6 +476,7 @@ flowchart LR
 | `src/wat2wasm.{c,h}`     | Self-contained WAT→wasm binary assembler (library + standalone `wat2wasm` CLI; no Binaryen)      |
 | `src/wasm_entry.c`       | Export shim used when the compiler is itself compiled to freestanding wasm (playground / embed)  |
 | `src/freestanding/`      | Minimal libc (mem/str/ctype, allocator, vsnprintf, vendored dtoa + Wasm-EH setjmp shim) for that wasm build |
+| `runtime/prelude/`       | The runtime: hand-written WAT, one file per topic, embedded at the head of every compiled module |
 | `runtime/host.mjs`       | Reference host: instantiates a compiled module and renders `print` output                        |
 | `runtime/lua2wasm-wasm.mjs`| Host glue for the freestanding compiler module (string marshaling over its linear memory)       |
 | `runtime/playground.html`| CodeMirror editor + in-browser compile + built-in wat→wasm + execute                            |
