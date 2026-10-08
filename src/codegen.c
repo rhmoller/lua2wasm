@@ -4608,26 +4608,17 @@ static int for_gen_has_closing(const Stmt *s) {
  * declaration, plus each generic-for closing value), NOT descending into nested
  * function bodies. An upper bound on the simultaneously live count, used to
  * pre-size the $tbc backing array. */
-static int count_fn_close(const Block *b) {
-    int n = count_block_close(b);
+static void count_close_in(const Block *b, void *ctx) {
+    int *n = ctx;
+    *n += count_block_close(b);
     for (size_t i = 0; i < b->count; i++) {
-        const Stmt *s = b->items[i];
-        switch (s->kind) {
-        case STMT_DO: n += count_fn_close(&s->as.do_stmt.body); break;
-        case STMT_WHILE: n += count_fn_close(&s->as.while_stmt.body); break;
-        case STMT_REPEAT: n += count_fn_close(&s->as.repeat.body); break;
-        case STMT_FOR_NUM: n += count_fn_close(&s->as.for_num.body); break;
-        case STMT_FOR_GEN:
-            n += for_gen_has_closing(s) + count_fn_close(&s->as.for_gen.body);
-            break;
-        case STMT_IF:
-            for (size_t a = 0; a < s->as.if_stmt.narms; a++)
-                n += count_fn_close(&s->as.if_stmt.arms[a].body);
-            if (s->as.if_stmt.has_else) n += count_fn_close(&s->as.if_stmt.else_body);
-            break;
-        default: break;
-        }
+        if (b->items[i]->kind == STMT_FOR_GEN) *n += for_gen_has_closing(b->items[i]);
+        for_each_nested_block(b->items[i], count_close_in, ctx);
     }
+}
+static int count_fn_close(const Block *b) {
+    int n = 0;
+    count_close_in(b, &n);
     return n;
 }
 
@@ -5304,11 +5295,10 @@ typedef struct {
 } LiveSet;
 
 static void ts_mark_expr(LiveSet *L, const Expr *e);
-static void ts_mark_stmt(LiveSet *L, const Stmt *s);
+static void ts_mark_stmt(const Stmt *s, void *ctx);
 static int class_for_global(const char *name, size_t name_len); /* defined below */
 static void ts_mark_block(LiveSet *L, const Block *b) {
-    if (!b) return;
-    for (size_t i = 0; i < b->count; i++) ts_mark_stmt(L, b->items[i]);
+    if (b) walk_stmts(b, ts_mark_stmt, L);
 }
 
 static void ts_mark_var(LiveSet *L, VarKind k, int idx) {
@@ -5400,71 +5390,23 @@ static void ts_mark_expr(LiveSet *L, const Expr *e) {
     }
 }
 
-static void ts_mark_stmt(LiveSet *L, const Stmt *s) {
-    if (!s) return;
+static void ts_mark_expr_visit(const Expr *e, void *ctx) { ts_mark_expr(ctx, e); }
+static void ts_mark_stmt(const Stmt *s, void *ctx) {
+    LiveSet *L = ctx;
+    for_each_own_expr(s, ts_mark_expr_visit, L);
     switch (s->kind) {
-    case STMT_LOCAL:
-        for (int i = 0; i < s->as.local.n_values; i++)
-            ts_mark_expr(L, s->as.local.values[i]);
-        break;
     case STMT_ASSIGN:
         for (int i = 0; i < s->as.assign.n_targets; i++) {
             const AssignTarget *t = &s->as.assign.targets[i];
-            if (t->kind == TGT_INDEX) {
-                L->needs_runtime = 1; /* t[k] = v -> __newindex */
-                ts_mark_expr(L, t->as.index.table);
-                ts_mark_expr(L, t->as.index.key);
-            } else {
-                ts_mark_var(L, t->as.var.kind, t->as.var.idx);
-            }
+            if (t->kind == TGT_INDEX) L->needs_runtime = 1; /* t[k] = v -> __newindex */
+            else ts_mark_var(L, t->as.var.kind, t->as.var.idx);
         }
-        for (int i = 0; i < s->as.assign.n_values; i++)
-            ts_mark_expr(L, s->as.assign.values[i]);
         break;
-    case STMT_EXPR: ts_mark_expr(L, s->as.expr_stmt.expr); break;
-    case STMT_IF:
-        for (size_t i = 0; i < s->as.if_stmt.narms; i++) {
-            ts_mark_expr(L, s->as.if_stmt.arms[i].cond);
-            ts_mark_block(L, &s->as.if_stmt.arms[i].body);
-        }
-        if (s->as.if_stmt.has_else)
-            ts_mark_block(L, &s->as.if_stmt.else_body);
-        break;
-    case STMT_WHILE:
-        ts_mark_expr(L, s->as.while_stmt.cond);
-        ts_mark_block(L, &s->as.while_stmt.body);
-        break;
-    case STMT_DO: ts_mark_block(L, &s->as.do_stmt.body); break;
-    case STMT_RETURN:
-        for (int i = 0; i < s->as.return_stmt.n_values; i++)
-            ts_mark_expr(L, s->as.return_stmt.values[i]);
-        break;
-    case STMT_LOCAL_FUNC:
-        ts_mark_block(L, &s->as.local_func.func->body);
-        break;
-    case STMT_FOR_NUM:
-        L->needs_runtime = 1; /* numeric-for bad-bound error path reads $g_src_name */
-        ts_mark_expr(L, s->as.for_num.start);
-        ts_mark_expr(L, s->as.for_num.stop);
-        ts_mark_expr(L, s->as.for_num.step);
-        ts_mark_block(L, &s->as.for_num.body);
-        break;
-    case STMT_FOR_GEN:
-        L->needs_runtime = 1; /* generic-for iterator protocol */
-        for (int i = 0; i < s->as.for_gen.n_exprs; i++)
-            ts_mark_expr(L, s->as.for_gen.exprs[i]);
-        ts_mark_block(L, &s->as.for_gen.body);
-        break;
-    case STMT_REPEAT:
-        ts_mark_block(L, &s->as.repeat.body);
-        ts_mark_expr(L, s->as.repeat.cond);
-        break;
-    case STMT_GLOBAL:
-        L->needs_runtime = 1; /* declares / writes a module global via _G */
-        for (int i = 0; i < s->as.global_decl.n_values; i++)
-            ts_mark_expr(L, s->as.global_decl.values[i]);
-        break;
-    default: break; /* BREAK, GOTO, LABEL — no refs */
+    case STMT_LOCAL_FUNC: ts_mark_block(L, &s->as.local_func.func->body); break;
+    case STMT_FOR_NUM: L->needs_runtime = 1; break; /* the bad-bound error path reads $g_src_name */
+    case STMT_FOR_GEN: L->needs_runtime = 1; break; /* the generic-for iterator protocol */
+    case STMT_GLOBAL: L->needs_runtime = 1; break;  /* declares / writes a module global via _G */
+    default: break;
     }
 }
 
@@ -5812,49 +5754,27 @@ static int expr_writes_table(const Expr *e) {
     default: return 0; /* EXPR_FUNCTION bodies are visited via pr->funcs */
     }
 }
-static int block_writes_table(const Block *b);
-static int stmt_writes_table(const Stmt *s) {
-    if (!s) return 0;
-    switch (s->kind) {
-    case STMT_LOCAL: return exprs_write_table(s->as.local.values, (size_t)s->as.local.n_values);
-    case STMT_ASSIGN:
+static void writes_table_expr(const Expr *e, void *ctx) {
+    int *w = ctx;
+    if (!*w) *w = expr_writes_table(e);
+}
+static void writes_table_stmt(const Stmt *s, void *ctx) {
+    int *w = ctx;
+    if (*w) return;
+    if (s->kind == STMT_GLOBAL && s->as.global_decl.n_values > 0) *w = 1; /* `global x = ...` writes _G */
+    if (s->kind == STMT_ASSIGN)
         for (int i = 0; i < s->as.assign.n_targets; i++) {
             const AssignTarget *t = &s->as.assign.targets[i];
-            if (t->kind == TGT_INDEX) return 1; /* t[k] = v */
-            if (t->kind == TGT_VAR &&
-                (t->as.var.kind == VAR_GLOBAL || t->as.var.kind == VAR_BUILTIN))
-                return 1; /* global write goes through _G */
+            if (t->kind == TGT_INDEX) *w = 1; /* t[k] = v */
+            if (t->kind == TGT_VAR && (t->as.var.kind == VAR_GLOBAL || t->as.var.kind == VAR_BUILTIN))
+                *w = 1; /* global write goes through _G */
         }
-        return exprs_write_table(s->as.assign.values, (size_t)s->as.assign.n_values);
-    case STMT_GLOBAL:
-        return s->as.global_decl.n_values > 0; /* `global x = ...` writes _G */
-    case STMT_EXPR: return expr_writes_table(s->as.expr_stmt.expr);
-    case STMT_RETURN: return exprs_write_table(s->as.return_stmt.values, (size_t)s->as.return_stmt.n_values);
-    case STMT_IF:
-        for (size_t i = 0; i < s->as.if_stmt.narms; i++)
-            if (expr_writes_table(s->as.if_stmt.arms[i].cond) ||
-                block_writes_table(&s->as.if_stmt.arms[i].body))
-                return 1;
-        return s->as.if_stmt.has_else && block_writes_table(&s->as.if_stmt.else_body);
-    case STMT_WHILE:
-        return expr_writes_table(s->as.while_stmt.cond) ||
-               block_writes_table(&s->as.while_stmt.body);
-    case STMT_DO: return block_writes_table(&s->as.do_stmt.body);
-    case STMT_FOR_NUM:
-        return expr_writes_table(s->as.for_num.start) || expr_writes_table(s->as.for_num.stop) ||
-               expr_writes_table(s->as.for_num.step) || block_writes_table(&s->as.for_num.body);
-    case STMT_FOR_GEN:
-        return exprs_write_table(s->as.for_gen.exprs, (size_t)s->as.for_gen.n_exprs) ||
-               block_writes_table(&s->as.for_gen.body);
-    case STMT_REPEAT:
-        return block_writes_table(&s->as.repeat.body) || expr_writes_table(s->as.repeat.cond);
-    default: return 0; /* LOCAL_FUNC body via pr->funcs; BREAK/GOTO/LABEL write nothing */
-    }
+    for_each_own_expr(s, writes_table_expr, w); /* LOCAL_FUNC bodies: via pr->funcs */
 }
 static int block_writes_table(const Block *b) {
-    for (size_t i = 0; i < b->count; i++)
-        if (stmt_writes_table(b->items[i])) return 1;
-    return 0;
+    int w = 0;
+    walk_stmts(b, writes_table_stmt, &w);
+    return w;
 }
 static int program_writes_table(const ParseResult *pr) {
     if (block_writes_table(&pr->main_body)) return 1;
