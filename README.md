@@ -161,23 +161,33 @@ the columns, not the absolutes):
 Those are microbenchmarks over unboxed locals. `scripts/bench.sh` runs a set of
 *realistic* programs (`bench/*.lua`: nbody, binary-trees, fannkuch,
 spectral-norm, a metatable-OO particle sim, string processing, closures, hash
-tables) under `lua5.5`, `luajit` and lua2wasm, checks the outputs match, and
-prints the ratio to reference. Seconds, best of two, Node 24 on one machine:
+tables, and game-logic shapes — an entity system with class hierarchies and a
+state machine, a structure-of-arrays particle system, tile-map A* / flood
+fill, an immutable-vector math library) under `lua5.5`, `luajit` and
+lua2wasm, checks the outputs match, and prints the ratio to reference.
+Seconds, best of two, Node 24 on one machine:
 
 | program (`bench/`) | reference `lua5.5` | lua2wasm | ratio |
 |--------------------|-------------------:|---------:|------:|
-| binarytrees        | 0.36 | **0.22** | 0.6× |
-| spectralnorm       | 0.91 | **0.78** | 0.9× |
-| nbody              | 0.44 | 0.52 | 1.2× |
-| oo                 | 0.46 | 0.62 | 1.35× |
-| hashtab            | 0.10 | 0.15 | 1.5× |
-| fannkuch           | 0.82 | 1.32 | 1.6× |
-| closures           | 0.08 | 0.13 | 1.75× |
+| binarytrees        | 0.37 | **0.21** | 0.6× |
+| spectralnorm       | 0.89 | **0.67** | 0.75× |
+| nbody_arr          | 0.38 | 0.39 | 1.0× |
+| nbody              | 0.44 | 0.46 | 1.05× |
+| tilemap            | 0.30 | 0.33 | 1.1× |
+| entities           | 0.69 | 0.82 | 1.2× |
+| oo                 | 0.47 | 0.57 | 1.25× |
+| vectors            | 1.09 | 1.38 | 1.25× |
+| fannkuch           | 0.83 | 1.13 | 1.4× |
+| closures           | 0.08 | 0.12 | 1.45× |
+| hashtab            | 0.10 | 0.16 | 1.5× |
+| particles          | 0.59 | 1.28 | 2.2× |
 | strings            | 0.07 | 0.24 | 3.5× |
 
 Allocation-heavy and float-array code runs faster than reference (the host GC
-is good); the rest sits between 1.2× and 1.8× of the C interpreter, with
-string processing the outlier. What closed the gap from the 6–10× the
+is good); most of the rest sits between 1.0× and 1.5× of the C interpreter.
+The outliers are string processing and `particles`, whose per-frame list
+compaction punches holes in the strictly dense array part (each one spills
+the array into the hash part). What closed the gap from the 6–10× the
 table-field and string-heavy programs started at:
 
 - **Constant strings are hoisted into module globals** with their hash
@@ -200,6 +210,12 @@ table-field and string-heavy programs started at:
 - **`string.format` parses and renders directives in wasm**; only float
   rendering crosses to the host, and the host takes a native formatting path
   whenever no decimal rounding tie is possible.
+- **Common idioms stay on the fast paths**: `for i = 1, #t` (any limit, settled
+  once at loop entry) runs on an `i64` counter; a float compared with an
+  integer (`x > 0`) compares unboxed, exactly; a local used only as a table
+  key (`local id = alive[i]; life[id]`) is maybe-typed; and multi-target
+  stores (`px[id], py[id] = x, y`) go through the same unboxed setters as
+  single stores instead of staging arrays.
 
 What remains is the table probe itself (struct loads plus a bounds check per
 array touched) and, for strings, host-side pattern matching and the
