@@ -36,10 +36,14 @@ void wat_append(WatBuilder *w, const char *s) {
 void wat_appendf(WatBuilder *w, const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
+    wat_vappendf(w, fmt, ap);
+    va_end(ap);
+}
+
+void wat_vappendf(WatBuilder *w, const char *fmt, va_list ap) {
     va_list ap2;
     va_copy(ap2, ap);
     int needed = vsnprintf(NULL, 0, fmt, ap);
-    va_end(ap);
     if (needed < 0) {
         /* A negative return from vsnprintf is an encoding error — a
          * programming bug in the format string, not a recoverable

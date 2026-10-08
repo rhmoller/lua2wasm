@@ -1,6 +1,7 @@
 #include "codegen.h"
 #include "builtins.h"
 #include "xalloc.h"
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -511,6 +512,22 @@ static void emit_indent(CG *c, int depth) {
     for (int i = 0; i < depth; i++) wat_append(c->w, "  ");
 }
 
+/* One line of WAT at `depth`: the indentation, then `text` (which carries
+ * its own trailing newline, if any). */
+static void emit_line(CG *c, int depth, const char *text) {
+    emit_indent(c, depth);
+    wat_append(c->w, text);
+}
+
+/* printf-style emit_line. */
+[[gnu::format(printf, 3, 4)]] static void emit_linef(CG *c, int depth, const char *fmt, ...) {
+    va_list ap;
+    emit_indent(c, depth);
+    va_start(ap, fmt);
+    wat_vappendf(c->w, fmt, ap);
+    va_end(ap);
+}
+
 static int i31_fits(int64_t v) {
     return v >= -(int64_t)0x40000000 && v < (int64_t)0x40000000;
 }
@@ -605,8 +622,7 @@ static void emit_int_literal(CG *c, int64_t v, int depth) {
 }
 
 static void emit_float_literal(CG *c, double v, int depth) {
-    emit_indent(c, depth);
-    wat_appendf(c->w, "(struct.new $LuaFloat (f64.const %.17g))\n", v);
+    emit_linef(c, depth, "(struct.new $LuaFloat (f64.const %.17g))\n", v);
 }
 
 /* Longest constant string that is hoisted into a module global; longer
@@ -725,8 +741,7 @@ static const char *ic_new(CG *c, char *buf, size_t bufsz) {
 /* Emit a constant string as one folded line indented to `depth`. */
 static void emit_string_literal(CG *c, const char *bytes, size_t len, int depth) {
     char eb[160];
-    emit_indent(c, depth);
-    wat_appendf(c->w, "%s\n", kstr_expr(c, bytes, len, eb, sizeof eb));
+    emit_linef(c, depth, "%s\n", kstr_expr(c, bytes, len, eb, sizeof eb));
 }
 
 /* ----- variable read / write -----
@@ -798,12 +813,10 @@ static void emit_tab_set_strval(CG *c, const char *target, const char *key,
 }
 
 static void emit_global_read(CG *c, const char *name, size_t name_len, int depth) {
-    emit_indent(c, depth);
-    wat_append(c->w, "(call $tab_get (ref.as_non_null (global.get $g_globals))\n");
+    emit_line(c, depth, "(call $tab_get (ref.as_non_null (global.get $g_globals))\n");
     emit_indent(c, depth + 1);
     emit_global_key(c, name, name_len);
-    emit_indent(c, depth);
-    wat_append(c->w, ")\n");
+    emit_line(c, depth, ")\n");
 }
 
 static void emit_var_read(CG *c, VarKind kind, int idx, int depth) {
@@ -821,12 +834,10 @@ static void emit_var_read(CG *c, VarKind kind, int idx, int depth) {
         }
         break;
     case VAR_UPVAL:
-        emit_indent(c, depth);
-        wat_appendf(c->w,
-                    "(struct.get $Box $v (array.get $UpvalArr "
-                    "(struct.get $LuaClosure $upvals (local.get $closure)) "
-                    "(i32.const %d)))\n",
-                    idx);
+        emit_linef(c, depth, "(struct.get $Box $v (array.get $UpvalArr "
+                             "(struct.get $LuaClosure $upvals (local.get $closure)) "
+                             "(i32.const %d)))\n",
+                   idx);
         break;
     case VAR_BUILTIN: {
         /* Read via $g_globals so user reassignment is honoured. */
@@ -884,17 +895,14 @@ static void emit_target_open(CG *c, const AssignTarget *t, int depth) {
                 return;
             }
             if (slot_is_boxed(c, t->as.var.idx)) {
-                emit_indent(c, depth);
-                wat_append(c->w, "(struct.set $Box $v\n");
+                emit_line(c, depth, "(struct.set $Box $v\n");
                 emit_box_ref(c, VAR_LOCAL, t->as.var.idx, depth + 1);
             } else {
-                emit_indent(c, depth);
-                wat_appendf(c->w, "(local.set $L%d\n", t->as.var.idx);
+                emit_linef(c, depth, "(local.set $L%d\n", t->as.var.idx);
             }
             break;
         case VAR_UPVAL:
-            emit_indent(c, depth);
-            wat_append(c->w, "(struct.set $Box $v\n");
+            emit_line(c, depth, "(struct.set $Box $v\n");
             emit_box_ref(c, t->as.var.kind, t->as.var.idx, depth + 1);
             break;
         case VAR_BUILTIN:
@@ -911,8 +919,7 @@ static void emit_target_open(CG *c, const AssignTarget *t, int depth) {
                 name = c->pr->globals.items[t->as.var.idx].name;
                 name_len = c->pr->globals.items[t->as.var.idx].name_len;
             }
-            emit_indent(c, depth);
-            wat_append(c->w, "(call $tab_set (ref.as_non_null (global.get $g_globals))\n");
+            emit_line(c, depth, "(call $tab_set (ref.as_non_null (global.get $g_globals))\n");
             emit_indent(c, depth + 1);
             emit_global_key(c, name, name_len);
             break;
@@ -932,25 +939,21 @@ static void emit_target_open(CG *c, const AssignTarget *t, int depth) {
     } else if (t->as.index.key->kind == EXPR_VAR && t->as.index.key->as.var.kind == VAR_LOCAL &&
                slot_is_maybe(c, t->as.index.key->as.var.idx)) {
         MCell k = mcell_slot(t->as.index.key->as.var.idx);
-        emit_indent(c, depth);
-        wat_append(c->w, "(call $lua_tabset_mk\n");
+        emit_line(c, depth, "(call $lua_tabset_mk\n");
         emit_expr(c, t->as.index.table, depth + 1);
-        emit_indent(c, depth + 1);
-        wat_appendf(c->w, "%s %s %s %s\n", k.t, k.i, k.f, k.b);
+        emit_linef(c, depth + 1, "%s %s %s %s\n", k.t, k.i, k.f, k.b);
     } else if (c->opt_int && expr_is_int(c, t->as.index.key)) {
         /* Int-typed key: $lua_tabset_ik takes the raw i64 (no make_int /
          * $as_arr_key) and still dispatches __newindex. The value is emitted
          * by the caller between open and close. */
-        emit_indent(c, depth);
-        wat_append(c->w, "(call $lua_tabset_ik\n");
+        emit_line(c, depth, "(call $lua_tabset_ik\n");
         emit_expr(c, t->as.index.table, depth + 1);
         emit_int_expr(c, t->as.index.key, depth + 1);
     } else {
         /* User-code assignment goes through \$lua_tabset so __newindex
          * has a chance to fire. Table constructors emit \$tab_set
          * directly since freshly built tables have no metatable. */
-        emit_indent(c, depth);
-        wat_append(c->w, "(call $lua_tabset\n");
+        emit_line(c, depth, "(call $lua_tabset\n");
         emit_expr(c, t->as.index.table, depth + 1);
         emit_expr(c, t->as.index.key, depth + 1);
     }
@@ -958,8 +961,7 @@ static void emit_target_open(CG *c, const AssignTarget *t, int depth) {
 /* Close an emit_target_open() expression. The target is the same one passed to
  * open, but every target shape closes with a single `)`, so it isn't needed. */
 static void emit_target_close(CG *c, int depth) {
-    emit_indent(c, depth);
-    wat_append(c->w, ")\n");
+    emit_line(c, depth, ")\n");
 }
 
 /* ----- binary / unary ops ----- */
@@ -1052,8 +1054,7 @@ static void emit_cmp_i32(CG *c, const Expr *e, int depth, int kind) {
     if (kind >= 3) {
         int int_left = kind == 3;
         if (expr_is_exact_f64_int_literal(int_left ? l : r)) {
-            emit_indent(c, depth);
-            wat_appendf(c->w, "(%s\n", fops[j]);
+            emit_linef(c, depth, "(%s\n", fops[j]);
             emit_num_as_f64(c, l, depth + 1);
             emit_num_as_f64(c, r, depth + 1);
         } else {
@@ -1068,16 +1069,13 @@ static void emit_cmp_i32(CG *c, const Expr *e, int depth, int kind) {
                 emit_int_expr(c, r, depth + 1);
             }
             if (j == 5) {
-                emit_indent(c, depth);
-                wat_append(c->w, ")\n");
+                emit_line(c, depth, ")\n");
             }
         }
-        emit_indent(c, depth);
-        wat_append(c->w, ")\n");
+        emit_line(c, depth, ")\n");
         return;
     }
-    emit_indent(c, depth);
-    wat_appendf(c->w, "(%s\n", kind == 1 ? iops[j] : fops[j]);
+    emit_linef(c, depth, "(%s\n", kind == 1 ? iops[j] : fops[j]);
     if (kind == 1) {
         emit_int_expr(c, e->as.binop.lhs, depth + 1);
         emit_int_expr(c, e->as.binop.rhs, depth + 1);
@@ -1085,8 +1083,7 @@ static void emit_cmp_i32(CG *c, const Expr *e, int depth, int kind) {
         emit_num_as_f64(c, e->as.binop.lhs, depth + 1);
         emit_num_as_f64(c, e->as.binop.rhs, depth + 1);
     }
-    emit_indent(c, depth);
-    wat_append(c->w, ")\n");
+    emit_line(c, depth, ")\n");
 }
 
 /* Emit `e` as an i32 truthiness (0/1). A numeric comparison becomes a direct
@@ -1102,69 +1099,51 @@ static void emit_truthy(CG *c, const Expr *e, int depth) {
         return;
     }
     emit_expr(c, e, depth);
-    emit_indent(c, depth);
-    wat_append(c->w, "(call $lua_truthy)\n");
+    emit_line(c, depth, "(call $lua_truthy)\n");
 }
 
 /* Concatenate `parts[0..k)` (already in source order): up to four at once
  * ($lua_concat / 3 / 4), a longer chain as its first three plus the rest. */
 static void emit_concat_parts(CG *c, const Expr *const *parts, int k, int depth) {
-    emit_indent(c, depth);
-    wat_append(c->w, k == 2 ? "(call $lua_concat\n" : k == 3 ? "(call $lua_concat3\n"
-                                                             : "(call $lua_concat4\n");
+    emit_line(c, depth, k == 2 ? "(call $lua_concat\n" : k == 3 ? "(call $lua_concat3\n"
+                                                                : "(call $lua_concat4\n");
     int direct = k <= 4 ? k : 3;
     for (int i = 0; i < direct; i++) emit_expr(c, parts[i], depth + 1);
     if (k > 4) emit_concat_parts(c, parts + 3, k - 3, depth + 1);
-    emit_indent(c, depth);
-    wat_append(c->w, ")\n");
+    emit_line(c, depth, ")\n");
 }
 
 static void emit_binop(CG *c, const Expr *e, int depth) {
     BinOp op = e->as.binop.op;
     if (op == BIN_AND || op == BIN_OR) {
         int label = c->next_label++;
-        emit_indent(c, depth);
-        wat_appendf(c->w, "(block $sc_%d (result anyref)\n", label);
+        emit_linef(c, depth, "(block $sc_%d (result anyref)\n", label);
 
         emit_expr(c, e->as.binop.lhs, depth + 1);
-        emit_indent(c, depth + 1);
-        wat_append(c->w, "local.set $tmp_any\n");
-        emit_indent(c, depth + 1);
-        wat_append(c->w, "(call $lua_truthy (local.get $tmp_any))\n");
-        emit_indent(c, depth + 1);
-        wat_append(c->w, "(if (then\n");
+        emit_line(c, depth + 1, "local.set $tmp_any\n");
+        emit_line(c, depth + 1, "(call $lua_truthy (local.get $tmp_any))\n");
+        emit_line(c, depth + 1, "(if (then\n");
         if (op == BIN_AND) {
             emit_expr(c, e->as.binop.rhs, depth + 2);
-            emit_indent(c, depth + 2);
-            wat_appendf(c->w, "br $sc_%d\n", label);
-            emit_indent(c, depth + 1);
-            wat_append(c->w, "))\n");
-            emit_indent(c, depth + 1);
-            wat_append(c->w, "local.get $tmp_any\n");
+            emit_linef(c, depth + 2, "br $sc_%d\n", label);
+            emit_line(c, depth + 1, "))\n");
+            emit_line(c, depth + 1, "local.get $tmp_any\n");
         } else {
-            emit_indent(c, depth + 2);
-            wat_append(c->w, "local.get $tmp_any\n");
-            emit_indent(c, depth + 2);
-            wat_appendf(c->w, "br $sc_%d\n", label);
-            emit_indent(c, depth + 1);
-            wat_append(c->w, "))\n");
+            emit_line(c, depth + 2, "local.get $tmp_any\n");
+            emit_linef(c, depth + 2, "br $sc_%d\n", label);
+            emit_line(c, depth + 1, "))\n");
             emit_expr(c, e->as.binop.rhs, depth + 1);
         }
-        emit_indent(c, depth);
-        wat_append(c->w, ")\n");
+        emit_line(c, depth, ")\n");
         return;
     }
     if (expr_involves_maybe(c, e)) {
         if (maybe_cmp_op(op)) {
-            emit_indent(c, depth);
-            wat_append(c->w, "(select (result anyref)\n");
-            emit_indent(c, depth + 1);
-            wat_append(c->w, "(global.get $g_true)\n");
-            emit_indent(c, depth + 1);
-            wat_append(c->w, "(global.get $g_false)\n");
+            emit_line(c, depth, "(select (result anyref)\n");
+            emit_line(c, depth + 1, "(global.get $g_true)\n");
+            emit_line(c, depth + 1, "(global.get $g_false)\n");
             emit_maybe_cmp_block(c, e, depth + 1);
-            emit_indent(c, depth);
-            wat_append(c->w, ")\n");
+            emit_line(c, depth, ")\n");
         } else {
             emit_maybe_boxed(c, e, depth);
         }
@@ -1173,15 +1152,11 @@ static void emit_binop(CG *c, const Expr *e, int depth) {
     int ck = cmp_numeric_kind(c, e);
     if (ck) {
         /* Value context: materialize the i32 compare as a Lua boolean. */
-        emit_indent(c, depth);
-        wat_append(c->w, "(select (result anyref)\n");
-        emit_indent(c, depth + 1);
-        wat_append(c->w, "(global.get $g_true)\n");
-        emit_indent(c, depth + 1);
-        wat_append(c->w, "(global.get $g_false)\n");
+        emit_line(c, depth, "(select (result anyref)\n");
+        emit_line(c, depth + 1, "(global.get $g_true)\n");
+        emit_line(c, depth + 1, "(global.get $g_false)\n");
         emit_cmp_i32(c, e, depth + 1, ck);
-        emit_indent(c, depth);
-        wat_append(c->w, ")\n");
+        emit_line(c, depth, ")\n");
         return;
     }
     if (op == BIN_CONCAT) {
@@ -1208,8 +1183,7 @@ static void emit_binop(CG *c, const Expr *e, int depth) {
     }
     emit_expr(c, e->as.binop.lhs, depth);
     emit_expr(c, e->as.binop.rhs, depth);
-    emit_indent(c, depth);
-    wat_appendf(c->w, "(call %s)\n", helper);
+    emit_linef(c, depth, "(call %s)\n", helper);
 }
 
 static void emit_unop(CG *c, const Expr *e, int depth) {
@@ -1240,8 +1214,7 @@ static int is_multival_tail(const Expr *e) {
 static void emit_call_array(CG *c, const Expr *e, int depth);
 static void emit_multival_array(CG *c, const Expr *e, int depth) {
     if (e->kind == EXPR_VARARG) {
-        emit_indent(c, depth);
-        wat_append(c->w, "(local.get $varargs)\n");
+        emit_line(c, depth, "(local.get $varargs)\n");
         return;
     }
     emit_call_array(c, e, depth);
@@ -1325,16 +1298,12 @@ static void emit_typed_args(CG *c, const Expr *e, const FuncSig *sg, int depth) 
  * numeric ret_ty, otherwise a single anyref. Callers ensure args are typed-ok. */
 static void emit_typed_direct_call1(CG *c, const Expr *e, const LuaFunc *K, int depth) {
     const FuncSig *sg = target_sig(c, K);
-    emit_indent(c, depth);
-    wat_appendf(c->w, "(call $user_%d_da1\n", K->func_idx);
-    emit_indent(c, depth + 1);
-    wat_append(c->w, "(ref.cast (ref $LuaClosure)\n");
+    emit_linef(c, depth, "(call $user_%d_da1\n", K->func_idx);
+    emit_line(c, depth + 1, "(ref.cast (ref $LuaClosure)\n");
     emit_expr(c, e->as.call.callee, depth + 2);
-    emit_indent(c, depth + 1);
-    wat_append(c->w, ")\n");
+    emit_line(c, depth + 1, ")\n");
     emit_typed_args(c, e, sg, depth + 1);
-    emit_indent(c, depth);
-    wat_append(c->w, ")\n");
+    emit_line(c, depth, ")\n");
 }
 
 /* Single-result calls with at most this many arguments (a method call's
@@ -1385,34 +1354,26 @@ static void emit_fast_call(CG *c, const Expr *e, int depth) {
     Expr *const *args;
     size_t na;
     if (e->kind == EXPR_METHOD_CALL) {
-        emit_indent(c, depth);
-        wat_append(c->w, "(local.set $tmp_any\n");
+        emit_line(c, depth, "(local.set $tmp_any\n");
         emit_expr(c, e->as.method_call.recv, depth + 1);
-        emit_indent(c, depth);
-        wat_append(c->w, ")\n");
-        emit_indent(c, depth);
-        wat_append(c->w, "(call $lua_call1\n");
+        emit_line(c, depth, ")\n");
+        emit_line(c, depth, "(call $lua_call1\n");
         emit_method_lookup(c, e->as.method_call.method, e->as.method_call.method_len, e->line, depth + 1);
-        emit_indent(c, depth + 1);
-        wat_append(c->w, "(local.get $tmp_any)\n");
+        emit_line(c, depth + 1, "(local.get $tmp_any)\n");
         args = e->as.method_call.args;
         na = e->as.method_call.nargs;
     } else {
-        emit_indent(c, depth);
-        wat_append(c->w, "(call $lua_call1\n");
+        emit_line(c, depth, "(call $lua_call1\n");
         emit_expr(c, e->as.call.callee, depth + 1);
         args = e->as.call.args;
         na = e->as.call.nargs;
     }
     for (size_t i = 0; i < na; i++) emit_expr(c, args[i], depth + 1);
     for (int i = n; i < FAST_MAX_ARGS; i++) {
-        emit_indent(c, depth + 1);
-        wat_append(c->w, "(ref.null any)\n");
+        emit_line(c, depth + 1, "(ref.null any)\n");
     }
-    emit_indent(c, depth + 1);
-    wat_appendf(c->w, "(i32.const %d) (i32.const %d)\n", n, e->line);
-    emit_indent(c, depth);
-    wat_append(c->w, ")\n");
+    emit_linef(c, depth + 1, "(i32.const %d) (i32.const %d)\n", n, e->line);
+    emit_line(c, depth, ")\n");
 }
 
 /* `return f(args)` / `return obj:m(args)` inside a $user_N_f body, when the
@@ -1426,95 +1387,69 @@ static void emit_fast_tail_call(CG *c, const Expr *e, int depth) {
     size_t na;
     int k = 0;
     if (e->kind == EXPR_METHOD_CALL) {
-        emit_indent(c, depth);
-        wat_append(c->w, "(local.set $tmp_any\n");
+        emit_line(c, depth, "(local.set $tmp_any\n");
         emit_expr(c, e->as.method_call.recv, depth + 1);
-        emit_indent(c, depth);
-        wat_append(c->w, ")\n");
-        emit_indent(c, depth);
-        wat_append(c->w, "(local.set $tmp_callee\n");
+        emit_line(c, depth, ")\n");
+        emit_line(c, depth, "(local.set $tmp_callee\n");
         emit_method_lookup(c, e->as.method_call.method, e->as.method_call.method_len, e->line, depth + 1);
-        emit_indent(c, depth);
-        wat_append(c->w, ")\n");
-        emit_indent(c, depth);
-        wat_append(c->w, "(local.set $ta0 (local.get $tmp_any))\n");
+        emit_line(c, depth, ")\n");
+        emit_line(c, depth, "(local.set $ta0 (local.get $tmp_any))\n");
         k = 1;
         args = e->as.method_call.args;
         na = e->as.method_call.nargs;
     } else {
-        emit_indent(c, depth);
-        wat_append(c->w, "(local.set $tmp_callee\n");
+        emit_line(c, depth, "(local.set $tmp_callee\n");
         emit_expr(c, e->as.call.callee, depth + 1);
-        emit_indent(c, depth);
-        wat_append(c->w, ")\n");
+        emit_line(c, depth, ")\n");
         args = e->as.call.args;
         na = e->as.call.nargs;
     }
     for (size_t i = 0; i < na; i++, k++) {
-        emit_indent(c, depth);
-        wat_appendf(c->w, "(local.set $ta%d\n", k);
+        emit_linef(c, depth, "(local.set $ta%d\n", k);
         emit_expr(c, args[i], depth + 1);
-        emit_indent(c, depth);
-        wat_append(c->w, ")\n");
+        emit_line(c, depth, ")\n");
     }
     char argv[160];
     int off = 0;
     for (int i = 0; i < FAST_MAX_ARGS; i++)
         off += snprintf(argv + off, sizeof argv - (size_t)off, i < n ? " (local.get $ta%d)" : " (ref.null any)", i);
-    emit_indent(c, depth);
-    wat_append(c->w, "(if (ref.test (ref $LuaClosure) (local.get $tmp_callee))\n");
-    emit_indent(c, depth + 1);
-    wat_append(c->w, "(then\n");
-    emit_indent(c, depth + 2);
-    wat_append(c->w, "(local.set $tmp_clo (ref.cast (ref $LuaClosure) (local.get $tmp_callee)))\n");
-    emit_indent(c, depth + 2);
-    wat_appendf(c->w,
-                "(call $replace_top_call_frame (i32.const %d) "
-                "(struct.get $LuaClosure $weight (ref.as_non_null (local.get $tmp_clo))))\n",
-                e->line);
-    emit_indent(c, depth + 2);
-    wat_appendf(c->w,
-                "(return_call_ref $LuaFn1 (ref.as_non_null (local.get $tmp_clo))%s (i32.const %d)\n", argv, n);
-    emit_indent(c, depth + 3);
-    wat_append(c->w, "(struct.get $LuaClosure $fast (ref.as_non_null (local.get $tmp_clo))))))\n");
-    emit_indent(c, depth);
-    wat_appendf(c->w, "(return (call $lua_call1 (local.get $tmp_callee)%s (i32.const %d) (i32.const %d)))\n", argv, n,
-                e->line);
+    emit_line(c, depth, "(if (ref.test (ref $LuaClosure) (local.get $tmp_callee))\n");
+    emit_line(c, depth + 1, "(then\n");
+    emit_line(c, depth + 2, "(local.set $tmp_clo (ref.cast (ref $LuaClosure) (local.get $tmp_callee)))\n");
+    emit_linef(c, depth + 2, "(call $replace_top_call_frame (i32.const %d) "
+                             "(struct.get $LuaClosure $weight (ref.as_non_null (local.get $tmp_clo))))\n",
+               e->line);
+    emit_linef(c, depth + 2, "(return_call_ref $LuaFn1 (ref.as_non_null (local.get $tmp_clo))%s (i32.const %d)\n", argv, n);
+    emit_line(c, depth + 3, "(struct.get $LuaClosure $fast (ref.as_non_null (local.get $tmp_clo))))))\n");
+    emit_linef(c, depth, "(return (call $lua_call1 (local.get $tmp_callee)%s (i32.const %d) (i32.const %d)))\n", argv, n,
+               e->line);
 }
 
 /* Build a (ref $ArgArr) from a sequence of argument expressions, splicing
  * the trailing expression's full multi-value result if it is a call or `...`. */
 static void emit_args_array(CG *c, Expr **args, size_t nargs, int depth) {
     if (nargs == 0) {
-        emit_indent(c, depth);
-        wat_append(c->w, "(global.get $g_empty_args)\n");
+        emit_line(c, depth, "(global.get $g_empty_args)\n");
         return;
     }
     int last_mv = is_multival_tail(args[nargs - 1]);
     if (!last_mv) {
-        emit_indent(c, depth);
-        wat_appendf(c->w, "(array.new_fixed $ArgArr %zu\n", nargs);
+        emit_linef(c, depth, "(array.new_fixed $ArgArr %zu\n", nargs);
         for (size_t i = 0; i < nargs; i++) emit_expr(c, args[i], depth + 1);
-        emit_indent(c, depth);
-        wat_append(c->w, ")\n");
+        emit_line(c, depth, ")\n");
         return;
     }
     size_t singles = nargs - 1;
-    emit_indent(c, depth);
-    wat_append(c->w, "(call $merge_args\n");
+    emit_line(c, depth, "(call $merge_args\n");
     if (singles == 0) {
-        emit_indent(c, depth + 1);
-        wat_append(c->w, "(global.get $g_empty_args)\n");
+        emit_line(c, depth + 1, "(global.get $g_empty_args)\n");
     } else {
-        emit_indent(c, depth + 1);
-        wat_appendf(c->w, "(array.new_fixed $ArgArr %zu\n", singles);
+        emit_linef(c, depth + 1, "(array.new_fixed $ArgArr %zu\n", singles);
         for (size_t i = 0; i < singles; i++) emit_expr(c, args[i], depth + 2);
-        emit_indent(c, depth + 1);
-        wat_append(c->w, ")\n");
+        emit_line(c, depth + 1, ")\n");
     }
     emit_multival_array(c, args[nargs - 1], depth + 1);
-    emit_indent(c, depth);
-    wat_append(c->w, ")\n");
+    emit_line(c, depth, ")\n");
 }
 
 /* Look up `obj:m` via $lua_index_sk (constant string key; routes strings
@@ -1532,17 +1467,13 @@ static void emit_method_lookup(CG *c, const char *method, size_t method_len, int
     wat_append(c->w, mic >= 0                 ? "(call $lua_method_ic\n"
                      : method_len <= KSTR_MAX ? "(call $lua_index_sk\n"
                                               : "(call $lua_index\n");
-    emit_indent(c, depth + 1);
-    wat_append(c->w, "(local.get $tmp_any)\n");
+    emit_line(c, depth + 1, "(local.get $tmp_any)\n");
     emit_string_literal(c, method, method_len, depth + 1);
-    emit_indent(c, depth + 1);
-    wat_appendf(c->w, "(i32.const %d)\n", line);
+    emit_linef(c, depth + 1, "(i32.const %d)\n", line);
     if (mic >= 0) {
-        emit_indent(c, depth + 1);
-        wat_appendf(c->w, "(global.get $mic_%d)\n", mic);
+        emit_linef(c, depth + 1, "(global.get $mic_%d)\n", mic);
     }
-    emit_indent(c, depth);
-    wat_append(c->w, ")\n");
+    emit_line(c, depth, ")\n");
 }
 
 /* Emit the method-call argument array [recv] ++ method-args, at `depth`:
@@ -1556,22 +1487,16 @@ static void emit_method_args_array(CG *c, const Expr *e, int depth) {
         /* Fixed arity: build [recv, args...] in one array.new_fixed. The
          * receiver is read from $tmp_any first (operand order), so an argument
          * that is itself a method call may reuse $tmp_any safely. */
-        emit_indent(c, depth);
-        wat_appendf(c->w, "(array.new_fixed $ArgArr %zu\n", mna + 1);
-        emit_indent(c, depth + 1);
-        wat_append(c->w, "(local.get $tmp_any)\n");
+        emit_linef(c, depth, "(array.new_fixed $ArgArr %zu\n", mna + 1);
+        emit_line(c, depth + 1, "(local.get $tmp_any)\n");
         for (size_t i = 0; i < mna; i++) emit_expr(c, e->as.method_call.args[i], depth + 1);
-        emit_indent(c, depth);
-        wat_append(c->w, ")\n");
+        emit_line(c, depth, ")\n");
         return;
     }
-    emit_indent(c, depth);
-    wat_append(c->w, "(call $merge_args\n");
-    emit_indent(c, depth + 1);
-    wat_append(c->w, "(array.new_fixed $ArgArr 1 (local.get $tmp_any))\n");
+    emit_line(c, depth, "(call $merge_args\n");
+    emit_line(c, depth + 1, "(array.new_fixed $ArgArr 1 (local.get $tmp_any))\n");
     emit_args_array(c, e->as.method_call.args, mna, depth + 1);
-    emit_indent(c, depth);
-    wat_append(c->w, ")\n");
+    emit_line(c, depth, ")\n");
 }
 
 /* Emit a call returning (ref $ArgArr) — the full multi-value result. */
@@ -1580,21 +1505,16 @@ static void emit_call_array(CG *c, const Expr *e, int depth) {
         /* obj:m(args). Evaluate receiver once into $tmp_any, look up the
          * method via $lua_index (which redirects strings through the
          * `string` library), then call with receiver prepended. */
-        emit_indent(c, depth);
-        wat_append(c->w, "(local.set $tmp_any\n");
+        emit_line(c, depth, "(local.set $tmp_any\n");
         emit_expr(c, e->as.method_call.recv, depth + 1);
-        emit_indent(c, depth);
-        wat_append(c->w, ")\n");
-        emit_indent(c, depth);
-        wat_append(c->w, "(call $lua_call_any\n");
+        emit_line(c, depth, ")\n");
+        emit_line(c, depth, "(call $lua_call_any\n");
         emit_method_lookup(c, e->as.method_call.method, e->as.method_call.method_len,
                            e->line, depth + 1);
         /* args = [recv] ++ method args */
         emit_method_args_array(c, e, depth + 1);
-        emit_indent(c, depth + 1);
-        wat_appendf(c->w, "(i32.const %d)\n", e->line);
-        emit_indent(c, depth);
-        wat_append(c->w, ")\n");
+        emit_linef(c, depth + 1, "(i32.const %d)\n", e->line);
+        emit_line(c, depth, ")\n");
         return;
     }
     const LuaFunc *dt = direct_call_target(c, e);
@@ -1604,26 +1524,19 @@ static void emit_call_array(CG *c, const Expr *e, int depth) {
          * (Frame push/pop is skipped — a known function needs no __call walk;
          * error positions inside it fall back to the caller's frame, matching
          * the project's "error position not tracked" stance.) */
-        emit_indent(c, depth);
-        wat_appendf(c->w, "(call $user_%d_da\n", dt->func_idx);
-        emit_indent(c, depth + 1);
-        wat_append(c->w, "(ref.cast (ref $LuaClosure)\n");
+        emit_linef(c, depth, "(call $user_%d_da\n", dt->func_idx);
+        emit_line(c, depth + 1, "(ref.cast (ref $LuaClosure)\n");
         emit_expr(c, e->as.call.callee, depth + 2);
-        emit_indent(c, depth + 1);
-        wat_append(c->w, ")\n");
+        emit_line(c, depth + 1, ")\n");
         emit_typed_args(c, e, target_sig(c, dt), depth + 1);
-        emit_indent(c, depth);
-        wat_append(c->w, ")\n");
+        emit_line(c, depth, ")\n");
         return;
     }
-    emit_indent(c, depth);
-    wat_append(c->w, "(call $lua_call_any\n");
+    emit_line(c, depth, "(call $lua_call_any\n");
     emit_expr(c, e->as.call.callee, depth + 1);
     emit_args_array(c, e->as.call.args, e->as.call.nargs, depth + 1);
-    emit_indent(c, depth + 1);
-    wat_appendf(c->w, "(i32.const %d)\n", e->line);
-    emit_indent(c, depth);
-    wat_append(c->w, ")\n");
+    emit_linef(c, depth + 1, "(i32.const %d)\n", e->line);
+    emit_line(c, depth, ")\n");
 }
 
 /* In expression context we want a single anyref; wrap with $args_first. */
@@ -1641,11 +1554,9 @@ static void emit_call(CG *c, const Expr *e, int depth) {
         emit_fast_call(c, e, depth);
         return;
     }
-    emit_indent(c, depth);
-    wat_append(c->w, "(call $args_first\n");
+    emit_line(c, depth, "(call $args_first\n");
     emit_call_array(c, e, depth + 1);
-    emit_indent(c, depth);
-    wat_append(c->w, ")\n");
+    emit_line(c, depth, ")\n");
 }
 
 /* Tail-call dispatch shared by the regular and method forms. Assumes the
@@ -1658,31 +1569,20 @@ static void emit_tail_dispatch(CG *c, int line, int depth) {
     /* Fast path: real closure -> return_call_ref. Update the top frame
      * line so error()/traceback see this site instead of the (now-defunct)
      * caller's. */
-    emit_indent(c, depth);
-    wat_append(c->w, "(if (ref.test (ref $LuaClosure) (local.get $tmp_callee))\n");
-    emit_indent(c, depth + 1);
-    wat_append(c->w, "(then\n");
-    emit_indent(c, depth + 2);
-    wat_append(c->w, "(local.set $tmp_clo (ref.cast (ref $LuaClosure) (local.get $tmp_callee)))\n");
-    emit_indent(c, depth + 2);
-    wat_appendf(c->w,
-                "(call $replace_top_call_frame (i32.const %d) "
-                "(struct.get $LuaClosure $weight (ref.as_non_null (local.get $tmp_clo))))\n",
-                line);
-    emit_indent(c, depth + 2);
-    wat_append(c->w, "(return_call_ref $LuaFn\n");
-    emit_indent(c, depth + 3);
-    wat_append(c->w, "(ref.as_non_null (local.get $tmp_clo))\n");
-    emit_indent(c, depth + 3);
-    wat_append(c->w, "(ref.as_non_null (local.get $tmp_args))\n");
-    emit_indent(c, depth + 3);
-    wat_append(c->w, "(struct.get $LuaClosure $code (ref.as_non_null (local.get $tmp_clo))))))\n");
+    emit_line(c, depth, "(if (ref.test (ref $LuaClosure) (local.get $tmp_callee))\n");
+    emit_line(c, depth + 1, "(then\n");
+    emit_line(c, depth + 2, "(local.set $tmp_clo (ref.cast (ref $LuaClosure) (local.get $tmp_callee)))\n");
+    emit_linef(c, depth + 2, "(call $replace_top_call_frame (i32.const %d) "
+                             "(struct.get $LuaClosure $weight (ref.as_non_null (local.get $tmp_clo))))\n",
+               line);
+    emit_line(c, depth + 2, "(return_call_ref $LuaFn\n");
+    emit_line(c, depth + 3, "(ref.as_non_null (local.get $tmp_clo))\n");
+    emit_line(c, depth + 3, "(ref.as_non_null (local.get $tmp_args))\n");
+    emit_line(c, depth + 3, "(struct.get $LuaClosure $code (ref.as_non_null (local.get $tmp_clo))))))\n");
     /* Slow path: __call walk / typed error. */
-    emit_indent(c, depth);
-    wat_appendf(c->w,
-                "(return (call $lua_call_any (local.get $tmp_callee) "
-                "(ref.as_non_null (local.get $tmp_args)) (i32.const %d)))\n",
-                line);
+    emit_linef(c, depth, "(return (call $lua_call_any (local.get $tmp_callee) "
+                         "(ref.as_non_null (local.get $tmp_args)) (i32.const %d)))\n",
+               line);
 }
 
 /* `return obj:m(args)` — the method-call tail form. Mirrors emit_call_array's
@@ -1693,22 +1593,16 @@ static void emit_tail_dispatch(CG *c, int line, int depth) {
  * the method args are evaluated, so an arg that itself reuses $tmp_any can't
  * clobber it. */
 static void emit_tail_method_call(CG *c, const Expr *e, int depth) {
-    emit_indent(c, depth);
-    wat_append(c->w, "(local.set $tmp_any\n");
+    emit_line(c, depth, "(local.set $tmp_any\n");
     emit_expr(c, e->as.method_call.recv, depth + 1);
-    emit_indent(c, depth);
-    wat_append(c->w, ")\n");
-    emit_indent(c, depth);
-    wat_append(c->w, "(local.set $tmp_callee\n");
+    emit_line(c, depth, ")\n");
+    emit_line(c, depth, "(local.set $tmp_callee\n");
     emit_method_lookup(c, e->as.method_call.method, e->as.method_call.method_len,
                        e->line, depth + 1);
-    emit_indent(c, depth);
-    wat_append(c->w, ")\n");
-    emit_indent(c, depth);
-    wat_append(c->w, "(local.set $tmp_args\n");
+    emit_line(c, depth, ")\n");
+    emit_line(c, depth, "(local.set $tmp_args\n");
     emit_method_args_array(c, e, depth + 1);
-    emit_indent(c, depth);
-    wat_append(c->w, ")\n");
+    emit_line(c, depth, ")\n");
     emit_tail_dispatch(c, e->line, depth);
 }
 
@@ -1723,16 +1617,12 @@ static void emit_tail_call(CG *c, const Expr *e, int depth) {
      * a method-call argument (e.g. `f(s:gmatch(...))`) reuses $tmp_any for
      * its receiver while we build the args array below, which would clobber
      * the callee. */
-    emit_indent(c, depth);
-    wat_append(c->w, "(local.set $tmp_callee\n");
+    emit_line(c, depth, "(local.set $tmp_callee\n");
     emit_expr(c, e->as.call.callee, depth + 1);
-    emit_indent(c, depth);
-    wat_append(c->w, ")\n");
-    emit_indent(c, depth);
-    wat_append(c->w, "(local.set $tmp_args\n");
+    emit_line(c, depth, ")\n");
+    emit_line(c, depth, "(local.set $tmp_args\n");
     emit_args_array(c, e->as.call.args, e->as.call.nargs, depth + 1);
-    emit_indent(c, depth);
-    wat_append(c->w, ")\n");
+    emit_line(c, depth, ")\n");
     emit_tail_dispatch(c, e->line, depth);
 }
 
@@ -1742,31 +1632,24 @@ static void emit_tail_call(CG *c, const Expr *e, int depth) {
  */
 static int fn_frame_weight(CG *c, const LuaFunc *fn);
 static void emit_function_expr(CG *c, const LuaFunc *fn, int depth) {
-    emit_indent(c, depth);
-    wat_append(c->w, "(struct.new $LuaClosure\n");
-    emit_indent(c, depth + 1);
-    wat_appendf(c->w, "(ref.func $user_%d)\n", fn->func_idx);
+    emit_line(c, depth, "(struct.new $LuaClosure\n");
+    emit_linef(c, depth + 1, "(ref.func $user_%d)\n", fn->func_idx);
     if (fn->n_upvalues == 0) {
-        emit_indent(c, depth + 1);
-        wat_append(c->w, "(global.get $g_empty_upvals)\n");
+        emit_line(c, depth + 1, "(global.get $g_empty_upvals)\n");
     } else {
-        emit_indent(c, depth + 1);
-        wat_appendf(c->w, "(array.new_fixed $UpvalArr %d\n", fn->n_upvalues);
+        emit_linef(c, depth + 1, "(array.new_fixed $UpvalArr %d\n", fn->n_upvalues);
         for (int i = 0; i < fn->n_upvalues; i++) {
             UpvalueRef *u = &fn->upvalues[i];
             VarKind k = (u->src == UPVAL_FROM_LOCAL) ? VAR_LOCAL : VAR_UPVAL;
             emit_box_ref(c, k, u->idx, depth + 2);
         }
-        emit_indent(c, depth + 1);
-        wat_append(c->w, ")\n");
+        emit_line(c, depth + 1, ")\n");
     }
-    emit_indent(c, depth + 1);
-    wat_appendf(c->w, "(i32.const %d)\n", fn_frame_weight(c, fn));
+    emit_linef(c, depth + 1, "(i32.const %d)\n", fn_frame_weight(c, fn));
     emit_indent(c, depth + 1);
     if (fn_has_fast_entry(c, fn)) wat_appendf(c->w, "(ref.func $user_%d_f)\n", fn->func_idx);
     else wat_append(c->w, "(ref.func $fast_adapter)\n");
-    emit_indent(c, depth);
-    wat_append(c->w, ")\n");
+    emit_line(c, depth, ")\n");
 }
 
 /* ----- table operations ----- */
@@ -1783,14 +1666,11 @@ static void emit_index_expr(CG *c, const Expr *e, int depth) {
          * site's inline cache when the specializer is on. */
         char icb[48];
         const char *ic = ic_new(c, icb, sizeof icb);
-        emit_indent(c, depth);
-        wat_append(c->w, ic ? "(call $lua_index_ic\n" : "(call $lua_index_sk\n");
+        emit_line(c, depth, ic ? "(call $lua_index_ic\n" : "(call $lua_index_sk\n");
         emit_expr(c, e->as.index.table, depth + 1);
         emit_string_literal(c, e->as.index.key->as.s.bytes, e->as.index.key->as.s.len, depth + 1);
-        emit_indent(c, depth + 1);
-        wat_appendf(c->w, "(i32.const %d)%s%s\n", e->line, ic ? " " : "", ic ? ic : "");
-        emit_indent(c, depth);
-        wat_append(c->w, ")\n");
+        emit_linef(c, depth + 1, "(i32.const %d)%s%s\n", e->line, ic ? " " : "", ic ? ic : "");
+        emit_line(c, depth, ")\n");
         return;
     }
     if (e->as.index.key->kind == EXPR_VAR && e->as.index.key->as.var.kind == VAR_LOCAL &&
@@ -1798,34 +1678,25 @@ static void emit_index_expr(CG *c, const Expr *e, int depth) {
         /* Maybe-typed key: the cell goes over unboxed; an int takes the
          * array fast path, anything else boxes on the slow path. */
         MCell k = mcell_slot(e->as.index.key->as.var.idx);
-        emit_indent(c, depth);
-        wat_append(c->w, "(call $lua_index_mk\n");
+        emit_line(c, depth, "(call $lua_index_mk\n");
         emit_expr(c, e->as.index.table, depth + 1);
-        emit_indent(c, depth + 1);
-        wat_appendf(c->w, "%s %s %s %s (i32.const %d)\n", k.t, k.i, k.f, k.b, e->line);
-        emit_indent(c, depth);
-        wat_append(c->w, ")\n");
+        emit_linef(c, depth + 1, "%s %s %s %s (i32.const %d)\n", k.t, k.i, k.f, k.b, e->line);
+        emit_line(c, depth, ")\n");
         return;
     }
     if (c->opt_int && expr_is_int(c, e->as.index.key)) {
-        emit_indent(c, depth);
-        wat_append(c->w, "(call $lua_index_ik\n");
+        emit_line(c, depth, "(call $lua_index_ik\n");
         emit_expr(c, e->as.index.table, depth + 1);
         emit_int_expr(c, e->as.index.key, depth + 1);
-        emit_indent(c, depth + 1);
-        wat_appendf(c->w, "(i32.const %d)\n", e->line);
-        emit_indent(c, depth);
-        wat_append(c->w, ")\n");
+        emit_linef(c, depth + 1, "(i32.const %d)\n", e->line);
+        emit_line(c, depth, ")\n");
         return;
     }
-    emit_indent(c, depth);
-    wat_append(c->w, "(call $lua_index\n");
+    emit_line(c, depth, "(call $lua_index\n");
     emit_expr(c, e->as.index.table, depth + 1);
     emit_expr(c, e->as.index.key, depth + 1);
-    emit_indent(c, depth + 1);
-    wat_appendf(c->w, "(i32.const %d)\n", e->line);
-    emit_indent(c, depth);
-    wat_append(c->w, ")\n");
+    emit_linef(c, depth + 1, "(i32.const %d)\n", e->line);
+    emit_line(c, depth, ")\n");
 }
 
 /* Largest record a constructor builds on a cached shape; matches the
@@ -1860,18 +1731,15 @@ static void emit_table_ctor(CG *c, const Expr *e, int depth) {
      * expression from outside (works inside array.new_fixed arg lists,
      * function calls, etc.) but uses stack-form internally to keep the
      * in-progress table on the operand stack across entries. */
-    emit_indent(c, depth);
-    wat_append(c->w, "(block (result anyref)\n");
+    emit_line(c, depth, "(block (result anyref)\n");
     int nshape = ctor_shape_fields(c, e);
     if (nshape > 0) {
         /* Its fields' final layout is known: start from the site's cached
          * shape (built on first use) and fill values in by position. */
         int site = c->n_ctor_shapes++;
-        emit_indent(c, depth + 1);
-        wat_appendf(c->w, "(if (ref.is_null (global.get $cshape_%d))\n", site);
-        emit_indent(c, depth + 2);
-        wat_appendf(c->w, "(then (global.set $cshape_%d (call $shape_for_keys (array.new_fixed $TArr %d", site,
-                    nshape);
+        emit_linef(c, depth + 1, "(if (ref.is_null (global.get $cshape_%d))\n", site);
+        emit_linef(c, depth + 2, "(then (global.set $cshape_%d (call $shape_for_keys (array.new_fixed $TArr %d", site,
+                   nshape);
         for (int i = 0; i < n; i++) {
             const TableEntry *ent = &e->as.table_ctor.entries[i];
             if (ent->kind == TENT_POSITIONAL) continue;
@@ -1879,11 +1747,9 @@ static void emit_table_ctor(CG *c, const Expr *e, int depth) {
             wat_appendf(c->w, " %s", kstr_expr(c, ent->key->as.s.bytes, ent->key->as.s.len, eb, sizeof eb));
         }
         wat_append(c->w, ")))))\n");
-        emit_indent(c, depth + 1);
-        wat_appendf(c->w, "(call $tab_new_shaped (ref.as_non_null (global.get $cshape_%d)))\n", site);
+        emit_linef(c, depth + 1, "(call $tab_new_shaped (ref.as_non_null (global.get $cshape_%d)))\n", site);
     } else {
-        emit_indent(c, depth + 1);
-        wat_append(c->w, "(call $tab_new)\n");
+        emit_line(c, depth + 1, "(call $tab_new)\n");
     }
     int field_pos = 0;
     int pos_idx = 1;
@@ -1895,28 +1761,22 @@ static void emit_table_ctor(CG *c, const Expr *e, int depth) {
     int last_normal = splice_last ? n - 1 : n;
     for (int i = 0; i < last_normal; i++) {
         TableEntry *ent = &e->as.table_ctor.entries[i];
-        emit_indent(c, depth + 1);
-        wat_append(c->w, "local.tee $tmp_tab\n");
-        emit_indent(c, depth + 1);
-        wat_append(c->w, "(ref.as_non_null (local.get $tmp_tab))\n");
+        emit_line(c, depth + 1, "local.tee $tmp_tab\n");
+        emit_line(c, depth + 1, "(ref.as_non_null (local.get $tmp_tab))\n");
         if (ent->kind == TENT_POSITIONAL) {
             /* Raw integer key: straight to the array part, no key boxing. */
-            emit_indent(c, depth + 1);
-            wat_appendf(c->w, "(i64.const %d)\n", pos_idx++);
+            emit_linef(c, depth + 1, "(i64.const %d)\n", pos_idx++);
             emit_expr(c, ent->value, depth + 1);
-            emit_indent(c, depth + 1);
-            wat_append(c->w, "call $tab_set_ik\n");
+            emit_line(c, depth + 1, "call $tab_set_ik\n");
             continue;
         }
         if (nshape > 0) {
             /* A field of a shaped constructor: its value goes to its position. */
             int vfloat = expr_is_float(c, ent->value);
-            emit_indent(c, depth + 1);
-            wat_appendf(c->w, "(i32.const %d)\n", field_pos++);
+            emit_linef(c, depth + 1, "(i32.const %d)\n", field_pos++);
             if (vfloat) emit_float_expr(c, ent->value, depth + 1);
             else emit_expr(c, ent->value, depth + 1);
-            emit_indent(c, depth + 1);
-            wat_append(c->w, vfloat ? "call $tab_put_pos_f\n" : "call $tab_put_pos\n");
+            emit_line(c, depth + 1, vfloat ? "call $tab_put_pos_f\n" : "call $tab_put_pos\n");
             continue;
         }
         if (ent->key->kind == EXPR_STRING && ent->key->as.s.len <= KSTR_MAX) {
@@ -1925,39 +1785,29 @@ static void emit_table_ctor(CG *c, const Expr *e, int depth) {
              * float value goes into the unboxed float storage. */
             char eb[160];
             int vfloat = c->opt_int && expr_is_float(c, ent->value);
-            emit_indent(c, depth + 1);
-            wat_appendf(c->w, "%s\n",
-                        kstr_expr(c, ent->key->as.s.bytes, ent->key->as.s.len, eb, sizeof eb));
-            emit_indent(c, depth + 1);
-            wat_appendf(c->w, "(i32.const %d)\n",
-                        (int)kstr_hash(ent->key->as.s.bytes, ent->key->as.s.len));
+            emit_linef(c, depth + 1, "%s\n",
+                       kstr_expr(c, ent->key->as.s.bytes, ent->key->as.s.len, eb, sizeof eb));
+            emit_linef(c, depth + 1, "(i32.const %d)\n",
+                       (int)kstr_hash(ent->key->as.s.bytes, ent->key->as.s.len));
             if (vfloat) emit_float_expr(c, ent->value, depth + 1);
             else emit_expr(c, ent->value, depth + 1);
-            emit_indent(c, depth + 1);
-            wat_append(c->w, vfloat ? "call $tab_set_f_hash_str\n" : "call $tab_set_hash_str\n");
+            emit_line(c, depth + 1, vfloat ? "call $tab_set_f_hash_str\n" : "call $tab_set_hash_str\n");
             continue;
         }
         emit_expr(c, ent->key, depth + 1);
         emit_expr(c, ent->value, depth + 1);
-        emit_indent(c, depth + 1);
-        wat_append(c->w, "call $tab_set\n");
+        emit_line(c, depth + 1, "call $tab_set\n");
     }
     if (splice_last) {
         /* (call $tab_append_args (local.tee $tmp_tab) (i32.const pos_idx) <args>) */
-        emit_indent(c, depth + 1);
-        wat_append(c->w, "local.tee $tmp_tab\n");
-        emit_indent(c, depth + 1);
-        wat_append(c->w, "(call $tab_append_args\n");
-        emit_indent(c, depth + 2);
-        wat_append(c->w, "(ref.as_non_null (local.get $tmp_tab))\n");
-        emit_indent(c, depth + 2);
-        wat_appendf(c->w, "(i32.const %d)\n", pos_idx);
+        emit_line(c, depth + 1, "local.tee $tmp_tab\n");
+        emit_line(c, depth + 1, "(call $tab_append_args\n");
+        emit_line(c, depth + 2, "(ref.as_non_null (local.get $tmp_tab))\n");
+        emit_linef(c, depth + 2, "(i32.const %d)\n", pos_idx);
         emit_multival_array(c, e->as.table_ctor.entries[n - 1].value, depth + 2);
-        emit_indent(c, depth + 1);
-        wat_append(c->w, ")\n");
+        emit_line(c, depth + 1, ")\n");
     }
-    emit_indent(c, depth);
-    wat_append(c->w, ")\n");
+    emit_line(c, depth, ")\n");
 }
 
 /* ----- integer specialization (opt >= 1) ----- */
@@ -2010,26 +1860,20 @@ static void emit_int_expr(CG *c, const Expr *e, int depth) {
     if (!c->ok) return;
     switch (e->kind) {
     case EXPR_INT:
-        emit_indent(c, depth);
-        wat_appendf(c->w, "(i64.const %lld)\n", (long long)e->as.i_val);
+        emit_linef(c, depth, "(i64.const %lld)\n", (long long)e->as.i_val);
         return;
     case EXPR_VAR:
-        emit_indent(c, depth);
-        wat_appendf(c->w, "(local.get $L%d)\n", e->as.var.idx);
+        emit_linef(c, depth, "(local.get $L%d)\n", e->as.var.idx);
         return;
     case EXPR_UNOP:
         if (e->as.unop.op == UN_NEG) {
-            emit_indent(c, depth);
-            wat_append(c->w, "(i64.sub (i64.const 0)\n");
+            emit_line(c, depth, "(i64.sub (i64.const 0)\n");
             emit_int_expr(c, e->as.unop.operand, depth + 1);
-            emit_indent(c, depth);
-            wat_append(c->w, ")\n");
+            emit_line(c, depth, ")\n");
         } else { /* UN_BNOT */
-            emit_indent(c, depth);
-            wat_append(c->w, "(i64.xor (i64.const -1)\n");
+            emit_line(c, depth, "(i64.xor (i64.const -1)\n");
             emit_int_expr(c, e->as.unop.operand, depth + 1);
-            emit_indent(c, depth);
-            wat_append(c->w, ")\n");
+            emit_line(c, depth, ")\n");
         }
         return;
     case EXPR_BINOP: {
@@ -2050,8 +1894,7 @@ static void emit_int_expr(CG *c, const Expr *e, int depth) {
         else wat_appendf(c->w, "(%s\n", op);
         emit_int_expr(c, e->as.binop.lhs, depth + 1);
         emit_int_expr(c, e->as.binop.rhs, depth + 1);
-        emit_indent(c, depth);
-        wat_append(c->w, ")\n");
+        emit_line(c, depth, ")\n");
         return;
     }
     case EXPR_CALL:
@@ -2114,11 +1957,9 @@ static void emit_num_as_f64(CG *c, const Expr *e, int depth) {
         return;
     }
     /* must be integer-typed (the only other case expr_is_float admits) */
-    emit_indent(c, depth);
-    wat_append(c->w, "(f64.convert_i64_s\n");
+    emit_line(c, depth, "(f64.convert_i64_s\n");
     emit_int_expr(c, e, depth + 1);
-    emit_indent(c, depth);
-    wat_append(c->w, ")\n");
+    emit_line(c, depth, ")\n");
 }
 
 /* Emit `e` (which must satisfy expr_is_float) as a raw f64 on the wasm stack. */
@@ -2126,19 +1967,15 @@ static void emit_float_expr(CG *c, const Expr *e, int depth) {
     if (!c->ok) return;
     switch (e->kind) {
     case EXPR_FLOAT:
-        emit_indent(c, depth);
-        wat_appendf(c->w, "(f64.const %.17g)\n", e->as.f_val);
+        emit_linef(c, depth, "(f64.const %.17g)\n", e->as.f_val);
         return;
     case EXPR_VAR:
-        emit_indent(c, depth);
-        wat_appendf(c->w, "(local.get $L%d)\n", e->as.var.idx);
+        emit_linef(c, depth, "(local.get $L%d)\n", e->as.var.idx);
         return;
     case EXPR_UNOP: /* UN_NEG */
-        emit_indent(c, depth);
-        wat_append(c->w, "(f64.neg\n");
+        emit_line(c, depth, "(f64.neg\n");
         emit_num_as_f64(c, e->as.unop.operand, depth + 1);
-        emit_indent(c, depth);
-        wat_append(c->w, ")\n");
+        emit_line(c, depth, ")\n");
         return;
     case EXPR_BINOP: {
         const char *op = "f64.add";
@@ -2149,12 +1986,10 @@ static void emit_float_expr(CG *c, const Expr *e, int depth) {
         case BIN_DIV: op = "f64.div"; break;
         default: break;
         }
-        emit_indent(c, depth);
-        wat_appendf(c->w, "(%s\n", op);
+        emit_linef(c, depth, "(%s\n", op);
         emit_num_as_f64(c, e->as.binop.lhs, depth + 1);
         emit_num_as_f64(c, e->as.binop.rhs, depth + 1);
-        emit_indent(c, depth);
-        wat_append(c->w, ")\n");
+        emit_line(c, depth, ")\n");
         return;
     }
     case EXPR_CALL:
@@ -2879,13 +2714,11 @@ static int mt_alloc(CG *c, int n) {
     return k;
 }
 static void emit_set_tag(CG *c, const MCell *m, int tag, int depth) {
-    emit_indent(c, depth);
-    wat_appendf(c->w, "(local.set %s (i32.const %d))\n", m->st, tag);
+    emit_linef(c, depth, "(local.set %s (i32.const %d))\n", m->st, tag);
 }
 /* `(call $box_num tag i f b)` — the cell as a Lua value. */
 static void emit_maybe_cell_box(CG *c, const MCell *m, int depth) {
-    emit_indent(c, depth);
-    wat_appendf(c->w, "(call $box_num %s %s %s %s)\n", m->t, m->i, m->f, m->b);
+    emit_linef(c, depth, "(call $box_num %s %s %s %s)\n", m->t, m->i, m->f, m->b);
 }
 static void emit_maybe_slot_box(CG *c, int slot, int depth) {
     MCell m = mcell_slot(slot);
@@ -2893,23 +2726,19 @@ static void emit_maybe_slot_box(CG *c, int slot, int depth) {
 }
 /* The f64 view of a cell known to be numeric (tag 1 or 2). */
 static void emit_cell_f64(CG *c, const MCell *m, int depth) {
-    emit_indent(c, depth);
-    wat_appendf(c->w, "(if (result f64) (i32.eq %s (i32.const 2)) (then %s) (else (f64.convert_i64_s %s)))\n",
-                m->t, m->f, m->i);
+    emit_linef(c, depth, "(if (result f64) (i32.eq %s (i32.const 2)) (then %s) (else (f64.convert_i64_s %s)))\n",
+               m->t, m->f, m->i);
 }
 static void emit_both_tags(CG *c, const MCell *a, const MCell *b, int tag, int depth) {
-    emit_indent(c, depth);
-    wat_appendf(c->w, "(i32.and (i32.eq %s (i32.const %d)) (i32.eq %s (i32.const %d)))\n", a->t, tag, b->t, tag);
+    emit_linef(c, depth, "(i32.and (i32.eq %s (i32.const %d)) (i32.eq %s (i32.const %d)))\n", a->t, tag, b->t, tag);
 }
 /* d = generic helper(box a, box b); tag 0. */
 static void emit_maybe_generic2(CG *c, const char *helper, const MCell *a, const MCell *b,
                                 const MCell *d, int depth) {
-    emit_indent(c, depth);
-    wat_appendf(c->w, "(local.set %s (call %s\n", d->sb, helper);
+    emit_linef(c, depth, "(local.set %s (call %s\n", d->sb, helper);
     emit_maybe_cell_box(c, a, depth + 1);
     emit_maybe_cell_box(c, b, depth + 1);
-    emit_indent(c, depth);
-    wat_append(c->w, "))\n");
+    emit_line(c, depth, "))\n");
     emit_set_tag(c, d, 0, depth);
 }
 
@@ -2944,11 +2773,9 @@ static void emit_maybe_arith(CG *c, BinOp op, const MCell *a, const MCell *b, co
     case BIN_MOD: ifn = "$imod_floor"; break;
     default: cg_error(c, "internal: emit_maybe_arith on a non-arithmetic op"); return;
     }
-    emit_indent(c, depth);
-    wat_append(c->w, "(if\n");
+    emit_line(c, depth, "(if\n");
     emit_both_tags(c, a, b, 1, depth + 1);
-    emit_indent(c, depth + 1);
-    wat_append(c->w, "(then\n");
+    emit_line(c, depth + 1, "(then\n");
     emit_indent(c, depth + 2);
     if (op == BIN_DIV) {
         wat_appendf(c->w, "(local.set %s (f64.div (f64.convert_i64_s %s) (f64.convert_i64_s %s)))\n", d->sf, a->i, b->i);
@@ -2960,61 +2787,41 @@ static void emit_maybe_arith(CG *c, BinOp op, const MCell *a, const MCell *b, co
         wat_appendf(c->w, "(local.set %s (%s %s %s))\n", d->si, iop, a->i, b->i);
         emit_set_tag(c, d, 1, depth + 2);
     }
-    emit_indent(c, depth + 1);
-    wat_append(c->w, ")\n");
-    emit_indent(c, depth + 1);
-    wat_append(c->w, "(else\n");
+    emit_line(c, depth + 1, ")\n");
+    emit_line(c, depth + 1, "(else\n");
     if (fop) {
-        emit_indent(c, depth + 2);
-        wat_appendf(c->w, "(if (i32.and (i32.ne %s (i32.const 0)) (i32.ne %s (i32.const 0)))\n", a->t, b->t);
-        emit_indent(c, depth + 3);
-        wat_append(c->w, "(then\n");
-        emit_indent(c, depth + 4);
-        wat_appendf(c->w, "(local.set %s (%s\n", d->sf, fop);
+        emit_linef(c, depth + 2, "(if (i32.and (i32.ne %s (i32.const 0)) (i32.ne %s (i32.const 0)))\n", a->t, b->t);
+        emit_line(c, depth + 3, "(then\n");
+        emit_linef(c, depth + 4, "(local.set %s (%s\n", d->sf, fop);
         emit_cell_f64(c, a, depth + 5);
         emit_cell_f64(c, b, depth + 5);
-        emit_indent(c, depth + 4);
-        wat_append(c->w, "))\n");
+        emit_line(c, depth + 4, "))\n");
         emit_set_tag(c, d, 2, depth + 4);
-        emit_indent(c, depth + 3);
-        wat_append(c->w, ")\n");
-        emit_indent(c, depth + 3);
-        wat_append(c->w, "(else\n");
+        emit_line(c, depth + 3, ")\n");
+        emit_line(c, depth + 3, "(else\n");
         emit_maybe_generic2(c, binop_helper(op), a, b, d, depth + 4);
-        emit_indent(c, depth + 3);
-        wat_append(c->w, "))\n");
+        emit_line(c, depth + 3, "))\n");
     } else {
         emit_maybe_generic2(c, binop_helper(op), a, b, d, depth + 2);
     }
-    emit_indent(c, depth + 1);
-    wat_append(c->w, "))\n");
+    emit_line(c, depth + 1, "))\n");
 }
 
 static void emit_maybe_neg(CG *c, const MCell *a, const MCell *d, int depth) {
-    emit_indent(c, depth);
-    wat_appendf(c->w, "(if (i32.eq %s (i32.const 1))\n", a->t);
-    emit_indent(c, depth + 1);
-    wat_appendf(c->w, "(then (local.set %s (i64.sub (i64.const 0) %s))\n", d->si, a->i);
+    emit_linef(c, depth, "(if (i32.eq %s (i32.const 1))\n", a->t);
+    emit_linef(c, depth + 1, "(then (local.set %s (i64.sub (i64.const 0) %s))\n", d->si, a->i);
     emit_set_tag(c, d, 1, depth + 2);
-    emit_indent(c, depth + 1);
-    wat_appendf(c->w, ")\n");
-    emit_indent(c, depth + 1);
-    wat_appendf(c->w, "(else (if (i32.eq %s (i32.const 2))\n", a->t);
-    emit_indent(c, depth + 2);
-    wat_appendf(c->w, "(then (local.set %s (f64.neg %s))\n", d->sf, a->f);
+    emit_linef(c, depth + 1, ")\n");
+    emit_linef(c, depth + 1, "(else (if (i32.eq %s (i32.const 2))\n", a->t);
+    emit_linef(c, depth + 2, "(then (local.set %s (f64.neg %s))\n", d->sf, a->f);
     emit_set_tag(c, d, 2, depth + 3);
-    emit_indent(c, depth + 2);
-    wat_append(c->w, ")\n");
-    emit_indent(c, depth + 2);
-    wat_append(c->w, "(else\n");
-    emit_indent(c, depth + 3);
-    wat_appendf(c->w, "(local.set %s (call $lua_neg\n", d->sb);
+    emit_line(c, depth + 2, ")\n");
+    emit_line(c, depth + 2, "(else\n");
+    emit_linef(c, depth + 3, "(local.set %s (call $lua_neg\n", d->sb);
     emit_maybe_cell_box(c, a, depth + 4);
-    emit_indent(c, depth + 3);
-    wat_append(c->w, "))\n");
+    emit_line(c, depth + 3, "))\n");
     emit_set_tag(c, d, 0, depth + 3);
-    emit_indent(c, depth + 2);
-    wat_append(c->w, "))))\n");
+    emit_line(c, depth + 2, "))))\n");
 }
 
 /* --- inline math builtins ---
@@ -3125,97 +2932,66 @@ static void emit_maybe_math_call(CG *c, const Expr *e, MathBuiltin mk, const MCe
     int k = c->mt_depth;
     MCell cv = mcell_tmp(k); /* the callee, never the destination (d may be the arg) */
     mt_alloc(c, 1);
-    emit_indent(c, depth);
-    wat_appendf(c->w, "(local.set %s\n", cv.sb);
+    emit_linef(c, depth, "(local.set %s\n", cv.sb);
     emit_expr(c, e->as.call.callee, depth + 1);
-    emit_indent(c, depth);
-    wat_append(c->w, ")\n");
+    emit_line(c, depth, ")\n");
     MCell a;
     if (!operand_immediate(c, e->as.call.args[0], NULL, &a)) {
         a = mcell_tmp(k + 1);
         mt_alloc(c, 1);
         emit_maybe_lower(c, e->as.call.args[0], &a, depth);
     }
-    emit_indent(c, depth);
-    wat_appendf(c->w, "(if (i32.and (ref.eq (ref.cast (ref null eq) %s) (global.get $g_%s)) (i32.ne %s (i32.const 0)))\n",
-                cv.b, glob, a.t);
-    emit_indent(c, depth + 1);
-    wat_append(c->w, "(then\n");
+    emit_linef(c, depth, "(if (i32.and (ref.eq (ref.cast (ref null eq) %s) (global.get $g_%s)) (i32.ne %s (i32.const 0)))\n",
+               cv.b, glob, a.t);
+    emit_line(c, depth + 1, "(then\n");
     switch (mk) {
     case MB_SQRT:
-        emit_indent(c, depth + 2);
-        wat_appendf(c->w, "(local.set %s (f64.sqrt\n", d->sf);
+        emit_linef(c, depth + 2, "(local.set %s (f64.sqrt\n", d->sf);
         emit_cell_f64(c, &a, depth + 3);
-        emit_indent(c, depth + 2);
-        wat_append(c->w, "))\n");
+        emit_line(c, depth + 2, "))\n");
         emit_set_tag(c, d, 2, depth + 2);
         break;
     case MB_ABS:
-        emit_indent(c, depth + 2);
-        wat_appendf(c->w, "(if (i32.eq %s (i32.const 1))\n", a.t);
-        emit_indent(c, depth + 3);
-        wat_appendf(c->w, "(then (local.set %s (select (i64.sub (i64.const 0) %s) %s (i64.lt_s %s (i64.const 0))))\n",
-                    d->si, a.i, a.i, a.i);
+        emit_linef(c, depth + 2, "(if (i32.eq %s (i32.const 1))\n", a.t);
+        emit_linef(c, depth + 3, "(then (local.set %s (select (i64.sub (i64.const 0) %s) %s (i64.lt_s %s (i64.const 0))))\n",
+                   d->si, a.i, a.i, a.i);
         emit_set_tag(c, d, 1, depth + 4);
-        emit_indent(c, depth + 3);
-        wat_append(c->w, ")\n");
-        emit_indent(c, depth + 3);
-        wat_appendf(c->w, "(else (local.set %s (f64.abs %s))\n", d->sf, a.f);
+        emit_line(c, depth + 3, ")\n");
+        emit_linef(c, depth + 3, "(else (local.set %s (f64.abs %s))\n", d->sf, a.f);
         emit_set_tag(c, d, 2, depth + 4);
-        emit_indent(c, depth + 3);
-        wat_append(c->w, "))\n");
+        emit_line(c, depth + 3, "))\n");
         break;
     case MB_FLOOR:
     case MB_CEIL:
         /* An int is its own floor; a float rounds and converts to an
          * integer when it fits (reference pushnumint), else stays float. */
-        emit_indent(c, depth + 2);
-        wat_appendf(c->w, "(if (i32.eq %s (i32.const 1))\n", a.t);
-        emit_indent(c, depth + 3);
-        wat_appendf(c->w, "(then (local.set %s %s)\n", d->si, a.i);
+        emit_linef(c, depth + 2, "(if (i32.eq %s (i32.const 1))\n", a.t);
+        emit_linef(c, depth + 3, "(then (local.set %s %s)\n", d->si, a.i);
         emit_set_tag(c, d, 1, depth + 4);
-        emit_indent(c, depth + 3);
-        wat_append(c->w, ")\n");
-        emit_indent(c, depth + 3);
-        wat_appendf(c->w, "(else (local.set %s (%s %s))\n", d->sf, mk == MB_FLOOR ? "f64.floor" : "f64.ceil", a.f);
-        emit_indent(c, depth + 4);
-        wat_appendf(c->w,
-                    "(if (i32.and (f64.ge %s (f64.const -9223372036854775808)) (f64.lt %s (f64.const 9223372036854775808)))\n",
-                    d->f, d->f);
-        emit_indent(c, depth + 5);
-        wat_appendf(c->w, "(then (local.set %s (i64.trunc_f64_s %s))\n", d->si, d->f);
+        emit_line(c, depth + 3, ")\n");
+        emit_linef(c, depth + 3, "(else (local.set %s (%s %s))\n", d->sf, mk == MB_FLOOR ? "f64.floor" : "f64.ceil", a.f);
+        emit_linef(c, depth + 4, "(if (i32.and (f64.ge %s (f64.const -9223372036854775808)) (f64.lt %s (f64.const 9223372036854775808)))\n",
+                   d->f, d->f);
+        emit_linef(c, depth + 5, "(then (local.set %s (i64.trunc_f64_s %s))\n", d->si, d->f);
         emit_set_tag(c, d, 1, depth + 6);
-        emit_indent(c, depth + 5);
-        wat_append(c->w, ")\n");
-        emit_indent(c, depth + 5);
-        wat_append(c->w, "(else\n");
+        emit_line(c, depth + 5, ")\n");
+        emit_line(c, depth + 5, "(else\n");
         emit_set_tag(c, d, 2, depth + 6);
-        emit_indent(c, depth + 5);
-        wat_append(c->w, "))\n");
-        emit_indent(c, depth + 3);
-        wat_append(c->w, "))\n");
+        emit_line(c, depth + 5, "))\n");
+        emit_line(c, depth + 3, "))\n");
         break;
     default: break;
     }
-    emit_indent(c, depth + 1);
-    wat_append(c->w, ")\n");
-    emit_indent(c, depth + 1);
-    wat_append(c->w, "(else\n");
-    emit_indent(c, depth + 2);
-    wat_appendf(c->w, "(local.set %s (call $args_first (call $lua_call_any %s (array.new_fixed $ArgArr 1\n", d->sb, cv.b);
+    emit_line(c, depth + 1, ")\n");
+    emit_line(c, depth + 1, "(else\n");
+    emit_linef(c, depth + 2, "(local.set %s (call $args_first (call $lua_call_any %s (array.new_fixed $ArgArr 1\n", d->sb, cv.b);
     emit_maybe_cell_box(c, &a, depth + 3);
-    emit_indent(c, depth + 2);
-    wat_appendf(c->w, ") (i32.const %d))))\n", e->line);
-    emit_indent(c, depth + 2);
-    wat_appendf(c->w, "(call $unbox_num %s)\n", d->b);
-    emit_indent(c, depth + 2);
-    wat_appendf(c->w, "local.set %s\n", d->sf);
-    emit_indent(c, depth + 2);
-    wat_appendf(c->w, "local.set %s\n", d->si);
-    emit_indent(c, depth + 2);
-    wat_appendf(c->w, "local.set %s\n", d->st);
-    emit_indent(c, depth + 1);
-    wat_append(c->w, "))\n");
+    emit_linef(c, depth + 2, ") (i32.const %d))))\n", e->line);
+    emit_linef(c, depth + 2, "(call $unbox_num %s)\n", d->b);
+    emit_linef(c, depth + 2, "local.set %s\n", d->sf);
+    emit_linef(c, depth + 2, "local.set %s\n", d->si);
+    emit_linef(c, depth + 2, "local.set %s\n", d->st);
+    emit_line(c, depth + 1, "))\n");
     c->mt_depth = k;
 }
 
@@ -3226,20 +3002,16 @@ static void emit_maybe_math_call(CG *c, const Expr *e, MathBuiltin mk, const MCe
 static void emit_maybe_lower(CG *c, const Expr *e, const MCell *d, int depth) {
     if (!c->ok) return;
     if (expr_is_int(c, e)) {
-        emit_indent(c, depth);
-        wat_appendf(c->w, "(local.set %s\n", d->si);
+        emit_linef(c, depth, "(local.set %s\n", d->si);
         emit_int_expr(c, e, depth + 1);
-        emit_indent(c, depth);
-        wat_append(c->w, ")\n");
+        emit_line(c, depth, ")\n");
         emit_set_tag(c, d, 1, depth);
         return;
     }
     if (expr_is_float(c, e)) {
-        emit_indent(c, depth);
-        wat_appendf(c->w, "(local.set %s\n", d->sf);
+        emit_linef(c, depth, "(local.set %s\n", d->sf);
         emit_float_expr(c, e, depth + 1);
-        emit_indent(c, depth);
-        wat_append(c->w, ")\n");
+        emit_line(c, depth, ")\n");
         emit_set_tag(c, d, 2, depth);
         return;
     }
@@ -3248,14 +3020,10 @@ static void emit_maybe_lower(CG *c, const Expr *e, const MCell *d, int depth) {
         if (e->as.var.kind == VAR_LOCAL && slot_is_maybe(c, e->as.var.idx)) {
             MCell src = mcell_slot(e->as.var.idx);
             if (strcmp(src.st, d->st) == 0) return; /* x = x */
-            emit_indent(c, depth);
-            wat_appendf(c->w, "(local.set %s %s)\n", d->st, src.t);
-            emit_indent(c, depth);
-            wat_appendf(c->w, "(local.set %s %s)\n", d->si, src.i);
-            emit_indent(c, depth);
-            wat_appendf(c->w, "(local.set %s %s)\n", d->sf, src.f);
-            emit_indent(c, depth);
-            wat_appendf(c->w, "(local.set %s %s)\n", d->sb, src.b);
+            emit_linef(c, depth, "(local.set %s %s)\n", d->st, src.t);
+            emit_linef(c, depth, "(local.set %s %s)\n", d->si, src.i);
+            emit_linef(c, depth, "(local.set %s %s)\n", d->sf, src.f);
+            emit_linef(c, depth, "(local.set %s %s)\n", d->sb, src.b);
             return;
         }
         break;
@@ -3288,10 +3056,8 @@ static void emit_maybe_lower(CG *c, const Expr *e, const MCell *d, int depth) {
         if (kstr || kint || kmaybe) {
             char icb[48];
             const char *ic = kstr ? ic_new(c, icb, sizeof icb) : NULL;
-            emit_indent(c, depth);
-            wat_append(c->w, kstr   ? (ic ? "(call $lua_index_ic_cell\n" : "(call $lua_index_sk_cell\n")
-                             : kint ? "(call $lua_index_ik_cell\n"
-                                    : "(call $lua_index_mk_cell\n");
+            emit_line(c, depth, kstr ? (ic ? "(call $lua_index_ic_cell\n" : "(call $lua_index_sk_cell\n") : kint ? "(call $lua_index_ik_cell\n"
+                                                                                                                 : "(call $lua_index_mk_cell\n");
             emit_expr(c, e->as.index.table, depth + 1);
             if (kstr) {
                 emit_string_literal(c, key->as.s.bytes, key->as.s.len, depth + 1);
@@ -3299,21 +3065,14 @@ static void emit_maybe_lower(CG *c, const Expr *e, const MCell *d, int depth) {
                 emit_int_expr(c, key, depth + 1);
             } else {
                 MCell kc = mcell_slot(key->as.var.idx);
-                emit_indent(c, depth + 1);
-                wat_appendf(c->w, "%s %s %s %s\n", kc.t, kc.i, kc.f, kc.b);
+                emit_linef(c, depth + 1, "%s %s %s %s\n", kc.t, kc.i, kc.f, kc.b);
             }
-            emit_indent(c, depth + 1);
-            wat_appendf(c->w, "(i32.const %d)%s%s\n", e->line, ic ? " " : "", ic ? ic : "");
-            emit_indent(c, depth);
-            wat_append(c->w, ")\n");
-            emit_indent(c, depth);
-            wat_appendf(c->w, "local.set %s\n", d->sb);
-            emit_indent(c, depth);
-            wat_appendf(c->w, "local.set %s\n", d->sf);
-            emit_indent(c, depth);
-            wat_appendf(c->w, "local.set %s\n", d->si);
-            emit_indent(c, depth);
-            wat_appendf(c->w, "local.set %s\n", d->st);
+            emit_linef(c, depth + 1, "(i32.const %d)%s%s\n", e->line, ic ? " " : "", ic ? ic : "");
+            emit_line(c, depth, ")\n");
+            emit_linef(c, depth, "local.set %s\n", d->sb);
+            emit_linef(c, depth, "local.set %s\n", d->sf);
+            emit_linef(c, depth, "local.set %s\n", d->si);
+            emit_linef(c, depth, "local.set %s\n", d->st);
             return;
         }
         break;
@@ -3335,19 +3094,13 @@ static void emit_maybe_lower(CG *c, const Expr *e, const MCell *d, int depth) {
     default: break;
     }
     /* Opaque: a Lua value, classified once. */
-    emit_indent(c, depth);
-    wat_appendf(c->w, "(local.set %s\n", d->sb);
+    emit_linef(c, depth, "(local.set %s\n", d->sb);
     emit_expr(c, e, depth + 1);
-    emit_indent(c, depth);
-    wat_append(c->w, ")\n");
-    emit_indent(c, depth);
-    wat_appendf(c->w, "(call $unbox_num %s)\n", d->b);
-    emit_indent(c, depth);
-    wat_appendf(c->w, "local.set %s\n", d->sf);
-    emit_indent(c, depth);
-    wat_appendf(c->w, "local.set %s\n", d->si);
-    emit_indent(c, depth);
-    wat_appendf(c->w, "local.set %s\n", d->st);
+    emit_line(c, depth, ")\n");
+    emit_linef(c, depth, "(call $unbox_num %s)\n", d->b);
+    emit_linef(c, depth, "local.set %s\n", d->sf);
+    emit_linef(c, depth, "local.set %s\n", d->si);
+    emit_linef(c, depth, "local.set %s\n", d->st);
 }
 
 /* `slot = e` for a maybe slot. */
@@ -3361,12 +3114,10 @@ static void emit_maybe_store(CG *c, int slot, const Expr *e, int depth) {
 static void emit_maybe_boxed(CG *c, const Expr *e, int depth) {
     int k = mt_alloc(c, 1);
     MCell d = mcell_tmp(k);
-    emit_indent(c, depth);
-    wat_append(c->w, "(block (result anyref)\n");
+    emit_line(c, depth, "(block (result anyref)\n");
     emit_maybe_lower(c, e, &d, depth + 1);
     emit_maybe_cell_box(c, &d, depth + 1);
-    emit_indent(c, depth);
-    wat_append(c->w, ")\n");
+    emit_line(c, depth, ")\n");
     c->mt_depth = k;
 }
 
@@ -3404,59 +3155,43 @@ static void emit_maybe_cmp_block(CG *c, const Expr *e, int depth) {
     static const char *fops[] = {"f64.lt", "f64.le", "f64.gt", "f64.ge", "f64.eq", "f64.ne"};
     int j = cmp_op_index(e->as.binop.op);
     MCell a, b;
-    emit_indent(c, depth);
-    wat_append(c->w, "(block (result i32)\n");
+    emit_line(c, depth, "(block (result i32)\n");
     int k = emit_maybe_operands(c, e->as.binop.lhs, e->as.binop.rhs, &a, &b, depth + 1);
-    emit_indent(c, depth + 1);
-    wat_append(c->w, "(if (result i32)\n");
+    emit_line(c, depth + 1, "(if (result i32)\n");
     emit_both_tags(c, &a, &b, 1, depth + 2);
-    emit_indent(c, depth + 2);
-    wat_appendf(c->w, "(then (%s %s %s))\n", iops[j], a.i, b.i);
-    emit_indent(c, depth + 2);
-    wat_append(c->w, "(else (if (result i32)\n");
+    emit_linef(c, depth + 2, "(then (%s %s %s))\n", iops[j], a.i, b.i);
+    emit_line(c, depth + 2, "(else (if (result i32)\n");
     emit_both_tags(c, &a, &b, 2, depth + 3);
-    emit_indent(c, depth + 3);
-    wat_appendf(c->w, "(then (%s %s %s))\n", fops[j], a.f, b.f);
+    emit_linef(c, depth + 3, "(then (%s %s %s))\n", fops[j], a.f, b.f);
     /* Both numeric with different tags: int vs float. A side whose tag is
      * static decides which way round; otherwise test at run time. */
     int at = mcell_static_tag(&a), bt = mcell_static_tag(&b);
     int mixed = !(at && bt && at == bt);
     if (mixed) {
-        emit_indent(c, depth + 3);
-        wat_appendf(c->w, "(else (if (result i32) (i32.and (i32.ne %s (i32.const 0)) (i32.ne %s (i32.const 0)))\n",
-                    a.t, b.t);
-        emit_indent(c, depth + 4);
-        wat_append(c->w, "(then\n");
+        emit_linef(c, depth + 3, "(else (if (result i32) (i32.and (i32.ne %s (i32.const 0)) (i32.ne %s (i32.const 0)))\n",
+                   a.t, b.t);
+        emit_line(c, depth + 4, "(then\n");
         if (at == 1 || bt == 2) {
             emit_mixed_cell_cmp(c, j, e, &a, &b, 1, depth + 5);
         } else if (at == 2 || bt == 1) {
             emit_mixed_cell_cmp(c, j, e, &a, &b, 0, depth + 5);
         } else {
-            emit_indent(c, depth + 5);
-            wat_appendf(c->w, "(if (result i32) (i32.eq %s (i32.const 1))\n", a.t);
-            emit_indent(c, depth + 6);
-            wat_append(c->w, "(then\n");
+            emit_linef(c, depth + 5, "(if (result i32) (i32.eq %s (i32.const 1))\n", a.t);
+            emit_line(c, depth + 6, "(then\n");
             emit_mixed_cell_cmp(c, j, e, &a, &b, 1, depth + 7);
-            emit_indent(c, depth + 6);
-            wat_append(c->w, ")\n");
-            emit_indent(c, depth + 6);
-            wat_append(c->w, "(else\n");
+            emit_line(c, depth + 6, ")\n");
+            emit_line(c, depth + 6, "(else\n");
             emit_mixed_cell_cmp(c, j, e, &a, &b, 0, depth + 7);
-            emit_indent(c, depth + 6);
-            wat_append(c->w, "))\n");
+            emit_line(c, depth + 6, "))\n");
         }
-        emit_indent(c, depth + 4);
-        wat_append(c->w, ")\n");
+        emit_line(c, depth + 4, ")\n");
     }
-    emit_indent(c, depth + 3 + mixed);
-    wat_appendf(c->w, "(else (call $lua_truthy (call %s\n", binop_helper(e->as.binop.op));
+    emit_linef(c, depth + 3 + mixed, "(else (call $lua_truthy (call %s\n", binop_helper(e->as.binop.op));
     emit_maybe_cell_box(c, &a, depth + 4 + mixed);
     emit_maybe_cell_box(c, &b, depth + 4 + mixed);
-    emit_indent(c, depth + 3 + mixed);
-    wat_append(c->w, mixed ? "))))))))\n" /* call, call, else, if(mixed), else, if, else, if */
-                           : "))))))\n"); /* call, call, else, if, else, if */
-    emit_indent(c, depth);
-    wat_append(c->w, ")\n");
+    emit_line(c, depth + 3 + mixed, mixed ? "))))))))\n" /* call, call, else, if(mixed), else, if, else, if */
+                                          : "))))))\n"); /* call, call, else, if, else, if */
+    emit_line(c, depth, ")\n");
     c->mt_depth = k;
 }
 
@@ -3964,33 +3699,26 @@ static void emit_expr(CG *c, const Expr *e, int depth) {
     /* Integer-specialized value used in a Lua-value (anyref) context: emit the
      * unboxed i64 and box it. EXPR_INT keeps its existing path. */
     if (c->opt_int && e->kind != EXPR_INT && expr_is_int(c, e)) {
-        emit_indent(c, depth);
-        wat_append(c->w, "(call $make_int\n");
+        emit_line(c, depth, "(call $make_int\n");
         emit_int_expr(c, e, depth + 1);
-        emit_indent(c, depth);
-        wat_append(c->w, ")\n");
+        emit_line(c, depth, ")\n");
         return;
     }
     if (c->opt_int && e->kind != EXPR_FLOAT && expr_is_float(c, e)) {
-        emit_indent(c, depth);
-        wat_append(c->w, "(call $make_float\n");
+        emit_line(c, depth, "(call $make_float\n");
         emit_float_expr(c, e, depth + 1);
-        emit_indent(c, depth);
-        wat_append(c->w, ")\n");
+        emit_line(c, depth, ")\n");
         return;
     }
     switch (e->kind) {
     case EXPR_NIL:
-        emit_indent(c, depth);
-        wat_append(c->w, "(ref.null any)\n");
+        emit_line(c, depth, "(ref.null any)\n");
         break;
     case EXPR_TRUE:
-        emit_indent(c, depth);
-        wat_append(c->w, "(global.get $g_true)\n");
+        emit_line(c, depth, "(global.get $g_true)\n");
         break;
     case EXPR_FALSE:
-        emit_indent(c, depth);
-        wat_append(c->w, "(global.get $g_false)\n");
+        emit_line(c, depth, "(global.get $g_false)\n");
         break;
     case EXPR_INT: emit_int_literal(c, e->as.i_val, depth); break;
     case EXPR_FLOAT: emit_float_literal(c, e->as.f_val, depth); break;
@@ -4009,17 +3737,13 @@ static void emit_expr(CG *c, const Expr *e, int depth) {
             emit_fast_call(c, e, depth);
             break;
         }
-        emit_indent(c, depth);
-        wat_append(c->w, "(call $args_first\n");
+        emit_line(c, depth, "(call $args_first\n");
         emit_call_array(c, e, depth + 1);
-        emit_indent(c, depth);
-        wat_append(c->w, ")\n");
+        emit_line(c, depth, ")\n");
         break;
     }
     case EXPR_VARARG:
-        emit_indent(c, depth);
-        wat_append(c->w,
-                   "(call $args_first (local.get $varargs))\n");
+        emit_line(c, depth, "(call $args_first (local.get $varargs))\n");
         break;
     }
 }
@@ -4028,10 +3752,8 @@ static void emit_expr(CG *c, const Expr *e, int depth) {
  * as a standalone indented line — the i-th value of the call/vararg result
  * currently parked in $tmp_args. */
 static void emit_args_at(CG *c, int idx, int depth) {
-    emit_indent(c, depth);
-    wat_appendf(c->w,
-                "(call $args_at (ref.as_non_null (local.get $tmp_args)) (i32.const %d))\n",
-                idx);
+    emit_linef(c, depth, "(call $args_at (ref.as_non_null (local.get $tmp_args)) (i32.const %d))\n",
+               idx);
 }
 
 /* ----- statement arms (split out of emit_stmt) ----- */
@@ -4058,11 +3780,9 @@ static int store_value_lowers(CG *c, const Expr *v) {
  * part, anything else through the maybe lowering. */
 static void emit_store_value_cell(CG *c, const Expr *v, const MCell *vc, int depth) {
     if (expr_is_float(c, v)) {
-        emit_indent(c, depth);
-        wat_appendf(c->w, "(local.set %s\n", vc->sf);
+        emit_linef(c, depth, "(local.set %s\n", vc->sf);
         emit_float_expr(c, v, depth + 1);
-        emit_indent(c, depth);
-        wat_append(c->w, ")\n");
+        emit_line(c, depth, ")\n");
         emit_set_tag(c, vc, 2, depth);
     } else {
         emit_maybe_lower(c, v, vc, depth);
@@ -4097,8 +3817,7 @@ static void emit_index_store_from(CG *c, const char *tb, int kkind, const char *
         if (kkind == SK_STR && ic) wat_appendf(c->w, "(then (call $lua_tabset_ic_f %s %s %s %s))\n", ic, tb, kb, vc->f);
         else if (kkind == SK_STR) wat_appendf(c->w, "(then (call $lua_tabset_sk_f %s %s %s))\n", tb, kb, vc->f);
         else wat_appendf(c->w, "(then (call $lua_tabset_ik_f %s %s %s))\n", tb, kc->i, vc->f);
-        emit_indent(c, depth + 1);
-        wat_append(c->w, "(else ");
+        emit_line(c, depth + 1, "(else ");
         depth = 0; /* the boxed store below continues this line */
     }
     switch (kkind) {
@@ -4132,17 +3851,13 @@ static int emit_unboxed_index_store(CG *c, const AssignTarget *t, const Expr *v,
     if (!store_value_lowers(c, v)) return 0;
     int k = mt_alloc(c, 2);
     MCell tc = mcell_tmp(k), vc = mcell_tmp(k + 1);
-    emit_indent(c, depth);
-    wat_appendf(c->w, "(local.set %s\n", tc.sb);
+    emit_linef(c, depth, "(local.set %s\n", tc.sb);
     emit_expr(c, t->as.index.table, depth + 1);
-    emit_indent(c, depth);
-    wat_append(c->w, ")\n");
+    emit_line(c, depth, ")\n");
     if (kint) { /* the key is evaluated once, before the value */
-        emit_indent(c, depth);
-        wat_appendf(c->w, "(local.set %s\n", tc.si);
+        emit_linef(c, depth, "(local.set %s\n", tc.si);
         emit_int_expr(c, key, depth + 1);
-        emit_indent(c, depth);
-        wat_append(c->w, ")\n");
+        emit_line(c, depth, ")\n");
     }
     emit_store_value_cell(c, v, &vc, depth);
     char kb[160] = "";
@@ -4183,11 +3898,9 @@ static int emit_assign_multi_cells(CG *c, const Stmt *s, int depth) {
         if (t->kind == TGT_VAR) continue;
         const Expr *key = t->as.index.key;
         g[i].t = mcell_tmp(mt_alloc(c, 1));
-        emit_indent(c, depth);
-        wat_appendf(c->w, "(local.set %s\n", g[i].t.sb);
+        emit_linef(c, depth, "(local.set %s\n", g[i].t.sb);
         emit_expr(c, t->as.index.table, depth + 1);
-        emit_indent(c, depth);
-        wat_append(c->w, ")\n");
+        emit_line(c, depth, ")\n");
         if (key->kind == EXPR_STRING && key->as.s.len <= KSTR_MAX) {
             g[i].kkind = SK_STR;
             kstr_expr(c, key->as.s.bytes, key->as.s.len, g[i].kb, sizeof g[i].kb);
@@ -4196,24 +3909,19 @@ static int emit_assign_multi_cells(CG *c, const Stmt *s, int depth) {
         g[i].k = mcell_tmp(mt_alloc(c, 1));
         if (expr_is_int(c, key)) {
             g[i].kkind = SK_INT;
-            emit_indent(c, depth);
-            wat_appendf(c->w, "(local.set %s\n", g[i].k.si);
+            emit_linef(c, depth, "(local.set %s\n", g[i].k.si);
             emit_int_expr(c, key, depth + 1);
-            emit_indent(c, depth);
-            wat_append(c->w, ")\n");
+            emit_line(c, depth, ")\n");
         } else if (key->kind == EXPR_VAR && key->as.var.kind == VAR_LOCAL && slot_is_maybe(c, key->as.var.idx)) {
             g[i].kkind = SK_MAYBE;
             MCell ks = mcell_slot(key->as.var.idx);
-            emit_indent(c, depth);
-            wat_appendf(c->w, "(local.set %s %s) (local.set %s %s) (local.set %s %s) (local.set %s %s)\n",
-                        g[i].k.st, ks.t, g[i].k.si, ks.i, g[i].k.sf, ks.f, g[i].k.sb, ks.b);
+            emit_linef(c, depth, "(local.set %s %s) (local.set %s %s) (local.set %s %s) (local.set %s %s)\n",
+                       g[i].k.st, ks.t, g[i].k.si, ks.i, g[i].k.sf, ks.f, g[i].k.sb, ks.b);
         } else {
             g[i].kkind = SK_ANY;
-            emit_indent(c, depth);
-            wat_appendf(c->w, "(local.set %s\n", g[i].k.sb);
+            emit_linef(c, depth, "(local.set %s\n", g[i].k.sb);
             emit_expr(c, key, depth + 1);
-            emit_indent(c, depth);
-            wat_append(c->w, ")\n");
+            emit_line(c, depth, ")\n");
         }
     }
     for (int i = 0; i < nt; i++) {
@@ -4223,19 +3931,16 @@ static int emit_assign_multi_cells(CG *c, const Stmt *s, int depth) {
         if (g[i].lowered) {
             emit_store_value_cell(c, v, &g[i].v, depth);
         } else {
-            emit_indent(c, depth);
-            wat_appendf(c->w, "(local.set %s\n", g[i].v.sb);
+            emit_linef(c, depth, "(local.set %s\n", g[i].v.sb);
             emit_expr(c, v, depth + 1);
-            emit_indent(c, depth);
-            wat_append(c->w, ")\n");
+            emit_line(c, depth, ")\n");
         }
     }
     for (int i = nt - 1; i >= 0; i--) {
         const AssignTarget *t = &s->as.assign.targets[i];
         if (t->kind == TGT_VAR) {
             emit_target_open(c, t, depth);
-            emit_indent(c, depth + 1);
-            wat_appendf(c->w, "%s\n", g[i].v.b);
+            emit_linef(c, depth + 1, "%s\n", g[i].v.b);
             emit_target_close(c, depth);
         } else {
             emit_index_store_from(c, g[i].t.b, g[i].kkind, g[i].kb, &g[i].k, g[i].lowered ? &g[i].v : NULL,
@@ -4258,19 +3963,15 @@ static void emit_assign(CG *c, const Stmt *s, int depth) {
     if (n_targets == 1 && n_values == 1) {
         AssignTarget *t = &s->as.assign.targets[0];
         if (t->kind == TGT_VAR && t->as.var.kind == VAR_LOCAL && slot_is_int(c, t->as.var.idx)) {
-            emit_indent(c, depth);
-            wat_appendf(c->w, "(local.set $L%d\n", t->as.var.idx);
+            emit_linef(c, depth, "(local.set $L%d\n", t->as.var.idx);
             emit_int_expr(c, s->as.assign.values[0], depth + 1);
-            emit_indent(c, depth);
-            wat_append(c->w, ")\n");
+            emit_line(c, depth, ")\n");
             return;
         }
         if (t->kind == TGT_VAR && t->as.var.kind == VAR_LOCAL && slot_is_float(c, t->as.var.idx)) {
-            emit_indent(c, depth);
-            wat_appendf(c->w, "(local.set $L%d\n", t->as.var.idx);
+            emit_linef(c, depth, "(local.set $L%d\n", t->as.var.idx);
             emit_float_expr(c, s->as.assign.values[0], depth + 1);
-            emit_indent(c, depth);
-            wat_append(c->w, ")\n");
+            emit_line(c, depth, ")\n");
             return;
         }
         if (t->kind == TGT_VAR && t->as.var.kind == VAR_LOCAL && slot_is_maybe(c, t->as.var.idx)) {
@@ -4319,42 +4020,30 @@ static void emit_assign(CG *c, const Stmt *s, int depth) {
         }
     }
     if (has_index) {
-        emit_indent(c, depth);
-        wat_appendf(c->w,
-                    "(local.set $tmp_lhs_t (array.new $ArgArr (ref.null any) "
-                    "(i32.const %d)))\n",
-                    n_targets);
-        emit_indent(c, depth);
-        wat_appendf(c->w,
-                    "(local.set $tmp_lhs_k (array.new $ArgArr (ref.null any) "
-                    "(i32.const %d)))\n",
-                    n_targets);
+        emit_linef(c, depth, "(local.set $tmp_lhs_t (array.new $ArgArr (ref.null any) "
+                             "(i32.const %d)))\n",
+                   n_targets);
+        emit_linef(c, depth, "(local.set $tmp_lhs_k (array.new $ArgArr (ref.null any) "
+                             "(i32.const %d)))\n",
+                   n_targets);
         for (int i = 0; i < n_targets; i++) {
             AssignTarget *t = &s->as.assign.targets[i];
             if (t->kind == TGT_VAR) continue;
-            emit_indent(c, depth);
-            wat_appendf(c->w,
-                        "(array.set $ArgArr (ref.as_non_null (local.get $tmp_lhs_t)) "
-                        "(i32.const %d)\n",
-                        i);
+            emit_linef(c, depth, "(array.set $ArgArr (ref.as_non_null (local.get $tmp_lhs_t)) "
+                                 "(i32.const %d)\n",
+                       i);
             emit_expr(c, t->as.index.table, depth + 1);
-            emit_indent(c, depth);
-            wat_append(c->w, ")\n");
-            emit_indent(c, depth);
-            wat_appendf(c->w,
-                        "(array.set $ArgArr (ref.as_non_null (local.get $tmp_lhs_k)) "
-                        "(i32.const %d)\n",
-                        i);
+            emit_line(c, depth, ")\n");
+            emit_linef(c, depth, "(array.set $ArgArr (ref.as_non_null (local.get $tmp_lhs_k)) "
+                                 "(i32.const %d)\n",
+                       i);
             emit_expr(c, t->as.index.key, depth + 1);
-            emit_indent(c, depth);
-            wat_append(c->w, ")\n");
+            emit_line(c, depth, ")\n");
         }
     }
-    emit_indent(c, depth);
-    wat_append(c->w, "(local.set $tmp_args\n");
+    emit_line(c, depth, "(local.set $tmp_args\n");
     emit_args_array(c, s->as.assign.values, n_values, depth + 1);
-    emit_indent(c, depth);
-    wat_append(c->w, ")\n");
+    emit_line(c, depth, ")\n");
     for (int i = n_targets - 1; i >= 0; i--) {
         AssignTarget *t = &s->as.assign.targets[i];
         if (t->kind == TGT_VAR || !has_index) {
@@ -4364,21 +4053,15 @@ static void emit_assign(CG *c, const Stmt *s, int depth) {
         } else {
             /* index target: store via pre-evaluated table+key so
              * __newindex still fires (matches emit_target_open). */
-            emit_indent(c, depth);
-            wat_append(c->w, "(call $lua_tabset\n");
-            emit_indent(c, depth + 1);
-            wat_appendf(c->w,
-                        "(array.get $ArgArr (ref.as_non_null (local.get $tmp_lhs_t)) "
-                        "(i32.const %d))\n",
-                        i);
-            emit_indent(c, depth + 1);
-            wat_appendf(c->w,
-                        "(array.get $ArgArr (ref.as_non_null (local.get $tmp_lhs_k)) "
-                        "(i32.const %d))\n",
-                        i);
+            emit_line(c, depth, "(call $lua_tabset\n");
+            emit_linef(c, depth + 1, "(array.get $ArgArr (ref.as_non_null (local.get $tmp_lhs_t)) "
+                                     "(i32.const %d))\n",
+                       i);
+            emit_linef(c, depth + 1, "(array.get $ArgArr (ref.as_non_null (local.get $tmp_lhs_k)) "
+                                     "(i32.const %d))\n",
+                       i);
             emit_args_at(c, i, depth + 1);
-            emit_indent(c, depth);
-            wat_append(c->w, ")\n");
+            emit_line(c, depth, ")\n");
         }
     }
 }
@@ -4394,12 +4077,10 @@ static void emit_return(CG *c, const Stmt *s, int depth) {
         if (c->in_main) {
             for (int i = 0; i < n_values; i++) {
                 emit_expr(c, s->as.return_stmt.values[i], depth);
-                emit_indent(c, depth);
-                wat_append(c->w, "drop\n");
+                emit_line(c, depth, "drop\n");
             }
             emit_close_upto(c, 0, "(ref.null any)", depth);
-            emit_indent(c, depth);
-            wat_append(c->w, "return\n");
+            emit_line(c, depth, "return\n");
             return;
         }
         if (c->ret_single) {
@@ -4409,14 +4090,12 @@ static void emit_return(CG *c, const Stmt *s, int depth) {
                 else
                     emit_num_as_f64(c, s->as.return_stmt.values[0], depth);
             } else if (n_values == 0) {
-                emit_indent(c, depth);
-                wat_append(c->w, "(ref.null any)\n");
+                emit_line(c, depth, "(ref.null any)\n");
             } else {
                 emit_expr(c, s->as.return_stmt.values[0], depth);
                 for (int i = 1; i < n_values; i++) {
                     emit_expr(c, s->as.return_stmt.values[i], depth);
-                    emit_indent(c, depth);
-                    wat_append(c->w, "drop\n");
+                    emit_line(c, depth, "drop\n");
                 }
             }
         } else if (n_values == 1 && is_multival_tail(s->as.return_stmt.values[0])) {
@@ -4425,8 +4104,7 @@ static void emit_return(CG *c, const Stmt *s, int depth) {
             emit_args_array(c, s->as.return_stmt.values, n_values, depth);
         }
         emit_close_upto(c, 0, "(ref.null any)", depth);
-        emit_indent(c, depth);
-        wat_append(c->w, "return\n");
+        emit_line(c, depth, "return\n");
         return;
     }
     if (c->in_main) {
@@ -4437,11 +4115,9 @@ static void emit_return(CG *c, const Stmt *s, int depth) {
          * evaluation, then exit. */
         for (int i = 0; i < n_values; i++) {
             emit_expr(c, s->as.return_stmt.values[i], depth);
-            emit_indent(c, depth);
-            wat_append(c->w, "drop\n");
+            emit_line(c, depth, "drop\n");
         }
-        emit_indent(c, depth);
-        wat_append(c->w, "return\n");
+        emit_line(c, depth, "return\n");
         return;
     }
     if (c->fast_body && n_values == 1 && !s->as.return_stmt.values[0]->paren &&
@@ -4459,12 +4135,10 @@ static void emit_return(CG *c, const Stmt *s, int depth) {
          * only when every return is a single numeric value, so emit it
          * raw (i64/f64). */
         if ((c->cur_ret_ty == NT_INT || c->cur_ret_ty == NT_FLOAT) && n_values == 1) {
-            emit_indent(c, depth);
-            wat_append(c->w, "(return\n");
+            emit_line(c, depth, "(return\n");
             if (c->cur_ret_ty == NT_INT) emit_int_expr(c, s->as.return_stmt.values[0], depth + 1);
             else emit_num_as_f64(c, s->as.return_stmt.values[0], depth + 1);
-            emit_indent(c, depth);
-            wat_append(c->w, ")\n");
+            emit_line(c, depth, ")\n");
             return;
         }
         /* ret_ty == ANY: produce a single anyref. A non-vararg body never
@@ -4472,27 +4146,20 @@ static void emit_return(CG *c, const Stmt *s, int depth) {
          * to one by emit_expr. Extra return values still evaluate (side
          * effects), in order. */
         if (n_values == 0) {
-            emit_indent(c, depth);
-            wat_append(c->w, "(return (ref.null any))\n");
+            emit_line(c, depth, "(return (ref.null any))\n");
         } else if (n_values == 1) {
-            emit_indent(c, depth);
-            wat_append(c->w, "(return\n");
+            emit_line(c, depth, "(return\n");
             emit_expr(c, s->as.return_stmt.values[0], depth + 1);
-            emit_indent(c, depth);
-            wat_append(c->w, ")\n");
+            emit_line(c, depth, ")\n");
         } else {
-            emit_indent(c, depth);
-            wat_append(c->w, "(local.set $tmp_any\n");
+            emit_line(c, depth, "(local.set $tmp_any\n");
             emit_expr(c, s->as.return_stmt.values[0], depth + 1);
-            emit_indent(c, depth);
-            wat_append(c->w, ")\n");
+            emit_line(c, depth, ")\n");
             for (int i = 1; i < n_values; i++) {
                 emit_expr(c, s->as.return_stmt.values[i], depth);
-                emit_indent(c, depth);
-                wat_append(c->w, "drop\n");
+                emit_line(c, depth, "drop\n");
             }
-            emit_indent(c, depth);
-            wat_append(c->w, "(return (local.get $tmp_any))\n");
+            emit_line(c, depth, "(return (local.get $tmp_any))\n");
         }
         return;
     }
@@ -4510,8 +4177,7 @@ static void emit_return(CG *c, const Stmt *s, int depth) {
     } else {
         emit_args_array(c, s->as.return_stmt.values, n_values, depth);
     }
-    emit_indent(c, depth);
-    wat_append(c->w, "return\n");
+    emit_line(c, depth, "return\n");
 }
 
 static void emit_for_num(CG *c, const Stmt *s, int depth) {
@@ -4539,11 +4205,9 @@ static void emit_for_num(CG *c, const Stmt *s, int depth) {
             snprintf(step_s, sizeof step_s, "(local.get $ifor_step_%d)", fd);
             sign = 0;
         }
-        emit_indent(c, depth);
-        wat_appendf(c->w, "(local.set $L%d\n", slot);
+        emit_linef(c, depth, "(local.set $L%d\n", slot);
         emit_int_expr(c, s->as.for_num.start, depth + 1);
-        emit_indent(c, depth);
-        wat_append(c->w, ")\n");
+        emit_line(c, depth, ")\n");
         emit_indent(c, depth);
         if (stop_int) {
             wat_appendf(c->w, "(local.set $ifor_stop_%d\n", fd);
@@ -4552,36 +4216,25 @@ static void emit_for_num(CG *c, const Stmt *s, int depth) {
             wat_appendf(c->w, "(local.set $for_stop_%d\n", fd);
             emit_expr(c, s->as.for_num.stop, depth + 1);
         }
-        emit_indent(c, depth);
-        wat_append(c->w, ")\n");
+        emit_line(c, depth, ")\n");
         if (sign == 0) {
-            emit_indent(c, depth);
-            wat_appendf(c->w, "(local.set $ifor_step_%d\n", fd);
+            emit_linef(c, depth, "(local.set $ifor_step_%d\n", fd);
             emit_int_expr(c, st, depth + 1);
-            emit_indent(c, depth);
-            wat_append(c->w, ")\n");
-            emit_indent(c, depth);
-            wat_appendf(c->w,
-                        "(if (i64.eqz %s) (then (call $throw_lit_at (i32.const 75) (i32.const 18) (i32.const %d))))\n",
-                        step_s, s->line);
+            emit_line(c, depth, ")\n");
+            emit_linef(c, depth, "(if (i64.eqz %s) (then (call $throw_lit_at (i32.const 75) (i32.const 18) (i32.const %d))))\n",
+                       step_s, s->line);
         }
         if (!stop_int) {
-            emit_indent(c, depth);
-            wat_appendf(c->w, "(call $for_limit (local.get $for_stop_%d) (local.get $L%d) %s (i32.const %d))\n", fd,
-                        slot, step_s, s->line);
-            emit_indent(c, depth);
-            wat_appendf(c->w, "(local.set $for_skip_%d)\n", fd);
-            emit_indent(c, depth);
-            wat_appendf(c->w, "(local.set $ifor_stop_%d)\n", fd);
+            emit_linef(c, depth, "(call $for_limit (local.get $for_stop_%d) (local.get $L%d) %s (i32.const %d))\n", fd,
+                       slot, step_s, s->line);
+            emit_linef(c, depth, "(local.set $for_skip_%d)\n", fd);
+            emit_linef(c, depth, "(local.set $ifor_stop_%d)\n", fd);
         }
-        emit_indent(c, depth);
-        wat_appendf(c->w, "(block $brk_%d\n", label);
+        emit_linef(c, depth, "(block $brk_%d\n", label);
         if (!stop_int) {
-            emit_indent(c, depth + 1);
-            wat_appendf(c->w, "(br_if $brk_%d (local.get $for_skip_%d))\n", label, fd);
+            emit_linef(c, depth + 1, "(br_if $brk_%d (local.get $for_skip_%d))\n", label, fd);
         }
-        emit_indent(c, depth + 1);
-        wat_appendf(c->w, "(loop $cont_%d\n", label);
+        emit_linef(c, depth + 1, "(loop $cont_%d\n", label);
         emit_indent(c, depth + 2);
         if (sign == 1)
             wat_appendf(c->w, "(br_if $brk_%d (i64.gt_s (local.get $L%d) (local.get $ifor_stop_%d)))\n", label, slot, fd);
@@ -4594,8 +4247,7 @@ static void emit_for_num(CG *c, const Stmt *s, int depth) {
         c->for_depth++;
         emit_block(c, &s->as.for_num.body, depth + 2);
         c->for_depth--;
-        emit_indent(c, depth + 2);
-        wat_appendf(c->w, "(local.set $ifor_next_%d (i64.add (local.get $L%d) %s))\n", fd, slot, step_s);
+        emit_linef(c, depth + 2, "(local.set $ifor_next_%d (i64.add (local.get $L%d) %s))\n", fd, slot, step_s);
         emit_indent(c, depth + 2);
         if (sign == 1)
             wat_appendf(c->w, "(br_if $brk_%d (i64.lt_s (local.get $ifor_next_%d) (local.get $L%d)))\n", label, fd, slot);
@@ -4605,14 +4257,10 @@ static void emit_for_num(CG *c, const Stmt *s, int depth) {
             wat_appendf(c->w,
                         "(if (i64.gt_s %s (i64.const 0)) (then (br_if $brk_%d (i64.lt_s (local.get $ifor_next_%d) (local.get $L%d)))) (else (br_if $brk_%d (i64.gt_s (local.get $ifor_next_%d) (local.get $L%d)))))\n",
                         step_s, label, fd, slot, label, fd, slot);
-        emit_indent(c, depth + 2);
-        wat_appendf(c->w, "(local.set $L%d (local.get $ifor_next_%d))\n", slot, fd);
-        emit_indent(c, depth + 2);
-        wat_appendf(c->w, "br $cont_%d\n", label);
-        emit_indent(c, depth + 1);
-        wat_append(c->w, ")\n");
-        emit_indent(c, depth);
-        wat_append(c->w, ")\n");
+        emit_linef(c, depth + 2, "(local.set $L%d (local.get $ifor_next_%d))\n", slot, fd);
+        emit_linef(c, depth + 2, "br $cont_%d\n", label);
+        emit_line(c, depth + 1, ")\n");
+        emit_line(c, depth, ")\n");
         c->break_depth--;
         return;
     }
@@ -4639,23 +4287,17 @@ static void emit_for_num(CG *c, const Stmt *s, int depth) {
         wat_appendf(c->w, "(local.set $L%d\n", slot);
     }
     emit_expr(c, s->as.for_num.start, depth + 1);
-    emit_indent(c, depth);
-    wat_append(c->w, ")\n");
-    emit_indent(c, depth);
-    wat_appendf(c->w, "(local.set %s\n", f_stop);
+    emit_line(c, depth, ")\n");
+    emit_linef(c, depth, "(local.set %s\n", f_stop);
     emit_expr(c, s->as.for_num.stop, depth + 1);
-    emit_indent(c, depth);
-    wat_append(c->w, ")\n");
-    emit_indent(c, depth);
-    wat_appendf(c->w, "(local.set %s\n", f_step);
+    emit_line(c, depth, ")\n");
+    emit_linef(c, depth, "(local.set %s\n", f_step);
     if (s->as.for_num.step) {
         emit_expr(c, s->as.for_num.step, depth + 1);
     } else {
-        emit_indent(c, depth + 1);
-        wat_append(c->w, "(ref.i31 (i32.const 1))\n");
+        emit_line(c, depth + 1, "(ref.i31 (i32.const 1))\n");
     }
-    emit_indent(c, depth);
-    wat_append(c->w, ")\n");
+    emit_line(c, depth, ")\n");
     /* $for_prep applies Lua's forprep: it settles the loop's type (integer
      * iff init and step are integers, else all three coerced to floats),
      * converts the limit, raises on a zero step or a non-numeric value, and
@@ -4666,25 +4308,19 @@ static void emit_for_num(CG *c, const Stmt *s, int depth) {
     else snprintf(counter_loc, sizeof counter_loc, "$L%d", slot);
     char f_skip[24];
     snprintf(f_skip, sizeof f_skip, "$for_skip_%d", fd);
-    emit_indent(c, depth);
-    wat_appendf(c->w, "(call $for_prep (local.get %s) (local.get %s) (local.get %s) (i32.const %d))\n",
-                counter_loc, f_stop, f_step, s->line);
-    emit_indent(c, depth);
-    wat_appendf(c->w, "(local.set %s) (local.set %s) (local.set %s) (local.set %s)\n", f_skip, f_step, f_stop,
-                counter_loc);
+    emit_linef(c, depth, "(call $for_prep (local.get %s) (local.get %s) (local.get %s) (i32.const %d))\n",
+               counter_loc, f_stop, f_step, s->line);
+    emit_linef(c, depth, "(local.set %s) (local.set %s) (local.set %s) (local.set %s)\n", f_skip, f_step, f_stop,
+               counter_loc);
     char load_buf[80];
     snprintf(load_buf, sizeof(load_buf), "(local.get %s)", counter_loc);
 
-    emit_indent(c, depth);
-    wat_appendf(c->w, "(block $brk_%d\n", label);
-    emit_indent(c, depth + 1);
-    wat_appendf(c->w, "(br_if $brk_%d (local.get %s))\n", label, f_skip);
-    emit_indent(c, depth + 1);
-    wat_appendf(c->w, "(loop $cont_%d\n", label);
+    emit_linef(c, depth, "(block $brk_%d\n", label);
+    emit_linef(c, depth + 1, "(br_if $brk_%d (local.get %s))\n", label, f_skip);
+    emit_linef(c, depth + 1, "(loop $cont_%d\n", label);
     /* Fresh per-iteration binding for a captured control variable. */
     if (boxed) {
-        emit_indent(c, depth + 2);
-        wat_appendf(c->w, "(local.set $L%d (struct.new $Box %s))\n", slot, load_buf);
+        emit_linef(c, depth + 2, "(local.set $L%d (struct.new $Box %s))\n", slot, load_buf);
     }
     /* body */
     c->for_depth++;
@@ -4693,28 +4329,20 @@ static void emit_for_num(CG *c, const Stmt *s, int depth) {
     /* i = i + step, but stop if the integer addition wrapped past the
      * representable range (Lua 5.4 numeric-for overflow semantics) —
      * otherwise `for i = maxinteger-2, maxinteger` would loop forever. */
-    emit_indent(c, depth + 2);
-    wat_appendf(c->w, "(local.set %s (call $lua_add %s (local.get %s)))\n", f_next, load_buf, f_step);
-    emit_indent(c, depth + 2);
-    wat_appendf(c->w, "(br_if $brk_%d (call $for_overflowed %s (local.get %s) (local.get %s)))\n", label, load_buf,
-                f_step, f_next);
-    emit_indent(c, depth + 2);
-    wat_appendf(c->w, "(local.set %s (local.get %s))\n", counter_loc, f_next);
+    emit_linef(c, depth + 2, "(local.set %s (call $lua_add %s (local.get %s)))\n", f_next, load_buf, f_step);
+    emit_linef(c, depth + 2, "(br_if $brk_%d (call $for_overflowed %s (local.get %s) (local.get %s)))\n", label, load_buf,
+               f_step, f_next);
+    emit_linef(c, depth + 2, "(local.set %s (local.get %s))\n", counter_loc, f_next);
     /* Continue while the new value is within the limit. The entry test was
      * $for_prep's, so only later iterations compare here (a NaN float bound
      * runs the body once, as in reference Lua). */
-    emit_indent(c, depth + 2);
-    wat_appendf(c->w,
-                "(if (call $for_step_positive (local.get %s))\n"
-                "%*s  (then (br_if $brk_%d (i32.eqz (call $num_le %s (local.get %s)))))\n"
-                "%*s  (else (br_if $brk_%d (i32.eqz (call $num_le (local.get %s) %s)))))\n",
-                f_step, 2 * (depth + 2), "", label, load_buf, f_stop, 2 * (depth + 2), "", label, f_stop, load_buf);
-    emit_indent(c, depth + 2);
-    wat_appendf(c->w, "br $cont_%d\n", label);
-    emit_indent(c, depth + 1);
-    wat_append(c->w, ")\n");
-    emit_indent(c, depth);
-    wat_append(c->w, ")\n");
+    emit_linef(c, depth + 2, "(if (call $for_step_positive (local.get %s))\n"
+                             "%*s  (then (br_if $brk_%d (i32.eqz (call $num_le %s (local.get %s)))))\n"
+                             "%*s  (else (br_if $brk_%d (i32.eqz (call $num_le (local.get %s) %s)))))\n",
+               f_step, 2 * (depth + 2), "", label, load_buf, f_stop, 2 * (depth + 2), "", label, f_stop, load_buf);
+    emit_linef(c, depth + 2, "br $cont_%d\n", label);
+    emit_line(c, depth + 1, ")\n");
+    emit_line(c, depth, ")\n");
     c->break_depth--;
 }
 
@@ -4734,27 +4362,19 @@ static void emit_for_gen(CG *c, const Stmt *s, int depth) {
     snprintf(f_state, sizeof f_state, "$for_state_%d", fd);
     snprintf(f_k, sizeof f_k, "$for_k_%d", fd);
     int n_exprs = s->as.for_gen.n_exprs;
-    emit_indent(c, depth);
-    wat_append(c->w, "(local.set $tmp_args\n");
+    emit_line(c, depth, "(local.set $tmp_args\n");
     emit_args_array(c, s->as.for_gen.exprs, n_exprs, depth + 1);
-    emit_indent(c, depth);
-    wat_append(c->w, ")\n");
+    emit_line(c, depth, ")\n");
     /* iter = args[0]; state = args[1]; k = args[2]. */
-    emit_indent(c, depth);
-    wat_appendf(c->w,
-                "(local.set %s "
-                "(call $args_at (ref.as_non_null (local.get $tmp_args)) (i32.const 0)))\n",
-                f_iter);
-    emit_indent(c, depth);
-    wat_appendf(c->w,
-                "(local.set %s "
-                "(call $args_at (ref.as_non_null (local.get $tmp_args)) (i32.const 1)))\n",
-                f_state);
-    emit_indent(c, depth);
-    wat_appendf(c->w,
-                "(local.set %s "
-                "(call $args_at (ref.as_non_null (local.get $tmp_args)) (i32.const 2)))\n",
-                f_k);
+    emit_linef(c, depth, "(local.set %s "
+                         "(call $args_at (ref.as_non_null (local.get $tmp_args)) (i32.const 0)))\n",
+               f_iter);
+    emit_linef(c, depth, "(local.set %s "
+                         "(call $args_at (ref.as_non_null (local.get $tmp_args)) (i32.const 1)))\n",
+               f_state);
+    emit_linef(c, depth, "(local.set %s "
+                         "(call $args_at (ref.as_non_null (local.get $tmp_args)) (i32.const 2)))\n",
+               f_k);
     /* The explist's 4th value is a to-be-closed "closing" value (Lua §3.3.5):
      * validate+push it now (after push_break_label recorded the pre-closing
      * depth, so `break` closes it too); close it when the loop exits. nil/false
@@ -4762,10 +4382,9 @@ static void emit_for_gen(CG *c, const Stmt *s, int depth) {
     int for_close = for_gen_has_closing(s);
     int pre_close_base = c->close_count;
     if (for_close) {
-        emit_indent(c, depth);
-        wat_append(c->w, "(call $tbc_push (ref.as_non_null (local.get $tbc)) "
-                         "(call $args_at (ref.as_non_null (local.get $tmp_args)) "
-                         "(i32.const 3)))\n");
+        emit_line(c, depth, "(call $tbc_push (ref.as_non_null (local.get $tbc)) "
+                            "(call $args_at (ref.as_non_null (local.get $tmp_args)) "
+                            "(i32.const 3)))\n");
         c->close_count++;
     }
 
@@ -4781,40 +4400,26 @@ static void emit_for_gen(CG *c, const Stmt *s, int depth) {
         }
     }
 
-    emit_indent(c, depth);
-    wat_appendf(c->w, "(block $brk_%d\n", label);
-    emit_indent(c, depth + 1);
-    wat_appendf(c->w, "(loop $cont_%d\n", label);
+    emit_linef(c, depth, "(block $brk_%d\n", label);
+    emit_linef(c, depth + 1, "(loop $cont_%d\n", label);
     /* Call iter(state, k). The iterator can be any callable (a
      * closure, or a table with __call) — go through $lua_call_any
      * so a wrong type produces a typed error instead of a trap. */
-    emit_indent(c, depth + 2);
-    wat_append(c->w, "(local.set $tmp_args\n");
-    emit_indent(c, depth + 3);
-    wat_append(c->w, "(call $lua_call_any\n");
-    emit_indent(c, depth + 4);
-    wat_appendf(c->w, "(local.get %s)\n", f_iter);
-    emit_indent(c, depth + 4);
-    wat_appendf(c->w,
-                "(array.new_fixed $ArgArr 2 (local.get %s) (local.get %s))\n", f_state, f_k);
-    emit_indent(c, depth + 4);
-    wat_appendf(c->w, "(i32.const %d)\n", s->line);
-    emit_indent(c, depth + 3);
-    wat_append(c->w, ")\n");
-    emit_indent(c, depth + 2);
-    wat_append(c->w, ")\n");
+    emit_line(c, depth + 2, "(local.set $tmp_args\n");
+    emit_line(c, depth + 3, "(call $lua_call_any\n");
+    emit_linef(c, depth + 4, "(local.get %s)\n", f_iter);
+    emit_linef(c, depth + 4, "(array.new_fixed $ArgArr 2 (local.get %s) (local.get %s))\n", f_state, f_k);
+    emit_linef(c, depth + 4, "(i32.const %d)\n", s->line);
+    emit_line(c, depth + 3, ")\n");
+    emit_line(c, depth + 2, ")\n");
     /* terminate if results[0] is nil */
-    emit_indent(c, depth + 2);
-    wat_appendf(c->w,
-                "(br_if $brk_%d (ref.is_null "
-                "(call $args_at (ref.as_non_null (local.get $tmp_args)) (i32.const 0))))\n",
-                label);
+    emit_linef(c, depth + 2, "(br_if $brk_%d (ref.is_null "
+                             "(call $args_at (ref.as_non_null (local.get $tmp_args)) (i32.const 0))))\n",
+               label);
     /* update k to results[0] */
-    emit_indent(c, depth + 2);
-    wat_appendf(c->w,
-                "(local.set %s "
-                "(call $args_at (ref.as_non_null (local.get $tmp_args)) (i32.const 0)))\n",
-                f_k);
+    emit_linef(c, depth + 2, "(local.set %s "
+                             "(call $args_at (ref.as_non_null (local.get $tmp_args)) (i32.const 0)))\n",
+               f_k);
     /* Bind loop vars from results. A captured var gets a FRESH $Box
      * each iteration so closures over it see distinct values
      * (Lua 5.4+ semantics), rather than sharing one mutated cell. */
@@ -4839,12 +4444,9 @@ static void emit_for_gen(CG *c, const Stmt *s, int depth) {
     c->for_depth++;
     emit_block(c, &s->as.for_gen.body, depth + 2);
     c->for_depth--;
-    emit_indent(c, depth + 2);
-    wat_appendf(c->w, "br $cont_%d\n", label);
-    emit_indent(c, depth + 1);
-    wat_append(c->w, ")\n");
-    emit_indent(c, depth);
-    wat_append(c->w, ")\n");
+    emit_linef(c, depth + 2, "br $cont_%d\n", label);
+    emit_line(c, depth + 1, ")\n");
+    emit_line(c, depth, ")\n");
     /* Loop exited normally (iterator returned nil) — close the closing value.
      * break already closed it (down to pre_close_base) before branching here,
      * so this is a no-op on that path; an error/goto exit closed it via $tbc. */
@@ -4878,26 +4480,21 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
         for (int i = 0; i < n_lead; i++) {
             if (i >= n_names) {
                 emit_expr(c, s->as.local.values[i], depth);
-                emit_indent(c, depth);
-                wat_append(c->w, "drop\n");
+                emit_line(c, depth, "drop\n");
                 continue;
             }
             int slot = s->as.local.local_idxs[i];
             if (slot_is_int(c, slot)) {
                 /* i64 slot: analysis guarantees a matching single int value. */
-                emit_indent(c, depth);
-                wat_appendf(c->w, "(local.set $L%d\n", slot);
+                emit_linef(c, depth, "(local.set $L%d\n", slot);
                 emit_int_expr(c, s->as.local.values[i], depth + 1);
-                emit_indent(c, depth);
-                wat_append(c->w, ")\n");
+                emit_line(c, depth, ")\n");
                 continue;
             }
             if (slot_is_float(c, slot)) {
-                emit_indent(c, depth);
-                wat_appendf(c->w, "(local.set $L%d\n", slot);
+                emit_linef(c, depth, "(local.set $L%d\n", slot);
                 emit_float_expr(c, s->as.local.values[i], depth + 1);
-                emit_indent(c, depth);
-                wat_append(c->w, ")\n");
+                emit_line(c, depth, ")\n");
                 continue;
             }
             if (slot_is_maybe(c, slot)) {
@@ -4905,14 +4502,10 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
                 continue;
             }
             int boxed = slot_is_boxed(c, slot);
-            emit_indent(c, depth);
-            wat_appendf(c->w,
-                        boxed ? "(local.set $L%d (struct.new $Box\n"
-                              : "(local.set $L%d\n",
-                        slot);
+            emit_linef(c, depth, boxed ? "(local.set $L%d (struct.new $Box\n" : "(local.set $L%d\n",
+                       slot);
             emit_expr(c, s->as.local.values[i], depth + 1);
-            emit_indent(c, depth);
-            wat_append(c->w, boxed ? "))\n" : ")\n");
+            emit_line(c, depth, boxed ? "))\n" : ")\n");
         }
         /* 2. Trailing multivalue tail, evaluated *after* the leading values
          *    and spread across the remaining names (and evaluated even when
@@ -4920,34 +4513,26 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
          *    specialized (the analysis only specializes single literal/int
          *    initializers), so the boxed/anyref path covers them. */
         if (last_call) {
-            emit_indent(c, depth);
-            wat_append(c->w, "(local.set $tmp_args\n");
+            emit_line(c, depth, "(local.set $tmp_args\n");
             emit_multival_array(c, s->as.local.values[n_values - 1], depth + 1);
-            emit_indent(c, depth);
-            wat_append(c->w, ")\n");
+            emit_line(c, depth, ")\n");
             for (int i = n_lead; i < n_names; i++) {
                 int slot = s->as.local.local_idxs[i];
                 int boxed = slot_is_boxed(c, slot);
-                emit_indent(c, depth);
-                wat_appendf(c->w,
-                            boxed ? "(local.set $L%d (struct.new $Box\n"
-                                  : "(local.set $L%d\n",
-                            slot);
+                emit_linef(c, depth, boxed ? "(local.set $L%d (struct.new $Box\n" : "(local.set $L%d\n",
+                           slot);
                 emit_args_at(c, i - n_lead, depth + 1);
-                emit_indent(c, depth);
-                wat_append(c->w, boxed ? "))\n" : ")\n");
+                emit_line(c, depth, boxed ? "))\n" : ")\n");
             }
         } else {
             /* 3. No trailing tail: names past the value list get nil. */
             for (int i = n_lead; i < n_names; i++) {
                 int slot = s->as.local.local_idxs[i];
                 int boxed = slot_is_boxed(c, slot);
-                emit_indent(c, depth);
-                wat_appendf(c->w,
-                            boxed ? "(local.set $L%d (struct.new $Box (ref.null "
-                                    "any)))\n"
-                                  : "(local.set $L%d (ref.null any))\n",
-                            slot);
+                emit_linef(c, depth, boxed ? "(local.set $L%d (struct.new $Box (ref.null "
+                                             "any)))\n"
+                                           : "(local.set $L%d (ref.null any))\n",
+                           slot);
             }
         }
         /* <close> declarations: push each onto the per-activation to-be-closed
@@ -4990,8 +4575,7 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
         if (dt && direct_args_typed_ok(c, ce, dt)) emit_typed_direct_call1(c, ce, dt, depth);
         else if (fast_call_nargs(c, ce) >= 0) emit_fast_call(c, ce, depth);
         else emit_call_array(c, ce, depth);
-        emit_indent(c, depth);
-        wat_append(c->w, "drop\n");
+        emit_line(c, depth, "drop\n");
         break;
     }
 
@@ -5006,22 +4590,15 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
     case STMT_WHILE: {
         int label = c->next_label++;
         if (!push_break_label(c, label)) break;
-        emit_indent(c, depth);
-        wat_appendf(c->w, "(block $brk_%d\n", label);
-        emit_indent(c, depth + 1);
-        wat_appendf(c->w, "(loop $cont_%d\n", label);
+        emit_linef(c, depth, "(block $brk_%d\n", label);
+        emit_linef(c, depth + 1, "(loop $cont_%d\n", label);
         emit_truthy(c, s->as.while_stmt.cond, depth + 2);
-        emit_indent(c, depth + 2);
-        wat_append(c->w, "i32.eqz\n");
-        emit_indent(c, depth + 2);
-        wat_appendf(c->w, "br_if $brk_%d\n", label);
+        emit_line(c, depth + 2, "i32.eqz\n");
+        emit_linef(c, depth + 2, "br_if $brk_%d\n", label);
         emit_block(c, &s->as.while_stmt.body, depth + 2);
-        emit_indent(c, depth + 2);
-        wat_appendf(c->w, "br $cont_%d\n", label);
-        emit_indent(c, depth + 1);
-        wat_append(c->w, ")\n");
-        emit_indent(c, depth);
-        wat_append(c->w, ")\n");
+        emit_linef(c, depth + 2, "br $cont_%d\n", label);
+        emit_line(c, depth + 1, ")\n");
+        emit_line(c, depth, ")\n");
         c->break_depth--;
         break;
     }
@@ -5029,10 +4606,8 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
     case STMT_REPEAT: {
         int label = c->next_label++;
         if (!push_break_label(c, label)) break;
-        emit_indent(c, depth);
-        wat_appendf(c->w, "(block $brk_%d\n", label);
-        emit_indent(c, depth + 1);
-        wat_appendf(c->w, "(loop $cont_%d\n", label);
+        emit_linef(c, depth, "(block $brk_%d\n", label);
+        emit_linef(c, depth + 1, "(loop $cont_%d\n", label);
         /* A <close> var declared in the body stays in scope for the until
          * condition and is closed AFTER it (Lua §3.3.5). Emit the body
          * statements directly (emit_block would close at the body's end),
@@ -5042,17 +4617,13 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
         int rbase = c->close_count;
         emit_block_stmts(c, &s->as.repeat.body, depth + 2);
         emit_truthy(c, s->as.repeat.cond, depth + 2);
-        emit_indent(c, depth + 2);
-        wat_append(c->w, "i32.eqz\n");
+        emit_line(c, depth + 2, "i32.eqz\n");
         if (c->close_count > rbase)
             emit_close_upto(c, rbase, "(ref.null any)", depth + 2);
         c->close_count = rbase;
-        emit_indent(c, depth + 2);
-        wat_appendf(c->w, "br_if $cont_%d\n", label);
-        emit_indent(c, depth + 1);
-        wat_append(c->w, ")\n");
-        emit_indent(c, depth);
-        wat_append(c->w, ")\n");
+        emit_linef(c, depth + 2, "br_if $cont_%d\n", label);
+        emit_line(c, depth + 1, ")\n");
+        emit_line(c, depth, ")\n");
         c->break_depth--;
         break;
     }
@@ -5066,8 +4637,7 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
         /* Close to-be-closed locals declared inside this loop before leaving. */
         int base = c->break_close_count[c->break_depth - 1];
         if (c->close_count > base) emit_close_upto(c, base, "(ref.null any)", depth);
-        emit_indent(c, depth);
-        wat_appendf(c->w, "br $brk_%d\n", label);
+        emit_linef(c, depth, "br $brk_%d\n", label);
         break;
     }
 
@@ -5079,11 +4649,9 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
          * (down to the count live at the target label). */
         if (c->close_count > s->as.label.close_base)
             emit_close_upto(c, s->as.label.close_base, "(ref.null any)", depth);
-        emit_indent(c, depth);
-        wat_appendf(c->w, "(local.set $next_%d (i32.const %d))\n",
-                    s->as.label.block_dispatch_id, s->as.label.target_segment_idx);
-        emit_indent(c, depth);
-        wat_appendf(c->w, "(br $dispatch_%d)\n", s->as.label.block_dispatch_id);
+        emit_linef(c, depth, "(local.set $next_%d (i32.const %d))\n",
+                   s->as.label.block_dispatch_id, s->as.label.target_segment_idx);
+        emit_linef(c, depth, "(br $dispatch_%d)\n", s->as.label.block_dispatch_id);
         break;
     }
 
@@ -5114,68 +4682,53 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
         for (int i = 0; i < n_lead; i++) {
             if (i >= n_names) {
                 emit_expr(c, s->as.global_decl.values[i], depth);
-                emit_indent(c, depth);
-                wat_append(c->w, "drop\n");
+                emit_line(c, depth, "drop\n");
                 continue;
             }
             int gi = s->as.global_decl.global_idxs[i];
-            emit_indent(c, depth);
-            wat_append(c->w,
-                       "(call $tab_set (ref.as_non_null (global.get $g_globals))\n");
+            emit_line(c, depth, "(call $tab_set (ref.as_non_null (global.get $g_globals))\n");
             emit_indent(c, depth + 1);
             emit_global_key(c, c->pr->globals.items[gi].name,
                             c->pr->globals.items[gi].name_len);
             emit_expr(c, s->as.global_decl.values[i], depth + 1);
-            emit_indent(c, depth);
-            wat_append(c->w, ")\n");
+            emit_line(c, depth, ")\n");
         }
         if (last_call) {
-            emit_indent(c, depth);
-            wat_append(c->w, "(local.set $tmp_args\n");
+            emit_line(c, depth, "(local.set $tmp_args\n");
             emit_multival_array(c, s->as.global_decl.values[n_values - 1], depth + 1);
-            emit_indent(c, depth);
-            wat_append(c->w, ")\n");
+            emit_line(c, depth, ")\n");
         }
         for (int i = n_lead; i < n_names; i++) {
             int gi = s->as.global_decl.global_idxs[i];
-            emit_indent(c, depth);
-            wat_append(c->w,
-                       "(call $tab_set (ref.as_non_null (global.get $g_globals))\n");
+            emit_line(c, depth, "(call $tab_set (ref.as_non_null (global.get $g_globals))\n");
             emit_indent(c, depth + 1);
             emit_global_key(c, c->pr->globals.items[gi].name,
                             c->pr->globals.items[gi].name_len);
             if (last_call) {
                 emit_args_at(c, i - n_lead, depth + 1);
             } else {
-                emit_indent(c, depth + 1);
-                wat_append(c->w, "(ref.null any)\n");
+                emit_line(c, depth + 1, "(ref.null any)\n");
             }
-            emit_indent(c, depth);
-            wat_append(c->w, ")\n");
+            emit_line(c, depth, ")\n");
         }
         break;
     }
 
     case STMT_IF: {
         int label = c->next_label++;
-        emit_indent(c, depth);
-        wat_appendf(c->w, "(block $if_end_%d\n", label);
+        emit_linef(c, depth, "(block $if_end_%d\n", label);
         for (size_t i = 0; i < s->as.if_stmt.narms; i++) {
             IfArm *a = &s->as.if_stmt.arms[i];
             emit_truthy(c, a->cond, depth + 1);
-            emit_indent(c, depth + 1);
-            wat_append(c->w, "(if (then\n");
+            emit_line(c, depth + 1, "(if (then\n");
             emit_block(c, &a->body, depth + 2);
-            emit_indent(c, depth + 2);
-            wat_appendf(c->w, "br $if_end_%d\n", label);
-            emit_indent(c, depth + 1);
-            wat_append(c->w, "))\n");
+            emit_linef(c, depth + 2, "br $if_end_%d\n", label);
+            emit_line(c, depth + 1, "))\n");
         }
         if (s->as.if_stmt.has_else) {
             emit_block(c, &s->as.if_stmt.else_body, depth + 1);
         }
-        emit_indent(c, depth);
-        wat_append(c->w, ")\n");
+        emit_line(c, depth, ")\n");
         break;
     }
 
@@ -5187,22 +4740,15 @@ static void emit_stmt(CG *c, const Stmt *s, int depth) {
          * can see its own slot; then store the closure into the box.
          * If not captured, simply build the closure and store it. */
         if (boxed) {
-            emit_indent(c, depth);
-            wat_appendf(c->w,
-                        "(local.set $L%d (struct.new $Box (ref.null any)))\n", slot);
-            emit_indent(c, depth);
-            wat_append(c->w, "(struct.set $Box $v\n");
-            emit_indent(c, depth + 1);
-            wat_appendf(c->w, "(local.get $L%d)\n", slot);
+            emit_linef(c, depth, "(local.set $L%d (struct.new $Box (ref.null any)))\n", slot);
+            emit_line(c, depth, "(struct.set $Box $v\n");
+            emit_linef(c, depth + 1, "(local.get $L%d)\n", slot);
             emit_function_expr(c, s->as.local_func.func, depth + 1);
-            emit_indent(c, depth);
-            wat_append(c->w, ")\n");
+            emit_line(c, depth, ")\n");
         } else {
-            emit_indent(c, depth);
-            wat_appendf(c->w, "(local.set $L%d\n", slot);
+            emit_linef(c, depth, "(local.set $L%d\n", slot);
             emit_function_expr(c, s->as.local_func.func, depth + 1);
-            emit_indent(c, depth);
-            wat_append(c->w, ")\n");
+            emit_line(c, depth, ")\n");
         }
         break;
     }
@@ -5261,10 +4807,9 @@ static int count_fn_close(const Block *b) {
 /* Emit a close of the to-be-closed stack down to `target`, with the given 2nd
  * __close argument (null on a structured exit). */
 static void emit_close_upto(CG *c, int target, const char *err_wat, int depth) {
-    emit_indent(c, depth);
-    wat_appendf(c->w, "(call $close_upto (ref.as_non_null (local.get $tbc)) "
-                      "(i32.const %d) %s)\n",
-                target, err_wat);
+    emit_linef(c, depth, "(call $close_upto (ref.as_non_null (local.get $tbc)) "
+                         "(i32.const %d) %s)\n",
+               target, err_wat);
 }
 
 /* The locals and prologue a function/main body needs for <close> support:
@@ -5296,30 +4841,19 @@ static void emit_close_body(CG *c, const Block *body, int has_close, int depth) 
         return;
     }
     int L = c->next_label++;
-    emit_indent(c, depth);
-    wat_appendf(c->w, "(block $fnclose_done_%d\n", L);
-    emit_indent(c, depth + 1);
-    wat_appendf(c->w, "(block $fnclose_catch_%d (result anyref)\n", L);
-    emit_indent(c, depth + 2);
-    wat_appendf(c->w, "(try_table (catch $LuaError $fnclose_catch_%d)\n", L);
+    emit_linef(c, depth, "(block $fnclose_done_%d\n", L);
+    emit_linef(c, depth + 1, "(block $fnclose_catch_%d (result anyref)\n", L);
+    emit_linef(c, depth + 2, "(try_table (catch $LuaError $fnclose_catch_%d)\n", L);
     emit_block(c, body, depth + 3);
-    emit_indent(c, depth + 2);
-    wat_append(c->w, ")\n"); /* try_table */
-    emit_indent(c, depth + 2);
-    wat_appendf(c->w, "(br $fnclose_done_%d)\n", L);
-    emit_indent(c, depth + 1);
-    wat_append(c->w, ")\n"); /* fnclose_catch: caught error value on stack */
-    emit_indent(c, depth + 1);
-    wat_append(c->w, "(local.set $tmp_any)\n");
-    emit_indent(c, depth + 1);
-    wat_append(c->w, "(global.set $call_depth (local.get $close_depth))\n");
-    emit_indent(c, depth + 1);
-    wat_append(c->w, "(call $close_upto (ref.as_non_null (local.get $tbc)) "
-                     "(i32.const 0) (local.get $tmp_any))\n");
-    emit_indent(c, depth + 1);
-    wat_append(c->w, "(unreachable)\n");
-    emit_indent(c, depth);
-    wat_append(c->w, ")\n"); /* fnclose_done */
+    emit_line(c, depth + 2, ")\n"); /* try_table */
+    emit_linef(c, depth + 2, "(br $fnclose_done_%d)\n", L);
+    emit_line(c, depth + 1, ")\n"); /* fnclose_catch: caught error value on stack */
+    emit_line(c, depth + 1, "(local.set $tmp_any)\n");
+    emit_line(c, depth + 1, "(global.set $call_depth (local.get $close_depth))\n");
+    emit_line(c, depth + 1, "(call $close_upto (ref.as_non_null (local.get $tbc)) "
+                            "(i32.const 0) (local.get $tmp_any))\n");
+    emit_line(c, depth + 1, "(unreachable)\n");
+    emit_line(c, depth, ")\n"); /* fnclose_done */
 }
 
 /* Emit a goto-able block as a dispatch table:
@@ -5397,28 +4931,22 @@ static void emit_block_stmts(CG *c, const Block *b, int depth) {
      * local, so a previous entry (e.g. a previous iteration of an
      * enclosing for-loop) would otherwise leave us pointing at the wrong
      * segment. */
-    emit_indent(c, depth);
-    wat_appendf(c->w, "(local.set $next_%d (i32.const 0))\n", bid);
+    emit_linef(c, depth, "(local.set $next_%d (i32.const 0))\n", bid);
     /* Outer (block $exit_BID) — natural fall-through and gotos exit here. */
-    emit_indent(c, depth);
-    wat_appendf(c->w, "(block $exit_%d\n", bid);
+    emit_linef(c, depth, "(block $exit_%d\n", bid);
     /* Dispatch loop — backward jumps go through here. */
-    emit_indent(c, depth + 1);
-    wat_appendf(c->w, "(loop $dispatch_%d\n", bid);
+    emit_linef(c, depth + 1, "(loop $dispatch_%d\n", bid);
 
     /* Open N+1 nested (block $seg_BID_k …) from outermost (k=N) to innermost (k=0). */
     for (int k = N; k >= 0; k--) {
-        emit_indent(c, depth + 2 + (N - k));
-        wat_appendf(c->w, "(block $seg_%d_%d\n", bid, k);
+        emit_linef(c, depth + 2 + (N - k), "(block $seg_%d_%d\n", bid, k);
     }
     /* Innermost: the br_table. Targets in order: seg_0, seg_1, …, seg_N, exit. */
-    emit_indent(c, depth + 3 + N);
-    wat_append(c->w, "(br_table");
+    emit_line(c, depth + 3 + N, "(br_table");
     for (int k = 0; k <= N; k++) wat_appendf(c->w, " $seg_%d_%d", bid, k);
     wat_appendf(c->w, " $exit_%d (local.get $next_%d))\n", bid, bid);
     /* Close the innermost block ($seg_BID_0). */
-    emit_indent(c, depth + 2 + N);
-    wat_append(c->w, ")\n");
+    emit_line(c, depth + 2 + N, ")\n");
 
     /* Emit segment 0..N bodies. After each segment's closing paren of its
      * own (block) wrapper, we are at depth = depth + 2 + (N-k) — i.e. for
@@ -5436,25 +4964,19 @@ static void emit_block_stmts(CG *c, const Block *b, int depth) {
         }
         if (k < N) {
             /* Fall through to segment k+1 by re-entering the dispatch. */
-            emit_indent(c, body_depth);
-            wat_appendf(c->w, "(local.set $next_%d (i32.const %d))\n", bid, k + 1);
-            emit_indent(c, body_depth);
-            wat_appendf(c->w, "(br $dispatch_%d)\n", bid);
+            emit_linef(c, body_depth, "(local.set $next_%d (i32.const %d))\n", bid, k + 1);
+            emit_linef(c, body_depth, "(br $dispatch_%d)\n", bid);
             /* Close the surrounding $seg_BID_{k+1} block now that this
              * segment's body is complete. */
-            emit_indent(c, body_depth - 1);
-            wat_append(c->w, ")\n");
+            emit_line(c, body_depth - 1, ")\n");
         } else {
             /* Last segment: natural exit from the dispatched block. */
-            emit_indent(c, body_depth);
-            wat_appendf(c->w, "(br $exit_%d)\n", bid);
+            emit_linef(c, body_depth, "(br $exit_%d)\n", bid);
         }
     }
     /* Close the loop and outer block. */
-    emit_indent(c, depth + 1);
-    wat_append(c->w, ")\n");
-    emit_indent(c, depth);
-    wat_append(c->w, ")\n");
+    emit_line(c, depth + 1, ")\n");
+    emit_line(c, depth, ")\n");
 }
 
 /* Emit a block, applying <close> semantics. A block with no to-be-closed
