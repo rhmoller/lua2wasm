@@ -1376,6 +1376,39 @@
         (local.get $n) (struct.get $Shape $used (local.get $sh)) (ref.null $TArr) (ref.null $ShapeArr)))
     (struct.set $LuaTable $own (local.get $t) (i32.const 1)))
 
+  ;; The shape a table reaches by adding the string keys $keys in order from
+  ;; empty — the same shape incremental construction reaches. Built once per
+  ;; constructor site (codegen caches it in a module global).
+  (func $shape_for_keys (param $keys (ref $TArr)) (result (ref $Shape))
+    (local $sh (ref $Shape)) (local $i i32) (local $k (ref $LuaString))
+    (local.set $sh (global.get $g_root_shape))
+    (block $done (loop $lp
+      (br_if $done (i32.ge_s (local.get $i) (array.len (local.get $keys))))
+      (local.set $k (ref.cast (ref $LuaString) (array.get $TArr (local.get $keys) (local.get $i))))
+      (local.set $sh (call $shape_child (local.get $sh) (local.get $k) (call $str_hash (local.get $k))))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br $lp)))
+    (local.get $sh))
+
+  ;; A constructor's table: its final shape up front, values filled in by
+  ;; position ($tab_put_pos / $tab_put_pos_f) in field order.
+  (func $tab_new_shaped (param $sh (ref $Shape)) (result (ref $LuaTable))
+    (local $id i32)
+    (local.set $id (global.get $g_next_table_id))
+    (global.set $g_next_table_id (i32.add (local.get $id) (i32.const 1)))
+    (struct.new $LuaTable
+      (local.get $sh) (array.new $TArr (ref.null any) (struct.get $Shape $n (local.get $sh))) (i32.const 0)
+      (ref.null $LuaTable)
+      (local.get $id)
+      (ref.null $TArr) (i32.const 0)
+      (ref.null $FArr) (ref.null $FArr)))
+  (func $tab_put_pos (param $t (ref $LuaTable)) (param $pos i32) (param $v anyref)
+    (array.set $TArr (ref.as_non_null (struct.get $LuaTable $vals (local.get $t))) (local.get $pos) (local.get $v)))
+  (func $tab_put_pos_f (param $t (ref $LuaTable)) (param $pos i32) (param $f f64)
+    (array.set $TArr (ref.as_non_null (struct.get $LuaTable $vals (local.get $t))) (local.get $pos)
+      (global.get $g_fmark))
+    (array.set $FArr (call $fvals_ensure (local.get $t)) (local.get $pos) (local.get $f)))
+
   ;; Reserve room for `cap` hash entries (table.create's record hint): a
   ;; private shape with that much key capacity, and the value array.
   (func $tab_reserve_hash (param $t (ref $LuaTable)) (param $cap i32)

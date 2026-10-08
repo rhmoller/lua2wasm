@@ -293,9 +293,10 @@ typedef struct {
      * function), so a call f(args) of matching arity can skip the $ArgArr and
      * invoke the function's direct-args entry $user_N_da. */
     const LuaFunc **cur_func_slot;
-    int ret_single;   /* emitting a $user_N_da1 / $user_N_f body: return one value */
-    int fast_body;    /* emitting a $user_N_f body: tail calls go through $fast */
-    NumTy cur_ret_ty; /* result type of the $user_N_da1 body being emitted */
+    int ret_single;    /* emitting a $user_N_da1 / $user_N_f body: return one value */
+    int fast_body;     /* emitting a $user_N_f body: tail calls go through $fast */
+    int n_ctor_shapes; /* table-constructor sites with a cached shape ($cshape_N) */
+    NumTy cur_ret_ty;  /* result type of the $user_N_da1 body being emitted */
     /* Whole-program inferred signatures, indexed by func_idx (opt_int only). */
     FuncSig *sigs;
     int n_sigs;
@@ -1762,6 +1763,32 @@ static void emit_index_expr(CG *c, const Expr *e, int depth) {
     wat_append(c->w, ")\n");
 }
 
+/* Largest record a constructor builds on a cached shape; matches the
+ * runtime's $shape_share_max (a table with more keys is a dictionary). */
+#define CTOR_SHAPE_MAX 32
+
+/* The number of `name = v` fields of a constructor that can be built on a
+ * cached shape: every non-positional key a hoistable constant string, all
+ * distinct, at most CTOR_SHAPE_MAX of them. 0 when there are none or the
+ * constructor doesn't qualify (computed keys keep the incremental path). */
+static int ctor_shape_fields(const CG *c, const Expr *e) {
+    if (!c->opt_int) return 0;
+    int n = e->as.table_ctor.n_entries, k = 0;
+    for (int i = 0; i < n; i++) {
+        const TableEntry *ent = &e->as.table_ctor.entries[i];
+        if (ent->kind == TENT_POSITIONAL) continue;
+        if (ent->key->kind != EXPR_STRING || ent->key->as.s.len > KSTR_MAX) return 0;
+        for (int j = 0; j < i; j++) {
+            const TableEntry *o = &e->as.table_ctor.entries[j];
+            if (o->kind != TENT_POSITIONAL && o->key->as.s.len == ent->key->as.s.len &&
+                memcmp(o->key->as.s.bytes, ent->key->as.s.bytes, ent->key->as.s.len) == 0)
+                return 0;
+        }
+        k++;
+    }
+    return k <= CTOR_SHAPE_MAX ? k : 0;
+}
+
 static void emit_table_ctor(CG *c, const Expr *e, int depth) {
     int n = e->as.table_ctor.n_entries;
     /* Wrap in a block so the constructor appears as a single folded
@@ -1770,8 +1797,30 @@ static void emit_table_ctor(CG *c, const Expr *e, int depth) {
      * in-progress table on the operand stack across entries. */
     emit_indent(c, depth);
     wat_append(c->w, "(block (result anyref)\n");
-    emit_indent(c, depth + 1);
-    wat_append(c->w, "(call $tab_new)\n");
+    int nshape = ctor_shape_fields(c, e);
+    if (nshape > 0) {
+        /* Its fields' final layout is known: start from the site's cached
+         * shape (built on first use) and fill values in by position. */
+        int site = c->n_ctor_shapes++;
+        emit_indent(c, depth + 1);
+        wat_appendf(c->w, "(if (ref.is_null (global.get $cshape_%d))\n", site);
+        emit_indent(c, depth + 2);
+        wat_appendf(c->w, "(then (global.set $cshape_%d (call $shape_for_keys (array.new_fixed $TArr %d", site,
+                    nshape);
+        for (int i = 0; i < n; i++) {
+            const TableEntry *ent = &e->as.table_ctor.entries[i];
+            if (ent->kind == TENT_POSITIONAL) continue;
+            char eb[160];
+            wat_appendf(c->w, " %s", kstr_expr(c, ent->key->as.s.bytes, ent->key->as.s.len, eb, sizeof eb));
+        }
+        wat_append(c->w, ")))))\n");
+        emit_indent(c, depth + 1);
+        wat_appendf(c->w, "(call $tab_new_shaped (ref.as_non_null (global.get $cshape_%d)))\n", site);
+    } else {
+        emit_indent(c, depth + 1);
+        wat_append(c->w, "(call $tab_new)\n");
+    }
+    int field_pos = 0;
     int pos_idx = 1;
     /* If the final entry is positional AND a multi-value tail (call/vararg),
      * we splice all of its values rather than just taking the first. */
@@ -1792,6 +1841,17 @@ static void emit_table_ctor(CG *c, const Expr *e, int depth) {
             emit_expr(c, ent->value, depth + 1);
             emit_indent(c, depth + 1);
             wat_append(c->w, "call $tab_set_ik\n");
+            continue;
+        }
+        if (nshape > 0) {
+            /* A field of a shaped constructor: its value goes to its position. */
+            int vfloat = expr_is_float(c, ent->value);
+            emit_indent(c, depth + 1);
+            wat_appendf(c->w, "(i32.const %d)\n", field_pos++);
+            if (vfloat) emit_float_expr(c, ent->value, depth + 1);
+            else emit_expr(c, ent->value, depth + 1);
+            emit_indent(c, depth + 1);
+            wat_append(c->w, vfloat ? "call $tab_put_pos_f\n" : "call $tab_put_pos\n");
             continue;
         }
         if (ent->key->kind == EXPR_STRING && ent->key->as.s.len <= KSTR_MAX) {
@@ -6788,6 +6848,8 @@ int codegen_module(const ParseResult *pr, const char *src_name,
     if (c.ok && embed_api) emit_embed_api(&c);
 
     emit_kstr_globals(&c);
+    for (int i = 0; i < c.n_ctor_shapes; i++)
+        wat_appendf(out, "  (global $cshape_%d (mut (ref null $Shape)) (ref.null $Shape))\n", i);
     emit_data_segment(&c);
 
     wat_append(out, ")\n");

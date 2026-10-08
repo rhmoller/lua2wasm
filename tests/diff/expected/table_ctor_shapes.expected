@@ -1,0 +1,8 @@
+{x=1 z=2}	{a=2 b=1}	{1=pos? k=1 k2=1}	{1=10 2=20 3=30 flag=false name=n1}	{1=7 2=8 3=9 first=1}	{f=0.5 g=0.75 h=s}	{}
+{x=2 z=4}	{a=2 b=2}	{2=pos? k=2 k2=2}	{1=10 2=20 3=30 flag=true name=n2}	{1=7 2=8 3=9 first=2}	{f=1.0 g=1.25 h=s}	{}
+{x=3 z=6}	{a=2 b=3}	{3=pos? k=3 k2=3}	{1=10 2=20 3=30 flag=true name=n3}	{1=7 2=8 3=9 first=3}	{f=1.5 g=1.75 h=s}	{}
+{extra=e p=1 q=2}	{p=20}	{p=back q=4}	{p=5 q=6}
+{q=5}	{p=4}
+wide	1275	1	18	50
+{x=8.0 y=16.5}	float
+1	dflt:unknown	nil

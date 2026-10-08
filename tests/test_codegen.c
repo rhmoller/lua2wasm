@@ -302,6 +302,26 @@ static MunitResult test_dynamic_call_fast(const MunitParameter params[], void *f
     return MUNIT_OK;
 }
 
+/* A constructor whose field names are distinct constants starts from its
+ * site's cached shape and fills values by position; computed or duplicate
+ * names keep the incremental path. */
+static MunitResult test_ctor_shape(const MunitParameter params[], void *fixture) {
+    (void)params; (void)fixture;
+    char *m = main_func_wat("local a = {x = 1, y = 2.5, 10}\n"
+                            "print(a)\n");
+    munit_assert_not_null(strstr(m, "$tab_new_shaped"));
+    munit_assert_not_null(strstr(m, "$tab_put_pos_f"));
+    munit_assert_null(strstr(m, "$tab_set_hash_str"));
+    free(m);
+    m = main_func_wat("local k = 'x'\n"
+                      "local a = {[k] = 1, y = 2}\n"
+                      "local b = {x = 1, x = 2}\n"
+                      "print(a, b)\n");
+    munit_assert_null(strstr(m, "$tab_new_shaped"));
+    free(m);
+    return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
     { "/emits_expected",       test_emits_expected,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
     { "/boxed_fallback_o0",    test_emits_boxed_fallback_o0, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -312,6 +332,7 @@ static MunitTest tests[] = {
     { "/mixed_compare_unboxed", test_mixed_compare_unboxed, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
     { "/key_local_maybe_typed", test_key_local_maybe_typed, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
     { "/dynamic_call_fast",    test_dynamic_call_fast,      NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+    { "/ctor_shape",           test_ctor_shape,             NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
     { NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 };
 
