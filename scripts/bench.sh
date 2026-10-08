@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # Run the bench/ programs under reference lua5.5, luajit (when installed) and
-# lua2wasm, and print a table of wall-clock times reported by each program's
-# own `TIME` line (os.clock, so process startup is excluded).
+# lua2wasm, and print a table of the times each program reports on its own
+# `TIME` line (os.clock, so process startup is excluded). os.clock is CPU
+# time, which for lua2wasm includes V8's background compiler and parallel GC
+# threads; the `wall` column reruns lua2wasm with os.clock as wall time
+# (LUA2WASM_CLOCK=wall), the fairer comparison with single-threaded Lua.
 #
 #   scripts/bench.sh                 # every bench/*.lua
 #   scripts/bench.sh nbody oo        # a subset, by basename
@@ -52,11 +55,11 @@ ratio() { # ratio A B -> B/A formatted, or "-" when either is not a number
     else echo "-"; fi
 }
 
-printf '%-14s %9s %9s %10s %9s  %s\n' bench lua5.5 luajit lua2wasm ratio output
+printf '%-14s %9s %9s %10s %9s %9s  %s\n' bench lua5.5 luajit lua2wasm ratio wall output
 for b in "${benches[@]}"; do
     src=$root/bench/$b.lua
     [ -f "$src" ] || { echo "no such bench: $b" >&2; continue; }
-    ref="-"; jt="-"; same="-"
+    ref="-"; jt="-"; same="-"; wall="-"
     if [ -n "$lua" ]; then
         ref=$(best_time "$lua" "$src"); cp "$tmp/last.out" "$tmp/ref.out" 2>/dev/null || true
     fi
@@ -64,11 +67,14 @@ for b in "${benches[@]}"; do
     # shellcheck disable=SC2086
     if "$l2w" "$src" ${L2W_FLAGS:-} -o "$tmp/$b.wasm" 2>"$tmp/cerr"; then
         w=$(best_time node --experimental-wasm-exnref "$host" "$tmp/$b.wasm")
+        cp "$tmp/last.out" "$tmp/l2w.out" 2>/dev/null || true
+        wall=$(LUA2WASM_CLOCK=wall best_time node --experimental-wasm-exnref "$host" "$tmp/$b.wasm")
+        cp "$tmp/l2w.out" "$tmp/last.out" 2>/dev/null || true
         if [ -n "$lua" ] && [ -f "$tmp/ref.out" ]; then
             if diff -q "$tmp/ref.out" "$tmp/last.out" >/dev/null; then same=ok; else same=DIFF; fi
         fi
     else
         w=COMPILEFAIL
     fi
-    printf '%-14s %9s %9s %10s %9s  %s\n' "$b" "$ref" "$jt" "$w" "$(ratio "$ref" "$w")" "$same"
+    printf '%-14s %9s %9s %10s %9s %9s  %s\n' "$b" "$ref" "$jt" "$w" "$(ratio "$ref" "$w")" "$wall" "$same"
 done

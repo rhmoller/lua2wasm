@@ -6,31 +6,35 @@ Update it when an item lands or a measurement changes.
 
 ## Where we stand
 
-Seconds (`TIME`, best of five) on one machine, Node 24:
+Seconds (`TIME`, best of five) on one machine, Node 24. `TIME` is
+`os.clock()`, CPU time, which for lua2wasm includes V8's background compiler
+and parallel GC threads; `wall` is the same run timed by the wall clock
+(`LUA2WASM_CLOCK=wall`), the fairer comparison with single-threaded Lua:
 
-| bench | lua5.5 | lua2wasm | ratio |
-|---|---:|---:|---:|
-| fannkuch | 0.82 | 0.34 | 0.41× |
-| binarytrees | 0.36 | 0.15 | 0.42× |
-| spectralnorm | 0.95 | 0.54 | 0.57× |
-| oo | 0.46 | 0.27 | 0.59× |
-| nbody_arr | 0.38 | 0.23 | 0.62× |
-| vectors | 1.07 | 0.73 | 0.68× |
-| particles | 0.58 | 0.46 | 0.78× |
-| nbody | 0.43 | 0.35 | 0.80× |
-| entities | 0.68 | 0.57 | 0.84× |
-| tilemap | 0.28 | 0.26 | 0.91× |
-| closures | 0.07 | 0.09 | 1.20× |
-| hashtab | 0.10 | 0.14 | 1.48× |
-| strings | 0.07 | 0.16 | 2.39× |
+| bench | lua5.5 | lua2wasm | ratio | wall | wall ratio |
+|---|---:|---:|---:|---:|---:|
+| fannkuch | 0.815 | 0.335 | 0.41× | 0.332 | 0.41× |
+| binarytrees | 0.353 | 0.153 | 0.43× | 0.115 | 0.33× |
+| spectralnorm | 0.951 | 0.530 | 0.56× | 0.524 | 0.55× |
+| oo | 0.454 | 0.268 | 0.59× | 0.250 | 0.55× |
+| nbody_arr | 0.386 | 0.237 | 0.61× | 0.232 | 0.60× |
+| vectors | 1.074 | 0.741 | 0.69× | 0.662 | 0.62× |
+| particles | 0.583 | 0.463 | 0.79× | 0.431 | 0.74× |
+| nbody | 0.439 | 0.350 | 0.80× | 0.345 | 0.79× |
+| entities | 0.683 | 0.569 | 0.83× | 0.518 | 0.76× |
+| tilemap | 0.286 | 0.256 | 0.90× | 0.213 | 0.74× |
+| closures | 0.074 | 0.090 | 1.22× | 0.062 | 0.84× |
+| hashtab | 0.096 | 0.146 | 1.52× | 0.089 | 0.93× |
+| strings | 0.066 | 0.155 | 2.35× | 0.094 | 1.42× |
 
 ## Measuring
 
 - `scripts/bench.sh [name...]` — the suite (`RUNS=5` keeps the best run).
   `TIME` is `os.clock()`, the process's CPU time, which **includes V8's
   background compiler and parallel GC threads**; reference Lua is
-  single-threaded. When `TIME` and wall time disagree, compare with node's
-  `--single-threaded-gc` (strings: `TIME` 199 → 159 ms, same wall time).
+  single-threaded. The `wall` column reruns lua2wasm with `os.clock()` as wall
+  time (`LUA2WASM_CLOCK=wall`, honoured by runtime/host.mjs); on the short
+  benchmarks the two differ by a third (strings 0.16 against 0.09).
 - `scripts/profile.sh FILE.lua [N]` — self time by wasm function (needs
   Binaryen's `wasm-as` for the name section). `TREE=1` adds the call tree;
   `INLINING=fn` lists V8's inlining decisions while optimizing `$fn`, with
@@ -73,17 +77,6 @@ scavenges copying fresh strings that stay alive).
 hash in a 4-byte header); possibly interning short run-time strings.
 
 **Verify.** strings, hashtab, tilemap, closures; the GC share in profiles.
-
-### 3. Warm-up dominates short programs
-
-**Evidence.** `scripts/micro.sh bench/micro/strings_warm.lua`: `build` 56 ms
-on the first run, 8 ms warm; `string.format` 44 ms, 11 ms warm (lua5.5: 14
-and 31). Lowering `--wasm-tiering-budget` doesn't help; a larger young
-generation does — this is mostly item 2. A short benchmark's `TIME` also
-carries V8's parallel GC threads (see Measuring).
-
-**Fix.** Mostly item 2. Consider reporting wall time next to `TIME` in
-bench.sh, so helper-thread CPU doesn't read as slowdown.
 
 ### 4. String method calls take the generic path
 
@@ -181,6 +174,15 @@ seedings a body is emitted with). Signature inference reads the boxes, so a
 function returning one returns an i64; the two alternate until the set
 settles. 6M calls of hashtab's `rnd()`: 67 → 18 ms (lua5.5: 94). tilemap
 0.28 → 0.26, hashtab 0.147 → 0.142.
+
+**Warm-up, measured by the wall clock** (was item 3). bench.sh reports wall
+time next to `TIME`: much of what read as warm-up cost on the short
+benchmarks was V8's helper threads (strings `TIME` 0.16, wall 0.09; hashtab
+0.145 and 0.091 — faster than lua5.5's 0.096; closures 0.094 and 0.066). A
+larger young generation is no general cure, in wall time: with
+`--min-semi-space-size=16` / `64` hashtab 0.093 → 0.080 / 0.075, but strings
+0.095 → 0.095 / 0.106 and closures 0.063 → 0.070 / 0.083. Heap flags can't be
+set from inside the host anyway; an embedder that knows its workload can.
 
 Maybe-typed locals ([note 22](design/22-maybe-typed-locals.md)), table shapes
 and inline caches ([note 23](design/23-table-shapes.md)), run-once loop

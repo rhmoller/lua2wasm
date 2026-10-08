@@ -26,6 +26,11 @@ const { luaToString, formatFloatDirective, parseLuaNumber, osDate, osGetenv, obj
 const FROZEN_TIME = process.env.LUA2WASM_TEST_TIME
     ? BigInt(process.env.LUA2WASM_TEST_TIME) : null;
 const cpuStart = process.cpuUsage();
+// os.clock() is the process's CPU time, like reference Lua's — which here
+// includes V8's compiler and parallel GC threads. LUA2WASM_CLOCK=wall makes it
+// the wall time since start instead (scripts/bench.sh's "wall" column).
+const WALL_CLOCK = process.env.LUA2WASM_CLOCK === 'wall';
+const wallStart = performance.now();
 
 const bytes = await readFile(wasmPath);
 
@@ -180,6 +185,7 @@ function osTmpname() {
             BigInt(Math.floor(new Date(Number(y), Number(mo) - 1, Number(d),
                 Number(h), Number(mi), Number(s)).getTime() / 1000)),
         os_clock:  ()             => {
+            if (WALL_CLOCK) return (performance.now() - wallStart) / 1000;
             const u = process.cpuUsage(cpuStart);
             return (u.user + u.system) / 1e6;
         },
