@@ -4252,300 +4252,288 @@ static void emit_for_gen(CG *c, const Stmt *s, int depth) {
 }
 
 /* ----- statements ----- */
-static void emit_stmt(CG *c, const Stmt *s, int depth) {
-    if (!c->ok) return;
-    switch (s->kind) {
-    case STMT_LOCAL: {
-        int n_names = s->as.local.n_names;
-        int n_values = s->as.local.n_values;
-        /* A trailing call / `...` only spreads when names remain after it;
-         * otherwise only its first value (or none) is used, so it is a
-         * single value like the rest (`local x = f()` takes the call's
-         * single-value entry). */
-        int last_call = (n_values > 0 && n_names > n_values &&
-                         is_multival_tail(s->as.local.values[n_values - 1]));
-        /* Count of leading single-valued source expressions: everything but
-         * a trailing multivalue tail. Lua evaluates the value list strictly
-         * left-to-right, so these are emitted *before* the trailing tail. */
-        int n_lead = last_call ? n_values - 1 : n_values;
-        /* 1. Leading single values, in source order. A value with a matching
-         *    name is assigned to its slot; an excess value is still evaluated
-         *    for its side effects (e.g. an __index trigger) and dropped. */
-        for (int i = 0; i < n_lead; i++) {
-            if (i >= n_names) {
-                emit_expr(c, s->as.local.values[i], depth);
-                emit_line(c, depth, "drop\n");
-                continue;
-            }
+/* `local n1, n2, ... = v1, v2, ...`: the values evaluated left to right and
+ * stored by slot type, a trailing call / `...` spread over the names left
+ * after the leading values, missing values nil; then each <close> name is
+ * registered with the to-be-closed stack. */
+static void emit_local_stmt(CG *c, const Stmt *s, int depth) {
+    int n_names = s->as.local.n_names;
+    int n_values = s->as.local.n_values;
+    /* A trailing call / `...` only spreads when names remain after it;
+     * otherwise only its first value (or none) is used, so it is a
+     * single value like the rest (`local x = f()` takes the call's
+     * single-value entry). */
+    int last_call = (n_values > 0 && n_names > n_values &&
+                     is_multival_tail(s->as.local.values[n_values - 1]));
+    /* Count of leading single-valued source expressions: everything but
+     * a trailing multivalue tail. Lua evaluates the value list strictly
+     * left-to-right, so these are emitted *before* the trailing tail. */
+    int n_lead = last_call ? n_values - 1 : n_values;
+    /* 1. Leading single values, in source order. A value with a matching
+     *    name is assigned to its slot; an excess value is still evaluated
+     *    for its side effects (e.g. an __index trigger) and dropped. */
+    for (int i = 0; i < n_lead; i++) {
+        if (i >= n_names) {
+            emit_expr(c, s->as.local.values[i], depth);
+            emit_line(c, depth, "drop\n");
+            continue;
+        }
+        int slot = s->as.local.local_idxs[i];
+        if (slot_is_int(c, slot)) {
+            /* i64 slot: analysis guarantees a matching single int value. */
+            emit_linef(c, depth, "(local.set $L%d\n", slot);
+            emit_int_expr(c, s->as.local.values[i], depth + 1);
+            emit_line(c, depth, ")\n");
+            continue;
+        }
+        if (slot_is_float(c, slot)) {
+            emit_linef(c, depth, "(local.set $L%d\n", slot);
+            emit_float_expr(c, s->as.local.values[i], depth + 1);
+            emit_line(c, depth, ")\n");
+            continue;
+        }
+        if (slot_is_maybe(c, slot)) {
+            emit_maybe_store(c, slot, s->as.local.values[i], depth);
+            continue;
+        }
+        int boxed = slot_is_boxed(c, slot);
+        emit_linef(c, depth, boxed ? "(local.set $L%d (struct.new $Box\n" : "(local.set $L%d\n",
+                   slot);
+        emit_expr(c, s->as.local.values[i], depth + 1);
+        emit_line(c, depth, boxed ? "))\n" : ")\n");
+    }
+    /* 2. Trailing multivalue tail, evaluated *after* the leading values
+     *    and spread across the remaining names (and evaluated even when
+     *    no name consumes it). Spread slots are never int/float-
+     *    specialized (the analysis only specializes single literal/int
+     *    initializers), so the boxed/anyref path covers them. */
+    if (last_call) {
+        emit_line(c, depth, "(local.set $tmp_args\n");
+        emit_multival_array(c, s->as.local.values[n_values - 1], depth + 1);
+        emit_line(c, depth, ")\n");
+        for (int i = n_lead; i < n_names; i++) {
             int slot = s->as.local.local_idxs[i];
-            if (slot_is_int(c, slot)) {
-                /* i64 slot: analysis guarantees a matching single int value. */
-                emit_linef(c, depth, "(local.set $L%d\n", slot);
-                emit_int_expr(c, s->as.local.values[i], depth + 1);
-                emit_line(c, depth, ")\n");
-                continue;
-            }
-            if (slot_is_float(c, slot)) {
-                emit_linef(c, depth, "(local.set $L%d\n", slot);
-                emit_float_expr(c, s->as.local.values[i], depth + 1);
-                emit_line(c, depth, ")\n");
-                continue;
-            }
-            if (slot_is_maybe(c, slot)) {
-                emit_maybe_store(c, slot, s->as.local.values[i], depth);
-                continue;
-            }
             int boxed = slot_is_boxed(c, slot);
             emit_linef(c, depth, boxed ? "(local.set $L%d (struct.new $Box\n" : "(local.set $L%d\n",
                        slot);
-            emit_expr(c, s->as.local.values[i], depth + 1);
+            emit_args_at(c, i - n_lead, depth + 1);
             emit_line(c, depth, boxed ? "))\n" : ")\n");
         }
-        /* 2. Trailing multivalue tail, evaluated *after* the leading values
-         *    and spread across the remaining names (and evaluated even when
-         *    no name consumes it). Spread slots are never int/float-
-         *    specialized (the analysis only specializes single literal/int
-         *    initializers), so the boxed/anyref path covers them. */
-        if (last_call) {
-            emit_line(c, depth, "(local.set $tmp_args\n");
-            emit_multival_array(c, s->as.local.values[n_values - 1], depth + 1);
-            emit_line(c, depth, ")\n");
-            for (int i = n_lead; i < n_names; i++) {
-                int slot = s->as.local.local_idxs[i];
-                int boxed = slot_is_boxed(c, slot);
-                emit_linef(c, depth, boxed ? "(local.set $L%d (struct.new $Box\n" : "(local.set $L%d\n",
-                           slot);
-                emit_args_at(c, i - n_lead, depth + 1);
-                emit_line(c, depth, boxed ? "))\n" : ")\n");
-            }
-        } else {
-            /* 3. No trailing tail: names past the value list get nil. */
-            for (int i = n_lead; i < n_names; i++) {
-                int slot = s->as.local.local_idxs[i];
-                int boxed = slot_is_boxed(c, slot);
-                emit_linef(c, depth, boxed ? "(local.set $L%d (struct.new $Box (ref.null "
-                                             "any)))\n"
-                                           : "(local.set $L%d (ref.null any))\n",
-                           slot);
-            }
-        }
-        /* <close> declarations: push each onto the per-activation to-be-closed
-         * stack. $tbc_push validates closability at the declaration (matching
-         * reference Lua: a truthy value with no __close is rejected here, not
-         * at scope exit; nil/false are accepted and never closed). close_count
-         * tracks the live depth for the enclosing block / break / goto / return
-         * close targets. */
-        if (s->as.local.attribs) {
-            for (int i = 0; i < n_names; i++) {
-                if (s->as.local.attribs[i] != 2) continue;
-                int slot = s->as.local.local_idxs[i];
-                emit_indent(c, depth);
-                if (slot_is_boxed(c, slot))
-                    wat_appendf(c->w,
-                                "(call $tbc_push (ref.as_non_null (local.get $tbc)) "
-                                "(struct.get $Box $v (local.get $L%d)))\n",
-                                slot);
-                else
-                    wat_appendf(c->w,
-                                "(call $tbc_push (ref.as_non_null (local.get $tbc)) "
-                                "(local.get $L%d))\n",
-                                slot);
-                c->close_count++;
-            }
-        }
-        break;
-    }
-
-    case STMT_ASSIGN:
-        emit_assign(c, s, depth);
-        break;
-
-    case STMT_EXPR: {
-        /* Call as statement: its results are dropped, so a direct call takes
-         * the single-value entry and a dynamic one the fast entry when they
-         * apply; otherwise get the result array and drop it. */
-        const Expr *ce = s->as.expr_stmt.expr;
-        const LuaFunc *dt = ce->kind == EXPR_CALL ? direct_call_target(c, ce) : NULL;
-        if (dt && direct_args_typed_ok(c, ce, dt)) emit_typed_direct_call1(c, ce, dt, depth);
-        else if (fast_call_nargs(c, ce) >= 0) emit_fast_call(c, ce, depth);
-        else emit_call_array(c, ce, depth);
-        emit_line(c, depth, "drop\n");
-        break;
-    }
-
-    case STMT_DO:
-        emit_block(c, &s->as.do_stmt.body, depth);
-        break;
-
-    case STMT_RETURN:
-        emit_return(c, s, depth);
-        break;
-
-    case STMT_WHILE: {
-        int label = c->next_label++;
-        if (!push_break_label(c, label)) break;
-        emit_linef(c, depth, "(block $brk_%d\n", label);
-        emit_linef(c, depth + 1, "(loop $cont_%d\n", label);
-        emit_truthy(c, s->as.while_stmt.cond, depth + 2);
-        emit_line(c, depth + 2, "i32.eqz\n");
-        emit_linef(c, depth + 2, "br_if $brk_%d\n", label);
-        emit_block(c, &s->as.while_stmt.body, depth + 2);
-        emit_linef(c, depth + 2, "br $cont_%d\n", label);
-        emit_line(c, depth + 1, ")\n");
-        emit_line(c, depth, ")\n");
-        c->break_depth--;
-        break;
-    }
-
-    case STMT_REPEAT: {
-        int label = c->next_label++;
-        if (!push_break_label(c, label)) break;
-        emit_linef(c, depth, "(block $brk_%d\n", label);
-        emit_linef(c, depth + 1, "(loop $cont_%d\n", label);
-        /* A <close> var declared in the body stays in scope for the until
-         * condition and is closed AFTER it (Lua §3.3.5). Emit the body
-         * statements directly (emit_block would close at the body's end),
-         * evaluate the condition, then close the body's to-be-closed vars.
-         * $close_upto is a stack-neutral folded call, so it can sit between the
-         * condition's i32 result and the br_if that consumes it. */
-        int rbase = c->close_count;
-        emit_block_stmts(c, &s->as.repeat.body, depth + 2);
-        emit_truthy(c, s->as.repeat.cond, depth + 2);
-        emit_line(c, depth + 2, "i32.eqz\n");
-        if (c->close_count > rbase)
-            emit_close_upto(c, rbase, "(ref.null any)", depth + 2);
-        c->close_count = rbase;
-        emit_linef(c, depth + 2, "br_if $cont_%d\n", label);
-        emit_line(c, depth + 1, ")\n");
-        emit_line(c, depth, ")\n");
-        c->break_depth--;
-        break;
-    }
-
-    case STMT_BREAK: {
-        if (c->break_depth == 0) {
-            cg_error(c, "break outside loop");
-            break;
-        }
-        int label = c->break_labels[c->break_depth - 1];
-        /* Close to-be-closed locals declared inside this loop before leaving. */
-        int base = c->break_close_count[c->break_depth - 1];
-        if (c->close_count > base) emit_close_upto(c, base, "(ref.null any)", depth);
-        emit_linef(c, depth, "br $brk_%d\n", label);
-        break;
-    }
-
-    case STMT_GOTO: {
-        /* Dispatch lowering: set the target block's $next, then re-enter
-         * its dispatch loop. The local and label are function-scoped, so
-         * this works from inside arbitrarily nested blocks/loops. Before
-         * leaving, close any to-be-closed vars whose scope the jump exits
-         * (down to the count live at the target label). */
-        if (c->close_count > s->as.label.close_base)
-            emit_close_upto(c, s->as.label.close_base, "(ref.null any)", depth);
-        emit_linef(c, depth, "(local.set $next_%d (i32.const %d))\n",
-                   s->as.label.block_dispatch_id, s->as.label.target_segment_idx);
-        emit_linef(c, depth, "(br $dispatch_%d)\n", s->as.label.block_dispatch_id);
-        break;
-    }
-
-    case STMT_LABEL:
-        /* Wrappers are emitted by emit_block; the label statement
-         * itself produces no code at its position. */
-        break;
-
-    case STMT_FOR_NUM:
-        emit_for_num(c, s, depth);
-        break;
-
-    case STMT_FOR_GEN:
-        emit_for_gen(c, s, depth);
-        break;
-
-    case STMT_GLOBAL: {
-        int n_names = s->as.global_decl.n_names;
-        int n_values = s->as.global_decl.n_values;
-        if (n_values == 0) break;
-        int last_call = (n_values > 0 &&
-                         is_multival_tail(s->as.global_decl.values[n_values - 1]));
-        int n_lead = last_call ? n_values - 1 : n_values;
-        /* Same left-to-right evaluation contract as STMT_LOCAL: leading
-         * single values first, then the trailing multivalue tail. The store
-         * keys are constant strings (no side effects), so only the value
-         * order matters. */
-        for (int i = 0; i < n_lead; i++) {
-            if (i >= n_names) {
-                emit_expr(c, s->as.global_decl.values[i], depth);
-                emit_line(c, depth, "drop\n");
-                continue;
-            }
-            int gi = s->as.global_decl.global_idxs[i];
-            emit_line(c, depth, "(call $tab_set (ref.as_non_null (global.get $g_globals))\n");
-            emit_indent(c, depth + 1);
-            emit_global_key(c, c->pr->globals.items[gi].name,
-                            c->pr->globals.items[gi].name_len);
-            emit_expr(c, s->as.global_decl.values[i], depth + 1);
-            emit_line(c, depth, ")\n");
-        }
-        if (last_call) {
-            emit_line(c, depth, "(local.set $tmp_args\n");
-            emit_multival_array(c, s->as.global_decl.values[n_values - 1], depth + 1);
-            emit_line(c, depth, ")\n");
-        }
+    } else {
+        /* 3. No trailing tail: names past the value list get nil. */
         for (int i = n_lead; i < n_names; i++) {
-            int gi = s->as.global_decl.global_idxs[i];
-            emit_line(c, depth, "(call $tab_set (ref.as_non_null (global.get $g_globals))\n");
-            emit_indent(c, depth + 1);
-            emit_global_key(c, c->pr->globals.items[gi].name,
-                            c->pr->globals.items[gi].name_len);
-            if (last_call) {
-                emit_args_at(c, i - n_lead, depth + 1);
-            } else {
-                emit_line(c, depth + 1, "(ref.null any)\n");
-            }
-            emit_line(c, depth, ")\n");
+            int slot = s->as.local.local_idxs[i];
+            int boxed = slot_is_boxed(c, slot);
+            emit_linef(c, depth, boxed ? "(local.set $L%d (struct.new $Box (ref.null "
+                                         "any)))\n"
+                                       : "(local.set $L%d (ref.null any))\n",
+                       slot);
         }
-        break;
     }
-
-    case STMT_IF: {
-        int label = c->next_label++;
-        emit_linef(c, depth, "(block $if_end_%d\n", label);
-        for (size_t i = 0; i < s->as.if_stmt.narms; i++) {
-            IfArm *a = &s->as.if_stmt.arms[i];
-            emit_truthy(c, a->cond, depth + 1);
-            emit_line(c, depth + 1, "(if (then\n");
-            emit_block(c, &a->body, depth + 2);
-            emit_linef(c, depth + 2, "br $if_end_%d\n", label);
-            emit_line(c, depth + 1, "))\n");
+    /* <close> declarations: push each onto the per-activation to-be-closed
+     * stack. $tbc_push validates closability at the declaration (matching
+     * reference Lua: a truthy value with no __close is rejected here, not
+     * at scope exit; nil/false are accepted and never closed). close_count
+     * tracks the live depth for the enclosing block / break / goto / return
+     * close targets. */
+    if (s->as.local.attribs) {
+        for (int i = 0; i < n_names; i++) {
+            if (s->as.local.attribs[i] != 2) continue;
+            int slot = s->as.local.local_idxs[i];
+            emit_indent(c, depth);
+            if (slot_is_boxed(c, slot))
+                wat_appendf(c->w,
+                            "(call $tbc_push (ref.as_non_null (local.get $tbc)) "
+                            "(struct.get $Box $v (local.get $L%d)))\n",
+                            slot);
+            else
+                wat_appendf(c->w,
+                            "(call $tbc_push (ref.as_non_null (local.get $tbc)) "
+                            "(local.get $L%d))\n",
+                            slot);
+            c->close_count++;
         }
-        if (s->as.if_stmt.has_else) {
-            emit_block(c, &s->as.if_stmt.else_body, depth + 1);
+    }
+}
+
+/* A call as a statement: its results are dropped, so a direct call takes
+ * the single-value entry and a dynamic one the fast entry when they apply;
+ * otherwise get the result array and drop it. */
+static void emit_call_stmt(CG *c, const Stmt *s, int depth) {
+    const Expr *ce = s->as.expr_stmt.expr;
+    const LuaFunc *dt = ce->kind == EXPR_CALL ? direct_call_target(c, ce) : NULL;
+    if (dt && direct_args_typed_ok(c, ce, dt)) emit_typed_direct_call1(c, ce, dt, depth);
+    else if (fast_call_nargs(c, ce) >= 0) emit_fast_call(c, ce, depth);
+    else emit_call_array(c, ce, depth);
+    emit_line(c, depth, "drop\n");
+}
+
+static void emit_while(CG *c, const Stmt *s, int depth) {
+    int label = c->next_label++;
+    if (!push_break_label(c, label)) return;
+    emit_linef(c, depth, "(block $brk_%d\n", label);
+    emit_linef(c, depth + 1, "(loop $cont_%d\n", label);
+    emit_truthy(c, s->as.while_stmt.cond, depth + 2);
+    emit_line(c, depth + 2, "i32.eqz\n");
+    emit_linef(c, depth + 2, "br_if $brk_%d\n", label);
+    emit_block(c, &s->as.while_stmt.body, depth + 2);
+    emit_linef(c, depth + 2, "br $cont_%d\n", label);
+    emit_line(c, depth + 1, ")\n");
+    emit_line(c, depth, ")\n");
+    c->break_depth--;
+}
+
+static void emit_repeat(CG *c, const Stmt *s, int depth) {
+    int label = c->next_label++;
+    if (!push_break_label(c, label)) return;
+    emit_linef(c, depth, "(block $brk_%d\n", label);
+    emit_linef(c, depth + 1, "(loop $cont_%d\n", label);
+    /* A <close> var declared in the body stays in scope for the until
+     * condition and is closed AFTER it (Lua §3.3.5). Emit the body
+     * statements directly (emit_block would close at the body's end),
+     * evaluate the condition, then close the body's to-be-closed vars.
+     * $close_upto is a stack-neutral folded call, so it can sit between the
+     * condition's i32 result and the br_if that consumes it. */
+    int rbase = c->close_count;
+    emit_block_stmts(c, &s->as.repeat.body, depth + 2);
+    emit_truthy(c, s->as.repeat.cond, depth + 2);
+    emit_line(c, depth + 2, "i32.eqz\n");
+    if (c->close_count > rbase)
+        emit_close_upto(c, rbase, "(ref.null any)", depth + 2);
+    c->close_count = rbase;
+    emit_linef(c, depth + 2, "br_if $cont_%d\n", label);
+    emit_line(c, depth + 1, ")\n");
+    emit_line(c, depth, ")\n");
+    c->break_depth--;
+}
+
+static void emit_break(CG *c, const Stmt *s, int depth) {
+    if (c->break_depth == 0) {
+        cg_error(c, "break outside loop");
+        return;
+    }
+    int label = c->break_labels[c->break_depth - 1];
+    /* Close to-be-closed locals declared inside this loop before leaving. */
+    int base = c->break_close_count[c->break_depth - 1];
+    if (c->close_count > base) emit_close_upto(c, base, "(ref.null any)", depth);
+    emit_linef(c, depth, "br $brk_%d\n", label);
+}
+
+static void emit_goto(CG *c, const Stmt *s, int depth) {
+    /* Dispatch lowering: set the target block's $next, then re-enter
+     * its dispatch loop. The local and label are function-scoped, so
+     * this works from inside arbitrarily nested blocks/loops. Before
+     * leaving, close any to-be-closed vars whose scope the jump exits
+     * (down to the count live at the target label). */
+    if (c->close_count > s->as.label.close_base)
+        emit_close_upto(c, s->as.label.close_base, "(ref.null any)", depth);
+    emit_linef(c, depth, "(local.set $next_%d (i32.const %d))\n",
+               s->as.label.block_dispatch_id, s->as.label.target_segment_idx);
+    emit_linef(c, depth, "(br $dispatch_%d)\n", s->as.label.block_dispatch_id);
+}
+
+/* `global n1, ... = v1, ...`: like `local`, but each name is a field of
+ * $g_globals. */
+static void emit_global_decl(CG *c, const Stmt *s, int depth) {
+    int n_names = s->as.global_decl.n_names;
+    int n_values = s->as.global_decl.n_values;
+    if (n_values == 0) return;
+    int last_call = (n_values > 0 &&
+                     is_multival_tail(s->as.global_decl.values[n_values - 1]));
+    int n_lead = last_call ? n_values - 1 : n_values;
+    /* Same left-to-right evaluation contract as STMT_LOCAL: leading
+     * single values first, then the trailing multivalue tail. The store
+     * keys are constant strings (no side effects), so only the value
+     * order matters. */
+    for (int i = 0; i < n_lead; i++) {
+        if (i >= n_names) {
+            emit_expr(c, s->as.global_decl.values[i], depth);
+            emit_line(c, depth, "drop\n");
+            continue;
+        }
+        int gi = s->as.global_decl.global_idxs[i];
+        emit_line(c, depth, "(call $tab_set (ref.as_non_null (global.get $g_globals))\n");
+        emit_indent(c, depth + 1);
+        emit_global_key(c, c->pr->globals.items[gi].name,
+                        c->pr->globals.items[gi].name_len);
+        emit_expr(c, s->as.global_decl.values[i], depth + 1);
+        emit_line(c, depth, ")\n");
+    }
+    if (last_call) {
+        emit_line(c, depth, "(local.set $tmp_args\n");
+        emit_multival_array(c, s->as.global_decl.values[n_values - 1], depth + 1);
+        emit_line(c, depth, ")\n");
+    }
+    for (int i = n_lead; i < n_names; i++) {
+        int gi = s->as.global_decl.global_idxs[i];
+        emit_line(c, depth, "(call $tab_set (ref.as_non_null (global.get $g_globals))\n");
+        emit_indent(c, depth + 1);
+        emit_global_key(c, c->pr->globals.items[gi].name,
+                        c->pr->globals.items[gi].name_len);
+        if (last_call) {
+            emit_args_at(c, i - n_lead, depth + 1);
+        } else {
+            emit_line(c, depth + 1, "(ref.null any)\n");
         }
         emit_line(c, depth, ")\n");
-        break;
     }
+}
 
-    case STMT_LOCAL_FUNC: {
-        int slot = s->as.local_func.local_idx;
-        int boxed = slot_is_boxed(c, slot);
-        /* If the slot is captured (e.g. by the closure itself for
-         * recursion), pre-allocate the box with nil so the function body
-         * can see its own slot; then store the closure into the box.
-         * If not captured, simply build the closure and store it. */
-        if (boxed) {
-            emit_linef(c, depth, "(local.set $L%d (struct.new $Box (ref.null any)))\n", slot);
-            emit_line(c, depth, "(struct.set $Box $v\n");
-            emit_linef(c, depth + 1, "(local.get $L%d)\n", slot);
-            emit_function_expr(c, s->as.local_func.func, depth + 1);
-            emit_line(c, depth, ")\n");
-        } else {
-            emit_linef(c, depth, "(local.set $L%d\n", slot);
-            emit_function_expr(c, s->as.local_func.func, depth + 1);
-            emit_line(c, depth, ")\n");
-        }
-        break;
+static void emit_if(CG *c, const Stmt *s, int depth) {
+    int label = c->next_label++;
+    emit_linef(c, depth, "(block $if_end_%d\n", label);
+    for (size_t i = 0; i < s->as.if_stmt.narms; i++) {
+        IfArm *a = &s->as.if_stmt.arms[i];
+        emit_truthy(c, a->cond, depth + 1);
+        emit_line(c, depth + 1, "(if (then\n");
+        emit_block(c, &a->body, depth + 2);
+        emit_linef(c, depth + 2, "br $if_end_%d\n", label);
+        emit_line(c, depth + 1, "))\n");
     }
+    if (s->as.if_stmt.has_else) {
+        emit_block(c, &s->as.if_stmt.else_body, depth + 1);
+    }
+    emit_line(c, depth, ")\n");
+}
+
+static void emit_local_func(CG *c, const Stmt *s, int depth) {
+    int slot = s->as.local_func.local_idx;
+    int boxed = slot_is_boxed(c, slot);
+    /* If the slot is captured (e.g. by the closure itself for
+     * recursion), pre-allocate the box with nil so the function body
+     * can see its own slot; then store the closure into the box.
+     * If not captured, simply build the closure and store it. */
+    if (boxed) {
+        emit_linef(c, depth, "(local.set $L%d (struct.new $Box (ref.null any)))\n", slot);
+        emit_line(c, depth, "(struct.set $Box $v\n");
+        emit_linef(c, depth + 1, "(local.get $L%d)\n", slot);
+        emit_function_expr(c, s->as.local_func.func, depth + 1);
+        emit_line(c, depth, ")\n");
+    } else {
+        emit_linef(c, depth, "(local.set $L%d\n", slot);
+        emit_function_expr(c, s->as.local_func.func, depth + 1);
+        emit_line(c, depth, ")\n");
+    }
+}
+
+static void emit_stmt(CG *c, const Stmt *s, int depth) {
+    if (!c->ok) return;
+    switch (s->kind) {
+    case STMT_LOCAL: emit_local_stmt(c, s, depth); break;
+    case STMT_ASSIGN: emit_assign(c, s, depth); break;
+    case STMT_EXPR: emit_call_stmt(c, s, depth); break;
+    case STMT_DO: emit_block(c, &s->as.do_stmt.body, depth); break;
+    case STMT_RETURN: emit_return(c, s, depth); break;
+    case STMT_WHILE: emit_while(c, s, depth); break;
+    case STMT_REPEAT: emit_repeat(c, s, depth); break;
+    case STMT_BREAK: emit_break(c, s, depth); break;
+    case STMT_GOTO: emit_goto(c, s, depth); break;
+    case STMT_LABEL: break; /* its wrappers come from emit_block; no code at its position */
+    case STMT_FOR_NUM: emit_for_num(c, s, depth); break;
+    case STMT_FOR_GEN: emit_for_gen(c, s, depth); break;
+    case STMT_GLOBAL: emit_global_decl(c, s, depth); break;
+    case STMT_IF: emit_if(c, s, depth); break;
+    case STMT_LOCAL_FUNC: emit_local_func(c, s, depth); break;
     }
 }
 
