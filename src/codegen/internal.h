@@ -13,7 +13,7 @@
 #include <string.h>
 
 /* ============================================================
- * Codegen v3a.
+ * The code generator.
  *
  * Value representation: every Lua value is `anyref`.
  *   nil      -> (ref.null any)
@@ -184,10 +184,10 @@ typedef struct {
     const unsigned char *maybe_key_only;
     int mt_depth;
     int mt_max;
-    /* Direct-call PoC (lever 3): cur_func_slot[s] != NULL means local slot s is
-     * statically bound to that LuaFunc (a non-captured, never-reassigned local
-     * function), so a call f(args) of matching arity can skip the $ArgArr and
-     * invoke the function's direct-args entry $user_N_da. */
+    /* Direct calls: cur_func_slot[s] != NULL means local slot s is statically
+     * bound to that LuaFunc (its row of bind_slot, below), so a call f(args) of
+     * matching arity can skip the $ArgArr and invoke one of the function's
+     * direct entries ($user_N_da / _da1). */
     const LuaFunc **cur_func_slot;
     FnEntry entry;     /* the entry whose body is being emitted (GENERIC for main) */
     int n_ctor_shapes; /* table-constructor sites with a cached shape ($cshape_N) */

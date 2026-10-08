@@ -339,7 +339,7 @@ static void emit_main_chunk(CG *c) {
     wat_append(c->w, "  )\n");
 }
 
-/* ---------- tree-shaking (milestone 0 / size opt) ---------- */
+/* ----- tree-shaking ----- */
 /* mark_* walks the AST and records which top-level builtins and which
  * pre-declared globals are referenced. Used by codegen_module to skip
  * emitting closure globals, _G entries, and library installations
@@ -987,6 +987,118 @@ static void emit_embed_api(CG *c) {
         "    (call $as_int (call $lua_len (local.get $t))))\n");
 }
 
+/* elem-declare every live builtin (so ref.func works in constant
+ * initializers) and give each one a global pre-wrapping its closure. The
+ * global name mirrors the WAT func name (sans $), so library builtins
+ * (e.g. $builtin_math_type) don't collide with top-level ones (e.g.
+ * $builtin_type) that happen to share a Lua-visible name. */
+static void emit_builtin_globals(CG *c, const unsigned char *live, int nb) {
+    wat_append(c->w, "\n  (elem declare func");
+    for (int i = 0; i < nb; i++) {
+        if (!live[i]) continue;
+        wat_appendf(c->w, " %s", builtin_func_name(i));
+    }
+    wat_append(c->w, ")\n");
+    for (int i = 0; i < nb; i++) {
+        if (!live[i]) continue;
+        wat_appendf(c->w,
+                    "  (global $g_%s (ref $LuaClosure)\n"
+                    "    (struct.new $LuaClosure (ref.func %s) (global.get $g_empty_upvals) (i32.const 256)\n"
+                    "      (ref.func $fast_adapter)))\n",
+                    builtin_func_name(i) + 1, builtin_func_name(i));
+    }
+}
+
+/* $stdlib_init: allocate the runtime's buffers, then build $g_globals — the
+ * live top-level builtins, _G / _ENV, the referenced library tables — and
+ * package.loaded. */
+static void emit_stdlib_init(CG *c, const unsigned char *live, const unsigned char *gref, int nb) {
+    wat_append(c->w, "\n  (func $stdlib_init"
+                     " (local $tab (ref $LuaTable))"
+                     " (local $h (ref $LuaTable))\n");
+    wat_appendf(c->w,
+                "    (global.set $fmt_buf\n"
+                "      (array.new $LuaArr (i32.const 0) (i32.const %d)))\n"
+                "    (global.set $call_lines\n"
+                "      (array.new $LineArr (i32.const 0) (i32.const 256)))\n"
+                "    (global.set $call_weights\n"
+                "      (array.new $LineArr (i32.const 0) (i32.const 256)))\n",
+                LUA_FMT_BUF_CAP);
+    /* Create the global-environment table $g_globals. Every Lua global
+     * (user-declared, library, builtin) is installed as an entry below;
+     * codegen emits $tab_get / $tab_set against this table for every
+     * global read/write. */
+    wat_append(c->w, "    (global.set $g_globals (call $tab_new))\n");
+
+    /* Install every live top-level builtin (print, error, pcall, ...)
+     * as a $g_globals entry. The underlying $g_<func_name> closure is
+     * the value; user reassignment via `print = 42` writes a new entry,
+     * leaving the original closure intact. */
+    for (int bi = 0; bi < nb; bi++) {
+        if (builtin_class(bi) != BLT_TOPLEVEL) continue;
+        if (!live[bi]) continue;
+        const char *key = builtin_name(bi);
+        if (key[0] == '_') continue; /* internal-only (e.g. _ipairs_iter) */
+        char val[128];
+        int vn = snprintf(val, sizeof(val), "(global.get $g_%s)",
+                          builtin_func_name(bi) + 1);
+        if (vn < 0 || (size_t)vn >= sizeof(val)) {
+            cg_error(c, "builtin global-get expression too long");
+            break;
+        }
+        emit_tab_set_str(c, "(ref.as_non_null (global.get $g_globals))",
+                         key, strlen(key), val);
+    }
+
+    /* Install _G as a self-reference. _ENV is the per-function "environment"
+     * upvalue in Lua 5.4+; we don't implement that machinery, so we alias
+     * it to _G — close enough for tests that just need _ENV to exist. */
+    emit_tab_set_str(c, "(ref.as_non_null (global.get $g_globals))",
+                     "_G", 2, "(ref.as_non_null (global.get $g_globals))");
+    emit_tab_set_str(c, "(ref.as_non_null (global.get $g_globals))",
+                     "_ENV", 4, "(ref.as_non_null (global.get $g_globals))");
+
+    emit_library_tables(c, gref, nb);
+
+    emit_require_bridge(c, gref);
+    wat_append(c->w, "  )\n");
+}
+
+/* Every wasm entry of every Lua function (FnEntry). */
+static void emit_user_functions(CG *c) {
+    const ParseResult *pr = c->pr;
+    wat_append(c->w, "  ;; --- user functions ---\n");
+    for (size_t i = 0; i < pr->funcs.count; i++) {
+        emit_user_function(c, pr->funcs.items[i], ENTRY_GENERIC);
+        if (fn_has_fast_entry(c, pr->funcs.items[i])) emit_user_function(c, pr->funcs.items[i], ENTRY_FAST);
+        /* Direct-call fast entries (non-vararg only): _da returns the result
+         * array (multi-value call contexts), _da1 returns a single value
+         * (single-value contexts — no result-array allocation). Emitted only
+         * when some direct-call site actually targets this function (has_site),
+         * otherwise they would be dead code. */
+        if (c->opt_int && !pr->funcs.items[i]->is_vararg && c->sigs[i].has_site) {
+            emit_user_function(c, pr->funcs.items[i], ENTRY_DIRECT);
+            emit_user_function(c, pr->funcs.items[i], ENTRY_DIRECT1);
+        }
+        if (!c->ok) break;
+    }
+}
+
+/* The globals the emitted code registered per site: constructor shapes
+ * ($cshape_N) and the inline caches of constant-key ($ic_N) and method
+ * ($mic_N) sites. */
+static void emit_site_globals(CG *c) {
+    for (int i = 0; i < c->n_ctor_shapes; i++)
+        wat_appendf(c->w, "  (global $cshape_%d (mut (ref null $Shape)) (ref.null $Shape))\n", i);
+    for (int i = 0; i < c->n_ics; i++)
+        wat_appendf(c->w, "  (global $ic_%d (ref $IC) (struct.new $IC (ref.null $Shape) (i32.const 0)))\n", i);
+    for (int i = 0; i < c->n_mics; i++)
+        wat_appendf(c->w,
+                    "  (global $mic_%d (ref $MIC) (struct.new $MIC (ref.null $Shape) (ref.null $Shape) (i32.const 0)"
+                    " (ref.null $LuaTable) (ref.null $Shape) (i32.const 0)))\n",
+                    i);
+}
+
 int codegen_module(const ParseResult *pr, const char *src_name,
                    int tree_shake, int opt, int embed_api, WatBuilder *out,
                    char *err, size_t errlen) {
@@ -1060,123 +1172,25 @@ int codegen_module(const ParseResult *pr, const char *src_name,
     c.tab_set_fn =
         (effective_tree_shake && !program_writes_table(pr)) ? "$tab_bootstrap_set" : "$tab_set";
 
-    /* elem declare for every live builtin func, so ref.func works in const init. */
-    wat_append(out, "\n  (elem declare func");
-    for (int i = 0; i < nb; i++) {
-        if (!live[i]) continue;
-        wat_appendf(out, " %s", builtin_func_name(i));
-    }
-    wat_append(out, ")\n");
-
-    /* One wasm global per live builtin, pre-wrapping a closure. The global
-     * name mirrors the WAT func name (sans $), so library builtins
-     * (e.g. $builtin_math_type) don't collide with top-level ones
-     * (e.g. $builtin_type) that happen to share a Lua-visible name. */
-    for (int i = 0; i < nb; i++) {
-        if (!live[i]) continue;
-        wat_appendf(out,
-                    "  (global $g_%s (ref $LuaClosure)\n"
-                    "    (struct.new $LuaClosure (ref.func %s) (global.get $g_empty_upvals) (i32.const 256)\n"
-                    "      (ref.func $fast_adapter)))\n",
-                    builtin_func_name(i) + 1, builtin_func_name(i));
-    }
-
-    /* User-declared globals used to get a per-name $g_user_N wasm slot.
-     * Since milestone 19 they live as entries in $g_globals (the Lua _G
-     * table) and access goes through $tab_get / $tab_set. The parser
-     * still tracks the global list for name resolution, but no wasm
-     * globals are emitted for them. */
-
+    emit_builtin_globals(&c, live, nb);
+    /* User-declared globals get no wasm global: they are entries in
+     * $g_globals (the Lua _G table), accessed through $tab_get / $tab_set. */
     emit_mkey_globals(&c);
     /* The empty string and the source name (used by error()/traceback) are also
      * constants — const-init them so DCE can drop them when unreferenced. */
     emit_global_const_str(&c, "$g_empty_str", "", 0);
     emit_global_const_str(&c, "$g_src_name", src_name ? src_name : "", src_name ? strlen(src_name) : 0);
 
-    /* $stdlib_init: builds math/string tables from the library builtins
-     * and assigns them to the corresponding $g_user_N slots. */
-    wat_append(out, "\n  (func $stdlib_init"
-                    " (local $tab (ref $LuaTable))"
-                    " (local $h (ref $LuaTable))\n");
-    wat_appendf(out,
-                "    (global.set $fmt_buf\n"
-                "      (array.new $LuaArr (i32.const 0) (i32.const %d)))\n"
-                "    (global.set $call_lines\n"
-                "      (array.new $LineArr (i32.const 0) (i32.const 256)))\n"
-                "    (global.set $call_weights\n"
-                "      (array.new $LineArr (i32.const 0) (i32.const 256)))\n",
-                LUA_FMT_BUF_CAP);
-    /* Create the global-environment table $g_globals. Every Lua global
-     * (user-declared, library, builtin) is installed as an entry below;
-     * codegen emits $tab_get / $tab_set against this table for every
-     * global read/write. */
-    wat_append(out, "    (global.set $g_globals (call $tab_new))\n");
-
-    /* Install every live top-level builtin (print, error, pcall, ...)
-     * as a $g_globals entry. The underlying $g_<func_name> closure is
-     * the value; user reassignment via `print = 42` writes a new entry,
-     * leaving the original closure intact. */
-    for (int bi = 0; bi < nb; bi++) {
-        if (builtin_class(bi) != BLT_TOPLEVEL) continue;
-        if (!live[bi]) continue;
-        const char *key = builtin_name(bi);
-        if (key[0] == '_') continue; /* internal-only (e.g. _ipairs_iter) */
-        char val[128];
-        int vn = snprintf(val, sizeof(val), "(global.get $g_%s)",
-                          builtin_func_name(bi) + 1);
-        if (vn < 0 || (size_t)vn >= sizeof(val)) {
-            cg_error(&c, "builtin global-get expression too long");
-            break;
-        }
-        emit_tab_set_str(&c, "(ref.as_non_null (global.get $g_globals))",
-                         key, strlen(key), val);
-    }
-
-    /* Install _G as a self-reference. _ENV is the per-function "environment"
-     * upvalue in Lua 5.4+; we don't implement that machinery, so we alias
-     * it to _G — close enough for tests that just need _ENV to exist. */
-    emit_tab_set_str(&c, "(ref.as_non_null (global.get $g_globals))",
-                     "_G", 2, "(ref.as_non_null (global.get $g_globals))");
-    emit_tab_set_str(&c, "(ref.as_non_null (global.get $g_globals))",
-                     "_ENV", 4, "(ref.as_non_null (global.get $g_globals))");
-
-    emit_library_tables(&c, gref, nb);
-
-    emit_require_bridge(&c, gref);
-    wat_append(out, "  )\n");
+    emit_stdlib_init(&c, live, gref, nb);
 
     wat_append(out, "\n  ;; @@SECTION:user-code@@\n");
-    wat_append(out, "  ;; --- user functions ---\n");
-
-    for (size_t i = 0; i < pr->funcs.count; i++) {
-        emit_user_function(&c, pr->funcs.items[i], ENTRY_GENERIC);
-        if (fn_has_fast_entry(&c, pr->funcs.items[i])) emit_user_function(&c, pr->funcs.items[i], ENTRY_FAST);
-        /* Direct-call fast entries (non-vararg only): _da returns the result
-         * array (multi-value call contexts), _da1 returns a single value
-         * (single-value contexts — no result-array allocation). Emitted only
-         * when some direct-call site actually targets this function (has_site),
-         * otherwise they would be dead code. */
-        if (c.opt_int && !pr->funcs.items[i]->is_vararg && c.sigs[i].has_site) {
-            emit_user_function(&c, pr->funcs.items[i], ENTRY_DIRECT);
-            emit_user_function(&c, pr->funcs.items[i], ENTRY_DIRECT1);
-        }
-        if (!c.ok) break;
-    }
-
+    emit_user_functions(&c);
     if (c.ok) emit_main_chunk(&c);
 
     if (c.ok && embed_api) emit_embed_api(&c);
 
     emit_kstr_globals(&c);
-    for (int i = 0; i < c.n_ctor_shapes; i++)
-        wat_appendf(out, "  (global $cshape_%d (mut (ref null $Shape)) (ref.null $Shape))\n", i);
-    for (int i = 0; i < c.n_ics; i++)
-        wat_appendf(out, "  (global $ic_%d (ref $IC) (struct.new $IC (ref.null $Shape) (i32.const 0)))\n", i);
-    for (int i = 0; i < c.n_mics; i++)
-        wat_appendf(out,
-                    "  (global $mic_%d (ref $MIC) (struct.new $MIC (ref.null $Shape) (ref.null $Shape) (i32.const 0)"
-                    " (ref.null $LuaTable) (ref.null $Shape) (i32.const 0)))\n",
-                    i);
+    emit_site_globals(&c);
     emit_data_segment(&c);
 
     wat_append(out, ")\n");
