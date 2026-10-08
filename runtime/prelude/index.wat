@@ -41,7 +41,7 @@
   ;; __index chain; a non-table receiver defers to $lua_index (string lib /
   ;; error).
   (func $lua_index_sk (param $tv anyref) (param $k (ref $LuaString)) (param $line i32) (result anyref)
-    (local $t (ref $LuaTable)) (local $v anyref) (local $i i32) (local $full i32)
+    (local $t (ref $LuaTable)) (local $v anyref) (local $full i32)
     (if (ref.test (ref $LuaTable) (local.get $tv))
       (then
         (local.set $t (ref.cast (ref $LuaTable) (local.get $tv)))
@@ -49,13 +49,8 @@
         ;; precomputed and never 0, so read the field instead of calling
         ;; $str_hash.
         (local.set $full (struct.get $LuaString $hash (local.get $k)))
-        (local.set $i (call $tab_find_str (local.get $t) (local.get $k) (local.get $full)))
-        (if (i32.ge_s (local.get $i) (i32.const 0))
-          (then
-            (local.set $v (call $tval (array.get $TArr (ref.as_non_null (struct.get $LuaTable $vals (local.get $t)))
-                                                      (local.get $i))
-                                      (struct.get $LuaTable $fvals (local.get $t)) (local.get $i)))
-            (if (i32.eqz (ref.is_null (local.get $v))) (then (return (local.get $v))))))
+        (local.set $v (call $tab_get_str_h (local.get $t) (local.get $k) (local.get $full)))
+        (if (i32.eqz (ref.is_null (local.get $v))) (then (return (local.get $v))))
         (return (call $tab_get_miss_str (local.get $t) (local.get $k) (local.get $full) (i32.const 64)))))
     (call $lua_index (local.get $tv) (local.get $k) (local.get $line)))
 
@@ -218,28 +213,19 @@
   (func $tab_get_miss_str (param $t (ref $LuaTable)) (param $k (ref $LuaString)) (param $full i32)
                           (param $depth i32) (result anyref)
     (local $v anyref) (local $mt (ref null $LuaTable)) (local $idx anyref)
-    (local $nt (ref $LuaTable)) (local $i i32) (local $mk (ref $LuaString))
+    (local $nt (ref $LuaTable)) (local $mk (ref $LuaString))
     (local.set $mt (struct.get $LuaTable $meta (local.get $t)))
     (if (ref.is_null (local.get $mt)) (then (return (ref.null any))))
     (local.set $mk (ref.as_non_null (global.get $g_mkey_index)))
-    (local.set $i (call $tab_find_str (ref.as_non_null (local.get $mt)) (local.get $mk)
-                                      (struct.get $LuaString $hash (local.get $mk))))
-    (if (i32.lt_s (local.get $i) (i32.const 0)) (then (return (ref.null any))))
-    (local.set $idx (call $tval (array.get $TArr
-      (ref.as_non_null (struct.get $LuaTable $vals (ref.as_non_null (local.get $mt)))) (local.get $i))
-      (struct.get $LuaTable $fvals (ref.as_non_null (local.get $mt))) (local.get $i)))
+    (local.set $idx (call $tab_get_str_h (ref.as_non_null (local.get $mt)) (local.get $mk)
+                                         (struct.get $LuaString $hash (local.get $mk))))
     (if (ref.is_null (local.get $idx)) (then (return (ref.null any))))
     (if (ref.test (ref $LuaTable) (local.get $idx))
       (then
         (if (i32.le_s (local.get $depth) (i32.const 1)) (then (return (ref.null any))))
         (local.set $nt (ref.cast (ref $LuaTable) (local.get $idx)))
-        (local.set $i (call $tab_find_str (local.get $nt) (local.get $k) (local.get $full)))
-        (if (i32.ge_s (local.get $i) (i32.const 0))
-          (then
-            (local.set $v (call $tval (array.get $TArr (ref.as_non_null (struct.get $LuaTable $vals (local.get $nt)))
-                                                      (local.get $i))
-                                      (struct.get $LuaTable $fvals (local.get $nt)) (local.get $i)))
-            (if (i32.eqz (ref.is_null (local.get $v))) (then (return (local.get $v))))))
+        (local.set $v (call $tab_get_str_h (local.get $nt) (local.get $k) (local.get $full)))
+        (if (i32.eqz (ref.is_null (local.get $v))) (then (return (local.get $v))))
         (return (call $tab_get_miss_str (local.get $nt) (local.get $k) (local.get $full)
                                         (i32.sub (local.get $depth) (i32.const 1))))))
     (if (ref.test (ref $LuaClosure) (local.get $idx))

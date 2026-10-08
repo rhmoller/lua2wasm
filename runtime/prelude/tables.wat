@@ -633,15 +633,19 @@
         (i32.wrap_i64 (i64.sub (local.get $val) (i64.const 1)))))))
     (call $tab_get_hash (local.get $t) (local.get $k)))
 
-  ;; Raw hash-part read of a string key (no array part, no __index) through
-  ;; the string-specialized probe with the key's cached hash: the metamethod
-  ;; fetch path. A deleted entry reads as nil like any miss.
-  (func $tab_get_str (param $t (ref $LuaTable)) (param $k (ref $LuaString)) (result anyref)
+  ;; Raw hash-part read of a string key whose hash is $full (no array part —
+  ;; strings never live there — and no __index), through the
+  ;; string-specialized probe. A deleted entry reads as nil like any miss.
+  (func $tab_get_str_h (param $t (ref $LuaTable)) (param $k (ref $LuaString)) (param $full i32) (result anyref)
     (local $i i32)
-    (local.set $i (call $tab_find_str (local.get $t) (local.get $k) (call $str_hash (local.get $k))))
+    (local.set $i (call $tab_find_str (local.get $t) (local.get $k) (local.get $full)))
     (if (i32.lt_s (local.get $i) (i32.const 0)) (then (return (ref.null any))))
     (call $tval (array.get $TArr (ref.as_non_null (struct.get $LuaTable $vals (local.get $t))) (local.get $i))
                 (struct.get $LuaTable $fvals (local.get $t)) (local.get $i)))
+
+  ;; $tab_get_str_h with the key's cached hash: the metamethod fetch path.
+  (func $tab_get_str (param $t (ref $LuaTable)) (param $k (ref $LuaString)) (result anyref)
+    (call $tab_get_str_h (local.get $t) (local.get $k) (call $str_hash (local.get $k))))
 
   ;; Apply `t[val] = v` (val an unboxed integer key) to the array part only.
   ;; The array part holds integer keys 1..$alen and may contain holes: a nil
