@@ -252,7 +252,9 @@ export function makeHelpers({ getInstance, formatFloat, cFormatG, cFormatF, cFor
     function applyPadNumeric(body, flags, width) {
         if (width <= body.length) return body;
         if (flags.includes("-")) return body + " ".repeat(width - body.length);
-        if (flags.includes("0")) {
+        // '0' pads with zeros after the sign, except for inf/nan (C pads those
+        // with spaces).
+        if (flags.includes("0") && !/^[-+ ]?(inf|nan)$/i.test(body)) {
             const m = /^([-+ ]?(?:0[xX])?)(.*)$/.exec(body);
             return m[1] + "0".repeat(width - body.length) + m[2];
         }

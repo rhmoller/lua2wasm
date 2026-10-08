@@ -7820,7 +7820,7 @@
     (local $fmt (ref $LuaArr)) (local $n i32) (local $i i32) (local $j i32) (local $b i32)
     (local $bld (ref $Builder)) (local $arg_idx i32) (local $arg anyref)
     (local $flags i32) (local $width i32) (local $wnd i32) (local $prec i32) (local $nd i32)
-    (local $conv i32) (local $allowed i32) (local $len i32) (local $s (ref $LuaArr))
+    (local $conv i32) (local $allowed i32) (local $len i32) (local $s (ref $LuaArr)) (local $fx f64)
     (local $written i32) (local $k i32)
     (local.set $fmt (struct.get $LuaString $bytes
       (call $arg_string (call $args_at (local.get $args) (i32.const 0)))))
@@ -7988,9 +7988,16 @@
         (then (call $fmt_int (local.get $bld) (call $as_int_co (local.get $arg)) (i32.const 0)
                 (i32.const 16) (i32.const 1) (local.get $flags) (local.get $width) (local.get $prec))
               (br $main)))
-      ;; floats (e E f F g G a A): rendered and padded by the host
+      ;; floats (e E f g G a A): %f in wasm when $fmt_fixed can, else (and
+      ;; for the rest) rendered and padded by the host
+      (local.set $fx (call $as_float_co (local.get $arg)))
+      (if (i32.eq (local.get $conv) (i32.const 102))
+        (then (if (call $fmt_fixed (local.get $bld) (local.get $fx)
+                    (if (result i32) (i32.lt_s (local.get $prec) (i32.const 0)) (then (i32.const 6)) (else (local.get $prec)))
+                    (local.get $flags) (local.get $width))
+          (then (br $main)))))
       (local.set $written (call $host_fmt_float (local.get $conv) (local.get $flags)
-        (local.get $width) (local.get $prec) (call $as_float_co (local.get $arg))))
+        (local.get $width) (local.get $prec) (local.get $fx)))
       (if (i32.lt_s (local.get $written) (i32.const 0))
         (then (call $throw_lit (i32.const 416) (i32.const 14))))
       (call $builder_append (local.get $bld) (ref.as_non_null (global.get $fmt_buf))
@@ -8043,6 +8050,134 @@
   ;; Precision is the minimum digit count (0 with a zero value prints
   ;; nothing) and disables the '0' flag; '#' prefixes 0x/0X for non-zero hex
   ;; and forces a leading 0 for octal.
+  ;; %.<prec>f of a finite double, exactly, without the host, for the usual
+  ;; precisions (0..13). With x = m * 2^e (m < 2^53), x * 10^prec equals
+  ;; m * 5^prec * 2^(e+prec); 5^prec < 2^31, so m * 5^prec < 2^84 is exact in
+  ;; 128 bits (hi:lo), and one shift with round-half-even on the exact
+  ;; remainder gives the correctly rounded digits C's printf prints. Flags and
+  ;; width as $fmt_int. Returns 0 having written nothing when the value is
+  ;; out of reach (inf/nan, a wider precision, |x| * 10^prec >= 2^64): the
+  ;; host renders it.
+  (func $fmt_fixed (param $bld (ref $Builder)) (param $x f64) (param $prec i32)
+                   (param $flags i32) (param $width i32) (result i32)
+    (local $bits i64) (local $neg i32) (local $ex i32) (local $m i64) (local $e i32)
+    (local $p5 i64) (local $lo i64) (local $hi i64) (local $t1 i64) (local $t2 i64)
+    (local $s i32) (local $t i32) (local $q i64)
+    (local $remhi i64) (local $remlo i64) (local $halfhi i64) (local $halflo i64) (local $up i32)
+    (local $tmp (ref $LuaArr)) (local $nd i32) (local $signch i32) (local $dot i32)
+    (local $body i32) (local $pad i32) (local $i i32)
+    (if (i32.gt_u (local.get $prec) (i32.const 13)) (then (return (i32.const 0))))
+    (local.set $bits (i64.reinterpret_f64 (local.get $x)))
+    (local.set $neg (i64.lt_s (local.get $bits) (i64.const 0)))
+    (local.set $ex (i32.wrap_i64 (i64.and (i64.shr_u (local.get $bits) (i64.const 52)) (i64.const 0x7ff))))
+    (if (i32.eq (local.get $ex) (i32.const 0x7ff)) (then (return (i32.const 0))))   ;; inf / nan
+    (local.set $m (i64.and (local.get $bits) (i64.const 0xfffffffffffff)))
+    (if (local.get $ex)
+      (then (local.set $m (i64.or (local.get $m) (i64.const 0x10000000000000)))
+            (local.set $e (i32.sub (local.get $ex) (i32.const 1075))))
+      (else (local.set $e (i32.const -1074))))
+    ;; P = m * 5^prec, as hi:lo from two 32x31-bit partial products
+    (local.set $p5 (i64.const 1))
+    (local.set $i (local.get $prec))
+    (block $pd (loop $pl
+      (br_if $pd (i32.eqz (local.get $i)))
+      (local.set $p5 (i64.mul (local.get $p5) (i64.const 5)))
+      (local.set $i (i32.sub (local.get $i) (i32.const 1)))
+      (br $pl)))
+    (local.set $t1 (i64.mul (i64.and (local.get $m) (i64.const 0xffffffff)) (local.get $p5)))
+    (local.set $t2 (i64.mul (i64.shr_u (local.get $m) (i64.const 32)) (local.get $p5)))
+    (local.set $lo (i64.add (local.get $t1) (i64.shl (local.get $t2) (i64.const 32))))
+    (local.set $hi (i64.add (i64.shr_u (local.get $t2) (i64.const 32))
+                            (i64.extend_i32_u (i64.lt_u (local.get $lo) (local.get $t1)))))
+    ;; q = round(P * 2^s), s = e + prec
+    (local.set $s (i32.add (local.get $e) (local.get $prec)))
+    (if (i32.ge_s (local.get $s) (i32.const 0))
+      (then
+        ;; exact left shift; the result must fit 64 bits
+        (if (i32.or (i64.ne (local.get $hi) (i64.const 0)) (i32.ge_s (local.get $s) (i32.const 64)))
+          (then (return (i32.const 0))))
+        (if (i32.gt_s (local.get $s) (i32.const 0))
+          (then (if (i64.ne (i64.shr_u (local.get $lo) (i64.extend_i32_u (i32.sub (i32.const 64) (local.get $s))))
+                            (i64.const 0))
+            (then (return (i32.const 0))))))
+        (local.set $q (i64.shl (local.get $lo) (i64.extend_i32_u (local.get $s)))))
+      (else
+        (local.set $t (i32.sub (i32.const 0) (local.get $s)))
+        (if (i32.lt_s (local.get $t) (i32.const 128))
+          (then
+            (if (i32.lt_s (local.get $t) (i32.const 64))
+              (then
+                (if (i64.ne (i64.shr_u (local.get $hi) (i64.extend_i32_u (local.get $t))) (i64.const 0))
+                  (then (return (i32.const 0))))
+                (local.set $q (i64.or (i64.shr_u (local.get $lo) (i64.extend_i32_u (local.get $t)))
+                                      (i64.shl (local.get $hi) (i64.extend_i32_u (i32.sub (i32.const 64) (local.get $t))))))
+                (local.set $remlo (i64.and (local.get $lo)
+                  (i64.sub (i64.shl (i64.const 1) (i64.extend_i32_u (local.get $t))) (i64.const 1))))
+                (local.set $halflo (i64.shl (i64.const 1) (i64.extend_i32_u (i32.sub (local.get $t) (i32.const 1))))))
+              (else
+                (local.set $q (i64.shr_u (local.get $hi) (i64.extend_i32_u (i32.sub (local.get $t) (i32.const 64)))))
+                (local.set $remhi (i64.and (local.get $hi)
+                  (i64.sub (i64.shl (i64.const 1) (i64.extend_i32_u (i32.sub (local.get $t) (i32.const 64))))
+                           (i64.const 1))))
+                (local.set $remlo (local.get $lo))
+                (if (i32.eq (local.get $t) (i32.const 64))
+                  (then (local.set $halflo (i64.const 0x8000000000000000)))
+                  (else (local.set $halfhi
+                    (i64.shl (i64.const 1) (i64.extend_i32_u (i32.sub (local.get $t) (i32.const 65)))))))))
+            ;; round half to even on the exact remainder
+            (if (i64.gt_u (local.get $remhi) (local.get $halfhi))
+              (then (local.set $up (i32.const 1)))
+              (else (if (i64.eq (local.get $remhi) (local.get $halfhi))
+                (then (if (i64.gt_u (local.get $remlo) (local.get $halflo))
+                  (then (local.set $up (i32.const 1)))
+                  (else (if (i64.eq (local.get $remlo) (local.get $halflo))
+                    (then (local.set $up (i32.wrap_i64 (i64.and (local.get $q) (i64.const 1))))))))))))
+            (if (local.get $up)
+              (then
+                (local.set $q (i64.add (local.get $q) (i64.const 1)))
+                (if (i64.eqz (local.get $q)) (then (return (i32.const 0))))))))))
+        ;; (t >= 128: P < 2^84 is below half of 2^t, so q = 0)
+    ;; digits of q, least significant first, at least prec + 1 of them
+    (local.set $tmp (array.new $LuaArr (i32.const 48) (i32.const 32)))
+    (loop $dl
+      (array.set $LuaArr (local.get $tmp) (local.get $nd)
+        (i32.add (i32.wrap_i64 (i64.rem_u (local.get $q) (i64.const 10))) (i32.const 48)))
+      (local.set $q (i64.div_u (local.get $q) (i64.const 10)))
+      (local.set $nd (i32.add (local.get $nd) (i32.const 1)))
+      (br_if $dl (i64.ne (local.get $q) (i64.const 0))))
+    (if (i32.le_s (local.get $nd) (local.get $prec))
+      (then (local.set $nd (i32.add (local.get $prec) (i32.const 1)))))
+    (local.set $dot (i32.or (i32.gt_s (local.get $prec) (i32.const 0))
+                            (i32.ne (i32.and (local.get $flags) (i32.const 8)) (i32.const 0))))
+    (local.set $signch (i32.const 0))
+    (if (local.get $neg) (then (local.set $signch (i32.const 45)))
+      (else (if (i32.and (local.get $flags) (i32.const 2)) (then (local.set $signch (i32.const 43)))
+        (else (if (i32.and (local.get $flags) (i32.const 4)) (then (local.set $signch (i32.const 32))))))))
+    (local.set $body (i32.add (i32.add (i32.ne (local.get $signch) (i32.const 0)) (local.get $nd))
+                              (local.get $dot)))
+    (local.set $pad (i32.sub (local.get $width) (local.get $body)))
+    (if (i32.lt_s (local.get $pad) (i32.const 0)) (then (local.set $pad (i32.const 0))))
+    (if (i32.eqz (i32.and (local.get $flags) (i32.const 17)))   ;; neither '-' nor '0'
+      (then (call $fmt_fill (local.get $bld) (i32.const 32) (local.get $pad))))
+    (if (local.get $signch) (then (call $builder_append_byte (local.get $bld) (local.get $signch))))
+    (if (i32.eq (i32.and (local.get $flags) (i32.const 17)) (i32.const 16))   ;; '0' without '-'
+      (then (call $fmt_fill (local.get $bld) (i32.const 48) (local.get $pad))))
+    (local.set $i (i32.sub (local.get $nd) (i32.const 1)))
+    (block $id (loop $il
+      (br_if $id (i32.lt_s (local.get $i) (local.get $prec)))
+      (call $builder_append_byte (local.get $bld) (array.get_u $LuaArr (local.get $tmp) (local.get $i)))
+      (local.set $i (i32.sub (local.get $i) (i32.const 1)))
+      (br $il)))
+    (if (local.get $dot) (then (call $builder_append_byte (local.get $bld) (i32.const 46))))
+    (block $fd (loop $fl
+      (br_if $fd (i32.lt_s (local.get $i) (i32.const 0)))
+      (call $builder_append_byte (local.get $bld) (array.get_u $LuaArr (local.get $tmp) (local.get $i)))
+      (local.set $i (i32.sub (local.get $i) (i32.const 1)))
+      (br $fl)))
+    (if (i32.and (local.get $flags) (i32.const 1))
+      (then (call $fmt_fill (local.get $bld) (i32.const 32) (local.get $pad))))
+    (i32.const 1))
+
   (func $fmt_int (param $bld (ref $Builder)) (param $v i64) (param $signed i32)
                  (param $base i32) (param $upper i32)
                  (param $flags i32) (param $width i32) (param $prec i32)

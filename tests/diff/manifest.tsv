@@ -147,3 +147,4 @@ pass	table_ctor_shapes	constructors on cached layouts: nil/duplicate/computed ke
 pass	inline_caches	field/method inline caches never serve stale slots: shape changes, nil slots, compaction, method/metatable swaps
 pass	concat_chains	flattened .. chains: number conversion, __concat order, grouping, errors, evaluation order
 pass	format_missing_arg	string.format raises on a conversion with no argument (diff-fuzz find)
+pass	format_fixed	%.Nf rendered in wasm matches printf exactly: property sweep over values/precisions/flags + edge cases
