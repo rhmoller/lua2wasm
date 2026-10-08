@@ -224,6 +224,14 @@ typedef struct {
     int has_site; /* a direct-call site somewhere targets this function */
 } FuncSig;
 
+/* The wasm functions one Lua function compiles to. */
+typedef enum {
+    ENTRY_GENERIC, /* $user_N: (closure, argument array) -> result array — the closure's $code */
+    ENTRY_FAST,    /* $user_N_f: $LuaFn1 — up to FAST_MAX_ARGS arguments in registers, one result */
+    ENTRY_DIRECT,  /* $user_N_da: typed arguments, result array (multi-value direct-call sites) */
+    ENTRY_DIRECT1, /* $user_N_da1: typed arguments, one typed result (single-value sites) */
+} FnEntry;
+
 /* ----- codegen context ----- */
 typedef struct {
     WatBuilder *w;
@@ -294,8 +302,7 @@ typedef struct {
      * function), so a call f(args) of matching arity can skip the $ArgArr and
      * invoke the function's direct-args entry $user_N_da. */
     const LuaFunc **cur_func_slot;
-    int ret_single;    /* emitting a $user_N_da1 / $user_N_f body: return one value */
-    int fast_body;     /* emitting a $user_N_f body: tail calls go through $fast */
+    FnEntry entry;     /* the entry whose body is being emitted (GENERIC for main) */
     int n_ctor_shapes; /* table-constructor sites with a cached shape ($cshape_N) */
     int n_ics;         /* constant-key access sites with an inline cache ($ic_N) */
     int n_mics;        /* method-call sites with an inline cache ($mic_N) */
@@ -3893,6 +3900,10 @@ static void emit_assign(CG *c, const Stmt *s, int depth) {
     }
 }
 
+/* Does the body being emitted return exactly one value ($user_N_da1 or
+ * $user_N_f) rather than a result array? */
+static int entry_single_result(const CG *c) { return c->entry == ENTRY_DIRECT1 || c->entry == ENTRY_FAST; }
+
 static void emit_return(CG *c, const Stmt *s, int depth) {
     int n_values = s->as.return_stmt.n_values;
     /* Close-aware return: any to-be-closed local in scope must be closed
@@ -3910,7 +3921,7 @@ static void emit_return(CG *c, const Stmt *s, int depth) {
             emit_line(c, depth, "return\n");
             return;
         }
-        if (c->ret_single) {
+        if (entry_single_result(c)) {
             if ((c->cur_ret_ty == NT_INT || c->cur_ret_ty == NT_FLOAT) && n_values == 1) {
                 if (c->cur_ret_ty == NT_INT)
                     emit_int_expr(c, s->as.return_stmt.values[0], depth);
@@ -3947,7 +3958,7 @@ static void emit_return(CG *c, const Stmt *s, int depth) {
         emit_line(c, depth, "return\n");
         return;
     }
-    if (c->fast_body && n_values == 1 && !s->as.return_stmt.values[0]->paren &&
+    if (c->entry == ENTRY_FAST && n_values == 1 && !s->as.return_stmt.values[0]->paren &&
         fast_call_nargs(c, s->as.return_stmt.values[0]) >= 0) {
         /* A $user_N_f body's tail call that fits the fast entry stays a
          * proper tail call; wider ones fall to the single-value code below
@@ -3956,7 +3967,7 @@ static void emit_return(CG *c, const Stmt *s, int depth) {
         emit_fast_tail_call(c, s->as.return_stmt.values[0], depth);
         return;
     }
-    if (c->ret_single) {
+    if (entry_single_result(c)) {
         /* Single-value-return entry ($user_N_da1): produce exactly one
          * value of the entry's result type. A numeric ret_ty was inferred
          * only when every return is a single numeric value, so emit it
@@ -5031,26 +5042,28 @@ static int fn_frame_weight(CG *c, const LuaFunc *fn) {
     return 8 * locals + 300;
 }
 
-static void emit_user_function(CG *c, const LuaFunc *fn, int direct, int ret_single, int fast) {
+static void emit_user_function(CG *c, const LuaFunc *fn, FnEntry entry) {
     WatBuilder *w = c->w;
+    int direct = entry == ENTRY_DIRECT || entry == ENTRY_DIRECT1;
+    int fast = entry == ENTRY_FAST;
     const FuncSig *sg = (c->opt_int && fn->func_idx >= 0 && fn->func_idx < c->n_sigs)
                             ? &c->sigs[fn->func_idx]
                             : NULL;
     /* Typed direct entries seed their parameter slots from the signature; the
      * generic entry and the main chunk leave parameters boxed. */
     const NumTy *param_seed = (direct && sg) ? sg->param_ty : NULL;
-    NumTy ret_ty = (direct && ret_single && sg) ? sg->ret_ty : NT_ANY;
+    NumTy ret_ty = (entry == ENTRY_DIRECT1 && sg) ? sg->ret_ty : NT_ANY;
     if (direct) {
         /* Direct-args entry: closure + one (typed) param per declared parameter,
-         * no $args/$ArgArr. ret_single ($user_N_da1) returns a single value of
+         * no $args/$ArgArr. $user_N_da1 returns a single value of
          * the inferred result type; otherwise ($user_N_da) the array-based
          * return. Same body as $user_N either way. */
         wat_appendf(w, "  (func $user_%d_%s (param $closure (ref $LuaClosure))",
-                    fn->func_idx, ret_single ? "da1" : "da");
+                    fn->func_idx, entry == ENTRY_DIRECT1 ? "da1" : "da");
         for (int i = 0; i < fn->n_params; i++)
             wat_appendf(w, " (param $p%d %s)", i,
                         num_wat_ty(param_seed ? param_seed[i] : NT_ANY));
-        if (ret_single) wat_appendf(w, " (result %s)\n", num_wat_ty(ret_ty));
+        if (entry == ENTRY_DIRECT1) wat_appendf(w, " (result %s)\n", num_wat_ty(ret_ty));
         else wat_append(w, " (result (ref $ArgArr))\n");
     } else if (fast) {
         /* Fast entry ($LuaFn1): arguments in $a0..$a3, $nargs of them; one
@@ -5214,23 +5227,21 @@ static void emit_user_function(CG *c, const LuaFunc *fn, int direct, int ret_sin
     if (fn_n_close > 0) emit_tbc_init(w, fn_n_close);
 
     int was_in_main = c->in_main;
-    int prev_ret_single = c->ret_single, prev_fast_body = c->fast_body;
+    FnEntry prev_entry = c->entry;
     NumTy prev_ret_ty = c->cur_ret_ty;
     c->in_main = 0;
-    c->ret_single = ret_single || fast;
-    c->fast_body = fast;
+    c->entry = entry;
     c->cur_ret_ty = ret_ty;
     if (c->ok) emit_close_body(c, &fn->body, fn_n_close > 0, 2);
     c->next_label_id = saved_next_id_pre;
     c->in_main = was_in_main;
-    c->ret_single = prev_ret_single;
-    c->fast_body = prev_fast_body;
+    c->entry = prev_entry;
     c->cur_ret_ty = prev_ret_ty;
 
     /* Default trailing fall-through value. A numeric ret_ty implies the body
      * always returns (block_always_returns), so this default is dead but must
      * still type-check; otherwise it is nil / the empty results array. */
-    if (ret_single || fast)
+    if (entry == ENTRY_DIRECT1 || entry == ENTRY_FAST)
         wat_appendf(w, "    %s\n", ret_ty == NT_INT ? "(i64.const 0)" : ret_ty == NT_FLOAT ? "(f64.const 0)"
                                                                                            : "(ref.null any)");
     else
@@ -6149,16 +6160,16 @@ int codegen_module(const ParseResult *pr, const char *src_name,
     wat_append(out, "  ;; --- user functions ---\n");
 
     for (size_t i = 0; i < pr->funcs.count; i++) {
-        emit_user_function(&c, pr->funcs.items[i], 0, 0, 0);
-        if (fn_has_fast_entry(&c, pr->funcs.items[i])) emit_user_function(&c, pr->funcs.items[i], 0, 0, 1);
+        emit_user_function(&c, pr->funcs.items[i], ENTRY_GENERIC);
+        if (fn_has_fast_entry(&c, pr->funcs.items[i])) emit_user_function(&c, pr->funcs.items[i], ENTRY_FAST);
         /* Direct-call fast entries (non-vararg only): _da returns the result
          * array (multi-value call contexts), _da1 returns a single value
          * (single-value contexts — no result-array allocation). Emitted only
          * when some direct-call site actually targets this function (has_site),
          * otherwise they would be dead code. */
         if (c.opt_int && !pr->funcs.items[i]->is_vararg && c.sigs[i].has_site) {
-            emit_user_function(&c, pr->funcs.items[i], 1, 0, 0);
-            emit_user_function(&c, pr->funcs.items[i], 1, 1, 0);
+            emit_user_function(&c, pr->funcs.items[i], ENTRY_DIRECT);
+            emit_user_function(&c, pr->funcs.items[i], ENTRY_DIRECT1);
         }
         if (!c.ok) break;
     }
