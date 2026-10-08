@@ -1873,7 +1873,9 @@ static void int_kill_stmt(CG *c, const Stmt *s, unsigned char *out, int *changed
     }
     case STMT_FOR_NUM: {
         const Expr *st = s->as.for_num.step;
-        if (!(expr_is_int(c, s->as.for_num.start) && expr_is_int(c, s->as.for_num.stop) && (st == NULL || expr_is_int(c, st))))
+        /* Lua 5.4+: integer init and step make an integer loop whatever the
+         * limit is ($for_limit settles a non-integer limit at loop entry). */
+        if (!(expr_is_int(c, s->as.for_num.start) && (st == NULL || expr_is_int(c, st))))
             KILL(s->as.for_num.local_idx);
         int_kill_block(c, &s->as.for_num.body, out, changed);
         break;
@@ -3922,10 +3924,12 @@ static void emit_for_num(CG *c, const Stmt *s, int depth) {
     /* Integer-specialized loop: control var + bounds are i64, the
      * counter is an unboxed i64 slot, no per-iteration boxing or
      * generic-helper calls. The analysis only marks the slot int when
-     * start/stop/step are all integer and the var isn't captured. */
+     * start and step are integer and the var isn't captured; a limit that
+     * isn't statically an integer is converted once by $for_limit. */
     if (slot_is_int(c, slot)) {
         int fd = c->for_depth;
         const Expr *st = s->as.for_num.step;
+        int stop_int = expr_is_int(c, s->as.for_num.stop);
         char step_s[40];
         int sign; /* +1/-1 known at compile time; 0 = runtime */
         if (!st) {
@@ -3944,8 +3948,13 @@ static void emit_for_num(CG *c, const Stmt *s, int depth) {
         emit_indent(c, depth);
         wat_append(c->w, ")\n");
         emit_indent(c, depth);
-        wat_appendf(c->w, "(local.set $ifor_stop_%d\n", fd);
-        emit_int_expr(c, s->as.for_num.stop, depth + 1);
+        if (stop_int) {
+            wat_appendf(c->w, "(local.set $ifor_stop_%d\n", fd);
+            emit_int_expr(c, s->as.for_num.stop, depth + 1);
+        } else {
+            wat_appendf(c->w, "(local.set $for_stop_%d\n", fd);
+            emit_expr(c, s->as.for_num.stop, depth + 1);
+        }
         emit_indent(c, depth);
         wat_append(c->w, ")\n");
         if (sign == 0) {
@@ -3959,8 +3968,21 @@ static void emit_for_num(CG *c, const Stmt *s, int depth) {
                         "(if (i64.eqz %s) (then (call $throw_lit_at (i32.const 75) (i32.const 18) (i32.const %d))))\n",
                         step_s, s->line);
         }
+        if (!stop_int) {
+            emit_indent(c, depth);
+            wat_appendf(c->w, "(call $for_limit (local.get $for_stop_%d) (local.get $L%d) %s (i32.const %d))\n", fd,
+                        slot, step_s, s->line);
+            emit_indent(c, depth);
+            wat_appendf(c->w, "(local.set $for_skip_%d)\n", fd);
+            emit_indent(c, depth);
+            wat_appendf(c->w, "(local.set $ifor_stop_%d)\n", fd);
+        }
         emit_indent(c, depth);
         wat_appendf(c->w, "(block $brk_%d\n", label);
+        if (!stop_int) {
+            emit_indent(c, depth + 1);
+            wat_appendf(c->w, "(br_if $brk_%d (local.get $for_skip_%d))\n", label, fd);
+        }
         emit_indent(c, depth + 1);
         wat_appendf(c->w, "(loop $cont_%d\n", label);
         emit_indent(c, depth + 2);
@@ -4037,55 +4059,35 @@ static void emit_for_num(CG *c, const Stmt *s, int depth) {
     }
     emit_indent(c, depth);
     wat_append(c->w, ")\n");
-    emit_indent(c, depth);
-    wat_appendf(c->w, "(call $for_check_step (local.get %s) (i32.const %d))\n", f_step, s->line);
-    /* Settle the control variable's type up front: if init or step is
-     * a float the whole loop is float (Lua 5.4+). counter_loc is the
-     * local that holds the running value. */
+    /* $for_prep applies Lua's forprep: it settles the loop's type (integer
+     * iff init and step are integers, else all three coerced to floats),
+     * converts the limit, raises on a zero step or a non-numeric value, and
+     * says whether the loop runs at all. counter_loc is the local that holds
+     * the running value. */
     char counter_loc[24];
     if (boxed) snprintf(counter_loc, sizeof counter_loc, "%s", f_cur);
     else snprintf(counter_loc, sizeof counter_loc, "$L%d", slot);
+    char f_skip[24];
+    snprintf(f_skip, sizeof f_skip, "$for_skip_%d", fd);
     emit_indent(c, depth);
-    wat_appendf(c->w,
-                "(local.set %s (call $for_coerce (local.get %s) (local.get %s)))\n",
-                counter_loc, counter_loc, f_step);
+    wat_appendf(c->w, "(call $for_prep (local.get %s) (local.get %s) (local.get %s) (i32.const %d))\n",
+                counter_loc, f_stop, f_step, s->line);
     emit_indent(c, depth);
-    wat_appendf(c->w,
-                "(local.set %s (call $for_coerce (local.get %s) (local.get %s)))\n",
-                f_step, f_step, counter_loc);
+    wat_appendf(c->w, "(local.set %s) (local.set %s) (local.set %s) (local.set %s)\n", f_skip, f_step, f_stop,
+                counter_loc);
+    char load_buf[80];
+    snprintf(load_buf, sizeof(load_buf), "(local.get %s)", counter_loc);
 
     emit_indent(c, depth);
     wat_appendf(c->w, "(block $brk_%d\n", label);
     emit_indent(c, depth + 1);
+    wat_appendf(c->w, "(br_if $brk_%d (local.get %s))\n", label, f_skip);
+    emit_indent(c, depth + 1);
     wat_appendf(c->w, "(loop $cont_%d\n", label);
-    /* terminate? */
-    emit_indent(c, depth + 2);
-    wat_appendf(c->w,
-                "(if (call $for_step_positive (local.get %s))\n", f_step);
-    emit_indent(c, depth + 2);
-    wat_append(c->w, "  (then\n");
-    char load_buf[80];
-    if (boxed) snprintf(load_buf, sizeof(load_buf), "(local.get %s)", f_cur);
-    else snprintf(load_buf, sizeof(load_buf), "(local.get $L%d)", slot);
-    emit_indent(c, depth + 2);
-    wat_appendf(c->w,
-                "    (br_if $brk_%d (i32.eqz (call $num_le\n"
-                "      %s\n"
-                "      (local.get %s)))))\n",
-                label, load_buf, f_stop);
-    emit_indent(c, depth + 2);
-    wat_append(c->w, "  (else\n");
-    emit_indent(c, depth + 2);
-    wat_appendf(c->w,
-                "    (br_if $brk_%d (i32.eqz (call $num_le\n"
-                "      (local.get %s)\n"
-                "      %s)))))\n",
-                label, f_stop, load_buf);
     /* Fresh per-iteration binding for a captured control variable. */
     if (boxed) {
         emit_indent(c, depth + 2);
-        wat_appendf(c->w,
-                    "(local.set $L%d (struct.new $Box %s))\n", slot, load_buf);
+        wat_appendf(c->w, "(local.set $L%d (struct.new $Box %s))\n", slot, load_buf);
     }
     /* body */
     c->for_depth++;
@@ -4095,21 +4097,21 @@ static void emit_for_num(CG *c, const Stmt *s, int depth) {
      * representable range (Lua 5.4 numeric-for overflow semantics) —
      * otherwise `for i = maxinteger-2, maxinteger` would loop forever. */
     emit_indent(c, depth + 2);
-    wat_appendf(c->w, "(local.set %s (call $lua_add %s (local.get %s)))\n",
-                f_next, load_buf, f_step);
+    wat_appendf(c->w, "(local.set %s (call $lua_add %s (local.get %s)))\n", f_next, load_buf, f_step);
+    emit_indent(c, depth + 2);
+    wat_appendf(c->w, "(br_if $brk_%d (call $for_overflowed %s (local.get %s) (local.get %s)))\n", label, load_buf,
+                f_step, f_next);
+    emit_indent(c, depth + 2);
+    wat_appendf(c->w, "(local.set %s (local.get %s))\n", counter_loc, f_next);
+    /* Continue while the new value is within the limit. The entry test was
+     * $for_prep's, so only later iterations compare here (a NaN float bound
+     * runs the body once, as in reference Lua). */
     emit_indent(c, depth + 2);
     wat_appendf(c->w,
-                "(br_if $brk_%d (call $for_overflowed %s (local.get %s) "
-                "(local.get %s)))\n",
-                label, load_buf, f_step, f_next);
-    emit_indent(c, depth + 2);
-    if (boxed) {
-        wat_appendf(c->w,
-                    "(local.set %s (local.get %s))\n", f_cur, f_next);
-    } else {
-        wat_appendf(c->w,
-                    "(local.set $L%d (local.get %s))\n", slot, f_next);
-    }
+                "(if (call $for_step_positive (local.get %s))\n"
+                "%*s  (then (br_if $brk_%d (i32.eqz (call $num_le %s (local.get %s)))))\n"
+                "%*s  (else (br_if $brk_%d (i32.eqz (call $num_le (local.get %s) %s)))))\n",
+                f_step, 2 * (depth + 2), "", label, load_buf, f_stop, 2 * (depth + 2), "", label, f_stop, load_buf);
     emit_indent(c, depth + 2);
     wat_appendf(c->w, "br $cont_%d\n", label);
     emit_indent(c, depth + 1);
@@ -4950,8 +4952,9 @@ static void emit_for_scratch_locals(WatBuilder *w, const Block *body) {
     for (int d = 0; d < levels; d++) {
         wat_appendf(w,
                     "    (local $for_stop_%d anyref) (local $for_step_%d anyref)"
-                    " (local $for_next_%d anyref) (local $for_cur_%d anyref)\n",
-                    d, d, d, d);
+                    " (local $for_next_%d anyref) (local $for_cur_%d anyref)"
+                    " (local $for_skip_%d i32)\n",
+                    d, d, d, d, d);
         wat_appendf(w,
                     "    (local $for_iter_%d anyref) (local $for_state_%d anyref)"
                     " (local $for_k_%d anyref)\n",
@@ -4973,8 +4976,8 @@ static const char PRELUDE[] = {
  * LITERAL_SLAB below; verify_literal_slab() checks that LITERAL_PREFIX and
  * that map agree, so an edit to one without the other fails the build
  * instead of silently corrupting messages or reading past the slab. */
-#define LITERAL_PREFIX     "niltruefalse<float>numberstringtablefunctionboolean__index__add__eq\tLua 5.5'for' step is zeroattempt to call a non-function value__callmodule '' not loadedvalue out of rangedata does not fitinvalid UTF-8 codeattempt to perform arithmeticattempt to index a valuetable index is niltable index is NaNtoo largeyearmonthdayhourminsecwdayydayisdsttable overflowout of limitsmissing sizevariable-length formatnot power of 2invalid formatattempt to divide by zeroattempt to perform 'n%0'attempt to compare two values'__tostring' must return a string'__newindex' chain too long; possible loopattempt to close a non-closable valuevalue expectedcannot change a protected metatablestring expectedtable expectedtable or string expectedinvalid replacement valuestring contains zeros<no error object>invalid value in table for 'concat'base out of rangeposition out of boundsinitial position is a continuation bytefield missing in date tablewrong number of argumentsnumber expected, got stack overflownumber has no integer representationinvalid key to 'next'function expectedfield is not an integervariable got a non-closable valueinvalid order function for sorting"
-#define LITERAL_PREFIX_LEN 1149
+#define LITERAL_PREFIX     "niltruefalse<float>numberstringtablefunctionboolean__index__add__eq\tLua 5.5'for' step is zeroattempt to call a non-function value__callmodule '' not loadedvalue out of rangedata does not fitinvalid UTF-8 codeattempt to perform arithmeticattempt to index a valuetable index is niltable index is NaNtoo largeyearmonthdayhourminsecwdayydayisdsttable overflowout of limitsmissing sizevariable-length formatnot power of 2invalid formatattempt to divide by zeroattempt to perform 'n%0'attempt to compare two values'__tostring' must return a string'__newindex' chain too long; possible loopattempt to close a non-closable valuevalue expectedcannot change a protected metatablestring expectedtable expectedtable or string expectedinvalid replacement valuestring contains zeros<no error object>invalid value in table for 'concat'base out of rangeposition out of boundsinitial position is a continuation bytefield missing in date tablewrong number of argumentsnumber expected, got stack overflownumber has no integer representationinvalid key to 'next'function expectedfield is not an integervariable got a non-closable valueinvalid order function for sortingbad 'for' limit (bad 'for' step (bad 'for' initial value ()"
+#define LITERAL_PREFIX_LEN 1208
 static_assert(sizeof(LITERAL_PREFIX) - 1 == LITERAL_PREFIX_LEN,
               "LITERAL_PREFIX_LEN must match the byte length of LITERAL_PREFIX");
 
@@ -5000,7 +5003,7 @@ static const struct {
     {63, "__eq"},
     {67, "\t"},
     {68, "Lua 5.5"},
-    {75, "'for' step is zero"},                   /* $for_check_step */
+    {75, "'for' step is zero"},                   /* $for_prep / int for-loop */
     {93, "attempt to call a non-function value"}, /* $lua_call_any */
     {129, "__call"},                              /* $g_mkey_call */
     {135, "module '"},
@@ -5056,6 +5059,10 @@ static const struct {
     {1059, "field is not an integer"},                   /* $os_date_field */
     {1082, "variable got a non-closable value"},         /* $check_closable */
     {1115, "invalid order function for sorting"},        /* $partition */
+    {1149, "bad 'for' limit ("},                         /* $for_limit / $for_prep */
+    {1166, "bad 'for' step ("},                          /* $for_prep */
+    {1182, "bad 'for' initial value ("},                 /* $for_prep */
+    {1207, ")"},                                         /* $for_error */
 };
 
 /* Returns the offending entry's string on drift between LITERAL_PREFIX and

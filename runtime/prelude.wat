@@ -2361,29 +2361,103 @@
       (then (i64.ge_s (call $as_int (local.get $s)) (i64.const 0)))
       (else (f64.ge (call $as_float (local.get $s)) (f64.const 0)))))
 
-  ;; Numeric-for type rule (Lua 5.4+): the loop runs with integers iff the
-  ;; initial value AND the step are both integers; otherwise all three run
-  ;; as floats (the limit's type is irrelevant). Coerce $v to a float value
-  ;; when $v or $other is a float, so the control variable's type is settled
-  ;; before the first iteration (e.g. `for i=1,3,1.0` starts at 1.0, not 1).
-  (func $for_coerce (param $v anyref) (param $other anyref) (result anyref)
-    (if (result anyref)
-      (i32.or (call $is_float (local.get $v)) (call $is_float (local.get $other)))
-      (then (call $make_float (call $as_float (local.get $v))))
-      (else (local.get $v))))
+  ;; Raise "bad 'for' <what> (number expected, got <type>)" at the loop's own
+  ;; line. $off/$len address the "bad 'for' <what> (" prefix in the slab.
+  (func $for_error (param $v anyref) (param $off i32) (param $len i32) (param $line i32)
+    (throw $LuaError (call $prefix_error_msg
+      (ref.as_non_null (global.get $g_src_name))
+      (local.get $line)
+      (ref.cast (ref $LuaString) (call $lua_concat
+        (call $lua_concat
+          (struct.new $LuaString
+            (array.new_data $LuaArr $str_data (local.get $off) (local.get $len)) (i32.const 0))
+          (struct.new $LuaString
+            (array.new_data $LuaArr $str_data (i32.const 950) (i32.const 21)) (i32.const 0)))
+        (call $lua_concat
+          (struct.new $LuaString (call $basic_type_bytes (local.get $v)) (i32.const 0))
+          (struct.new $LuaString
+            (array.new_data $LuaArr $str_data (i32.const 1207) (i32.const 1)) (i32.const 0))))))))
 
-  ;; Real Lua errors at runtime when a numeric-for step is zero.
-  ;; $line is the `for` statement's own source line, so the "'for' step is
-  ;; zero" error is attributed to the loop (matching reference Lua) rather than
-  ;; the enclosing call frame.
-  (func $for_check_step (param $s anyref) (param $line i32)
-    (if (call $is_int (local.get $s))
-      (then
-        (if (i64.eqz (call $as_int (local.get $s)))
-          (then (call $throw_lit_at (i32.const 75) (i32.const 18) (local.get $line)))))
+  ;; The limit of an integer numeric-for (Lua's forlimit): any value is
+  ;; accepted as long as it converts to a number (numeric strings included).
+  ;; A float limit is floored (ceiled for a negative step); one beyond the i64
+  ;; range clips to maxinteger/mininteger, or skips the loop when the init
+  ;; can't reach it. NaN fails `0 < lim`, so it behaves like -inf (skips an
+  ;; ascending loop, runs a descending one) — as in reference Lua. Returns the
+  ;; i64 limit and whether to skip the loop.
+  (func $for_limit (param $lim anyref) (param $init i64) (param $step i64) (param $line i32)
+                   (result i64 i32)
+    (local $c anyref) (local $f f64) (local $p i64)
+    (local.set $c (call $coerce_num (local.get $lim)))
+    (if (ref.is_null (local.get $c))
+      (then (call $for_error (local.get $lim) (i32.const 1149) (i32.const 17) (local.get $line))))
+    (if (call $is_int (local.get $c))
+      (then (local.set $p (call $as_int (local.get $c))))
       (else
-        (if (f64.eq (call $as_float (local.get $s)) (f64.const 0))
-          (then (call $throw_lit_at (i32.const 75) (i32.const 18) (local.get $line)))))))
+        (local.set $f (call $as_float (local.get $c)))
+        (local.set $f (if (result f64) (i64.lt_s (local.get $step) (i64.const 0))
+          (then (f64.ceil (local.get $f)))
+          (else (f64.floor (local.get $f)))))
+        (if (i32.and (f64.ge (local.get $f) (f64.const -9223372036854775808.0))
+                     (f64.lt (local.get $f) (f64.const 9223372036854775808.0)))
+          (then (local.set $p (i64.trunc_f64_s (local.get $f))))
+          (else
+            (if (f64.gt (local.get $f) (f64.const 0))
+              (then
+                (if (i64.lt_s (local.get $step) (i64.const 0))
+                  (then (i64.const 0) (i32.const 1) (return)))
+                (local.set $p (i64.const 9223372036854775807)))
+              (else
+                (if (i64.gt_s (local.get $step) (i64.const 0))
+                  (then (i64.const 0) (i32.const 1) (return)))
+                (local.set $p (i64.const -9223372036854775808))))))))
+    (local.get $p)
+    (if (result i32) (i64.gt_s (local.get $step) (i64.const 0))
+      (then (i64.gt_s (local.get $init) (local.get $p)))
+      (else (i64.lt_s (local.get $init) (local.get $p)))))
+
+  ;; Lua's forprep over boxed control values, for the generic loop. Integer
+  ;; init AND step (actual integers, not numeric strings) make an integer
+  ;; loop with the limit settled by $for_limit; otherwise limit, step and init
+  ;; are coerced to floats, checked in that order. A zero step raises before
+  ;; the limit is looked at. Returns the normalized (init, limit, step) and
+  ;; whether to skip the loop; the loop tests only later iterations, so a NaN
+  ;; float bound runs the body once, as in reference Lua.
+  (func $for_prep (param $init anyref) (param $lim anyref) (param $step anyref) (param $line i32)
+                  (result anyref anyref anyref i32)
+    (local $i i64) (local $s i64) (local $p i64) (local $skip i32)
+    (local $c anyref) (local $fi f64) (local $fl f64) (local $fs f64)
+    (if (i32.and (call $is_int (local.get $init)) (call $is_int (local.get $step)))
+      (then
+        (local.set $i (call $as_int (local.get $init)))
+        (local.set $s (call $as_int (local.get $step)))
+        (if (i64.eqz (local.get $s))
+          (then (call $throw_lit_at (i32.const 75) (i32.const 18) (local.get $line))))
+        (call $for_limit (local.get $lim) (local.get $i) (local.get $s) (local.get $line))
+        (local.set $skip)
+        (local.set $p)
+        (local.get $init) (call $make_int (local.get $p)) (local.get $step) (local.get $skip)
+        (return)))
+    (local.set $c (call $coerce_num (local.get $lim)))
+    (if (ref.is_null (local.get $c))
+      (then (call $for_error (local.get $lim) (i32.const 1149) (i32.const 17) (local.get $line))))
+    (local.set $fl (call $as_float (local.get $c)))
+    (local.set $c (call $coerce_num (local.get $step)))
+    (if (ref.is_null (local.get $c))
+      (then (call $for_error (local.get $step) (i32.const 1166) (i32.const 16) (local.get $line))))
+    (local.set $fs (call $as_float (local.get $c)))
+    (local.set $c (call $coerce_num (local.get $init)))
+    (if (ref.is_null (local.get $c))
+      (then (call $for_error (local.get $init) (i32.const 1182) (i32.const 25) (local.get $line))))
+    (local.set $fi (call $as_float (local.get $c)))
+    (if (f64.eq (local.get $fs) (f64.const 0))
+      (then (call $throw_lit_at (i32.const 75) (i32.const 18) (local.get $line))))
+    (call $make_float (local.get $fi))
+    (call $make_float (local.get $fl))
+    (call $make_float (local.get $fs))
+    (if (result i32) (f64.gt (local.get $fs) (f64.const 0))
+      (then (f64.lt (local.get $fl) (local.get $fi)))
+      (else (f64.lt (local.get $fi) (local.get $fl)))))
 
   ;; True iff advancing a numeric-for index wrapped the i64 range: only
   ;; possible when index and step are both integers. step>0 wraps iff

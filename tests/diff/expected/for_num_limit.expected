@@ -1,0 +1,39 @@
+3/1	3 3 integer	3 3 integer
+3.7/1	3 3 integer	3 3 integer
+-3.7/1	0 nil nil	0 nil nil
+2.5/-1	0 nil nil	0 nil nil
+-2.5/-1	4 -2 integer	4 -2 integer
+3.0/1	3 3 integer	3 3 integer
+nan/1	0 nil nil	0 nil nil
+nan/-1	6 -4 integer	6 -4 integer
+inf/1	6 6 integer	6 6 integer
+-inf/1	0 nil nil	0 nil nil
+inf/-1	0 nil nil	0 nil nil
+-inf/-1	6 -4 integer	6 -4 integer
+9.2233720368547758e+18/1	6 6 integer	6 6 integer
+-9.2233720368547758e+18/-1	6 -4 integer	6 -4 integer
+1e+300/1	6 6 integer	6 6 integer
+-1e+300/-1	6 -4 integer	6 -4 integer
+3/1	3 3 integer	3 3 integer
+3.5/1	3 3 integer	3 3 integer
+ 0x10 /1	6 6 integer	6 6 integer
+-2/-1	4 -2 integer	4 -2 integer
+init,limit,step,body1,body2
+2	9223372036854775806	9223372036854775807
+2	-9223372036854775807	-9223372036854775808
+float init, NaN limit	1
+NaN init	1
+float step, NaN limit	1
+string init	1.0	float
+string init	2.0	float
+string step	1.0	float
+string step	2.0	float
+false	75: bad 'for' limit (number expected, got table)
+false	76: bad 'for' limit (number expected, got nil)
+false	77: bad 'for' limit (number expected, got string)
+false	78: 'for' step is zero
+false	79: 'for' step is zero
+false	80: bad 'for' initial value (number expected, got table)
+false	81: bad 'for' step (number expected, got table)
+false	82: bad 'for' limit (number expected, got table)
+false	83: bad 'for' limit (number expected, got table)
