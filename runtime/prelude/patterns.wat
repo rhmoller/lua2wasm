@@ -548,11 +548,7 @@
     (if (i32.eq (local.get $len) (i32.const -2))
       (then (return (call $make_int (i64.extend_i32_s
         (i32.add (local.get $start) (i32.const 1)))))))
-    (local.set $bytes (array.new $LuaArr (i32.const 0) (local.get $len)))
-    (array.copy $LuaArr $LuaArr
-      (local.get $bytes) (i32.const 0)
-      (local.get $sub) (local.get $start) (local.get $len))
-    (struct.new $LuaString (local.get $bytes) (i32.const 0)))
+    (call $str_from_range (local.get $sub) (local.get $start) (local.get $len) (i32.const 2)))
 
   ;; Plain byte-for-byte search: returns the 0-based end-position of
   ;; the first occurrence of $needle starting at $start, or -1.
@@ -730,14 +726,9 @@
           (if (i32.eqz (local.get $ncaps))
             (then
               ;; No captures: return the whole match as a $LuaString.
-              (local.set $whole (array.new $LuaArr (i32.const 0)
-                (i32.sub (local.get $end) (local.get $sp))))
-              (array.copy $LuaArr $LuaArr
-                (local.get $whole) (i32.const 0)
-                (local.get $sub) (local.get $sp)
-                (i32.sub (local.get $end) (local.get $sp)))
               (return (array.new_fixed $ArgArr 1
-                (struct.new $LuaString (local.get $whole) (i32.const 0))))))
+                (call $str_from_range (local.get $sub) (local.get $sp)
+                                      (i32.sub (local.get $end) (local.get $sp)) (i32.const 2))))))
           ;; One or more captures: return each.
           (local.set $out (array.new $ArgArr (ref.null any) (local.get $ncaps)))
           (local.set $i (i32.const 0))
@@ -807,13 +798,7 @@
       (array.get $UpvalArr (struct.get $LuaClosure $upvals (local.get $self)) (i32.const 4)))))
   ;; A match without captures yields the whole match.
   (func $gmatch_whole (param $sub (ref $LuaArr)) (param $sp i32) (param $end i32) (result anyref)
-    (local $whole (ref $LuaArr))
-    (local.set $whole (array.new $LuaArr (i32.const 0) (i32.sub (local.get $end) (local.get $sp))))
-    (array.copy $LuaArr $LuaArr
-      (local.get $whole) (i32.const 0)
-      (local.get $sub) (local.get $sp)
-      (i32.sub (local.get $end) (local.get $sp)))
-    (struct.new $LuaString (local.get $whole) (i32.const 0)))
+    (call $str_from_range (local.get $sub) (local.get $sp) (i32.sub (local.get $end) (local.get $sp)) (i32.const 2)))
   ;; The generic entry: every capture.
   (func $builtin_string_gmatch_iter (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))

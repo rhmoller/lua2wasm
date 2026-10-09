@@ -272,19 +272,25 @@
     (if (local.get $h) (then (return (local.get $h))))
     (return_call $str_hash_compute (local.get $s)))
   (func $str_hash_compute (param $s (ref $LuaString)) (result i32)
-    (local $h i32) (local $bytes (ref $LuaArr)) (local $i i32) (local $n i32)
+    (local $h i32) (local $bytes (ref $LuaArr))
     (local.set $bytes (call $str_bytes (local.get $s)))
+    (local.set $h (call $hash_range (local.get $bytes) (i32.const 0) (array.len (local.get $bytes))))
+    (struct.set $LuaString $hash (local.get $s) (local.get $h))
+    (local.get $h))
+  ;; The string hash of $src[$start .. $start + $len): FNV-1a, 0 stored as 1.
+  (func $hash_range (param $src (ref $LuaArr)) (param $start i32) (param $len i32) (result i32)
+    (local $h i32) (local $i i32) (local $end i32)
     (local.set $h (i32.const -2128831035)) ;; FNV offset basis
-    (local.set $n (array.len (local.get $bytes)))
+    (local.set $i (local.get $start))
+    (local.set $end (i32.add (local.get $start) (local.get $len)))
     (block $done (loop $lp
-      (br_if $done (i32.ge_s (local.get $i) (local.get $n)))
+      (br_if $done (i32.ge_s (local.get $i) (local.get $end)))
       (local.set $h (i32.mul
-        (i32.xor (local.get $h) (array.get_u $LuaArr (local.get $bytes) (local.get $i)))
+        (i32.xor (local.get $h) (array.get_u $LuaArr (local.get $src) (local.get $i)))
         (i32.const 16777619)))
       (local.set $i (i32.add (local.get $i) (i32.const 1)))
       (br $lp)))
     (if (i32.eqz (local.get $h)) (then (local.set $h (i32.const 1))))
-    (struct.set $LuaString $hash (local.get $s) (local.get $h))
     (local.get $h))
 
 

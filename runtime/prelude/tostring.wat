@@ -150,8 +150,7 @@
     (if (ref.test (ref $LuaString) (local.get $v))
       (then (return (ref.cast (ref $LuaString) (local.get $v)))))
     (if (call $is_int (local.get $v))
-      (then (return (struct.new $LuaString
-        (call $int_to_bytes (call $as_int (local.get $v))) (i32.const 0)))))
+      (then (return (call $str_of_bytes (call $int_to_bytes (call $as_int (local.get $v))) (i32.const 3)))))
     (if (call $is_float (local.get $v))
       (then (return (struct.new $LuaString
         (call $float_to_bytes (call $as_float (local.get $v))) (i32.const 0)))))
@@ -180,6 +179,135 @@
     (i32.or (ref.test (ref $LuaString) (local.get $v))
             (i32.or (call $is_int (local.get $v))
                     (call $is_float (local.get $v)))))
+
+;; The short-string cache. A string of at most 40 bytes made at run time
+  ;; (a match or capture, string.sub, a short `..` result, an integer's
+  ;; digits) is looked up first in a direct-mapped cache of 4096 strings,
+  ;; indexed by its hash: an equal string there is returned instead of a new
+  ;; one, so a program that makes the same short strings over and over —
+  ;; words, keys, tokens — allocates each once, keeps one copy alive, and its
+  ;; table lookups find the key by identity. A miss makes the string (its hash
+  ;; already computed, as a table key needs) and puts it in the slot, in place
+  ;; of whatever was there. Being lossy, the cache needs no weak references:
+  ;; it holds at most 4096 short strings alive, whatever the program makes.
+  ;; Probing costs a hash per string, so it is adaptive per kind of string
+  ;; ($kind: 0 a `..` result, 1 string.sub, 2 a match or capture, 3 an
+  ;; integer's digits): after 64 misses in a row a kind skips the cache for
+  ;; its next 1024 strings, then probes again. A program making unique
+  ;; strings of a kind probes ~6% of them; one repeating them keeps hitting.
+  (global $g_scache (ref $StrCache) (array.new_default $StrCache (i32.const 4096)))
+  ;; per kind: [2k] misses in a row, [2k+1] strings left to make uncached
+  (global $g_scache_state (ref $IArr) (array.new_default $IArr (i32.const 8)))
+  ;; A one-byte string needs no hash: there are 256 of them, each made once.
+  (global $g_char_strs (ref $StrCache) (array.new_default $StrCache (i32.const 256)))
+  (func $char_str (param $b i32) (result (ref $LuaString))
+    (local $c (ref null $LuaString)) (local $s (ref $LuaString))
+    (local.set $c (array.get $StrCache (global.get $g_char_strs) (local.get $b)))
+    (if (i32.eqz (ref.is_null (local.get $c))) (then (return (ref.as_non_null (local.get $c)))))
+    (local.set $s (struct.new $LuaString (array.new $LuaArr (local.get $b) (i32.const 1))
+      (call $hash_range (array.new $LuaArr (local.get $b) (i32.const 1)) (i32.const 0) (i32.const 1))))
+    (array.set $StrCache (global.get $g_char_strs) (local.get $b) (local.get $s))
+    (local.get $s))
+  ;; 1 if this string of $kind should probe the cache.
+  (func $scache_on (param $kind i32) (result i32)
+    (local $st (ref $IArr)) (local $k i32) (local $skip i32)
+    (local.set $st (global.get $g_scache_state))
+    (local.set $k (i32.add (i32.shl (local.get $kind) (i32.const 1)) (i32.const 1)))
+    (local.set $skip (array.get $IArr (local.get $st) (local.get $k)))
+    (if (local.get $skip)
+      (then (array.set $IArr (local.get $st) (local.get $k) (i32.sub (local.get $skip) (i32.const 1)))
+            (return (i32.const 0))))
+    (i32.const 1))
+  ;; A probe of $kind missed: count it, and after 64 in a row switch the kind off.
+  (func $scache_missed (param $kind i32)
+    (local $st (ref $IArr)) (local $k i32) (local $m i32)
+    (local.set $st (global.get $g_scache_state))
+    (local.set $k (i32.shl (local.get $kind) (i32.const 1)))
+    (local.set $m (i32.add (array.get $IArr (local.get $st) (local.get $k)) (i32.const 1)))
+    (if (i32.ge_u (local.get $m) (i32.const 64))
+      (then (array.set $IArr (local.get $st) (i32.add (local.get $k) (i32.const 1)) (i32.const 1024))
+            (local.set $m (i32.const 0))))
+    (array.set $IArr (local.get $st) (local.get $k) (local.get $m)))
+  ;; The cache slot of $src[$start .. $start + $len) (2 <= $len <= 40): from
+  ;; its length and five of its bytes, which are independent loads where the
+  ;; table hash is a chain of multiplies through every byte. Strings alike in
+  ;; those only compete for a slot; the probe compares every byte.
+  (func $scache_slot (param $src (ref $LuaArr)) (param $start i32) (param $len i32) (result i32)
+    (local $end i32)
+    (local.set $end (i32.add (local.get $start) (local.get $len)))
+    (i32.shr_u
+      (i32.mul
+        (i32.xor
+          (i32.xor (i32.mul (local.get $len) (i32.const -1640531535))
+                   (i32.or (array.get_u $LuaArr (local.get $src) (local.get $start))
+                           (i32.shl (array.get_u $LuaArr (local.get $src)
+                                      (i32.add (local.get $start) (i32.const 1))) (i32.const 8))))
+          (i32.or (i32.shl (array.get_u $LuaArr (local.get $src)
+                             (i32.add (local.get $start) (i32.shr_u (local.get $len) (i32.const 1))))
+                           (i32.const 16))
+                  (i32.or (i32.shl (array.get_u $LuaArr (local.get $src) (i32.sub (local.get $end) (i32.const 2)))
+                                   (i32.const 24))
+                          (i32.rotl (array.get_u $LuaArr (local.get $src) (i32.sub (local.get $end) (i32.const 1)))
+                                    (i32.const 4)))))
+        (i32.const -2048144789))
+      (i32.const 20)))
+  ;; The cached string equal to $src[$start .. $start + $len) in $slot, or null.
+  (func $scache_find (param $src (ref $LuaArr)) (param $start i32) (param $len i32) (param $slot i32)
+                     (result (ref null $LuaString))
+    (local $c (ref null $LuaString)) (local $cb (ref $LuaArr)) (local $i i32)
+    (local.set $c (array.get $StrCache (global.get $g_scache) (local.get $slot)))
+    (if (ref.is_null (local.get $c)) (then (return (ref.null $LuaString))))
+    (local.set $cb (call $str_bytes (local.get $c)))
+    (if (i32.ne (array.len (local.get $cb)) (local.get $len)) (then (return (ref.null $LuaString))))
+    (block $done (loop $lp
+      (br_if $done (i32.ge_s (local.get $i) (local.get $len)))
+      (if (i32.ne (array.get_u $LuaArr (local.get $cb) (local.get $i))
+                  (array.get_u $LuaArr (local.get $src) (i32.add (local.get $start) (local.get $i))))
+        (then (return (ref.null $LuaString))))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br $lp)))
+    (local.get $c))
+  ;; The string of $src[$start .. $start + $len), through the cache: nothing
+  ;; is allocated when it hits.
+  (func $str_from_range (param $src (ref $LuaArr)) (param $start i32) (param $len i32) (param $kind i32)
+                        (result (ref $LuaString))
+    (local $slot i32) (local $c (ref null $LuaString)) (local $out (ref $LuaArr)) (local $s (ref $LuaString))
+    (local $on i32)
+    (if (i32.eq (local.get $len) (i32.const 1))
+      (then (return (call $char_str (array.get_u $LuaArr (local.get $src) (local.get $start))))))
+    (if (i32.and (i32.le_u (local.get $len) (i32.const 40)) (i32.ge_u (local.get $len) (i32.const 2)))
+      (then (local.set $on (call $scache_on (local.get $kind)))))
+    (if (local.get $on)
+      (then
+        (local.set $slot (call $scache_slot (local.get $src) (local.get $start) (local.get $len)))
+        (local.set $c (call $scache_find (local.get $src) (local.get $start) (local.get $len) (local.get $slot)))
+        (if (i32.eqz (ref.is_null (local.get $c))) (then (return (ref.as_non_null (local.get $c)))))))
+    (local.set $out (array.new $LuaArr (i32.const 0) (local.get $len)))
+    (array.copy $LuaArr $LuaArr (local.get $out) (i32.const 0) (local.get $src) (local.get $start) (local.get $len))
+    (if (i32.eqz (local.get $on))
+      (then (return (struct.new $LuaString (local.get $out) (i32.const 0)))))
+    (call $scache_missed (local.get $kind))
+    (local.set $s (struct.new $LuaString (local.get $out) (i32.const 0)))
+    (array.set $StrCache (global.get $g_scache) (local.get $slot) (local.get $s))
+    (local.get $s))
+  ;; The string of the bytes $out (a fresh array, which becomes the string's
+  ;; own), through the cache.
+  (func $str_of_bytes (param $out (ref $LuaArr)) (param $kind i32) (result (ref $LuaString))
+    (local $n i32) (local $slot i32) (local $c (ref null $LuaString)) (local $s (ref $LuaString))
+    (local.set $n (array.len (local.get $out)))
+    (if (i32.gt_u (local.get $n) (i32.const 40))
+      (then (return (struct.new $LuaString (local.get $out) (i32.const 0)))))
+    (if (i32.eq (local.get $n) (i32.const 1))
+      (then (return (call $char_str (array.get_u $LuaArr (local.get $out) (i32.const 0))))))
+    (if (i32.or (i32.lt_u (local.get $n) (i32.const 2)) (i32.eqz (call $scache_on (local.get $kind))))
+      (then (return (struct.new $LuaString (local.get $out) (i32.const 0)))))
+    (local.set $slot (call $scache_slot (local.get $out) (i32.const 0) (local.get $n)))
+    (local.set $c (call $scache_find (local.get $out) (i32.const 0) (local.get $n) (local.get $slot)))
+    (if (i32.eqz (ref.is_null (local.get $c))) (then (return (ref.as_non_null (local.get $c)))))
+    (call $scache_missed (local.get $kind))
+    (local.set $s (struct.new $LuaString (local.get $out) (i32.const 0)))
+    (array.set $StrCache (global.get $g_scache) (local.get $slot) (local.get $s))
+    (local.get $s))
 
 ;; Lazy strings. A `..` whose result is at least 128 bytes long (the
   ;; minimum below) doesn't copy its operands into a new array; it makes a
@@ -369,7 +497,7 @@
     (if (ref.test (ref $LuaString) (local.get $v))
       (then (return (ref.cast (ref $LuaString) (local.get $v)))))
     (if (ref.is_null (local.get $bytes))
-      (then (return (struct.new $LuaString (call $int_to_bytes (call $as_int (local.get $v))) (i32.const 0)))))
+      (then (return (call $str_of_bytes (call $int_to_bytes (call $as_int (local.get $v))) (i32.const 3)))))
     (struct.new $LuaString (local.get $bytes) (i32.const 0)))
 
   (func $lua_concat (param $a anyref) (param $b anyref) (result anyref)
@@ -390,7 +518,7 @@
     (drop (call $concat_put (local.get $out)
       (call $concat_put (local.get $out) (i32.const 0) (local.get $a) (local.get $sa) (local.get $na))
       (local.get $b) (local.get $sb) (local.get $nb)))
-    (struct.new $LuaString (local.get $out) (i32.const 0)))
+    (call $str_of_bytes (local.get $out) (i32.const 0)))
 
   ;; `a .. b .. c` / `a .. b .. c .. d` in one allocation (under the 128-byte
   ;; minimum for a lazy string): codegen flattens a right-nested chain, whose
@@ -418,7 +546,7 @@
         (call $concat_put (local.get $out) (i32.const 0) (local.get $a) (local.get $sa) (local.get $na))
         (local.get $b) (local.get $sb) (local.get $nb))
       (local.get $c) (local.get $sc) (local.get $nc)))
-    (struct.new $LuaString (local.get $out) (i32.const 0)))
+    (call $str_of_bytes (local.get $out) (i32.const 0)))
   (func $lua_concat4 (param $a anyref) (param $b anyref) (param $c anyref) (param $d anyref) (result anyref)
     (local $sa (ref null $LuaArr)) (local $sb (ref null $LuaArr)) (local $sc (ref null $LuaArr))
     (local $sd (ref null $LuaArr)) (local $na i32) (local $nb i32) (local $nc i32) (local $nd i32)
@@ -444,7 +572,7 @@
           (local.get $b) (local.get $sb) (local.get $nb))
         (local.get $c) (local.get $sc) (local.get $nc))
       (local.get $d) (local.get $sd) (local.get $nd)))
-    (struct.new $LuaString (local.get $out) (i32.const 0)))
+    (call $str_of_bytes (local.get $out) (i32.const 0)))
 
   ;; bytes_of_lit: looks up a built-in literal name (`number`, `string`, etc.)
   ;; by index into the type-name slab. Indices into the slab:

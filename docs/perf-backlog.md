@@ -25,8 +25,8 @@ and parallel GC threads; `wall` is the same run timed by the wall clock
 | nbody | 0.434 | 0.350 | 0.81× | 0.345 | 0.79× |
 | entities | 0.676 | 0.558 | 0.83× | 0.493 | 0.73× |
 | closures | 0.074 | 0.070 | 0.95× | 0.047 | 0.64× |
-| hashtab | 0.097 | 0.122 | 1.26× | 0.077 | 0.79× |
-| strings | 0.068 | 0.129 | 1.90× | 0.073 | 1.07× |
+| hashtab | 0.098 | 0.114 | 1.16× | 0.071 | 0.72× |
+| strings | 0.067 | 0.106 | 1.58× | 0.059 | 0.88× |
 
 ## Measuring
 
@@ -69,11 +69,12 @@ and parallel GC threads; `wall` is the same run timed by the wall clock
 
 ## Backlog
 
-Every item of the 2026-10-08 list has landed (under Done) or was measured
-and set aside (below). What remains between lua2wasm and lua5.5 on this
-suite is strings — 0.073 against 0.068 s by the wall clock (0.087 before
-items 1 and 2, see Done) — and the string runtime itself is not the slow
-part. Warm, it makes short strings faster than lua5.5, which interns each
+Nothing open. Every item of the 2026-10-08 list has landed (under Done) or
+was measured and set aside (below), and so has the 2026-10-09 list, which
+took on strings, the last benchmark slower than lua5.5 by the wall clock:
+bench/strings.lua now runs in 0.059 s against lua5.5's 0.067 (0.087 before;
+items 1–3 under Done, item 4 set aside). The analysis that list started
+from: the string runtime itself was not the slow part. Warm, it makes short strings faster than lua5.5, which interns each
 one and formats integers with `snprintf` (1M of each, ms: `tostring(i)` 16
 against 77, a fresh string `==` a constant 16 against 49, `t[fresh key]` 35
 against 54, `s:sub` of 6 bytes 19 against 29), and `string.format` runs at a
@@ -91,22 +92,10 @@ the wall clock; `strings_warm.lua` warm), in ms:
 | concat | 3.5 | 10.5 | 12.4 |
 | format | 30 | 20 | 10.8 |
 
-The difference is the first run and large strings, items 1–4 (items 1 and
-2 have landed, item 4 is set aside). Summed over the sections `TIME` reads 172 ms
-against 83 by the wall clock: half of the 2.3× that the table at the top
-read then is V8's helper threads.
-
-**3. Strings that survive.** Every string is two GC objects, and a program
-that keeps them pays the scavenger to copy each one out of the nursery
-while V8 grows the nursery to fit (1 → 16 MB). In bench/strings.lua's
-`build` (200k strings kept in `parts`) five scavenges take ~16 of 29 ms
-(`--trace-gc`); with the nursery fixed at 16 MB from the start `build`
-takes 9.5 ms, warm 4.8 against lua5.5's 13.8. lua5.5 hardly allocates
-there: interned, the 200k results are 70 strings. The garbage collector is
-23% of the benchmark's main-thread profile. No cheap fix (see "One GC object
-per string" and "Interning" below); a nursery size suits one section and
-hurts another (`--min-semi-space-size=16` takes `build` 25 → 9.5 ms;
-`--min-semi-space-size=64` takes `concat` 10 → 35).
+The difference was the first run, large strings and surviving ones,
+items 1–4. Summed over the sections `TIME` read 172 ms against 83 by the
+wall clock: half of the 2.3× that the table at the top read then was V8's
+helper threads.
 
 ## Measured and set aside
 
@@ -141,7 +130,8 @@ bench/strings.lua's `build` its survivors (item 3: 200k strings, 70
 distinct), but WasmGC has no weak references, so an intern table could
 never let go of a string without the host's (JS `WeakRef`) help; and on
 unique strings interning is what makes lua5.5 slow — keeping 200k unique
-short strings takes it 36 ms against our 6.
+short strings takes it 36 ms against our 6. A bounded, lossy cache gets the
+repeated case without either cost (Done, "A cache of short strings").
 
 **Wide integers in table slots** (from item 2). An integer from 2^30 up
 stored in a table is still a `$LuaInt`; the float storage's marker scheme
@@ -156,6 +146,34 @@ shared shapes.
 see Done): cost fannkuch / particles 2% and up to 13% module size.
 
 ## Done
+
+**A cache of short strings** (item 3 of the 2026-10-09 list). Every
+string is two GC objects, and a program that keeps them pays the scavenger
+to copy each one out of the nursery while V8 grows the nursery (1 → 16 MB):
+in bench/strings.lua's `build` (200k strings kept in `parts`) five
+scavenges took ~16 of 29 ms. lua5.5 hardly allocates there — interned, the
+200k results are 70 strings — but interning needs weak references WasmGC
+doesn't have, and costs unique strings (set aside below). Now a string of
+2–40 bytes made at run time (a match or capture, `string.sub`, a short `..`
+result, an integer's digits) is looked up in a direct-mapped cache of 4096
+strings, the slot from its length and five sampled bytes, the bytes then
+compared exactly; a hit returns the cached string, a miss makes the string
+and replaces the slot's. Lossy, it keeps at most 4096 short strings alive.
+A one-byte string comes from a table of all 256. Per kind of string,
+probing stops for the next 1024 after 64 misses in a row, so unique
+strings mostly skip it. Cold sections: `build` 21.4 → 10.6 ms, `gmatch` 22.5
+→ 14.4 (lua5.5 13.8, 12.8); words kept from `gmatch`, cold 31 → 12.4 ms;
+1M lookups with freshly built keys 34.8 → 28.1; a `s:sub(i, i)` loop over
+1.1 MB 45 → 37.7 cold, 17.1 → 16.7 warm; bench/strings.lua 0.074 → 0.066 s
+(median of 7, wall), hashtab 0.078 → 0.073, closures 0.054 → 0.051. It
+costs where strings repeat but die at once, warm: 1M repeated short `..`
+results 14.7 → 20.9 ms (the result is built before the probe), a fresh
+string `==` a constant 17.8 → 26.3; and a little where they don't repeat:
+1M unique short strings 18.4 → 19.9, `tostring(i)` 15.4 → 17.5. Measured
+against it: probing every string (unique 18.4 → 31.5, `tostring(i)` → 26.3),
+the slot from the FNV hash (a repeated 17-byte `..` 13.1 → 18.2 ms: the
+hash is a chain of multiplies through every byte), caching only `sub` and
+captures (bench/strings.lua −7% instead of −18%: `build` is `..` results).
 
 **Lazy strings for long concatenations** (item 2 of the 2026-10-09 list;
 [note 25](design/25-string-ropes.md)). `acc = acc .. x` is quadratic in

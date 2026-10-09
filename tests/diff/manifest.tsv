@@ -153,3 +153,4 @@ pass	run_once_loops	main-chunk loops outlined into resumable functions: every lo
 pass	run_once_functions	loops of a function called once run resumably: returns through every entry kind, upvalues, varargs, <close>
 pass	builder_results	results built once: table.concat sized fast path and fallback, the shared format/gsub/concat builder re-entered, abandoned by errors, grown past 64 KB
 pass	string_ropes	long .. results are ropes until read: append/prepend/chains/numbers, length/eq/keys/library/format/concat/errors on them
+pass	string_cache	short run-time strings through the lossy cache and the one-byte table: limits, every byte, slot collisions, every path to one key, digits, zeros

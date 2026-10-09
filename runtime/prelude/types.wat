@@ -31,6 +31,8 @@
                                                (field $hash (mut i32))
                                                (field $len i32)
                                                (field $buf (mut (ref null $StrBuf))))))
+  ;; The short-string cache ($str_of_bytes): one string per slot.
+  (type $StrCache  (array (mut (ref null $LuaString))))
   (type $LuaFloat  (sub (struct (field $v f64))))
   (type $LuaInt    (sub (struct (field $v i64))))
   (type $LuaBool   (sub (struct (field $b i32))))
