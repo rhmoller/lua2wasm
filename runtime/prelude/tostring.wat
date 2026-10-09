@@ -190,14 +190,18 @@
   ;; already computed, as a table key needs) and puts it in the slot, in place
   ;; of whatever was there. Being lossy, the cache needs no weak references:
   ;; it holds at most 4096 short strings alive, whatever the program makes.
-  ;; Probing costs a hash per string, so it is adaptive per kind of string
-  ;; ($kind: 0 a `..` result, 1 string.sub, 2 a match or capture, 3 an
-  ;; integer's digits): after 64 misses in a row a kind skips the cache for
-  ;; its next 1024 strings, then probes again. A program making unique
-  ;; strings of a kind probes ~6% of them; one repeating them keeps hitting.
+  ;; A probe costs more than the allocation it saves, and a miss also
+  ;; stores the string, so the cache only pays where most probes hit. It is
+  ;; adaptive per kind of string ($kind: 0 a `..` result, 1 string.sub, 2 a
+  ;; match or capture, 3 an integer's digits): when more than half of a
+  ;; window of 256 probes missed, the kind skips the cache for its next 4096
+  ;; strings, then probes again. A program making unique strings of a kind —
+  ;; or more distinct ones than the cache holds, like the coordinates of a
+  ;; large grid — probes ~6% of them; one repeating a few keeps hitting.
   (global $g_scache (ref $StrCache) (array.new_default $StrCache (i32.const 4096)))
-  ;; per kind: [2k] misses in a row, [2k+1] strings left to make uncached
-  (global $g_scache_state (ref $IArr) (array.new_default $IArr (i32.const 8)))
+  ;; per kind: [4k] probes in this window, [4k+1] misses in it, [4k+2]
+  ;; strings left to make uncached
+  (global $g_scache_state (ref $IArr) (array.new_default $IArr (i32.const 16)))
   ;; A one-byte string needs no hash: there are 256 of them, each made once.
   (global $g_char_strs (ref $StrCache) (array.new_default $StrCache (i32.const 256)))
   (func $char_str (param $b i32) (result (ref $LuaString))
@@ -210,24 +214,31 @@
     (local.get $s))
   ;; 1 if this string of $kind should probe the cache.
   (func $scache_on (param $kind i32) (result i32)
-    (local $st (ref $IArr)) (local $k i32) (local $skip i32)
+    (local $st (ref $IArr)) (local $k i32) (local $skip i32) (local $p i32)
     (local.set $st (global.get $g_scache_state))
-    (local.set $k (i32.add (i32.shl (local.get $kind) (i32.const 1)) (i32.const 1)))
-    (local.set $skip (array.get $IArr (local.get $st) (local.get $k)))
+    (local.set $k (i32.shl (local.get $kind) (i32.const 2)))
+    (local.set $skip (array.get $IArr (local.get $st) (i32.add (local.get $k) (i32.const 2))))
     (if (local.get $skip)
-      (then (array.set $IArr (local.get $st) (local.get $k) (i32.sub (local.get $skip) (i32.const 1)))
+      (then (array.set $IArr (local.get $st) (i32.add (local.get $k) (i32.const 2))
+                       (i32.sub (local.get $skip) (i32.const 1)))
             (return (i32.const 0))))
+    (local.set $p (i32.add (array.get $IArr (local.get $st) (local.get $k)) (i32.const 1)))
+    (if (i32.lt_u (local.get $p) (i32.const 256))
+      (then (array.set $IArr (local.get $st) (local.get $k) (local.get $p))
+            (return (i32.const 1))))
+    ;; the window is full: pause the kind if most of it missed
+    (if (i32.gt_u (array.get $IArr (local.get $st) (i32.add (local.get $k) (i32.const 1))) (i32.const 128))
+      (then (array.set $IArr (local.get $st) (i32.add (local.get $k) (i32.const 2)) (i32.const 4096))))
+    (array.set $IArr (local.get $st) (local.get $k) (i32.const 0))
+    (array.set $IArr (local.get $st) (i32.add (local.get $k) (i32.const 1)) (i32.const 0))
     (i32.const 1))
-  ;; A probe of $kind missed: count it, and after 64 in a row switch the kind off.
+  ;; A probe of $kind missed.
   (func $scache_missed (param $kind i32)
-    (local $st (ref $IArr)) (local $k i32) (local $m i32)
+    (local $st (ref $IArr)) (local $k i32)
     (local.set $st (global.get $g_scache_state))
-    (local.set $k (i32.shl (local.get $kind) (i32.const 1)))
-    (local.set $m (i32.add (array.get $IArr (local.get $st) (local.get $k)) (i32.const 1)))
-    (if (i32.ge_u (local.get $m) (i32.const 64))
-      (then (array.set $IArr (local.get $st) (i32.add (local.get $k) (i32.const 1)) (i32.const 1024))
-            (local.set $m (i32.const 0))))
-    (array.set $IArr (local.get $st) (local.get $k) (local.get $m)))
+    (local.set $k (i32.add (i32.shl (local.get $kind) (i32.const 2)) (i32.const 1)))
+    (array.set $IArr (local.get $st) (local.get $k)
+      (i32.add (array.get $IArr (local.get $st) (local.get $k)) (i32.const 1))))
   ;; The cache slot of $src[$start .. $start + $len) (2 <= $len <= 40): from
   ;; its length and five of its bytes, which are independent loads where the
   ;; table hash is a chain of multiplies through every byte. Strings alike in

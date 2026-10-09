@@ -170,9 +170,12 @@ result, an integer's digits) is looked up in a direct-mapped cache of 4096
 strings, the slot from its length and five sampled bytes, the bytes then
 compared exactly; a hit returns the cached string, a miss makes the string
 and replaces the slot's. Lossy, it keeps at most 4096 short strings alive.
-A one-byte string comes from a table of all 256. Per kind of string,
-probing stops for the next 1024 after 64 misses in a row, so unique
-strings mostly skip it. Cold sections: `build` 21.4 → 10.6 ms, `gmatch` 22.5
+A one-byte string comes from a table of all 256. Per kind of string, a
+window of 256 probes of which more than half missed pauses probing for the
+next 4096 strings, so unique strings mostly skip it — and so do more
+distinct ones than the cache holds: tilemap's A* keys (grid coordinates,
+hits and misses interleaved) never set off the first rule, 64 misses in a
+row, and ran 5% slower (0.188 → 0.197 s wall) until this one. Cold sections: `build` 21.4 → 10.6 ms, `gmatch` 22.5
 → 14.4 (lua5.5 13.8, 12.8); words kept from `gmatch`, cold 31 → 12.4 ms;
 1M lookups with freshly built keys 34.8 → 28.1; a `s:sub(i, i)` loop over
 1.1 MB 45 → 37.7 cold, 17.1 → 16.7 warm; bench/strings.lua 0.074 → 0.066 s
