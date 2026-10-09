@@ -28,8 +28,15 @@
   ;; Integer analog of $as_float_co: a number or numeric string denoting an
   ;; exact integer passes through; a fractional / out-of-range value raises a
   ;; catchable "number has no integer representation"; a non-number raises
-  ;; "number expected, got <type>".
+  ;; "number expected, got <type>". A small integer is read here and
+  ;; anything else left to $as_int_co_slow, so that V8, inlining this into a
+  ;; hot caller (string.sub's and string.byte's positions), keeps the
+  ;; coercions out of line and its inlining budget for the rest.
   (func $as_int_co (param $v anyref) (result i64)
+    (if (ref.test (ref i31) (local.get $v))
+      (then (return (i64.extend_i32_s (i31.get_s (ref.cast (ref i31) (local.get $v)))))))
+    (return_call $as_int_co_slow (local.get $v)))
+  (func $as_int_co_slow (param $v anyref) (result i64)
     (local $c anyref) (local $f f64)
     (local.set $c (call $coerce_num (local.get $v)))
     (if (ref.is_null (local.get $c))
