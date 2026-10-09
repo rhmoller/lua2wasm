@@ -2,8 +2,8 @@
 
 Bottlenecks with the evidence and a fix sketch for each, what has landed
 (Done) and what was measured and set aside. Snapshot of 2026-10-09, after
-working through the list of 2026-10-08. Update it when an item lands or a
-measurement changes.
+working through the lists of 2026-10-08 and 2026-10-09. Update it when an
+item lands or a measurement changes.
 
 ## Where we stand
 
@@ -14,19 +14,19 @@ and parallel GC threads; `wall` is the same run timed by the wall clock
 
 | bench | lua5.5 | lua2wasm | ratio | wall | wall ratio |
 |---|---:|---:|---:|---:|---:|
-| binarytrees | 0.355 | 0.113 | 0.32× | 0.087 | 0.25× |
-| fannkuch | 0.821 | 0.327 | 0.40× | 0.325 | 0.40× |
-| spectralnorm | 0.955 | 0.526 | 0.55× | 0.521 | 0.55× |
-| oo | 0.458 | 0.271 | 0.59× | 0.248 | 0.54× |
-| nbody_arr | 0.380 | 0.234 | 0.62× | 0.227 | 0.60× |
-| vectors | 1.081 | 0.668 | 0.62× | 0.621 | 0.57× |
-| particles | 0.586 | 0.453 | 0.77× | 0.416 | 0.71× |
-| tilemap | 0.289 | 0.226 | 0.78× | 0.179 | 0.62× |
-| nbody | 0.434 | 0.350 | 0.81× | 0.345 | 0.79× |
-| entities | 0.676 | 0.558 | 0.83× | 0.493 | 0.73× |
-| closures | 0.074 | 0.070 | 0.95× | 0.047 | 0.64× |
-| hashtab | 0.098 | 0.114 | 1.16× | 0.071 | 0.72× |
-| strings | 0.067 | 0.106 | 1.58× | 0.059 | 0.88× |
+| binarytrees | 0.360 | 0.122 | 0.34× | 0.090 | 0.25× |
+| fannkuch | 0.822 | 0.331 | 0.40× | 0.331 | 0.40× |
+| spectralnorm | 0.950 | 0.530 | 0.56× | 0.521 | 0.55× |
+| oo | 0.461 | 0.263 | 0.57× | 0.246 | 0.53× |
+| nbody_arr | 0.383 | 0.234 | 0.61× | 0.228 | 0.60× |
+| vectors | 1.077 | 0.675 | 0.63× | 0.631 | 0.59× |
+| particles | 0.587 | 0.451 | 0.77× | 0.421 | 0.72× |
+| tilemap | 0.297 | 0.233 | 0.78× | 0.180 | 0.61× |
+| nbody | 0.430 | 0.351 | 0.82× | 0.346 | 0.80× |
+| entities | 0.678 | 0.562 | 0.83× | 0.489 | 0.72× |
+| closures | 0.074 | 0.069 | 0.93× | 0.049 | 0.66× |
+| hashtab | 0.098 | 0.104 | 1.06× | 0.071 | 0.72× |
+| strings | 0.068 | 0.104 | 1.53× | 0.061 | 0.90× |
 
 ## Measuring
 
@@ -72,7 +72,7 @@ and parallel GC threads; `wall` is the same run timed by the wall clock
 Nothing open. Every item of the 2026-10-08 list has landed (under Done) or
 was measured and set aside (below), and so has the 2026-10-09 list, which
 took on strings, the last benchmark slower than lua5.5 by the wall clock:
-bench/strings.lua now runs in 0.059 s against lua5.5's 0.067 (0.087 before;
+bench/strings.lua now runs in 0.061 s against lua5.5's 0.068 (0.087 before;
 items 1–3 under Done, item 4 set aside). The analysis that list started
 from: the string runtime itself was not the slow part. Warm, it makes short strings faster than lua5.5, which interns each
 one and formats integers with `snprintf` (1M of each, ms: `tostring(i)` 16
