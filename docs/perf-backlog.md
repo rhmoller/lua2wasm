@@ -99,6 +99,17 @@ helper threads.
 
 ## Measured and set aside
 
+**Short `..` results built in a scratch array** (after "A cache of short
+strings", see Done). So that a cache hit would allocate nothing, a short
+`..` result and an integer's digits were assembled in one reused 40-byte
+array and copied into their own only on a miss. Hits gained ~1 ns (1M
+repeated short `..` results 20.7 → 19.4 ms; 14.7 with no cache), misses
+paid the extra copy (1M unique 20.2 → 23.6, `tostring(i)` 17.3 → 19.4).
+Young allocation in V8 is a pointer bump; a hit's cost is the probe itself —
+five sampled loads for the slot, the cache load, a byte-by-byte compare
+(WasmGC has no wider loads from an i8 array) — ~5 ns, a third of that loop
+(`$str_of_bytes`, its helpers inlined, 32% of the profile).
+
 **Splitting `string.format` for an earlier tier-up** (item 4 of the
 2026-10-09 list).
 `format` runs 20 ms cold (wall) against 10.8 warm, `gmatch` 21 against
@@ -167,8 +178,9 @@ strings mostly skip it. Cold sections: `build` 21.4 → 10.6 ms, `gmatch` 22.5
 1.1 MB 45 → 37.7 cold, 17.1 → 16.7 warm; bench/strings.lua 0.074 → 0.066 s
 (median of 7, wall), hashtab 0.078 → 0.073, closures 0.054 → 0.051. It
 costs where strings repeat but die at once, warm: 1M repeated short `..`
-results 14.7 → 20.9 ms (the result is built before the probe), a fresh
-string `==` a constant 17.8 → 26.3; and a little where they don't repeat:
+results 14.7 → 20.9 ms, a fresh string `==` a constant 17.8 → 26.3 — a
+probe costs more than V8's allocation (see "Short `..` results built in a
+scratch array" below); and a little where they don't repeat:
 1M unique short strings 18.4 → 19.9, `tostring(i)` 15.4 → 17.5. Measured
 against it: probing every string (unique 18.4 → 31.5, `tostring(i)` → 26.3),
 the slot from the FNV hash (a repeated 17-byte `..` 13.1 → 18.2 ms: the
