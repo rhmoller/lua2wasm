@@ -916,6 +916,30 @@
     (struct.set $Builder $len (local.get $b)
       (i32.add (struct.get $Builder $len (local.get $b)) (i32.const 1))))
 
+  ;; One builder, reused by the library functions that build a result and
+  ;; copy it out (string.format, gsub, table.concat), so a call allocates
+  ;; only its result rather than a builder and its doublings too.
+  ;; $builder_take hands it out empty, or a fresh builder while it is taken
+  ;; (a nested call: a __tostring under %s, a gsub callback that formats).
+  ;; $builder_give returns the result and puts the builder back
+  ;; ($builder_put, for a call that needed no result), unless it grew past
+  ;; 64 KB: one huge result shouldn't stay alive in it. A call that
+  ;; raises never gives it back; the next one starts a fresh builder.
+  (global $g_scratch_bld (mut (ref null $Builder)) (ref.null $Builder))
+  (func $builder_take (result (ref $Builder))
+    (local $b (ref null $Builder))
+    (local.set $b (global.get $g_scratch_bld))
+    (if (ref.is_null (local.get $b)) (then (return (call $builder_new))))
+    (global.set $g_scratch_bld (ref.null $Builder))
+    (struct.set $Builder $len (ref.as_non_null (local.get $b)) (i32.const 0))
+    (ref.as_non_null (local.get $b)))
+  (func $builder_give (param $b (ref $Builder)) (result (ref $LuaString))
+    (call $builder_put (local.get $b))
+    (call $builder_finish (local.get $b)))
+  (func $builder_put (param $b (ref $Builder))
+    (if (i32.le_u (array.len (struct.get $Builder $arr (local.get $b))) (i32.const 65536))
+      (then (global.set $g_scratch_bld (local.get $b)))))
+
   ;; Convert the builder into a (ref $LuaString), trimming to exact length.
   (func $builder_finish (param $b (ref $Builder)) (result (ref $LuaString))
     (local $out (ref $LuaArr)) (local $n i32)
@@ -1116,8 +1140,9 @@
     (local $ncaps i32) (local $caps (ref $CapArr))
     (local $anchored i32) (local $start_ppos i32)
     (local $last_end i32) (local $b (ref $Builder)) (local $last_match i32)
-    (local.set $sub (struct.get $LuaString $bytes
-      (call $arg_string (call $args_at (local.get $args) (i32.const 0)))))
+    (local $subs (ref $LuaString))
+    (local.set $subs (call $arg_string (call $args_at (local.get $args) (i32.const 0))))
+    (local.set $sub (struct.get $LuaString $bytes (local.get $subs)))
     (local.set $pat (struct.get $LuaString $bytes
       (call $arg_string (call $args_at (local.get $args) (i32.const 1)))))
     (local.set $repl_v (call $args_at (local.get $args) (i32.const 2)))
@@ -1149,7 +1174,7 @@
           (else (throw $LuaError (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 722) (i32.const 25)) (i32.const 0)))))))))
     (local.set $start_ppos (call $pat_anchor_start (local.get $pat)))
     (local.set $anchored (local.get $start_ppos))
-    (local.set $b (call $builder_new))
+    (local.set $b (call $builder_take))
     (local.set $caps (array.new $CapArr (i32.const 0) (i32.const 64)))
     ;; End position of the last accepted match. Used to reject an empty match
     ;; sitting exactly where the previous match ended (Lua's `e != lastmatch`),
@@ -1201,9 +1226,15 @@
       (br_if $done (local.get $anchored))
       (local.set $sp (i32.add (local.get $sp) (i32.const 1)))
       (br $lp)))
+    ;; No match: the subject itself, as reference Lua returns it (the
+    ;; builder is still empty).
+    (if (i32.eqz (local.get $count))
+      (then
+        (call $builder_put (local.get $b))
+        (return (array.new_fixed $ArgArr 2 (local.get $subs) (ref.i31 (i32.const 0))))))
     (call $builder_append (local.get $b) (local.get $sub)
       (local.get $last_end)
       (i32.sub (local.get $n_sub) (local.get $last_end)))
     (array.new_fixed $ArgArr 2
-      (call $builder_finish (local.get $b))
+      (call $builder_give (local.get $b))
       (call $make_int (i64.extend_i32_s (local.get $count)))))

@@ -151,3 +151,4 @@ pass	format_fixed	%.Nf rendered in wasm matches printf exactly: property sweep o
 pass	global_decl_direct_call	a direct call whose only site is a global declaration value compiles
 pass	run_once_loops	main-chunk loops outlined into resumable functions: every loop kind, break/goto/return, captured state, <close>, long runs
 pass	run_once_functions	loops of a function called once run resumably: returns through every entry kind, upvalues, varargs, <close>
+pass	builder_results	results built once: table.concat sized fast path and fallback, the shared format/gsub/concat builder re-entered, abandoned by errors, grown past 64 KB

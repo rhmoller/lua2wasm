@@ -140,6 +140,60 @@
     (call $tab_set (local.get $t) (ref.i31 (local.get $i)) (ref.null any))
     (array.new_fixed $ArgArr 1 (local.get $removed)))
 
+  ;; table.concat's fast path: a table without a metatable (raw reads, so
+  ;; reading the range twice is unobservable) whose t[i..j] sits in the
+  ;; array part, every element a string or an integer. The pieces' lengths
+  ;; are summed first, so the result is allocated once at its size and each
+  ;; piece written straight into it (an integer's digits in place). Anything
+  ;; else — a float, a hole, any other value, a range reaching past the
+  ;; array part — returns null having done nothing, and the general path
+  ;; decides (and raises). Precondition: $i <= $j.
+  (func $tab_concat_arr (param $t (ref $LuaTable)) (param $sep (ref $LuaArr))
+                        (param $i i32) (param $j i32) (result (ref null $LuaString))
+    (local $arr (ref $TArr)) (local $k i32) (local $v anyref) (local $total i64)
+    (local $nsep i32) (local $out (ref $LuaArr)) (local $pos i32)
+    (local $pb (ref null $LuaArr)) (local $pn i32)
+    (if (i32.eqz (ref.is_null (struct.get $LuaTable $meta (local.get $t))))
+      (then (return (ref.null $LuaString))))
+    (if (i32.or (i32.lt_s (local.get $i) (i32.const 1))
+                (i32.gt_s (local.get $j) (struct.get $LuaTable $alen (local.get $t))))
+      (then (return (ref.null $LuaString))))
+    (local.set $arr (ref.as_non_null (struct.get $LuaTable $arr (local.get $t))))
+    (local.set $nsep (array.len (local.get $sep)))
+    (local.set $total (i64.mul (i64.extend_i32_u (i32.sub (local.get $j) (local.get $i)))
+                               (i64.extend_i32_u (local.get $nsep))))
+    (local.set $k (i32.sub (local.get $i) (i32.const 1)))
+    (block $sized (loop $size
+      (br_if $sized (i32.ge_s (local.get $k) (local.get $j)))
+      (local.set $v (array.get $TArr (local.get $arr) (local.get $k)))
+      (if (ref.test (ref $LuaString) (local.get $v))
+        (then (local.set $total (i64.add (local.get $total) (i64.extend_i32_u (array.len
+                (struct.get $LuaString $bytes (ref.cast (ref $LuaString) (local.get $v))))))))
+        (else
+          (if (i32.eqz (call $is_int (local.get $v))) (then (return (ref.null $LuaString))))
+          (local.set $total (i64.add (local.get $total)
+            (i64.extend_i32_u (call $int_len (call $as_int (local.get $v))))))))
+      (local.set $k (i32.add (local.get $k) (i32.const 1)))
+      (br $size)))
+    (if (i64.gt_u (local.get $total) (i64.const 2147483647))
+      (then (call $throw_lit (i32.const 297) (i32.const 9))))     ;; "too large"
+    (local.set $out (array.new $LuaArr (i32.const 0) (i32.wrap_i64 (local.get $total))))
+    (local.set $k (i32.sub (local.get $i) (i32.const 1)))
+    (block $done (loop $lp
+      (br_if $done (i32.ge_s (local.get $k) (local.get $j)))
+      (if (i32.and (i32.ge_s (local.get $k) (local.get $i)) (i32.ne (local.get $nsep) (i32.const 0)))
+        (then
+          (array.copy $LuaArr $LuaArr (local.get $out) (local.get $pos)
+                      (local.get $sep) (i32.const 0) (local.get $nsep))
+          (local.set $pos (i32.add (local.get $pos) (local.get $nsep)))))
+      (local.set $v (array.get $TArr (local.get $arr) (local.get $k)))
+      (call $concat_piece (local.get $v)) (local.set $pn) (local.set $pb)
+      (local.set $pos (call $concat_put (local.get $out) (local.get $pos)
+                                        (local.get $v) (local.get $pb) (local.get $pn)))
+      (local.set $k (i32.add (local.get $k) (i32.const 1)))
+      (br $lp)))
+    (struct.new $LuaString (local.get $out) (i32.const 0)))
+
   ;; table.concat(t [, sep])    -> string concatenation of t[1..#t]
   ;; table.concat(t [, sep [, i [, j]]]) -> t[i] .. sep .. ... .. t[j].
   ;; Defaults: sep = "", i = 1, j = #t. An empty range (i > j) yields "".
@@ -149,6 +203,7 @@
     (local $i i32) (local $j i32) (local $k i32) (local $nargs i32)
     (local $elem anyref)
     (local $bld (ref $Builder)) (local $sepb (ref $LuaArr)) (local $eb (ref $LuaArr))
+    (local $r (ref null $LuaString))
     (local.set $t (call $arg_table (call $args_at (local.get $args) (i32.const 0))))
     (local.set $nargs (array.len (local.get $args)))
     (if (i32.gt_u (local.get $nargs) (i32.const 1))
@@ -171,7 +226,10 @@
     ;; accumulated in a single $Builder (O(total) bytes) instead of chaining
     ;; $lua_concat, which reallocates the whole prefix per element -> O(n^2).
     (local.set $sepb (struct.get $LuaString $bytes (call $lua_tostring (local.get $sep))))
-    (local.set $bld (call $builder_new))
+    (local.set $r (call $tab_concat_arr (local.get $t) (local.get $sepb) (local.get $i) (local.get $j)))
+    (if (i32.eqz (ref.is_null (local.get $r)))
+      (then (return (array.new_fixed $ArgArr 1 (ref.as_non_null (local.get $r))))))
+    (local.set $bld (call $builder_take))
     (local.set $acc (call $tab_get (local.get $t) (ref.i31 (local.get $i))))
     (if (i32.eqz (call $is_concatable (local.get $acc)))
       (then (call $throw_lit (i32.const 785) (i32.const 35))))
@@ -198,7 +256,7 @@
         (i32.const 0) (array.len (local.get $eb)))
       (local.set $k (i32.add (local.get $k) (i32.const 1)))
       (br $lp)))
-    (array.new_fixed $ArgArr 1 (call $builder_finish (local.get $bld))))
+    (array.new_fixed $ArgArr 1 (call $builder_give (local.get $bld))))
 
   ;; table.unpack(t [, i [, j]]) -> t[i], t[i+1], ..., t[j].
   ;; Defaults: i = 1, j = #t. Returns no values when j < i.

@@ -305,7 +305,7 @@
     (local.set $fmt (struct.get $LuaString $bytes
       (call $arg_string (call $args_at (local.get $args) (i32.const 0)))))
     (local.set $n (array.len (local.get $fmt)))
-    (local.set $bld (call $builder_new))
+    (local.set $bld (call $builder_take))
     (local.set $arg_idx (i32.const 1))
     (block $done (loop $main
       (br_if $done (i32.ge_s (local.get $i) (local.get $n)))
@@ -483,7 +483,12 @@
       (call $builder_append (local.get $bld) (ref.as_non_null (global.get $fmt_buf))
         (i32.const 0) (local.get $written))
       (br $main)))
-    (array.new_fixed $ArgArr 1 (call $builder_finish (local.get $bld))))
+    (array.new_fixed $ArgArr 1 (call $builder_give (local.get $bld))))
+
+  ;; Digit scratch for $fmt_int / $fmt_fixed, which write a number's digits
+  ;; here least significant first and then append them in order. Shared:
+  ;; neither runs Lua code while its digits sit here.
+  (global $g_fmt_digits (ref $LuaArr) (array.new_default $LuaArr (i32.const 32)))
 
   ;; Flag set each conversion accepts (reference L_FMTFLAGS{F,X,I,U,C}), or
   ;; -1 for an unknown conversion character.
@@ -618,15 +623,19 @@
                 (if (i64.eqz (local.get $q)) (then (return (i32.const 0))))))))))
         ;; (t >= 128: P < 2^84 is below half of 2^t, so q = 0)
     ;; digits of q, least significant first, at least prec + 1 of them
-    (local.set $tmp (array.new $LuaArr (i32.const 48) (i32.const 32)))
+    ;; (zeros above q's own; q < 2^64 has at most 20 digits, prec <= 13)
+    (local.set $tmp (global.get $g_fmt_digits))
     (loop $dl
       (array.set $LuaArr (local.get $tmp) (local.get $nd)
         (i32.add (i32.wrap_i64 (i64.rem_u (local.get $q) (i64.const 10))) (i32.const 48)))
       (local.set $q (i64.div_u (local.get $q) (i64.const 10)))
       (local.set $nd (i32.add (local.get $nd) (i32.const 1)))
       (br_if $dl (i64.ne (local.get $q) (i64.const 0))))
-    (if (i32.le_s (local.get $nd) (local.get $prec))
-      (then (local.set $nd (i32.add (local.get $prec) (i32.const 1)))))
+    (block $zd (loop $zl
+      (br_if $zd (i32.gt_s (local.get $nd) (local.get $prec)))
+      (array.set $LuaArr (local.get $tmp) (local.get $nd) (i32.const 48))
+      (local.set $nd (i32.add (local.get $nd) (i32.const 1)))
+      (br $zl)))
     (local.set $dot (i32.or (i32.gt_s (local.get $prec) (i32.const 0))
                             (i32.ne (i32.and (local.get $flags) (i32.const 8)) (i32.const 0))))
     (local.set $signch (i32.const 0))
@@ -667,7 +676,7 @@
     (local.set $neg (i32.and (local.get $signed) (i64.lt_s (local.get $v) (i64.const 0))))
     (local.set $mag (if (result i64) (local.get $neg)
       (then (i64.sub (i64.const 0) (local.get $v))) (else (local.get $v))))
-    (local.set $tmp (array.new $LuaArr (i32.const 0) (i32.const 24)))
+    (local.set $tmp (global.get $g_fmt_digits))
     (if (i32.eqz (i32.and (i32.eqz (local.get $prec)) (i64.eqz (local.get $mag))))
       (then (loop $dl
         (local.set $d (i32.wrap_i64 (i64.rem_u (local.get $mag) (i64.extend_i32_u (local.get $base)))))

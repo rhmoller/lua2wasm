@@ -26,7 +26,7 @@ and parallel GC threads; `wall` is the same run timed by the wall clock
 | entities | 0.676 | 0.558 | 0.83× | 0.493 | 0.73× |
 | closures | 0.074 | 0.070 | 0.95× | 0.047 | 0.64× |
 | hashtab | 0.097 | 0.122 | 1.26× | 0.077 | 0.79× |
-| strings | 0.066 | 0.152 | 2.30× | 0.087 | 1.32× |
+| strings | 0.067 | 0.136 | 2.03× | 0.081 | 1.21× |
 
 ## Measuring
 
@@ -51,7 +51,11 @@ and parallel GC threads; `wall` is the same run timed by the wall clock
   diff-test.sh and diff-fuzz.mjs.
 - V8 flags that answer "what is X worth": `--wasm-inlining-budget=50000`
   (helpers inlined everywhere), `--min-semi-space-size=64` (GC heap growth
-  removed), `--wasm-tiering-budget=N` (earlier tier-up), `--trace-gc`.
+  removed), `--wasm-tiering-budget=N` (earlier tier-up), `--trace-gc`
+  (its lines interleave with a micro's laps, so each section shows its
+  scavenges), `--liftoff-only` / `--no-liftoff` (one tier only),
+  `--wasm-sync-tier-up --wasm-tiering-budget=1` (all optimizing compilation
+  on the main thread, so the wall clock shows what it costs).
 - `grep` on the dev machine is ugrep: a `$` inside a pattern is an anchor, so
   use `grep -F` for WAT names like `$ol_2`.
 - An unrelated change can move a benchmark by 5–10% (binarytrees, vectors):
@@ -65,12 +69,72 @@ and parallel GC threads; `wall` is the same run timed by the wall clock
 
 ## Backlog
 
-Nothing open: every item of the 2026-10-08 list has landed (under Done) or
-was measured and set aside (below). What remains between lua2wasm and
-lua5.5 on this suite is strings — 0.087 against 0.066 s by the wall clock,
-mostly `string.format`'s first run (32 ms cold, 11 warm) and the quadratic
-`acc = acc .. x` section (12 ms against 4–5: array copies and the large
-young-generation objects they leave).
+Every item of the 2026-10-08 list has landed (under Done) or was measured
+and set aside (below). What remains between lua2wasm and lua5.5 on this
+suite is strings — 0.081 against 0.067 s by the wall clock (0.087 before
+item 1, see Done) — and the string runtime itself is not the slow part.
+Warm, it makes short strings faster than lua5.5, which interns each one and
+formats integers with `snprintf`
+(1M of each, ms: `tostring(i)` 16 against 77, a fresh string `==` a
+constant 16 against 49, `t[fresh key]` 35 against 54, `s:sub` of 6 bytes 19
+against 29), and `string.format` runs at a third of lua5.5's time.
+bench/strings.lua's sections before item 1 (`strings_sections.lua` cold, by
+the wall clock; `strings_warm.lua` warm), in ms:
+
+| section | lua5.5 | cold (wall) | warm |
+|---|---:|---:|---:|
+| build | 13.8 | 19–28 | 4.8 |
+| tconcat | 2.0 | 5.7 | 3.4 |
+| gmatch | 12.8 | 21 | 13.7 |
+| gsub | 1.3 | 2.3 | 1.8 |
+| byte | 3.3 | 5.0 | 3.8 |
+| concat | 3.5 | 10.5 | 12.4 |
+| format | 30 | 20 | 10.8 |
+
+The difference is the first run and large strings, items 1–4 (item 1 has
+landed). Summed over the sections `TIME` reads 172 ms against 83 by the wall
+clock: half of the 2.3× that the table at the top read then is V8's helper
+threads.
+
+**2. Concatenation without a fresh copy per step.** `acc = acc .. x` is
+quadratic in lua5.5 too; what costs more here is that every new array is
+fresh, zero-filled nursery memory (WasmGC has no uninitialized
+allocation), where lua5.5's `malloc` hands back the block it just freed,
+still in cache. A wasm loop of 20,000 10 KB `array.new` + `array.copy`: 7.7
+ms optimized, 1.0 ms for the copies alone. So it moves with the nursery's
+size — the loop warm 4.4 ms at ~2 MB, 6.9 at `--min-semi-space-size=16`, 9.6
+at 64 — and the benchmark reaches it after the earlier sections grew the
+nursery to 16 MB. Liftoff makes it worse: the same alloc+copy loop takes 49
+ms there (V8 tiers up on instructions executed, not bytes moved, so
+`$lua_concat` stays on Liftoff a long time), and the first call of a
+function whose loop concatenates (not outlined) takes 49 ms against 4.4 for
+the later calls. Fix sketch: ropes — `..` of a long left operand makes a
+node with the total length, flattened into one array on the first read of
+its bytes, as JS engines do. Every `struct.get $LuaString $bytes` site then
+goes through an accessor (with `#s` read from the node), so it needs a
+design note first.
+
+**3. Strings that survive.** Every string is two GC objects, and a program
+that keeps them pays the scavenger to copy each one out of the nursery
+while V8 grows the nursery to fit (1 → 16 MB). In bench/strings.lua's
+`build` (200k strings kept in `parts`) five scavenges take ~16 of 29 ms
+(`--trace-gc`); with the nursery fixed at 16 MB from the start `build`
+takes 9.5 ms, warm 4.8 against lua5.5's 13.8. lua5.5 hardly allocates
+there: interned, the 200k results are 70 strings. The garbage collector is
+23% of the benchmark's main-thread profile. No cheap fix (see "One GC object
+per string" and "Interning" below); a nursery size suits one section and
+hurts another (`--min-semi-space-size=16` takes `build` 25 → 9.5 ms;
+`--min-semi-space-size=64` takes `concat` 10 → 35).
+
+**4. Warm-up of the string builtins.** `format` 20 ms cold (wall) against
+10.8 warm, `gmatch` 21 against 13.7: the big builtins (`$builtin_string_format`,
+the matcher) run on Liftoff until TurboFan has compiled them in the
+background. `--wasm-sync-tier-up --wasm-tiering-budget=1`, which compiles
+each function with TurboFan on the main thread at its first call, adds ~55
+ms to the sections' 83: that much optimizing compilation the cold run does
+(in `TIME`, not in the wall clock). Fix sketch, unmeasured: split
+`$builtin_string_format` into a small driver and one function per
+conversion, so the hot parts are small and tier up (and compile) sooner.
 
 ## Measured and set aside
 
@@ -85,7 +149,12 @@ per cached-hash read. Not worth rewriting the 360 prelude sites that touch
 **Interning short run-time strings** (from item 2). It would pay a hash and
 a table probe at every string creation for pointer-equality key compares;
 string-key access already runs at a third of lua5.5's time (`ops.lua`: 9
-against 26 ms), identity first and cached hashes after.
+against 26 ms), identity first and cached hashes after. It would have spared
+bench/strings.lua's `build` its survivors (item 3: 200k strings, 70
+distinct), but WasmGC has no weak references, so an intern table could
+never let go of a string without the host's (JS `WeakRef`) help; and on
+unique strings interning is what makes lua5.5 slow — keeping 200k unique
+short strings takes it 36 ms against our 6.
 
 **Wide integers in table slots** (from item 2). An integer from 2^30 up
 stored in a table is still a `$LuaInt`; the float storage's marker scheme
@@ -100,6 +169,33 @@ shared shapes.
 see Done): cost fannkuch / particles 2% and up to 13% module size.
 
 ## Done
+
+**Results built in one allocation** (was item 1). A builder result
+(`string.format`, `gsub`, `table.concat`) used to start in a fresh `$Builder`
+(a struct and a 32-byte array), double its array as it grew (each a fresh,
+zero-filled copy) and copy it once more to the exact size in
+`$builder_finish`: 4–6 allocations for a short `string.format` result, ~2.6
+MB of doublings plus a 1.3 MB trim for tconcat's result. Now `table.concat`
+over a table without a metatable whose range sits in the array part
+(`$tab_concat_arr`) sums the pieces' lengths, allocates once and writes each
+piece, integers in place; anything else (a float, a hole, the hash part, a
+metatable) takes the general path. The builder users take one reused
+builder (`$builder_take` / `$builder_give`; a nested call — a `__tostring`
+under `%s`, a `gsub` callback — finds it taken and makes its own, and one
+grown past 64 KB isn't kept), `$fmt_int` / `$fmt_fixed` write digits into a
+shared scratch array instead of a fresh one per conversion, and a `gsub`
+that matched nothing returns its subject, as lua5.5 does. Warm, by the wall
+clock (ms, lua5.5 in brackets): `table.concat` of 200k strings 3.6 → 1.7
+(2.1), of 200k integers 5.9 → 3.3 (11.4), of 10 strings 100k times 14.5 →
+7.5 (13.9); `string.format` 100k–200k times 8–15% faster. `gsub` is
+unchanged: its time is the matcher, the argument arrays and the capture
+array it allocates per call. bench/strings.lua 0.092 → 0.081 s (median of
+15, wall), `TIME` 0.152 → 0.136. Compare sections by their sum: with less
+garbage from `table.concat` the collections land elsewhere — in
+`strings_warm.lua` a scavenge and a mark-compact move into `gmatch` and
+`gsub`, whose warm times rise 2.6 and 0.9 ms. Its warm sections sum to the
+same (48.5 against 48.7 ms, best of five each); its first run drops 86.8 →
+79.4.
 
 **Inline array-part paths** (was item 1). V8 inlines callees into a function
 only until it has grown by a budget (about 5000 wire bytes, and 1.1× its own
