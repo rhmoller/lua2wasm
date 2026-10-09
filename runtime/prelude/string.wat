@@ -9,7 +9,7 @@
   ;; string.len requires a string (numbers coerce); unlike the `#` operator it
   ;; must reject tables, so use $arg_string rather than $lua_len.
   (func $str_len (param $v anyref) (result anyref)
-    (call $make_int (i64.extend_i32_u (array.len (struct.get $LuaString $bytes (call $arg_string (local.get $v)))))))
+    (call $make_int (i64.extend_i32_u (call $str_length (call $arg_string (local.get $v))))))
   (func $builtin_string_len (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
     (array.new_fixed $ArgArr 1 (call $str_len (call $args_at (local.get $args) (i32.const 0)))))
@@ -102,7 +102,7 @@
   (func $str_byte_range (param $sv anyref) (param $iv anyref) (param $jv anyref)
                         (result (ref $LuaArr) i32 i32)
     (local $bytes (ref $LuaArr)) (local $n i32) (local $pi i64) (local $i i64) (local $j i64)
-    (local.set $bytes (struct.get $LuaString $bytes (call $arg_string (local.get $sv))))
+    (local.set $bytes (call $str_bytes (call $arg_string (local.get $sv))))
     (local.set $n (array.len (local.get $bytes)))
     (local.set $pi (call $opt_int (local.get $iv) (i64.const 1)))
     (local.set $j (call $str_end (call $opt_int (local.get $jv) (local.get $pi)) (local.get $n)))
@@ -144,11 +144,11 @@
     (local $n i32) (local $slen i32) (local $plen i32)
     (local $total i32) (local $i i32) (local $pos i32)
     (local $out (ref $LuaArr))
-    (local.set $sb (struct.get $LuaString $bytes (call $arg_string (local.get $sv))))
+    (local.set $sb (call $str_bytes (call $arg_string (local.get $sv))))
     (local.set $n64 (call $as_int_co (local.get $nv)))
     (local.set $pb (array.new $LuaArr (i32.const 0) (i32.const 0)))
     (if (i32.eqz (ref.is_null (local.get $sepv)))
-      (then (local.set $pb (struct.get $LuaString $bytes (call $arg_string (local.get $sepv))))))
+      (then (local.set $pb (call $str_bytes (call $arg_string (local.get $sepv))))))
     (local.set $slen (array.len (local.get $sb)))
     (local.set $plen (array.len (local.get $pb)))
     (if (i64.le_s (local.get $n64) (i64.const 0))
@@ -197,7 +197,7 @@
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
     (local $bytes (ref $LuaArr)) (local $out (ref $LuaArr))
     (local $n i32) (local $i i32)
-    (local.set $bytes (struct.get $LuaString $bytes
+    (local.set $bytes (call $str_bytes
       (call $arg_string (call $args_at (local.get $args) (i32.const 0)))))
     (local.set $n (array.len (local.get $bytes)))
     (local.set $out (array.new $LuaArr (i32.const 0) (local.get $n)))
@@ -213,11 +213,11 @@
 ;; string.upper(s) / string.lower(s) — ASCII only, other bytes unchanged.
   (func $str_upper (param $v anyref) (result anyref)
     (struct.new $LuaString
-      (call $str_case_map (struct.get $LuaString $bytes (call $arg_string (local.get $v)))
+      (call $str_case_map (call $str_bytes (call $arg_string (local.get $v)))
         (i32.const 97) (i32.const 122) (i32.const -32)) (i32.const 0)))
   (func $str_lower (param $v anyref) (result anyref)
     (struct.new $LuaString
-      (call $str_case_map (struct.get $LuaString $bytes (call $arg_string (local.get $v)))
+      (call $str_case_map (call $str_bytes (call $arg_string (local.get $v)))
         (i32.const 65) (i32.const 90) (i32.const 32)) (i32.const 0)))
   (func $builtin_string_upper (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
@@ -236,7 +236,7 @@
   (func $str_sub (param $sv anyref) (param $iv anyref) (param $jv anyref) (result anyref)
     (local $bytes (ref $LuaArr)) (local $n i32) (local $i i64) (local $j i64) (local $len i32)
     (local $out (ref $LuaArr))
-    (local.set $bytes (struct.get $LuaString $bytes (call $arg_string (local.get $sv))))
+    (local.set $bytes (call $str_bytes (call $arg_string (local.get $sv))))
     (local.set $n (array.len (local.get $bytes)))
     (local.set $i (call $str_start (call $as_int_co (local.get $iv)) (local.get $n)))
     (local.set $j (call $str_end (call $opt_int (local.get $jv) (i64.const -1)) (local.get $n)))
@@ -302,7 +302,7 @@
     (local $flags i32) (local $width i32) (local $wnd i32) (local $prec i32) (local $nd i32)
     (local $conv i32) (local $allowed i32) (local $len i32) (local $s (ref $LuaArr)) (local $fx f64)
     (local $written i32) (local $k i32)
-    (local.set $fmt (struct.get $LuaString $bytes
+    (local.set $fmt (call $str_bytes
       (call $arg_string (call $args_at (local.get $args) (i32.const 0)))))
     (local.set $n (array.len (local.get $fmt)))
     (local.set $bld (call $builder_take))
@@ -411,7 +411,7 @@
       ;; %p: address form; %c: one byte; %s: tostring (honours __tostring)
       (if (i32.eq (local.get $conv) (i32.const 112))
         (then
-          (local.set $s (struct.get $LuaString $bytes (call $fmt_ptr (local.get $arg))))
+          (local.set $s (call $str_bytes (call $fmt_ptr (local.get $arg))))
           (call $fmt_pad_str (local.get $bld) (local.get $s) (array.len (local.get $s))
                              (local.get $flags) (local.get $width))
           (br $main)))
@@ -425,7 +425,7 @@
           (br $main)))
       (if (i32.eq (local.get $conv) (i32.const 115))
         (then
-          (local.set $s (struct.get $LuaString $bytes (call $lua_tostring (local.get $arg))))
+          (local.set $s (call $str_bytes (call $lua_tostring (local.get $arg))))
           (local.set $len (array.len (local.get $s)))
           ;; Plain %s keeps the whole string (embedded NULs ok); with any
           ;; modifier the string must be NUL-free, like Lua.
@@ -777,7 +777,7 @@
         (return)))
     (if (i32.eqz (ref.test (ref $LuaString) (local.get $v)))
       (then (call $throw_lit (i32.const 416) (i32.const 14))))   ;; "invalid format"
-    (local.set $s (struct.get $LuaString $bytes (ref.cast (ref $LuaString) (local.get $v))))
+    (local.set $s (call $str_bytes (ref.cast (ref $LuaString) (local.get $v))))
     (local.set $n (array.len (local.get $s)))
     (call $builder_append_byte (local.get $bld) (i32.const 34))
     (block $done (loop $lp
@@ -1082,7 +1082,7 @@
     (local $offset i32) (local $sz i32) (local $n i32) (local $newpp i32)
     (local.set $endian_le (i32.const 1))
     (local.set $max_align (i32.const 1))
-    (local.set $bytes (struct.get $LuaString $bytes
+    (local.set $bytes (call $str_bytes
       (call $arg_string
         (call $args_at (local.get $args) (i32.const 0)))))
     (local.set $len (array.len (local.get $bytes)))
@@ -1176,7 +1176,7 @@
     (local.set $max_align (i32.const 1))
     (local.set $arg_idx (i32.const 1))
     (local.set $b (call $builder_new))
-    (local.set $bytes (struct.get $LuaString $bytes
+    (local.set $bytes (call $str_bytes
       (call $arg_string
         (call $args_at (local.get $args) (i32.const 0)))))
     (local.set $len (array.len (local.get $bytes)))
@@ -1235,7 +1235,7 @@
       ;; 'z' — zero-terminated string. Not aligned. Embedded NULs rejected.
       (if (i32.eq (local.get $c) (i32.const 122))                ;; 'z'
         (then
-          (local.set $str_bytes (struct.get $LuaString $bytes
+          (local.set $str_bytes (call $str_bytes
             (ref.cast (ref $LuaString)
               (call $args_at (local.get $args) (local.get $arg_idx)))))
           (local.set $arg_idx (i32.add (local.get $arg_idx) (i32.const 1)))
@@ -1265,7 +1265,7 @@
             (then (throw $LuaError (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 355) (i32.const 13)) (i32.const 0)))))
           (if (i32.gt_s (local.get $n) (i32.const 16))
             (then (throw $LuaError (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 355) (i32.const 13)) (i32.const 0)))))
-          (local.set $str_bytes (struct.get $LuaString $bytes
+          (local.set $str_bytes (call $str_bytes
             (ref.cast (ref $LuaString)
               (call $args_at (local.get $args) (local.get $arg_idx)))))
           (local.set $arg_idx (i32.add (local.get $arg_idx) (i32.const 1)))
@@ -1307,7 +1307,7 @@
                                (local.get $ppos))
           (local.set $newpp) (local.set $sz)
           (local.set $ppos (local.get $newpp))
-          (local.set $str_bytes (struct.get $LuaString $bytes
+          (local.set $str_bytes (call $str_bytes
             (ref.cast (ref $LuaString)
               (call $args_at (local.get $args) (local.get $arg_idx)))))
           (local.set $arg_idx (i32.add (local.get $arg_idx) (i32.const 1)))
@@ -1413,11 +1413,11 @@
     (local $str_bytes (ref $LuaArr))
     (local.set $endian_le (i32.const 1))
     (local.set $max_align (i32.const 1))
-    (local.set $bytes (struct.get $LuaString $bytes
+    (local.set $bytes (call $str_bytes
       (call $arg_string
         (call $args_at (local.get $args) (i32.const 0)))))
     (local.set $len (array.len (local.get $bytes)))
-    (local.set $subj (struct.get $LuaString $bytes
+    (local.set $subj (call $str_bytes
       (ref.cast (ref $LuaString)
         (call $args_at (local.get $args) (i32.const 1)))))
     (local.set $subj_len (array.len (local.get $subj)))

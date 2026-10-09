@@ -26,7 +26,7 @@ and parallel GC threads; `wall` is the same run timed by the wall clock
 | entities | 0.676 | 0.558 | 0.83× | 0.493 | 0.73× |
 | closures | 0.074 | 0.070 | 0.95× | 0.047 | 0.64× |
 | hashtab | 0.097 | 0.122 | 1.26× | 0.077 | 0.79× |
-| strings | 0.067 | 0.136 | 2.03× | 0.081 | 1.21× |
+| strings | 0.068 | 0.129 | 1.90× | 0.073 | 1.07× |
 
 ## Measuring
 
@@ -71,13 +71,13 @@ and parallel GC threads; `wall` is the same run timed by the wall clock
 
 Every item of the 2026-10-08 list has landed (under Done) or was measured
 and set aside (below). What remains between lua2wasm and lua5.5 on this
-suite is strings — 0.081 against 0.067 s by the wall clock (0.087 before
-item 1, see Done) — and the string runtime itself is not the slow part.
-Warm, it makes short strings faster than lua5.5, which interns each one and
-formats integers with `snprintf`
-(1M of each, ms: `tostring(i)` 16 against 77, a fresh string `==` a
-constant 16 against 49, `t[fresh key]` 35 against 54, `s:sub` of 6 bytes 19
-against 29), and `string.format` runs at a third of lua5.5's time.
+suite is strings — 0.073 against 0.068 s by the wall clock (0.087 before
+items 1 and 2, see Done) — and the string runtime itself is not the slow
+part. Warm, it makes short strings faster than lua5.5, which interns each
+one and formats integers with `snprintf` (1M of each, ms: `tostring(i)` 16
+against 77, a fresh string `==` a constant 16 against 49, `t[fresh key]` 35
+against 54, `s:sub` of 6 bytes 19 against 29), and `string.format` runs at a
+third of lua5.5's time.
 bench/strings.lua's sections before item 1 (`strings_sections.lua` cold, by
 the wall clock; `strings_warm.lua` warm), in ms:
 
@@ -91,28 +91,10 @@ the wall clock; `strings_warm.lua` warm), in ms:
 | concat | 3.5 | 10.5 | 12.4 |
 | format | 30 | 20 | 10.8 |
 
-The difference is the first run and large strings, items 1–4 (item 1 has
-landed). Summed over the sections `TIME` reads 172 ms against 83 by the wall
-clock: half of the 2.3× that the table at the top read then is V8's helper
-threads.
-
-**2. Concatenation without a fresh copy per step.** `acc = acc .. x` is
-quadratic in lua5.5 too; what costs more here is that every new array is
-fresh, zero-filled nursery memory (WasmGC has no uninitialized
-allocation), where lua5.5's `malloc` hands back the block it just freed,
-still in cache. A wasm loop of 20,000 10 KB `array.new` + `array.copy`: 7.7
-ms optimized, 1.0 ms for the copies alone. So it moves with the nursery's
-size — the loop warm 4.4 ms at ~2 MB, 6.9 at `--min-semi-space-size=16`, 9.6
-at 64 — and the benchmark reaches it after the earlier sections grew the
-nursery to 16 MB. Liftoff makes it worse: the same alloc+copy loop takes 49
-ms there (V8 tiers up on instructions executed, not bytes moved, so
-`$lua_concat` stays on Liftoff a long time), and the first call of a
-function whose loop concatenates (not outlined) takes 49 ms against 4.4 for
-the later calls. Fix sketch: ropes — `..` of a long left operand makes a
-node with the total length, flattened into one array on the first read of
-its bytes, as JS engines do. Every `struct.get $LuaString $bytes` site then
-goes through an accessor (with `#s` read from the node), so it needs a
-design note first.
+The difference is the first run and large strings, items 1–4 (items 1 and
+2 have landed, item 4 is set aside). Summed over the sections `TIME` reads 172 ms
+against 83 by the wall clock: half of the 2.3× that the table at the top
+read then is V8's helper threads.
 
 **3. Strings that survive.** Every string is two GC objects, and a program
 that keeps them pays the scavenger to copy each one out of the nursery
@@ -126,17 +108,22 @@ per string" and "Interning" below); a nursery size suits one section and
 hurts another (`--min-semi-space-size=16` takes `build` 25 → 9.5 ms;
 `--min-semi-space-size=64` takes `concat` 10 → 35).
 
-**4. Warm-up of the string builtins.** `format` 20 ms cold (wall) against
-10.8 warm, `gmatch` 21 against 13.7: the big builtins (`$builtin_string_format`,
-the matcher) run on Liftoff until TurboFan has compiled them in the
-background. `--wasm-sync-tier-up --wasm-tiering-budget=1`, which compiles
-each function with TurboFan on the main thread at its first call, adds ~55
-ms to the sections' 83: that much optimizing compilation the cold run does
-(in `TIME`, not in the wall clock). Fix sketch, unmeasured: split
-`$builtin_string_format` into a small driver and one function per
-conversion, so the hot parts are small and tier up (and compile) sooner.
-
 ## Measured and set aside
+
+**Splitting `string.format` for an earlier tier-up** (item 4 of the
+2026-10-09 list).
+`format` runs 20 ms cold (wall) against 10.8 warm, `gmatch` 21 against
+13.7, while the big builtins run on Liftoff and TurboFan compiles them in the
+background. `--wasm-sync-tier-up --wasm-tiering-budget=1` (all optimizing
+compilation on the main thread) adds ~55 ms to the sections' 83, but
+`--trace-wasm-compilation-times` shows the largest function compile is
+`$builtin_string_format` at 5 ms. `string.format` 100k times in a fresh
+process, by 10k-call blocks: 5.6 ms for the first block (Liftoff, 4–5 ms a
+block there), ~3 for the next two, ~1.2 once optimized. The other slow
+blocks, 3–4 ms, are scavenges promoting the kept results, which a split
+can't reach. A smaller driver would at best shorten the 5 ms compile wait
+(~2 ms of Liftoff time), and its helpers would cost calls in steady state
+wherever V8 doesn't inline them.
 
 **One GC object per string** (from item 2). Allocating and keeping 200k
 short strings as a struct plus its byte array costs 7.2–8.0 ms against 6.2
@@ -170,7 +157,27 @@ see Done): cost fannkuch / particles 2% and up to 13% module size.
 
 ## Done
 
-**Results built in one allocation** (was item 1). A builder result
+**Lazy strings for long concatenations** (item 2 of the 2026-10-09 list;
+[note 25](design/25-string-ropes.md)). `acc = acc .. x` is quadratic in
+lua5.5 too, but here each step's copy also lands in fresh, zero-filled
+nursery memory (WasmGC has no uninitialized allocation): 20,000 10 KB
+`array.new` + `array.copy` take 7.7 ms optimized, 1.0 of it the copies, and
+49 ms on Liftoff, where `array.new` fills a byte at a time; past 128 KB it
+was 5–9× slower than lua5.5. Now a `..` result of 128 bytes or more is lazy
+— a node over its operands, or, once a loop appends to a node it hasn't
+read, a version of a growable append buffer whose latest version appends in
+place — and is flattened into one array on the first read of its bytes
+(`$str_bytes`, which all 63 byte reads go through; `#s` reads `$len`). The
+concat section 11.1 → 1.3 ms (lua5.5 3.5), 1M small appends 21 ms (lua5.5
+12.9 s), bench/strings.lua 0.087 → 0.078 s (median of 11, wall). Measured
+against it: nodes only (64 bytes kept per small append; 1M of them left a
+67 MB heap, ~95 of 130 ms in the scavenger) and nodes merging short appends
+into the last leaf (35.7 ms for the 1M appends, simpler, faster for 1 KB
+pieces). `$str_bytes` in every inlined caller cost `s:byte(i)` 15% of its
+inlining budget until `$as_int_co` took a small-integer fast path (`s:byte`
+23.4 → 17.2 ms, `s:sub` 17.3 → 14.2).
+
+**Results built in one allocation** (item 1 of the 2026-10-09 list). A builder result
 (`string.format`, `gsub`, `table.concat`) used to start in a fresh `$Builder`
 (a struct and a 32-byte array), double its array as it grew (each a fresh,
 zero-filled copy) and copy it once more to the exact size in

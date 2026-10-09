@@ -626,8 +626,8 @@
     ;; Coerce numeric subject/pattern to strings (luaL_checkstring), like
     ;; string.match/gsub/gmatch; a non-coercible arg raises a catchable
     ;; "string expected" instead of trapping on ref.cast.
-    (local.set $sub (struct.get $LuaString $bytes (call $arg_string (local.get $arg0))))
-    (local.set $pat (struct.get $LuaString $bytes (call $arg_string (local.get $arg1))))
+    (local.set $sub (call $str_bytes (call $arg_string (local.get $arg0))))
+    (local.set $pat (call $str_bytes (call $arg_string (local.get $arg1))))
     (local.set $n_sub (array.len (local.get $sub)))
     (local.set $n_pat (array.len (local.get $pat)))
     (local.set $nargs (array.len (local.get $args)))
@@ -700,9 +700,9 @@
     (local $sp i32) (local $end i32) (local $ncaps i32)
     (local $caps (ref $CapArr)) (local $out (ref $ArgArr)) (local $i i32)
     (local $whole (ref $LuaArr))
-    (local.set $sub (struct.get $LuaString $bytes
+    (local.set $sub (call $str_bytes
       (call $arg_string (call $args_at (local.get $args) (i32.const 0)))))
-    (local.set $pat (struct.get $LuaString $bytes
+    (local.set $pat (call $str_bytes
       (call $arg_string (call $args_at (local.get $args) (i32.const 1)))))
     (local.set $n_sub (array.len (local.get $sub)))
     (local.set $n_pat (array.len (local.get $pat)))
@@ -769,7 +769,7 @@
     (local $n_sub i32) (local $sp i32) (local $end i32) (local $ncaps i32) (local $lastmatch i32)
     (local.set $upvals (struct.get $LuaClosure $upvals (local.get $self)))
     (local.set $sub (call $gmatch_subject (local.get $self)))
-    (local.set $pat (struct.get $LuaString $bytes
+    (local.set $pat (call $str_bytes
       (ref.cast (ref $LuaString) (struct.get $Box $v (array.get $UpvalArr (local.get $upvals) (i32.const 1))))))
     (local.set $sp (i32.wrap_i64 (call $as_int
       (struct.get $Box $v (array.get $UpvalArr (local.get $upvals) (i32.const 2))))))
@@ -800,7 +800,7 @@
       (br $search)))
     (i32.const 0) (i32.const -1) (i32.const 0))
   (func $gmatch_subject (param $self (ref $LuaClosure)) (result (ref $LuaArr))
-    (struct.get $LuaString $bytes (ref.cast (ref $LuaString) (struct.get $Box $v
+    (call $str_bytes (ref.cast (ref $LuaString) (struct.get $Box $v
       (array.get $UpvalArr (struct.get $LuaClosure $upvals (local.get $self)) (i32.const 0))))))
   (func $gmatch_caps (param $self (ref $LuaClosure)) (result (ref $CapArr))
     (ref.cast (ref $CapArr) (struct.get $Box $v
@@ -1056,14 +1056,14 @@
         (throw $LuaError (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 722) (i32.const 25)) (i32.const 0)))))
     (if (ref.test (ref $LuaString) (local.get $v))
       (then
-        (local.set $bytes (struct.get $LuaString $bytes
+        (local.set $bytes (call $str_bytes
           (ref.cast (ref $LuaString) (local.get $v))))
         (call $builder_append (local.get $b) (local.get $bytes)
           (i32.const 0) (array.len (local.get $bytes)))
         (return)))
     (if (i32.or (call $is_int (local.get $v)) (call $is_float (local.get $v)))
       (then
-        (local.set $bytes (struct.get $LuaString $bytes
+        (local.set $bytes (call $str_bytes
           (call $lua_tostring (local.get $v))))
         (call $builder_append (local.get $b) (local.get $bytes)
           (i32.const 0) (array.len (local.get $bytes)))
@@ -1142,8 +1142,8 @@
     (local $last_end i32) (local $b (ref $Builder)) (local $last_match i32)
     (local $subs (ref $LuaString))
     (local.set $subs (call $arg_string (call $args_at (local.get $args) (i32.const 0))))
-    (local.set $sub (struct.get $LuaString $bytes (local.get $subs)))
-    (local.set $pat (struct.get $LuaString $bytes
+    (local.set $sub (call $str_bytes (local.get $subs)))
+    (local.set $pat (call $str_bytes
       (call $arg_string (call $args_at (local.get $args) (i32.const 1)))))
     (local.set $repl_v (call $args_at (local.get $args) (i32.const 2)))
     ;; Initialize repl_bytes to an empty array so the validator can see
@@ -1163,7 +1163,7 @@
       (then (local.set $repl_v (call $lua_tostring (local.get $repl_v)))))
     (if (ref.test (ref $LuaString) (local.get $repl_v))
       (then (local.set $repl_kind (i32.const 0))
-            (local.set $repl_bytes (struct.get $LuaString $bytes
+            (local.set $repl_bytes (call $str_bytes
               (ref.cast (ref $LuaString) (local.get $repl_v)))))
       (else (if (ref.test (ref $LuaTable) (local.get $repl_v))
         (then (local.set $repl_kind (i32.const 1))

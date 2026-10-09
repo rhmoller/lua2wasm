@@ -16,10 +16,10 @@
   (func (export "lua_get_float") (param $v anyref) (result f64)
     (call $as_float (local.get $v)))
   (func (export "lua_str_len") (param $v anyref) (result i32)
-    (array.len (struct.get $LuaString $bytes (ref.cast (ref $LuaString) (local.get $v)))))
+    (call $str_length (ref.cast (ref $LuaString) (local.get $v))))
   (func (export "lua_str_byte") (param $v anyref) (param $i i32) (result i32)
     (array.get_u $LuaArr
-      (struct.get $LuaString $bytes (ref.cast (ref $LuaString) (local.get $v)))
+      (call $str_bytes (ref.cast (ref $LuaString) (local.get $v)))
       (local.get $i)))
   ;; Read up to four bytes starting at $i, packed little-endian into an i32
   ;; (bytes past the end read as 0). Lets the host pull a Lua string out in
@@ -29,7 +29,7 @@
   (func (export "lua_str_word") (param $v anyref) (param $i i32) (result i32)
     (local $a (ref $LuaArr)) (local $n i32) (local $w i32)
     (local.set $a
-      (struct.get $LuaString $bytes (ref.cast (ref $LuaString) (local.get $v))))
+      (call $str_bytes (ref.cast (ref $LuaString) (local.get $v))))
     (local.set $n (array.len (local.get $a)))
     (if (i32.lt_u (local.get $i) (local.get $n))
       (then (local.set $w (array.get_u $LuaArr (local.get $a) (local.get $i)))))

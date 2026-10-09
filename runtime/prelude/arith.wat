@@ -349,8 +349,7 @@
     (local $mm anyref)
     (if (ref.test (ref $LuaString) (local.get $a))
       (then (return (call $make_int (i64.extend_i32_u
-        (array.len (struct.get $LuaString $bytes
-          (ref.cast (ref $LuaString) (local.get $a)))))))))
+        (call $str_length (ref.cast (ref $LuaString) (local.get $a))))))))
     (if (ref.test (ref $LuaTable) (local.get $a))
       (then
         (local.set $mm (call $get_metamethod (local.get $a)
@@ -390,6 +389,7 @@
 
   (func $str_eq (param $a anyref) (param $b anyref) (result i32)
     (local $sa (ref $LuaArr)) (local $sb (ref $LuaArr))
+    (local $ra (ref null $LuaArr)) (local $rb (ref null $LuaArr))
     (local $i i32) (local $n i32) (local $ha i32) (local $hb i32)
     ;; Same object (hoisted constants, keys read back out of a table): equal.
     (if (ref.eq (ref.cast (ref eq) (local.get $a)) (ref.cast (ref eq) (local.get $b)))
@@ -399,8 +399,18 @@
     (local.set $hb (struct.get $LuaString $hash (ref.cast (ref $LuaString) (local.get $b))))
     (if (i32.and (i32.and (local.get $ha) (local.get $hb)) (i32.ne (local.get $ha) (local.get $hb)))
       (then (return (i32.const 0))))
-    (local.set $sa (struct.get $LuaString $bytes (ref.cast (ref $LuaString) (local.get $a))))
-    (local.set $sb (struct.get $LuaString $bytes (ref.cast (ref $LuaString) (local.get $b))))
+    ;; So do two lengths, before a lazy string is flattened for its bytes.
+    (local.set $ra (struct.get $LuaString $bytes (ref.cast (ref $LuaString) (local.get $a))))
+    (local.set $rb (struct.get $LuaString $bytes (ref.cast (ref $LuaString) (local.get $b))))
+    (if (i32.or (ref.is_null (local.get $ra)) (ref.is_null (local.get $rb)))
+      (then
+        (if (i32.ne (call $str_length (ref.cast (ref $LuaString) (local.get $a)))
+                    (call $str_length (ref.cast (ref $LuaString) (local.get $b))))
+          (then (return (i32.const 0))))
+        (local.set $ra (call $str_bytes (ref.cast (ref $LuaString) (local.get $a))))
+        (local.set $rb (call $str_bytes (ref.cast (ref $LuaString) (local.get $b))))))
+    (local.set $sa (ref.as_non_null (local.get $ra)))
+    (local.set $sb (ref.as_non_null (local.get $rb)))
     (local.set $n (array.len (local.get $sa)))
     (if (i32.ne (local.get $n) (array.len (local.get $sb)))
       (then (return (i32.const 0))))
@@ -584,8 +594,8 @@
     (local $sa (ref $LuaArr)) (local $sb (ref $LuaArr))
     (local $na i32) (local $nb i32) (local $i i32) (local $min i32)
     (local $ba i32) (local $bb i32)
-    (local.set $sa (struct.get $LuaString $bytes (ref.cast (ref $LuaString) (local.get $a))))
-    (local.set $sb (struct.get $LuaString $bytes (ref.cast (ref $LuaString) (local.get $b))))
+    (local.set $sa (call $str_bytes (ref.cast (ref $LuaString) (local.get $a))))
+    (local.set $sb (call $str_bytes (ref.cast (ref $LuaString) (local.get $b))))
     (local.set $na (array.len (local.get $sa)))
     (local.set $nb (array.len (local.get $sb)))
     (local.set $min (select (local.get $na) (local.get $nb)

@@ -10,9 +10,9 @@
     (local $src_b (ref $LuaArr)) (local $line_b (ref $LuaArr))
     (local $msg_b (ref $LuaArr)) (local $out (ref $LuaArr))
     (local $off i32) (local $total i32)
-    (local.set $src_b (struct.get $LuaString $bytes (local.get $src)))
+    (local.set $src_b (call $str_bytes (local.get $src)))
     (local.set $line_b (call $int_to_bytes (i64.extend_i32_s (local.get $line))))
-    (local.set $msg_b (struct.get $LuaString $bytes (local.get $msg)))
+    (local.set $msg_b (call $str_bytes (local.get $msg)))
     (local.set $total
       (i32.add (array.len (local.get $src_b))
       (i32.add (i32.const 1)

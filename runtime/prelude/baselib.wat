@@ -42,7 +42,7 @@
     ;; Accumulate once in a $Builder (O(total) bytes) instead of chaining
     ;; $lua_concat, which reallocates the whole prefix per arg -> O(n^2).
     (local.set $bld (call $builder_new))
-    (local.set $sbytes (struct.get $LuaString $bytes
+    (local.set $sbytes (call $str_bytes
       (call $lua_tostring (call $args_at (local.get $args) (i32.const 0)))))
     (call $builder_append (local.get $bld) (local.get $sbytes)
       (i32.const 0) (array.len (local.get $sbytes)))
@@ -50,7 +50,7 @@
     (block $done (loop $lp
       (br_if $done (i32.ge_s (local.get $i) (local.get $n)))
       (call $builder_append_byte (local.get $bld) (i32.const 9))   ;; TAB
-      (local.set $sbytes (struct.get $LuaString $bytes
+      (local.set $sbytes (call $str_bytes
         (call $lua_tostring (call $args_at (local.get $args) (local.get $i)))))
       (call $builder_append (local.get $bld) (local.get $sbytes)
         (i32.const 0) (array.len (local.get $sbytes)))
@@ -205,7 +205,7 @@
     (if (i32.and (i32.eq (local.get $n) (i32.const 1))
                  (ref.test (ref $LuaString) (local.get $first)))
       (then
-        (local.set $bytes (struct.get $LuaString $bytes
+        (local.set $bytes (call $str_bytes
           (ref.cast (ref $LuaString) (local.get $first))))
         (if (i32.and (i32.ge_s (array.len (local.get $bytes)) (i32.const 1))
                      (i32.eq (array.get_u $LuaArr (local.get $bytes) (i32.const 0))
@@ -217,7 +217,7 @@
     (local.set $i (i32.const 0))
     (block $done (loop $lp
       (br_if $done (i32.ge_s (local.get $i) (local.get $n)))
-      (local.set $wbytes (struct.get $LuaString $bytes
+      (local.set $wbytes (call $str_bytes
         (call $lua_tostring (call $args_at (local.get $args) (local.get $i)))))
       (call $builder_append (local.get $bld) (local.get $wbytes)
         (i32.const 0) (array.len (local.get $wbytes)))
@@ -277,8 +277,7 @@
       (else (if (ref.test (ref $LuaString) (local.get $v))
         (then (return (array.new_fixed $ArgArr 1
                 (call $make_int (i64.extend_i32_u
-                  (array.len (struct.get $LuaString $bytes
-                    (ref.cast (ref $LuaString) (local.get $v))))))))))))
+                  (call $str_length (ref.cast (ref $LuaString) (local.get $v)))))))))))
     (throw $LuaError (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 698) (i32.const 24)) (i32.const 0)))
     (global.get $g_empty_args))
 
@@ -339,7 +338,7 @@
     (local.set $sel (call $args_at (local.get $args) (i32.const 0)))
     (if (ref.test (ref $LuaString) (local.get $sel))
       (then
-        (local.set $bytes (struct.get $LuaString $bytes
+        (local.set $bytes (call $str_bytes
                             (ref.cast (ref $LuaString) (local.get $sel))))
         (if (i32.and (i32.eq (array.len (local.get $bytes)) (i32.const 1))
                      (i32.eq (array.get_u $LuaArr (local.get $bytes) (i32.const 0))
@@ -789,7 +788,7 @@
     (if (i32.eqz (ref.test (ref $LuaString) (local.get $opt)))
       (then (return (array.new_fixed $ArgArr 1 (ref.i31 (i32.const 0))))))
     (local.set $b
-      (struct.get $LuaString $bytes (ref.cast (ref $LuaString) (local.get $opt))))
+      (call $str_bytes (ref.cast (ref $LuaString) (local.get $opt))))
     (local.set $blen (array.len (local.get $b)))
     (if (i32.gt_s (local.get $blen) (i32.const 0))
       (then (local.set $b0 (array.get_u $LuaArr (local.get $b) (i32.const 0)))))

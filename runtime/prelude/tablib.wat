@@ -167,8 +167,8 @@
       (br_if $sized (i32.ge_s (local.get $k) (local.get $j)))
       (local.set $v (array.get $TArr (local.get $arr) (local.get $k)))
       (if (ref.test (ref $LuaString) (local.get $v))
-        (then (local.set $total (i64.add (local.get $total) (i64.extend_i32_u (array.len
-                (struct.get $LuaString $bytes (ref.cast (ref $LuaString) (local.get $v))))))))
+        (then (local.set $total (i64.add (local.get $total) (i64.extend_i32_u
+                (call $str_length (ref.cast (ref $LuaString) (local.get $v)))))))
         (else
           (if (i32.eqz (call $is_int (local.get $v))) (then (return (ref.null $LuaString))))
           (local.set $total (i64.add (local.get $total)
@@ -225,7 +225,7 @@
     ;; (so __index is honoured, like reference Lua), but the pieces are
     ;; accumulated in a single $Builder (O(total) bytes) instead of chaining
     ;; $lua_concat, which reallocates the whole prefix per element -> O(n^2).
-    (local.set $sepb (struct.get $LuaString $bytes (call $lua_tostring (local.get $sep))))
+    (local.set $sepb (call $str_bytes (call $lua_tostring (local.get $sep))))
     (local.set $r (call $tab_concat_arr (local.get $t) (local.get $sepb) (local.get $i) (local.get $j)))
     (if (i32.eqz (ref.is_null (local.get $r)))
       (then (return (array.new_fixed $ArgArr 1 (ref.as_non_null (local.get $r))))))
@@ -233,7 +233,7 @@
     (local.set $acc (call $tab_get (local.get $t) (ref.i31 (local.get $i))))
     (if (i32.eqz (call $is_concatable (local.get $acc)))
       (then (call $throw_lit (i32.const 785) (i32.const 35))))
-    (local.set $eb (struct.get $LuaString $bytes (call $lua_tostring (local.get $acc))))
+    (local.set $eb (call $str_bytes (call $lua_tostring (local.get $acc))))
     (call $builder_append (local.get $bld) (local.get $eb)
       (i32.const 0) (array.len (local.get $eb)))
     (local.set $k (i32.add (local.get $i) (i32.const 1)))
@@ -244,7 +244,7 @@
         (then (call $throw_lit (i32.const 785) (i32.const 35))))
       ;; Guard an i32 byte-length overflow before the builder's array.new can
       ;; trap, matching $lua_concat's catchable "too large".
-      (local.set $eb (struct.get $LuaString $bytes (call $lua_tostring (local.get $elem))))
+      (local.set $eb (call $str_bytes (call $lua_tostring (local.get $elem))))
       (if (i32.lt_s
             (i32.add (struct.get $Builder $len (local.get $bld))
               (i32.add (array.len (local.get $sepb)) (array.len (local.get $eb))))

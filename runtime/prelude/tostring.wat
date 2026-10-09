@@ -110,7 +110,7 @@
     (local.set $nm (call $get_metamethod (local.get $v)
       (ref.as_non_null (global.get $g_mkey_name))))
     (if (ref.test (ref $LuaString) (local.get $nm))
-      (then (return (struct.get $LuaString $bytes
+      (then (return (call $str_bytes
         (ref.cast (ref $LuaString) (local.get $nm))))))
     (call $basic_type_bytes (local.get $v)))
 
@@ -181,31 +181,196 @@
             (i32.or (call $is_int (local.get $v))
                     (call $is_float (local.get $v)))))
 
+;; Lazy strings. A `..` whose result is at least 128 bytes long (the
+  ;; minimum below) doesn't copy its operands into a new array; it makes a
+  ;; $LuaLazy string, one of two kinds:
+  ;;  - a $LuaRope, a node over the two operands;
+  ;;  - a $LuaBufStr, the first $len bytes of a growable $StrBuf. `s .. x`
+  ;;    with `s` the buffer's latest version (its $len is the buffer's
+  ;;    $used) writes `x` into the spare capacity and makes a new version:
+  ;;    an append copies only its piece, and nothing but the buffer and the
+  ;;    newest version stays alive.
+  ;; An append to a node not yet read (a loop appending without reading)
+  ;; starts a buffer; any other long result is a node — so a loop that reads
+  ;; its string every step never copies it into a buffer it can't use.
+  ;; The first read of the bytes ($str_bytes, which every byte read goes
+  ;; through) flattens a lazy string into one exact array, kept in $bytes,
+  ;; and drops the node's operands or the buffer (a finished string doesn't
+  ;; keep its spare capacity alive). Its length ($str_length, so `#s`) and an
+  ;; equality test against a string of another length never flatten it.
+  ;; Every lazy string is at least the minimum long, so a shorter result's
+  ;; operands are flat.
+  ;; (Kept small: V8 inlines it everywhere, and every byte it adds comes out
+  ;; of the inlining budget of the function it lands in.)
+  (func $str_bytes (param $s (ref null $LuaString)) (result (ref $LuaArr))
+    (local $b (ref null $LuaArr))
+    (if (ref.is_null (local.tee $b (struct.get $LuaString $bytes (local.get $s))))
+      (then (return_call $lazy_flatten (local.get $s))))
+    (ref.as_non_null (local.get $b)))
+  (func $str_length (param $s (ref $LuaString)) (result i32)
+    (local $b (ref null $LuaArr))
+    (local.set $b (struct.get $LuaString $bytes (local.get $s)))
+    (if (ref.is_null (local.get $b))
+      (then (return (struct.get $LuaLazy $len (ref.cast (ref $LuaLazy) (local.get $s))))))
+    (array.len (ref.as_non_null (local.get $b))))
+  (func $lazy_flatten (param $str (ref null $LuaString)) (result (ref $LuaArr))
+    (local $s (ref $LuaLazy)) (local $out (ref $LuaArr))
+    (local.set $s (ref.cast (ref $LuaLazy) (local.get $str)))
+    (local.set $out (call $lazy_write (ref.null $LuaArr) (struct.get $LuaLazy $len (local.get $s))
+                                      (local.get $s)))
+    (struct.set $LuaString $bytes (local.get $s) (local.get $out))
+    (if (ref.test (ref $LuaRope) (local.get $s))
+      (then
+        (struct.set $LuaRope $left (ref.cast (ref $LuaRope) (local.get $s)) (ref.null $LuaString))
+        (struct.set $LuaRope $right (ref.cast (ref $LuaRope) (local.get $s)) (ref.null $LuaString)))
+      (else (struct.set $LuaBufStr $buf (ref.cast (ref $LuaBufStr) (local.get $s)) (ref.null $StrBuf))))
+    (local.get $out))
+  ;; The bytes of an unread lazy string into $out (a new array of $end
+  ;; bytes when null), ending at $end; returns $out. Right to left over the
+  ;; leaves: a node continues with its right operand and leaves its left one
+  ;; on a stack (which only grows for a rope built by prepending); a flat
+  ;; string or a buffer version is a leaf. (The allocation sits here, in the
+  ;; function with the loop, which V8 optimizes soon: in the baseline tier
+  ;; `array.new` fills its array a byte at a time.)
+  (func $lazy_write (param $o (ref null $LuaArr)) (param $end i32) (param $s (ref $LuaLazy))
+                    (result (ref $LuaArr))
+    (local $out (ref $LuaArr))
+    (local $pos i32) (local $n (ref $LuaString)) (local $b (ref null $LuaArr)) (local $len i32)
+    (local $node (ref $LuaRope)) (local $stack (ref $TArr)) (local $sp i32) (local $grown (ref $TArr))
+    (local.set $out (if (result (ref $LuaArr)) (ref.is_null (local.get $o))
+      (then (array.new $LuaArr (i32.const 0) (local.get $end)))
+      (else (ref.as_non_null (local.get $o)))))
+    (local.set $pos (local.get $end))
+    (local.set $stack (array.new $TArr (ref.null any) (i32.const 16)))
+    (local.set $n (local.get $s))
+    (block $done (loop $lp
+      (local.set $b (struct.get $LuaString $bytes (local.get $n)))
+      (if (ref.is_null (local.get $b))
+        (then
+          (if (ref.test (ref $LuaRope) (local.get $n))
+            (then
+              (local.set $node (ref.cast (ref $LuaRope) (local.get $n)))
+              (if (i32.eq (local.get $sp) (array.len (local.get $stack)))
+                (then
+                  (local.set $grown (array.new $TArr (ref.null any) (i32.shl (local.get $sp) (i32.const 1))))
+                  (array.copy $TArr $TArr (local.get $grown) (i32.const 0)
+                                          (local.get $stack) (i32.const 0) (local.get $sp))
+                  (local.set $stack (local.get $grown))))
+              (array.set $TArr (local.get $stack) (local.get $sp) (struct.get $LuaRope $left (local.get $node)))
+              (local.set $sp (i32.add (local.get $sp) (i32.const 1)))
+              (local.set $n (ref.as_non_null (struct.get $LuaRope $right (local.get $node))))
+              (br $lp)))
+          (local.set $len (struct.get $LuaLazy $len (ref.cast (ref $LuaLazy) (local.get $n))))
+          (local.set $pos (i32.sub (local.get $pos) (local.get $len)))
+          (array.copy $LuaArr $LuaArr (local.get $out) (local.get $pos)
+            (struct.get $StrBuf $arr (ref.as_non_null
+              (struct.get $LuaBufStr $buf (ref.cast (ref $LuaBufStr) (local.get $n)))))
+            (i32.const 0) (local.get $len)))
+        (else
+          (local.set $pos (i32.sub (local.get $pos) (array.len (ref.as_non_null (local.get $b)))))
+          (array.copy $LuaArr $LuaArr (local.get $out) (local.get $pos) (ref.as_non_null (local.get $b))
+                                      (i32.const 0) (array.len (ref.as_non_null (local.get $b))))))
+      (br_if $done (i32.eqz (local.get $sp)))
+      (local.set $sp (i32.sub (local.get $sp) (i32.const 1)))
+      (local.set $n (ref.cast (ref $LuaString) (array.get $TArr (local.get $stack) (local.get $sp))))
+      (br $lp)))
+    (local.get $out))
+
 ;; A concat operand as a piece of the result (precondition: $is_concatable):
   ;; its bytes and their length — or, for an integer, no bytes and the length
   ;; of its digits, which $concat_put writes straight into the result (no
-  ;; array for the digits alone). `..` never consults __tostring, matching
+  ;; array for the digits alone), and for an unread lazy string no bytes
+  ;; either (see $concat_lazy). `..` never consults __tostring, matching
   ;; reference Lua.
   (func $concat_piece (param $v anyref) (result (ref null $LuaArr) i32)
-    (local $a (ref $LuaArr))
+    (local $a (ref $LuaArr)) (local $s (ref $LuaString))
     (if (ref.test (ref $LuaString) (local.get $v))
       (then
-        (local.set $a (struct.get $LuaString $bytes (ref.cast (ref $LuaString) (local.get $v))))
-        (return (local.get $a) (array.len (local.get $a)))))
+        (local.set $s (ref.cast (ref $LuaString) (local.get $v)))
+        (return (struct.get $LuaString $bytes (local.get $s)) (call $str_length (local.get $s)))))
     (if (call $is_int (local.get $v))
       (then (return (ref.null $LuaArr) (call $int_len (call $as_int (local.get $v))))))
     (local.set $a (call $float_to_bytes (call $as_float (local.get $v))))
     (local.get $a) (array.len (local.get $a)))
   ;; Write a piece ($v, its $bytes and length $n) into $out at $pos; returns
-  ;; the position after it.
+  ;; the position after it. A lazy string among the pieces is flattened for
+  ;; it.
   (func $concat_put (param $out (ref $LuaArr)) (param $pos i32) (param $v anyref)
                     (param $bytes (ref null $LuaArr)) (param $n i32) (result i32)
     (if (ref.is_null (local.get $bytes))
-      (then (call $int_write (local.get $out) (i32.add (local.get $pos) (local.get $n))
-                             (call $as_int (local.get $v))))
-      (else (array.copy $LuaArr $LuaArr (local.get $out) (local.get $pos)
-                        (ref.as_non_null (local.get $bytes)) (i32.const 0) (local.get $n))))
+      (then (if (ref.test (ref $LuaString) (local.get $v))
+        (then (local.set $bytes (call $str_bytes (ref.cast (ref $LuaString) (local.get $v)))))
+        (else (call $int_write (local.get $out) (i32.add (local.get $pos) (local.get $n))
+                               (call $as_int (local.get $v)))
+              (return (i32.add (local.get $pos) (local.get $n)))))))
+    (array.copy $LuaArr $LuaArr (local.get $out) (local.get $pos)
+                (ref.as_non_null (local.get $bytes)) (i32.const 0) (local.get $n))
     (i32.add (local.get $pos) (local.get $n)))
+  ;; The lazy string of two concat operands whose total length $n (at least
+  ;; the minimum) the caller has summed: the buffer's next version when $a
+  ;; is its latest, a new buffer when $a is a node not yet read, else a node
+  ;; (a number operand becomes its string; $sa / $sb: a float's bytes, from
+  ;; its piece).
+  (func $concat_lazy (param $a anyref) (param $sa (ref null $LuaArr))
+                     (param $b anyref) (param $sb (ref null $LuaArr)) (param $n i64) (result anyref)
+    (local $bs (ref $LuaBufStr)) (local $buf (ref null $StrBuf))
+    (if (i64.gt_u (local.get $n) (i64.const 2147483647))
+      (then (call $throw_lit (i32.const 297) (i32.const 9))))     ;; "too large"
+    (if (ref.test (ref $LuaBufStr) (local.get $a))
+      (then
+        (local.set $bs (ref.cast (ref $LuaBufStr) (local.get $a)))
+        (local.set $buf (struct.get $LuaBufStr $buf (local.get $bs)))
+        (if (i32.eqz (ref.is_null (local.get $buf)))
+          (then (if (i32.eq (struct.get $LuaLazy $len (local.get $bs))
+                            (struct.get $StrBuf $used (ref.as_non_null (local.get $buf))))
+            (then (return (call $buf_append (ref.as_non_null (local.get $buf))
+                    (struct.get $LuaLazy $len (local.get $bs))
+                    (local.get $b) (local.get $sb) (i32.wrap_i64 (local.get $n))))))))))
+    (if (ref.test (ref $LuaRope) (local.get $a))
+      (then (if (ref.is_null (struct.get $LuaString $bytes (ref.cast (ref $LuaRope) (local.get $a))))
+        (then (return (call $buf_start (ref.cast (ref $LuaRope) (local.get $a))
+                (local.get $b) (local.get $sb) (i32.wrap_i64 (local.get $n))))))))
+    (struct.new $LuaRope (ref.null $LuaArr) (i32.const 0) (i32.wrap_i64 (local.get $n))
+      (call $concat_str (local.get $a) (local.get $sa))
+      (call $concat_str (local.get $b) (local.get $sb))))
+  ;; Twice the needed capacity (a length is an i32).
+  (func $buf_cap (param $n i32) (result i32)
+    (if (i32.gt_u (local.get $n) (i32.const 0x3fffffff)) (then (return (i32.const 0x7fffffff))))
+    (i32.shl (local.get $n) (i32.const 1)))
+  ;; Append $b (piece bytes $sb) to the buffer's latest version, $na long;
+  ;; the result is $n long.
+  (func $buf_append (param $buf (ref $StrBuf)) (param $na i32)
+                    (param $b anyref) (param $sb (ref null $LuaArr)) (param $n i32) (result anyref)
+    (local $arr (ref $LuaArr)) (local $grown (ref $LuaArr))
+    (local.set $arr (struct.get $StrBuf $arr (local.get $buf)))
+    (if (i32.gt_u (local.get $n) (array.len (local.get $arr)))
+      (then
+        (local.set $grown (array.new $LuaArr (i32.const 0) (call $buf_cap (local.get $n))))
+        (array.copy $LuaArr $LuaArr (local.get $grown) (i32.const 0)
+                                    (local.get $arr) (i32.const 0) (local.get $na))
+        (struct.set $StrBuf $arr (local.get $buf) (local.get $grown))
+        (local.set $arr (local.get $grown))))
+    (drop (call $concat_put (local.get $arr) (local.get $na) (local.get $b) (local.get $sb)
+                            (i32.sub (local.get $n) (local.get $na))))
+    (struct.set $StrBuf $used (local.get $buf) (local.get $n))
+    (struct.new $LuaBufStr (ref.null $LuaArr) (i32.const 0) (local.get $n) (local.get $buf)))
+  ;; A buffer holding the unread node $a followed by $b; the result is $n long.
+  (func $buf_start (param $a (ref $LuaRope)) (param $b anyref) (param $sb (ref null $LuaArr))
+                   (param $n i32) (result anyref)
+    (local $na i32) (local $arr (ref $LuaArr))
+    (local.set $na (struct.get $LuaLazy $len (local.get $a)))
+    (local.set $arr (array.new $LuaArr (i32.const 0) (call $buf_cap (local.get $n))))
+    (drop (call $lazy_write (local.get $arr) (local.get $na) (local.get $a)))
+    (drop (call $concat_put (local.get $arr) (local.get $na) (local.get $b) (local.get $sb)
+                            (i32.sub (local.get $n) (local.get $na))))
+    (struct.new $LuaBufStr (ref.null $LuaArr) (i32.const 0) (local.get $n)
+      (struct.new $StrBuf (local.get $arr) (local.get $n))))
+  (func $concat_str (param $v anyref) (param $bytes (ref null $LuaArr)) (result (ref $LuaString))
+    (if (ref.test (ref $LuaString) (local.get $v))
+      (then (return (ref.cast (ref $LuaString) (local.get $v)))))
+    (if (ref.is_null (local.get $bytes))
+      (then (return (struct.new $LuaString (call $int_to_bytes (call $as_int (local.get $v))) (i32.const 0)))))
+    (struct.new $LuaString (local.get $bytes) (i32.const 0)))
 
   (func $lua_concat (param $a anyref) (param $b anyref) (result anyref)
     (local $sa (ref null $LuaArr)) (local $sb (ref null $LuaArr)) (local $out (ref $LuaArr))
@@ -216,10 +381,10 @@
                       (ref.as_non_null (global.get $g_mkey_concat))))))
     (call $concat_piece (local.get $a)) (local.set $na) (local.set $sa)
     (call $concat_piece (local.get $b)) (local.set $nb) (local.set $sb)
-    ;; Raise a Lua-level "too large" before wasm traps on array.new for
-    ;; a multi-gigabyte buffer — heavy.lua relies on pcall catching this.
-    (if (i32.lt_s (i32.add (local.get $na) (local.get $nb)) (i32.const 0))
-      (then (call $throw_lit (i32.const 297) (i32.const 9))))     ;; "too large"
+    ;; at least the minimum: a lazy string (which raises "too large")
+    (if (i32.ge_u (i32.add (local.get $na) (local.get $nb)) (i32.const 128))
+      (then (return (call $concat_lazy (local.get $a) (local.get $sa) (local.get $b) (local.get $sb)
+        (i64.add (i64.extend_i32_u (local.get $na)) (i64.extend_i32_u (local.get $nb)))))))
     (local.set $out (array.new $LuaArr (i32.const 0)
                        (i32.add (local.get $na) (local.get $nb))))
     (drop (call $concat_put (local.get $out)
@@ -227,8 +392,9 @@
       (local.get $b) (local.get $sb) (local.get $nb)))
     (struct.new $LuaString (local.get $out) (i32.const 0)))
 
-  ;; `a .. b .. c` / `a .. b .. c .. d` in one allocation: codegen flattens a
-  ;; right-nested chain, whose operands are already evaluated left to right.
+  ;; `a .. b .. c` / `a .. b .. c .. d` in one allocation (under the 128-byte
+  ;; minimum for a lazy string): codegen flattens a right-nested chain, whose
+  ;; operands are already evaluated left to right.
   ;; When one isn't a string or number the chain is concatenated pairwise from
   ;; the right, as reference Lua does, so __concat sees the same calls.
   (func $lua_concat3 (param $a anyref) (param $b anyref) (param $c anyref) (result anyref)
@@ -242,8 +408,10 @@
     (call $concat_piece (local.get $c)) (local.set $nc) (local.set $sc)
     (local.set $n (i64.add (i64.extend_i32_u (local.get $na))
                   (i64.add (i64.extend_i32_u (local.get $nb)) (i64.extend_i32_u (local.get $nc)))))
-    (if (i64.gt_u (local.get $n) (i64.const 2147483647))
-      (then (call $throw_lit (i32.const 297) (i32.const 9))))     ;; "too large"
+    ;; at least the minimum: lazy strings, pairwise from the right — so a long
+    ;; first operand (`acc .. x .. y`) gets one node over the short rest
+    (if (i64.ge_u (local.get $n) (i64.const 128))
+      (then (return (call $lua_concat (local.get $a) (call $lua_concat (local.get $b) (local.get $c))))))
     (local.set $out (array.new $LuaArr (i32.const 0) (i32.wrap_i64 (local.get $n))))
     (drop (call $concat_put (local.get $out)
       (call $concat_put (local.get $out)
@@ -265,8 +433,9 @@
     (call $concat_piece (local.get $d)) (local.set $nd) (local.set $sd)
     (local.set $n (i64.add (i64.add (i64.extend_i32_u (local.get $na)) (i64.extend_i32_u (local.get $nb)))
                            (i64.add (i64.extend_i32_u (local.get $nc)) (i64.extend_i32_u (local.get $nd)))))
-    (if (i64.gt_u (local.get $n) (i64.const 2147483647))
-      (then (call $throw_lit (i32.const 297) (i32.const 9))))     ;; "too large"
+    (if (i64.ge_u (local.get $n) (i64.const 128))   ;; lazy, as in $lua_concat3
+      (then (return (call $lua_concat (local.get $a)
+        (call $lua_concat (local.get $b) (call $lua_concat (local.get $c) (local.get $d)))))))
     (local.set $out (array.new $LuaArr (i32.const 0) (i32.wrap_i64 (local.get $n))))
     (drop (call $concat_put (local.get $out)
       (call $concat_put (local.get $out)

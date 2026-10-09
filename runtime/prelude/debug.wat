@@ -24,7 +24,7 @@
     ;; Optional prefix message + newline.
     (if (ref.test (ref $LuaString) (local.get $msg))
       (then
-        (local.set $src_b (struct.get $LuaString $bytes
+        (local.set $src_b (call $str_bytes
           (ref.cast (ref $LuaString) (local.get $msg))))
         (call $builder_append (local.get $b) (local.get $src_b)
                               (i32.const 0) (array.len (local.get $src_b)))
@@ -47,7 +47,7 @@
     (call $builder_append_byte (local.get $b) (i32.const 107))
     (call $builder_append_byte (local.get $b) (i32.const 58))      ;; ':'
     ;; Walk frames from depth-level down to 0.
-    (local.set $src_b (struct.get $LuaString $bytes
+    (local.set $src_b (call $str_bytes
       (ref.as_non_null (global.get $g_src_name))))
     (local.set $i (i32.sub (global.get $call_depth) (local.get $level)))
     (block $tb_done (loop $tb_lp

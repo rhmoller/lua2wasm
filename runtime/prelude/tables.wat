@@ -273,7 +273,7 @@
     (return_call $str_hash_compute (local.get $s)))
   (func $str_hash_compute (param $s (ref $LuaString)) (result i32)
     (local $h i32) (local $bytes (ref $LuaArr)) (local $i i32) (local $n i32)
-    (local.set $bytes (struct.get $LuaString $bytes (local.get $s)))
+    (local.set $bytes (call $str_bytes (local.get $s)))
     (local.set $h (i32.const -2128831035)) ;; FNV offset basis
     (local.set $n (array.len (local.get $bytes)))
     (block $done (loop $lp

@@ -172,7 +172,7 @@
     ;; two-pass: first count, then allocate the ArgArr and fill.
     (local $count i32) (local $idx i32)
     (local $out (ref $ArgArr))
-    (local.set $bytes (struct.get $LuaString $bytes
+    (local.set $bytes (call $str_bytes
       (call $arg_string (call $args_at (local.get $args) (i32.const 0)))))
     (local.set $n (array.len (local.get $bytes)))
     (local.set $nargs (array.len (local.get $args)))
@@ -241,7 +241,7 @@
     (local $bytes (ref $LuaArr)) (local $n_bytes i32)
     (local $ctrl i64) (local $n i32) (local $w i32) (local $next i32)
     (local $out (ref $ArgArr))
-    (local.set $bytes (struct.get $LuaString $bytes
+    (local.set $bytes (call $str_bytes
       (call $arg_string (call $args_at (local.get $args) (i32.const 0)))))
     (local.set $n_bytes (array.len (local.get $bytes)))
     (local.set $ctrl (call $as_int_co (call $args_at (local.get $args) (i32.const 1))))
@@ -287,7 +287,7 @@
     (local $bytes (ref $LuaArr))
     ;; Reference rejects a string that *starts* with a continuation byte at
     ;; the codes() call (the iterator's skip step would otherwise swallow it).
-    (local.set $bytes (struct.get $LuaString $bytes
+    (local.set $bytes (call $str_bytes
       (call $arg_string (call $args_at (local.get $args) (i32.const 0)))))
     (if (i32.gt_s (array.len (local.get $bytes)) (i32.const 0))
       (then (if (call $utf8_iscont
@@ -353,7 +353,7 @@
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
     (local $bytes (ref $LuaArr)) (local $len i32) (local $nargs i32)
     (local $n i64) (local $posi i64) (local $p i32)
-    (local.set $bytes (struct.get $LuaString $bytes
+    (local.set $bytes (call $str_bytes
       (call $arg_string (call $args_at (local.get $args) (i32.const 0)))))
     (local.set $len (array.len (local.get $bytes)))
     (local.set $nargs (array.len (local.get $args)))
@@ -438,7 +438,7 @@
     (local $posi i64) (local $posj i64) (local $lax i32)
     (local $p i32) (local $end i32) (local $w i32) (local $count i64)
     (local $out (ref $ArgArr))
-    (local.set $bytes (struct.get $LuaString $bytes
+    (local.set $bytes (call $str_bytes
       (call $arg_string (call $args_at (local.get $args) (i32.const 0)))))
     (local.set $n (array.len (local.get $bytes)))
     (local.set $nargs (array.len (local.get $args)))

@@ -139,7 +139,7 @@
                         (i32.add (local.get $start) (local.get $i))))
       (if (ref.test (ref $LuaString) (local.get $fmt))
         (then
-          (local.set $bytes (struct.get $LuaString $bytes
+          (local.set $bytes (call $str_bytes
             (ref.cast (ref $LuaString) (local.get $fmt))))
           (local.set $blen (array.len (local.get $bytes)))
           ;; Strip an optional leading '*' (legacy compat).
@@ -390,7 +390,7 @@
     (local.set $wv (call $args_at (local.get $args) (i32.const 1)))
     (if (ref.test (ref $LuaString) (local.get $wv))
       (then
-        (local.set $wbytes (struct.get $LuaString $bytes
+        (local.set $wbytes (call $str_bytes
           (ref.cast (ref $LuaString) (local.get $wv))))
         (if (i32.gt_s (array.len (local.get $wbytes)) (i32.const 0))
           (then

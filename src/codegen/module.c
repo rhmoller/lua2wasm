@@ -896,7 +896,7 @@ static void emit_embed_api(CG *c) {
         "    (struct.new $LuaString (array.new $LuaArr (i32.const 0) (local.get $n)) (i32.const 0)))\n"
         "  (func (export \"lua_str_setb\") (param $s anyref) (param $i i32) (param $b i32)\n"
         "    (array.set $LuaArr\n"
-        "      (struct.get $LuaString $bytes (ref.cast (ref $LuaString) (local.get $s)))\n"
+        "      (call $str_bytes (ref.cast (ref $LuaString) (local.get $s)))\n"
         "      (local.get $i) (local.get $b)))\n"
         "  (func (export \"lua_get_global\") (param $name anyref) (result anyref)\n"
         "    (call $tab_get (ref.as_non_null (global.get $g_globals)) (local.get $name)))\n"

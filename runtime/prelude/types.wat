@@ -8,7 +8,29 @@
   ;; hash of 0 is stored as 1). Strings are immutable once visible to Lua, so the
   ;; cache never goes stale. Table lookups compare cached hashes before bytes,
   ;; and compile-time constants carry their hash from codegen.
-  (type $LuaString (sub (struct (field $bytes (ref $LuaArr)) (field $hash (mut i32)))))
+  ;; $bytes is null only in a lazy string not yet read: read it through
+  ;; $str_bytes (and the length through $str_length), never directly.
+  (type $LuaString (sub (struct (field $bytes (mut (ref null $LuaArr))) (field $hash (mut i32)))))
+  ;; A long `..` result ($lua_concat) before its bytes are read: $bytes
+  ;; null, the length in $len. A $LuaRope is a node over the two operands; a
+  ;; $LuaBufStr is the first $len bytes of a growable buffer that appends
+  ;; write into. The first read flattens either ($lazy_flatten) and drops
+  ;; the operands or the buffer.
+  (type $LuaLazy   (sub $LuaString (struct (field $bytes (mut (ref null $LuaArr)))
+                                           (field $hash (mut i32))
+                                           (field $len i32))))
+  (type $LuaRope   (sub final $LuaLazy (struct (field $bytes (mut (ref null $LuaArr)))
+                                               (field $hash (mut i32))
+                                               (field $len i32)
+                                               (field $left (mut (ref null $LuaString)))
+                                               (field $right (mut (ref null $LuaString))))))
+  ;; $arr[0..$used) is written once and never changes (a grown $arr starts
+  ;; with a copy of it), so every version of the buffer reads its prefix.
+  (type $StrBuf    (struct (field $arr (mut (ref $LuaArr))) (field $used (mut i32))))
+  (type $LuaBufStr (sub final $LuaLazy (struct (field $bytes (mut (ref null $LuaArr)))
+                                               (field $hash (mut i32))
+                                               (field $len i32)
+                                               (field $buf (mut (ref null $StrBuf))))))
   (type $LuaFloat  (sub (struct (field $v f64))))
   (type $LuaInt    (sub (struct (field $v i64))))
   (type $LuaBool   (sub (struct (field $b i32))))
