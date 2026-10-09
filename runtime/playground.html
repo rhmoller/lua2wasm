@@ -9,176 +9,133 @@
 <link rel="icon" type="image/png" sizes="16x16" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAABmJLR0QAAAAAAAD5Q7t/AAAACXBIWXMAAAABAAAAAQBPJcTWAAAAB3RJTUUH1wQKDjopNFerjAAAAnpJREFUeJxtk89LVFEcxT/3vTvP54w/xlFnIEfNVMQyalNYpCBhUNQi2rfPbQtD6B/QllLUwn0bV4aLpDa1iiCoJgk1E8QxUx/Nszfz5r17W1xFE7+rC/eee77ne77H5sQSApIZcNNQUwduI1g2xBVznz0H3aMQeOIY0IJELThJiCoQhaA1WBbYCbAd8+mtp5C9AEuv5CHYkoZNxRD8gUw35M6D2wTBDvz6ArvL0HYF2odAutB9Ux4y19QZ1mQWrj6EvruQypnWVWxZf4taL85q/X0OthehuQ+KH/clOCmj222GOy/g9HUDNNXf38LY2GWCIIynp1++XlubfwKWA78Lcl+3C2XfMP8PltJifPwa9+9fRCltx7EenZhY+qb1wiOobbTMhOPIaO67exR84IfjyP2zwHGkDf33oKkLooqERBL+7kB2AFLZgYEsq6sevh8CUK0qpqbeEceKIIh49uwDWqdy0HIWvJ8SdARagZsBIQcH83hegO+H9PZmWF8vUSqFTE6+p6eniWo1BoSE2gxobQHCNFreMZ8JQCAEDA93ksm4DA11ks/X09qaYmSkC1CRsdayJMQhSAc2P8PeZiJhtbe3NwDgupJcro502qW+3sHzyqRSCWBvA7a+gp2wISqD2wClDWhokzJ/qaMjbSWTCYpFn7a2BgqFLTyvghACzwuilZW3M0oVZsGpPdiDJAgbatJw+zmcuXHcDVMqguV5mHsAYQlUtP9IxSYDoQ8/Fszu158yDgkBKoTSOnyagTePobwLtoRw70iYjmYhCqHpNLSeNe4E27BVAG/VLJ0QUPFBxSel0TXMcdUMWCvjlHRMgCq+mZtWAP8Azi3klkVk/CYAAAAASUVORK5CYII=">
 <link rel="icon" type="image/png" sizes="32x32" href="data:image/png;base64,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">
 <link rel="icon" type="image/png" sizes="64x64" href="data:image/png;base64,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">
+<!-- rhm/ui: the design system shared with rhmoller.dev (vendored, see rhm-ui/).
+     The stylesheet below only lays out the playground on its tokens. -->
+<link rel="preload" href="rhm-ui/fonts/recursive-latin-full-normal.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="rhm-ui/fonts.css">
+<link rel="stylesheet" href="rhm-ui/rhm.css">
+<script>
+  /* Apply a saved light/dark choice before first paint. */
+  try {
+    const t = localStorage.getItem("lua2wasm.theme");
+    if (t === "light" || t === "dark") document.documentElement.dataset.rhmScheme = t;
+  } catch {}
+</script>
 <style>
-  /* Catppuccin palettes (https://github.com/catppuccin/catppuccin).
-     Two flavours wired to the same variable names so the rest of the
-     stylesheet — and the CodeMirror theme below — only references
-     --ctp-* and just follows whichever block is active. Mocha is the
-     default; setting `data-theme="light"` on <html> swaps to Latte. */
-  :root, html[data-theme="dark"] {
-    color-scheme: dark;
-    --ctp-rosewater: #f5e0dc;
-    --ctp-flamingo:  #f2cdcd;
-    --ctp-pink:      #f5c2e7;
-    --ctp-mauve:     #cba6f7;
-    --ctp-red:       #f38ba8;
-    --ctp-maroon:    #eba0ac;
-    --ctp-peach:     #fab387;
-    --ctp-yellow:    #f9e2af;
-    --ctp-green:     #a6e3a1;
-    --ctp-teal:      #94e2d5;
-    --ctp-sky:       #89dceb;
-    --ctp-sapphire:  #74c7ec;
-    --ctp-blue:      #89b4fa;
-    --ctp-lavender:  #b4befe;
-    --ctp-text:      #cdd6f4;
-    --ctp-subtext1:  #bac2de;
-    --ctp-subtext0:  #a6adc8;
-    --ctp-overlay2:  #9399b2;
-    --ctp-overlay1:  #7f849c;
-    --ctp-overlay0:  #6c7086;
-    --ctp-surface2:  #585b70;
-    --ctp-surface1:  #45475a;
-    --ctp-surface0:  #313244;
-    --ctp-base:      #1e1e2e;
-    --ctp-mantle:    #181825;
-    --ctp-crust:     #11111b;
-  }
-  html[data-theme="light"] {
-    color-scheme: light;
-    --ctp-rosewater: #dc8a78;
-    --ctp-flamingo:  #dd7878;
-    --ctp-pink:      #ea76cb;
-    --ctp-mauve:     #8839ef;
-    --ctp-red:       #d20f39;
-    --ctp-maroon:    #e64553;
-    --ctp-peach:     #fe640b;
-    --ctp-yellow:    #df8e1d;
-    --ctp-green:     #40a02b;
-    --ctp-teal:      #179299;
-    --ctp-sky:       #04a5e5;
-    --ctp-sapphire:  #209fb5;
-    --ctp-blue:      #1e66f5;
-    --ctp-lavender:  #7287fd;
-    --ctp-text:      #4c4f69;
-    --ctp-subtext1:  #5c5f77;
-    --ctp-subtext0:  #6c6f85;
-    --ctp-overlay2:  #7c7f93;
-    --ctp-overlay1:  #8c8fa1;
-    --ctp-overlay0:  #9ca0b0;
-    --ctp-surface2:  #acb0be;
-    --ctp-surface1:  #bcc0cc;
-    --ctp-surface0:  #ccd0da;
-    --ctp-base:      #eff1f5;
-    --ctp-mantle:    #e6e9ef;
-    --ctp-crust:     #dce0e8;
-  }
-  * { box-sizing: border-box; }
-  html, body { height: 100%; margin: 0; }
+  html, body { height: 100%; }
   body {
     display: grid;
-    grid-template-rows: auto auto 1fr auto;
-    font: 14px/1.4 system-ui, sans-serif;
-    background: var(--ctp-base);
-    color: var(--ctp-text);
+    padding: var(--rhm-space-3);
+    font-size: var(--rhm-font-size-md);
   }
+
+  /* The whole app is one device: toolbar in the head, panels in the body. */
+  .app { grid-template-rows: auto minmax(0, 1fr); align-content: stretch; min-block-size: 0; }
+  .app-bar {
+    display: flex; flex-wrap: wrap; align-items: center;
+    gap: var(--rhm-space-3);
+  }
+  .app-bar h1 {
+    display: flex; align-items: baseline; gap: var(--rhm-space-2);
+    margin: 0 var(--rhm-space-1) 0 0;
+    font-size: var(--rhm-font-size-lg);
+  }
+  .app-bar h1 a { text-decoration: none; }
+  .app-bar h1 .app-kind { color: var(--rhm-color-text-muted); font-weight: var(--rhm-font-weight-control); }
+  .app-bar .rhm-select { max-inline-size: 16rem; }
+  .app-bar .spacer { flex: 1; }
+  .app-status {
+    min-inline-size: 13rem;
+    padding: var(--rhm-space-1) var(--rhm-space-3);
+    font-size: var(--rhm-font-size-sm);
+    line-height: 1.6;
+  }
+  .app-body {
+    display: grid;
+    grid-template-rows: auto minmax(0, 1fr) auto;
+    gap: var(--rhm-space-3);
+    min-block-size: 0;
+  }
+
   #intro {
-    padding: .55em 1em; font-size: 13px; line-height: 1.5;
-    color: var(--ctp-subtext1);
-    background: var(--ctp-mantle);
-    border-bottom: 1px solid var(--ctp-surface0);
+    max-inline-size: 110ch;
+    color: var(--rhm-color-text-muted);
+    font-size: var(--rhm-font-size-sm);
   }
-  #intro strong { color: var(--ctp-text); }
-  #intro a { color: var(--ctp-sapphire); text-decoration: none; }
-  #intro a:hover { text-decoration: underline; }
-  header {
-    display: flex; align-items: center; gap: 1em;
-    padding: .6em 1em;
-    background: var(--ctp-mantle);
-    border-bottom: 1px solid var(--ctp-surface0);
-  }
-  header h1 { font-size: 1em; margin: 0; color: var(--ctp-subtext0); font-weight: 500; }
-  header h1 a { color: var(--ctp-lavender); text-decoration: none; }
-  header h1 a:hover { text-decoration: underline; }
-  button, select {
-    background: var(--ctp-surface0); color: var(--ctp-text);
-    border: 1px solid var(--ctp-surface1);
-    padding: .4em .9em; border-radius: 6px; font: inherit; cursor: pointer;
-  }
-  button:hover, select:hover { background: var(--ctp-surface1); border-color: var(--ctp-surface2); }
-  button[disabled] { opacity: .4; cursor: default; }
+  #intro strong { color: var(--rhm-color-text); }
+
   main {
     /* Two flexible columns with a draggable splitter between them. The
        JS sets --split-left (a percent like "42%") on pointermove; the
        fr units fall back to the initial 50/50 split before any drag. */
     display: grid;
     grid-template-columns: minmax(160px, var(--split-left, 1fr))
-                           6px
+                           12px
                            minmax(160px, 1fr);
     min-height: 0;
-    border-bottom: 1px solid var(--ctp-surface0);
+  }
+  /* Both panels sit on the code surface: light paper by day, amber screen by night. */
+  #editor-host, #out {
+    min-inline-size: 0;
+    border-radius: var(--rhm-radius-tile);
+    background-color: var(--rhm-color-surface-code);
+    background-image: var(--rhm-face-code);
+    /* The glare stays a corner reflection on large panels (rhm/ui spec 5.11) */
+    background-size: min(100%, 16rem) min(100%, 16rem);
+    background-repeat: no-repeat;
+    box-shadow: var(--rhm-shadow-code);
+    color: var(--rhm-color-text-on-code);
+    @media (forced-colors: active) { border: 1px solid CanvasText; }
   }
   #editor-host {
     overflow: auto;
-    background: var(--ctp-base);
+    padding: 1px; /* keeps the active line inside the inset edge */
   }
   .cm-editor   { height: 100%; }
-  .cm-scroller { font: 13px/1.5 "JetBrains Mono", ui-monospace, monospace; }
+  .cm-scroller {
+    font-family: var(--rhm-font-family-mono);
+    font-variation-settings: var(--rhm-font-mono-axes);
+    font-size: var(--rhm-font-size-sm);
+    line-height: var(--rhm-font-line-height-code);
+  }
   #splitter {
-    background: var(--ctp-surface0);
     cursor: col-resize;
-    /* Widen the hit target without enlarging the visible bar — a
-       transparent pseudo-element extends the grabbable area to ~10px. */
+    /* The hit target is 24px wide; the visible grip stays small. */
     position: relative;
     touch-action: none;
+    border-radius: var(--rhm-radius-pill);
   }
   #splitter::before {
-    content: ""; position: absolute; inset: 0 -3px;
+    content: ""; position: absolute; inset: 0 -6px;
   }
-  #splitter:hover,
-  #splitter.dragging { background: var(--ctp-surface1); }
+  #splitter::after {
+    content: ""; position: absolute; inset-block-start: 50%; inset-inline-start: 50%;
+    inline-size: 4px; block-size: 36px; translate: -50% -50%;
+    border-radius: var(--rhm-radius-pill);
+    background-color: var(--rhm-color-edge);
+  }
+  #splitter:hover::after,
+  #splitter.dragging::after { background-color: var(--rhm-color-indicator); }
+  @media (forced-colors: active) {
+    #splitter::after { forced-color-adjust: none; background-color: CanvasText; }
+  }
   /* While dragging: kill text selection across the whole window and
      keep the resize cursor regardless of what the pointer is over. */
   body.splitter-dragging { cursor: col-resize; user-select: none; }
   #out {
-    margin: 0; padding: 1em; overflow: auto;
-    font: 13px/1.5 ui-monospace, monospace;
-    background: var(--ctp-crust); color: var(--ctp-text);
+    margin: 0; padding: var(--rhm-space-3) var(--rhm-space-4); overflow: auto;
+    font-family: var(--rhm-font-family-mono);
+    font-variation-settings: var(--rhm-font-mono-axes);
+    font-size: var(--rhm-font-size-sm);
+    line-height: 1.5;
     white-space: pre-wrap;
   }
 
-  /* Scrollbars: blend into the Catppuccin Mocha surface tones rather
-     than the browser default light-on-dark.
-     Firefox honours scrollbar-color; Chromium/Safari use the webkit
-     pseudo-elements. Both target the editor (.cm-scroller) and the
-     output panel (#out). */
-  .cm-scroller, #out {
-    scrollbar-width: thin;
-    scrollbar-color: var(--ctp-surface1) transparent;
-  }
-  .cm-scroller::-webkit-scrollbar,
-  #out::-webkit-scrollbar {
-    width: 10px; height: 10px;
-  }
-  .cm-scroller::-webkit-scrollbar-track,
-  #out::-webkit-scrollbar-track {
-    background: transparent;
-  }
-  .cm-scroller::-webkit-scrollbar-thumb,
-  #out::-webkit-scrollbar-thumb {
-    background: var(--ctp-surface1);
-    border: 2px solid transparent;       /* fakes inset padding around the thumb */
-    border-radius: 6px;
-    background-clip: padding-box;
-  }
-  .cm-scroller::-webkit-scrollbar-thumb:hover,
-  #out::-webkit-scrollbar-thumb:hover {
-    background: var(--ctp-surface2);
-    background-clip: padding-box;
-  }
-  .cm-scroller::-webkit-scrollbar-corner,
-  #out::-webkit-scrollbar-corner {
-    background: transparent;
+  /* Narrow screens: panels stack and the page scrolls. */
+  @media (max-width: 40rem) {
+    html, body { height: auto; }
+    main { grid-template-columns: minmax(0, 1fr); grid-template-rows: 55vh minmax(12rem, 40vh); gap: var(--rhm-space-3); }
+    #splitter { display: none; }
   }
 
   /* WAT viewer: codegen tags each region with `;; @@SECTION:name@@`;
@@ -189,88 +146,84 @@
   .wat-section > summary {
     list-style: none;
     cursor: pointer; user-select: none;
-    padding: .25em .6em; margin: 0;
-    background: var(--ctp-surface0); color: var(--ctp-subtext1);
+    min-block-size: var(--rhm-size-row);
+    padding: .2em .6em; margin: 0;
+    background: color-mix(in oklch, var(--rhm-color-text-on-code) 8%, transparent);
+    color: var(--rhm-color-text-on-code);
     border-radius: 4px;
-    font: 12px/1.4 system-ui, sans-serif;
+    font-family: var(--rhm-font-family-ui);
+    font-variation-settings: var(--rhm-font-ui-axes);
+    font-size: var(--rhm-font-size-xs);
     display: flex; align-items: center; gap: .6em;
   }
   .wat-section > summary::-webkit-details-marker { display: none; }
   .wat-section > summary::before {
     content: "▸"; display: inline-block; width: 1em;
-    color: var(--ctp-overlay1); transition: transform .1s;
+    color: var(--rhm-color-text-on-code-muted); transition: transform var(--rhm-duration-fast);
   }
   .wat-section[open] > summary::before { transform: rotate(90deg); }
-  .wat-section > summary .wat-name { color: var(--ctp-text); font-weight: 500; }
-  .wat-section > summary .wat-meta { color: var(--ctp-overlay1); font-size: 11px; margin-left: auto; }
+  .wat-section > summary .wat-name { font-weight: var(--rhm-font-weight-control); }
+  .wat-section > summary .wat-meta { color: var(--rhm-color-text-on-code-muted); margin-left: auto; }
   .wat-section > pre {
     margin: 0; padding: .4em .8em;
-    background: var(--ctp-base); color: var(--ctp-subtext1);
-    border-left: 2px solid var(--ctp-surface1);
-    border-radius: 0 0 4px 4px;
+    border-left: 2px solid var(--rhm-color-edge);
     overflow-x: auto;
-    font: 12px/1.45 "JetBrains Mono", ui-monospace, monospace;
+    font: inherit;
+    font-size: var(--rhm-font-size-xs);
   }
   /* Highlight the "user code" section — that's the part the dev cares about. */
   .wat-section[data-section="user-code"] > summary {
-    background: var(--ctp-surface1);
+    background: var(--rhm-color-syntax-line-current);
   }
   .wat-section[data-section="user-code"] > pre {
-    border-left-color: var(--ctp-sapphire);
-    color: var(--ctp-text);
+    border-left-color: var(--rhm-color-accent);
   }
 
-  /* WAT syntax tokens — palette mirrors the editor's Lua highlighter so
-     keywords/strings/comments/numbers all look the same on both sides. */
-  .wat-comment  { color: var(--ctp-overlay1); font-style: italic; }
-  .wat-string   { color: var(--ctp-green); }
-  .wat-number   { color: var(--ctp-peach); }
-  .wat-keyword  { color: var(--ctp-mauve); }          /* func, param, result, etc. */
-  .wat-instr    { color: var(--ctp-blue); }           /* local.get, call, br_table, etc. */
-  .wat-type     { color: var(--ctp-yellow); }         /* i32, f64, anyref, … */
-  .wat-ident    { color: var(--ctp-rosewater); }      /* $name */
-  .wat-paren    { color: var(--ctp-overlay2); }
+  /* WAT syntax tokens — the same syntax tokens as the editor's Lua
+     highlighter, so both sides read alike. Colour only, no weight or
+     italics (rhm/ui spec 5.11). */
+  .wat-comment  { color: var(--rhm-color-syntax-comment); }
+  .wat-string   { color: var(--rhm-color-syntax-string); }
+  .wat-number   { color: var(--rhm-color-syntax-number); }
+  .wat-keyword  { color: var(--rhm-color-syntax-keyword); }   /* func, param, result, etc. */
+  .wat-instr    { color: var(--rhm-color-syntax-function); }  /* local.get, call, br_table, etc. */
+  .wat-type     { color: var(--rhm-color-syntax-type); }      /* i32, f64, anyref, … */
+  .wat-ident    { color: var(--rhm-color-syntax-property); }  /* $name */
+  .wat-paren    { color: var(--rhm-color-syntax-punctuation); }
   /* A line belonging to a function/global that DCE drops from the final
      .wasm. Dimmed + struck through so the surviving module reads clearly;
      hover shows why. The opacity also fades the nested syntax spans. */
   .wat-dead { opacity: .4; text-decoration: line-through;
-              text-decoration-color: var(--ctp-overlay0); }
-  .wat-note { margin: 0 0 .5em 0; color: var(--ctp-overlay1);
-              font: 12px/1.45 "JetBrains Mono", ui-monospace, monospace; }
-  /* "hide dead code" toggle next to the Show WAT button. */
-  #hidedead-label { color: var(--ctp-subtext0); font-size: 13px;
-                    user-select: none; cursor: pointer;
-                    display: inline-flex; align-items: center; gap: .3em; }
-  #hidedead-label input { vertical-align: middle; cursor: pointer; }
-  .err  { color: var(--ctp-red); }
-  .info { color: var(--ctp-overlay1); }
-  .stdin-prompt { color: var(--ctp-sapphire); }
+              text-decoration-color: var(--rhm-color-text-on-code-muted); }
+  .wat-note { margin: 0 0 .5em 0; color: var(--rhm-color-text-on-code-muted); }
+  .err  { color: var(--rhm-color-syntax-ansi-red); }
+  .info { color: var(--rhm-color-text-on-code-muted); }
+  .stdin-prompt { color: var(--rhm-color-syntax-keyword); }
   .stdin-input {
-    background: transparent; border: none; color: var(--ctp-text);
+    background: transparent; border: none; color: var(--rhm-color-text-on-code);
     font: inherit; outline: none; min-width: 12em;
-    caret-color: var(--ctp-rosewater);
+    caret-color: currentColor;
   }
-  .stdin-done { color: var(--ctp-sky); }
+  .stdin-done { color: var(--rhm-color-syntax-string); }
+
   footer {
-    padding: .4em 1em; font-size: 12px; color: var(--ctp-overlay1);
-    background: var(--ctp-mantle);
-    border-top: 1px solid var(--ctp-surface0);
+    color: var(--rhm-color-text-muted);
+    font-size: var(--rhm-font-size-xs);
   }
   footer code {
-    background: var(--ctp-surface0); color: var(--ctp-subtext1);
-    padding: 1px 4px; border-radius: 3px;
+    padding: 1px 5px; border-radius: 4px;
+    background: var(--rhm-color-surface-sunken);
+    color: var(--rhm-color-text);
   }
-  footer .warn {
-    background: var(--ctp-surface0); color: var(--ctp-yellow);
-    padding: 1px 6px; border-radius: 3px;
-  }
-  footer a { color: var(--ctp-sapphire); text-decoration: none; }
-  footer a:hover { text-decoration: underline; }
+  footer a { display: inline-block; padding-block: 4px; }
 </style>
 
-<header>
-  <h1><a href="https://github.com/rhmoller/lua2wasm" target="_blank" rel="noopener">lua2wasm</a> playground</h1>
-  <select id="preset">
+<body>
+<div class="app rhm-device">
+<header class="app-bar" data-slot="head">
+  <h1><a href="https://github.com/rhmoller/lua2wasm" target="_blank" rel="noopener" data-rhm-hit><span class="rhm-label-tape" data-variant="plate">lua2wasm</span></a> <span class="app-kind">playground</span></h1>
+  <span class="rhm-select">
+  <select id="preset" aria-label="Example program">
     <optgroup label="quick">
       <option value="stack">stack (OO + errors + pcall)</option>
       <option value="hello">hello</option>
@@ -295,19 +248,30 @@
       <option value="tjdevries">TJ DeVries: Everything You Need To Start Writing Lua</option>
     </optgroup>
   </select>
-  <button id="run" disabled>Run ▶</button>
-  <button id="showwat">Show WAT</button>
-  <label id="hidedead-label"
+  </span>
+  <button id="run" class="rhm-key" data-variant="primary" type="button" disabled>Run <span aria-hidden="true">▶</span></button>
+  <button id="showwat" class="rhm-key" type="button">Show WAT</button>
+  <label id="hidedead-label" class="rhm-switch"
          title="Show WAT: strike through dead code, or omit it entirely">
-    <input type="checkbox" id="hidedead"> hide dead code
+    <input type="checkbox" role="switch" id="hidedead">
+    <span data-part="track"><span data-part="thumb"></span></span>
+    <span data-part="label">hide dead code</span>
+    <span data-part="state" aria-hidden="true"></span>
   </label>
-  <span id="status" style="color:#888"></span>
-  <button id="theme-toggle" style="margin-left:auto"
-          title="Toggle Catppuccin Mocha (dark) / Latte (light)">
-    <span class="theme-icon">🌙</span>
+  <span class="spacer"></span>
+  <div class="app-status rhm-screen" role="status">
+    <span class="rhm-status-light"><span id="status-lamp" class="rhm-lamp" aria-hidden="true"></span><span id="status"></span></span>
+  </div>
+  <button id="theme-toggle" class="rhm-icon-key" type="button"
+          title="Toggle light / dark theme" aria-label="Toggle light / dark theme">
+    <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2">
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 3a9 9 0 0 0 0 18z" fill="currentColor" stroke="none" />
+    </svg>
   </button>
 </header>
 
+<div class="app-body" data-slot="body">
 <aside id="intro">
   <strong>lua2wasm</strong> is an ahead-of-time compiler that turns Lua 5.5
   source into standalone WebAssembly modules using the WASM-GC,
@@ -319,16 +283,18 @@
 <main>
   <div id="editor-host"></div>
   <div id="splitter" role="separator" aria-orientation="vertical"
-       tabindex="0" aria-label="Resize panels"></div>
+       tabindex="0" aria-label="Resize panels"
+       aria-valuenow="50" aria-valuemin="8" aria-valuemax="92"></div>
   <pre id="out"></pre>
 </main>
 
 <footer>
   Pipeline: <code>Lua → lua2wasm (in WASM) → WAT → wat2wasm → WASM-GC → execute</code>
   · Runs in any current browser (Chrome 137+, Firefox 131+, Safari 18.4+).
-  · color theme by <a href="https://catppuccin.com" target="_blank" rel="noopener">catppuccin.com</a>
   · build <a id="build-hash" href="https://github.com/rhmoller/lua2wasm/commits/main" target="_blank" rel="noopener"><code>dev</code></a>
 </footer>
+</div>
+</div>
 
 <script type="module">
 import { basicSetup, EditorView }              from "https://esm.sh/codemirror@6.0.2";
@@ -337,25 +303,25 @@ import { StreamLanguage, HighlightStyle,
 import { lua as luaMode }                      from "https://esm.sh/@codemirror/legacy-modes@6.4.0/mode/lua";
 import { tags as t }                           from "https://esm.sh/@lezer/highlight@1.2.1";
 
-/* ---- Catppuccin theme via CSS variables ----
- * The actual color values live in the :root / [data-theme] blocks at
- * the top of this file. Pointing the CodeMirror theme at the same
- * --ctp-* vars means a theme toggle just flips html[data-theme]; the
- * editor follows along without rebuilding any extension. */
-const CTP = new Proxy({}, { get: (_, k) => `var(--ctp-${String(k)})` });
+/* ---- Editor theme on rhm/ui tokens ----
+ * Every colour is a CSS variable from rhm-ui/rhm.css, so a light/dark
+ * toggle just flips html[data-rhm-scheme]; the editor follows along
+ * without rebuilding any extension. Backgrounds stay transparent so the
+ * code surface and its inset edge on #editor-host show through. */
+const RHM = new Proxy({}, { get: (_, k) => `var(--rhm-${String(k)})` });
 
-const catppuccinTheme = EditorView.theme({
-  "&":               { color: CTP.text, backgroundColor: CTP.base },
-  ".cm-content":     { caretColor: CTP.rosewater },
-  ".cm-cursor, .cm-dropCursor": { borderLeftColor: CTP.rosewater },
+const rhmTheme = EditorView.theme({
+  "&":               { color: RHM["color-text-on-code"], backgroundColor: "transparent" },
+  ".cm-content":     { caretColor: RHM["color-text-on-code"] },
+  ".cm-cursor, .cm-dropCursor": { borderLeftColor: RHM["color-text-on-code"] },
   "&.cm-focused .cm-selectionBackground, .cm-selectionBackground, .cm-content ::selection": {
-    backgroundColor: CTP.surface1 + " !important",
+    backgroundColor: RHM["color-selection"] + " !important",
   },
-  ".cm-panels":              { backgroundColor: CTP.mantle, color: CTP.text },
-  ".cm-panels.cm-panels-top":    { borderBottom: "2px solid " + CTP.surface0 },
-  ".cm-panels.cm-panels-bottom": { borderTop:    "2px solid " + CTP.surface0 },
-  ".cm-searchMatch":         { backgroundColor: CTP.surface2, color: CTP.text },
-  ".cm-searchMatch.cm-searchMatch-selected": { backgroundColor: CTP.surface2 },
+  ".cm-panels":              { backgroundColor: RHM["color-surface-2"], color: RHM["color-text"] },
+  ".cm-panels.cm-panels-top":    { borderBottom: "1px solid " + RHM["color-edge"] },
+  ".cm-panels.cm-panels-bottom": { borderTop:    "1px solid " + RHM["color-edge"] },
+  ".cm-searchMatch":         { backgroundColor: RHM["color-selection"], color: RHM["color-text-on-code"] },
+  ".cm-searchMatch.cm-searchMatch-selected": { outline: "1px solid " + RHM["color-edge"] },
   /* Tint the active line via a pseudo-element behind CodeMirror's
      selection layer (drawSelection paints it at z-index -2, below
      .cm-content). An opaque line background would sit in the content
@@ -363,49 +329,49 @@ const catppuccinTheme = EditorView.theme({
      head — e.g. drag-selecting upward left the top line looking
      unselected. z-index -3 keeps the tint below the selection so both
      coexist. */
-  ".cm-activeLine":          { position: "relative" },
+  ".cm-activeLine":          { position: "relative", backgroundColor: "transparent" },
   ".cm-activeLine::before": {
     content: '""', position: "absolute", inset: "0",
-    backgroundColor: CTP.mantle, zIndex: "-3", pointerEvents: "none",
+    backgroundColor: RHM["color-syntax-line-current"], zIndex: "-3", pointerEvents: "none",
   },
-  ".cm-selectionMatch":      { backgroundColor: CTP.surface1 },
+  ".cm-selectionMatch":      { backgroundColor: RHM["color-selection"] },
   ".cm-matchingBracket, .cm-nonmatchingBracket": {
-    backgroundColor: CTP.surface1, outline: "1px solid " + CTP.overlay0,
+    backgroundColor: RHM["color-selection"], outline: "1px solid " + RHM["color-edge"],
   },
   ".cm-gutters": {
-    backgroundColor: CTP.base, color: CTP.overlay0,
-    borderRight: "1px solid " + CTP.surface0,
+    backgroundColor: "transparent", color: RHM["color-text-on-code-muted"],
+    borderRight: "1px solid color-mix(in oklch, " + RHM["color-edge"] + " 40%, transparent)",
   },
-  ".cm-activeLineGutter": { backgroundColor: CTP.mantle, color: CTP.lavender },
-  ".cm-foldPlaceholder": { backgroundColor: CTP.surface1, color: CTP.subtext0, border: "none" },
+  ".cm-activeLineGutter": { backgroundColor: RHM["color-syntax-line-current"], color: RHM["color-text-on-code"] },
+  ".cm-foldPlaceholder": { backgroundColor: RHM["color-selection"], color: RHM["color-text-on-code"], border: "none" },
   ".cm-tooltip": {
-    backgroundColor: CTP.mantle, color: CTP.text,
-    border: "1px solid " + CTP.surface0,
+    backgroundColor: RHM["color-surface-overlay"], color: RHM["color-text"],
+    border: "1px solid " + RHM["color-edge"], borderRadius: RHM["radius-field"],
   },
   ".cm-tooltip-autocomplete > ul > li[aria-selected]": {
-    backgroundColor: CTP.surface1, color: CTP.text,
+    backgroundColor: RHM["color-selected"], color: RHM["color-text-on-selected"],
   },
-}, { dark: true });
+});
 
 const luaHighlightStyle = HighlightStyle.define([
-  { tag: [t.keyword, t.controlKeyword, t.modifier, t.definitionKeyword], color: CTP.mauve, fontWeight: "500" },
-  { tag: t.operatorKeyword,               color: CTP.mauve },
-  { tag: [t.string, t.special(t.string)], color: CTP.green },
-  { tag: t.regexp,                        color: CTP.red },
-  { tag: t.escape,                        color: CTP.pink },
-  { tag: [t.number, t.bool, t.null, t.atom], color: CTP.peach },
-  { tag: [t.comment, t.lineComment, t.blockComment], color: CTP.overlay0, fontStyle: "italic" },
-  { tag: t.operator,                      color: CTP.sky },
-  { tag: [t.punctuation, t.bracket, t.brace, t.paren], color: CTP.overlay2 },
-  { tag: t.variableName,                  color: CTP.text },
-  { tag: t.function(t.variableName),      color: CTP.blue },
-  { tag: t.function(t.propertyName),      color: CTP.blue },
-  { tag: t.propertyName,                  color: CTP.lavender },
-  { tag: t.labelName,                     color: CTP.maroon },
-  { tag: t.typeName,                      color: CTP.yellow },
-  { tag: t.namespace,                     color: CTP.yellow },
-  { tag: t.self,                          color: CTP.red, fontStyle: "italic" },
-  { tag: t.invalid,                       color: CTP.red, textDecoration: "underline" },
+  { tag: [t.keyword, t.controlKeyword, t.modifier, t.definitionKeyword], color: RHM["color-syntax-keyword"] },
+  { tag: t.operatorKeyword,               color: RHM["color-syntax-keyword"] },
+  { tag: [t.string, t.special(t.string)], color: RHM["color-syntax-string"] },
+  { tag: t.regexp,                        color: RHM["color-syntax-string"] },
+  { tag: t.escape,                        color: RHM["color-syntax-number"] },
+  { tag: [t.number, t.bool, t.null, t.atom], color: RHM["color-syntax-number"] },
+  { tag: [t.comment, t.lineComment, t.blockComment], color: RHM["color-syntax-comment"] },
+  { tag: t.operator,                      color: RHM["color-syntax-punctuation"] },
+  { tag: [t.punctuation, t.bracket, t.brace, t.paren], color: RHM["color-syntax-punctuation"] },
+  { tag: t.variableName,                  color: RHM["color-text-on-code"] },
+  { tag: t.function(t.variableName),      color: RHM["color-syntax-function"] },
+  { tag: t.function(t.propertyName),      color: RHM["color-syntax-function"] },
+  { tag: t.propertyName,                  color: RHM["color-syntax-property"] },
+  { tag: t.labelName,                     color: RHM["color-syntax-type"] },
+  { tag: t.typeName,                      color: RHM["color-syntax-type"] },
+  { tag: t.namespace,                     color: RHM["color-syntax-type"] },
+  { tag: t.self,                          color: RHM["color-syntax-keyword"] },
+  { tag: t.invalid,                       color: RHM["color-syntax-ansi-red"], textDecoration: "underline" },
 ]);
 import { loadCompiler }           from "./lua2wasm-wasm.mjs";
 import { InMemoryFs }             from "https://esm.sh/just-bash@latest";
@@ -922,8 +888,11 @@ const editor = new EditorView({
   extensions: [
     basicSetup,
     StreamLanguage.define(luaMode),
-    catppuccinTheme,
+    rhmTheme,
     syntaxHighlighting(luaHighlightStyle),
+    /* An accessible name, and an explicit tab stop so checkers see the
+       scroller's focusable content (contenteditable is focusable anyway). */
+    EditorView.contentAttributes.of({ "aria-label": "Lua source", tabindex: "0" }),
   ],
 });
 
@@ -935,6 +904,13 @@ document.getElementById("preset").onchange = e => {
 /* ----- output helpers ----- */
 const out = document.getElementById("out");
 const status = document.getElementById("status");
+const statusLamp = document.getElementById("status-lamp");
+/* Status readout: text plus a lamp (warn and blinking while busy, ok when ready). */
+function setStatus(text, lamp, busy = false) {
+  status.textContent = text;
+  statusLamp.dataset.variant = lamp;
+  if (busy) statusLamp.dataset.state = "alert"; else delete statusLamp.dataset.state;
+}
 function clearOut() { out.textContent = ""; }
 function logLine(s, cls) {
   const node = cls ? document.createElement("span") : document.createTextNode(s + "\n");
@@ -946,7 +922,7 @@ function logLine(s, cls) {
 /* The compiler is a freestanding wasm module built with plain clang (no
  * Emscripten); lua2wasm-wasm.mjs is the host glue. It needs only env.abort /
  * env.log imports, which the glue supplies. */
-status.textContent = "loading compiler…";
+setStatus("loading compiler…", "warn", true);
 const compiler = await loadCompiler(
   await (await fetch("../build-wasm/lua2wasm.wasm")).arrayBuffer(),
   (line) => logLine(line, "err"),
@@ -1484,6 +1460,7 @@ async function showWat() {
       (dropped ? ` · ${dropped.toLocaleString()} ${hide ? "hidden" : "dropped"}` : "");
     det.appendChild(sum);
     const pre = document.createElement("pre");
+    pre.tabIndex = 0; /* long lines scroll sideways; keep that reachable by keyboard */
     /* Highlight line-by-line so a dead form's lines can be wrapped (or
      * dropped); codegen WAT keeps strings and comments within a single line,
      * so per-line tokenizing is safe. */
@@ -1525,27 +1502,25 @@ hideDeadCB.addEventListener("change", () => {
 });
 /* ----- light/dark theme toggle -----
  * First-load preference order: localStorage > prefers-color-scheme > dark.
- * Toggling flips html[data-theme]; the rest of the UI (and the editor,
+ * Toggling flips html[data-rhm-scheme]; the rest of the UI (and the editor,
  * via CSS-var-backed theme constants) updates automatically. */
 const THEME_KEY = "lua2wasm.theme";
 const themeBtn  = document.getElementById("theme-toggle");
-const themeIcon = themeBtn.querySelector(".theme-icon");
 function applyTheme(t) {
-  document.documentElement.dataset.theme = t;
-  themeIcon.textContent = t === "light" ? "☀️" : "🌙";
+  document.documentElement.dataset.rhmScheme = t;
 }
 const stored = localStorage.getItem(THEME_KEY);
 const initialTheme = stored
   ?? (window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
 applyTheme(initialTheme);
 themeBtn.addEventListener("click", () => {
-  const next = document.documentElement.dataset.theme === "light" ? "dark" : "light";
+  const next = document.documentElement.dataset.rhmScheme === "light" ? "dark" : "light";
   applyTheme(next);
   localStorage.setItem(THEME_KEY, next);
 });
 
 runBtn.disabled = false;
-status.textContent = "ready (Ctrl/Cmd+Enter to run)";
+setStatus("ready (Ctrl/Cmd+Enter to run)", "ok");
 
 /* Global Ctrl/Cmd+Enter → Run, regardless of which pane has focus.
  * Capture phase + preventDefault so CodeMirror doesn't insert a newline. */
@@ -1558,14 +1533,14 @@ window.addEventListener("keydown", e => {
 }, true);
 
 /* Draggable splitter between the editor and the output panel. The
- * gutter pixel column is fixed at 6px in the grid template; this code
+ * gutter pixel column is fixed at 12px in the grid template; this code
  * just updates a CSS custom property on <main> so the left track
  * grows/shrinks by the cursor's horizontal delta. The right track
  * inherits the rest via its 1fr unit. */
 (function setupSplitter() {
   const mainEl   = document.querySelector("main");
   const splitter = document.getElementById("splitter");
-  const GUTTER_PX = 6;
+  const GUTTER_PX = 12;
   const STORAGE_KEY = "lua2wasm.splitLeftPct";
 
   /* setSplit only touches the CSS variable. localStorage is written
@@ -1577,6 +1552,7 @@ window.addEventListener("keydown", e => {
     pct = Math.max(8, Math.min(92, pct));
     currentPct = pct;
     mainEl.style.setProperty("--split-left", pct.toFixed(2) + "%");
+    splitter.setAttribute("aria-valuenow", Math.round(pct));
   }
 
   /* Restore a previously chosen split. */
@@ -1623,6 +1599,7 @@ window.addEventListener("keydown", e => {
   splitter.addEventListener("dblclick", () => {
     mainEl.style.removeProperty("--split-left");
     currentPct = 50;
+    splitter.setAttribute("aria-valuenow", 50);
     localStorage.removeItem(STORAGE_KEY);
   });
 

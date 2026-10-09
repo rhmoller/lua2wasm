@@ -58,6 +58,8 @@ jobs:
           cp runtime/lua2wasm-wasm.mjs dist/lua2wasm-wasm.mjs
           cp runtime/host-bindings.mjs dist/host-bindings.mjs
           cp runtime/format.mjs        dist/format.mjs
+          # rhm/ui stylesheet and fonts, linked as rhm-ui/… from the page.
+          cp -r runtime/rhm-ui         dist/rhm-ui
           # Rewrite the relative wasm fetch so the flat dist resolves
           #   ("../build-wasm/lua2wasm.wasm" → "./lua2wasm.wasm"), and stamp the
           # footer's build-hash placeholder with the deployed commit so the
