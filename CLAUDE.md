@@ -177,5 +177,6 @@ counterexample, **shrink it and check it in as a `tests/diff` case** (the
 | `runtime/playground.html` | in-browser editor + compile + run (plain-clang wasm, no Emscripten) |
 | `tests/e2e/`        | data-driven e2e suite (manifest + goldens) |
 
-Rolling backlog / punch-list: `notes/codereview.md`. Open a discussion before
-large changes.
+Backlogs: performance work in `docs/perf-backlog.md`; known divergences from
+reference Lua are the `xfail` rows of `tests/diff/manifest.tsv`; larger features
+in the README's "Deferred / planned". Open a discussion before large changes.

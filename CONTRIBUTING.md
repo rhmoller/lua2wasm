@@ -102,8 +102,9 @@ No AI-attribution trailers (no `Co-Authored-By: Claude`).
 
 - One topic per PR. If a refactor and a feature both belong, two PRs.
 - The full `ctest` matrix must be green.
-- Mention the punch-list item from `notes/codereview.md` if your change
-  closes one — that file is the rolling backlog.
+- Say which backlog item your change closes, if any: a `docs/perf-backlog.md`
+  entry, an `xfail` row of `tests/diff/manifest.tsv` (promote it to `pass`), or
+  a README "Deferred / planned" card.
 
 ## License
 
