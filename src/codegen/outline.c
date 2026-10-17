@@ -114,15 +114,21 @@ static void once_block(const Block *b, void *ctx);
 static void once_stmt(const Stmt *s, OnceScan *o) {
     int loop = stmt_is_loop(s);
     if (s->kind == STMT_GOTO) o->has_goto = 1;
-    /* `function g() ... end` for a global g: a definition */
-    if (s->kind == STMT_ASSIGN && o->gdefs && o->loops == 0 && s->as.assign.n_targets == 1 &&
-        s->as.assign.n_values == 1 && s->as.assign.targets[0].kind == TGT_VAR &&
-        s->as.assign.targets[0].as.var.kind == VAR_GLOBAL && s->as.assign.values[0]->kind == EXPR_FUNCTION) {
-        int g = s->as.assign.targets[0].as.var.idx;
-        if (g >= 0 && g < o->ng) {
-            o->gdefs[g]++;
-            o->gfunc[g] = s->as.assign.values[0]->as.func_expr.func;
-        }
+    /* `function g() ... end` / `global function g() ... end` for a global
+     * g: a definition */
+    int g = -1;
+    const Expr *def = NULL;
+    if (s->kind == STMT_ASSIGN && s->as.assign.n_targets == 1 && s->as.assign.n_values == 1 &&
+        s->as.assign.targets[0].kind == TGT_VAR && s->as.assign.targets[0].as.var.kind == VAR_GLOBAL) {
+        g = s->as.assign.targets[0].as.var.idx;
+        def = s->as.assign.values[0];
+    } else if (s->kind == STMT_GLOBAL && s->as.global_decl.n_names == 1 && s->as.global_decl.n_values == 1) {
+        g = s->as.global_decl.global_idxs[0];
+        def = s->as.global_decl.values[0];
+    }
+    if (o->gdefs && o->loops == 0 && def && def->kind == EXPR_FUNCTION && g >= 0 && g < o->ng) {
+        o->gdefs[g]++;
+        o->gfunc[g] = def->as.func_expr.func;
     }
     o->loops += loop; /* a loop's own expressions count as inside it */
     for_each_own_expr(s, once_expr, o);
@@ -137,6 +143,7 @@ static void once_block(const Block *b, void *ctx) {
  * whether the pcall / xpcall names are ever assigned. */
 typedef struct {
     int *mentions, ng;
+    const GlobalDecl *names;
     int handoff_assigned;
 } GlobalScan;
 static void gscan_expr(const Expr *e, void *ctx) {
@@ -160,6 +167,16 @@ static void gscan_stmt(const Stmt *s, void *ctx) {
                 const char *n = builtin_name(t->as.var.idx);
                 if (strcmp(n, "pcall") == 0 || strcmp(n, "xpcall") == 0) g->handoff_assigned = 1;
             }
+        }
+    if (s->kind == STMT_GLOBAL && s->as.global_decl.n_values > 0) /* `global x = v` writes x */
+        for (int i = 0; i < s->as.global_decl.n_names; i++) {
+            int gi = s->as.global_decl.global_idxs[i];
+            if (gi < 0 || gi >= g->ng) continue;
+            g->mentions[gi]++;
+            const char *n = g->names[gi].name;
+            size_t len = g->names[gi].name_len;
+            if ((len == 5 && memcmp(n, "pcall", 5) == 0) || (len == 6 && memcmp(n, "xpcall", 6) == 0))
+                g->handoff_assigned = 1;
         }
     for_each_own_expr(s, gscan_expr, g);
 }
@@ -217,7 +234,9 @@ static int once_body(CG *c, int fi, int closed, const GlobalScan *gs, int *queue
 void compute_run_once(CG *c, const ParseResult *pr, int closed) {
     int nf = (int)pr->funcs.count;
     c->run_once = xcalloc((size_t)nf + 1, 1);
-    GlobalScan gs = {.mentions = xcalloc(pr->globals.count + 1, sizeof(int)), .ng = (int)pr->globals.count};
+    GlobalScan gs = {.mentions = xcalloc(pr->globals.count + 1, sizeof(int)),
+                     .ng = (int)pr->globals.count,
+                     .names = pr->globals.items};
     walk_stmts(&pr->main_body, gscan_stmt, &gs);
     for (int f = 0; f < nf; f++) walk_stmts(&pr->funcs.items[f]->body, gscan_stmt, &gs);
     int *queue = xcalloc((size_t)nf + 1, sizeof(int)), nq = 0;

@@ -1232,47 +1232,24 @@ static void emit_goto(CG *c, const Stmt *s, int depth) {
 /* `global n1, ... = v1, ...`: like `local`, but each name is a field of
  * $g_globals. */
 static void emit_global_decl(CG *c, const Stmt *s, int depth) {
+    /* `global a, b = e1, e2` (and `global function f`) initializes globals,
+     * as in reference Lua: every value is evaluated first (left to right),
+     * then each name, right to left, is checked — $global_init raises
+     * "global 'a' already defined" when it already holds a value — and
+     * stored. A declaration without values only declares. */
     int n_names = s->as.global_decl.n_names;
     int n_values = s->as.global_decl.n_values;
     if (n_values == 0) return;
-    int last_call = (n_values > 0 &&
-                     is_multival_tail(s->as.global_decl.values[n_values - 1]));
-    int n_lead = last_call ? n_values - 1 : n_values;
-    /* Same left-to-right evaluation contract as STMT_LOCAL: leading
-     * single values first, then the trailing multivalue tail. The store
-     * keys are constant strings (no side effects), so only the value
-     * order matters. */
-    for (int i = 0; i < n_lead; i++) {
-        if (i >= n_names) {
-            emit_expr(c, s->as.global_decl.values[i], depth);
-            emit_line(c, depth, "drop\n");
-            continue;
-        }
-        int gi = s->as.global_decl.global_idxs[i];
-        emit_line(c, depth, "(call $tab_set (ref.as_non_null (global.get $g_globals))\n");
+    emit_line(c, depth, "(local.set $tmp_args\n");
+    emit_args_array(c, s->as.global_decl.values, n_values, depth + 1);
+    emit_line(c, depth, ")\n");
+    for (int i = n_names - 1; i >= 0; i--) {
+        const GlobalDecl *g = &c->pr->globals.items[s->as.global_decl.global_idxs[i]];
+        emit_line(c, depth, "(call $global_init\n");
         emit_indent(c, depth + 1);
-        emit_global_key(c, c->pr->globals.items[gi].name,
-                        c->pr->globals.items[gi].name_len);
-        emit_expr(c, s->as.global_decl.values[i], depth + 1);
-        emit_line(c, depth, ")\n");
-    }
-    if (last_call) {
-        emit_line(c, depth, "(local.set $tmp_args\n");
-        emit_multival_array(c, s->as.global_decl.values[n_values - 1], depth + 1);
-        emit_line(c, depth, ")\n");
-    }
-    for (int i = n_lead; i < n_names; i++) {
-        int gi = s->as.global_decl.global_idxs[i];
-        emit_line(c, depth, "(call $tab_set (ref.as_non_null (global.get $g_globals))\n");
-        emit_indent(c, depth + 1);
-        emit_global_key(c, c->pr->globals.items[gi].name,
-                        c->pr->globals.items[gi].name_len);
-        if (last_call) {
-            emit_args_at(c, i - n_lead, depth + 1);
-        } else {
-            emit_line(c, depth + 1, "(ref.null any)\n");
-        }
-        emit_line(c, depth, ")\n");
+        emit_global_key(c, g->name, g->name_len);
+        emit_args_at(c, i, depth + 1);
+        emit_linef(c, depth + 1, "(i32.const %d))\n", s->line);
     }
 }
 

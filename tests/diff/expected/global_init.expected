@@ -1,0 +1,24 @@
+false	global 'a' already defined
+1
+false	global 'a' already defined
+1	20
+false	global 'c' already defined
+false
+true	
+5	nil
+false	global 'd' already defined
+5	nil
+true	
+3	nil
+true	
+1	2	3	r,s,t,extra
+true	
+x	y
+true	
+true	
+h
+false	global 'h' already defined
+h
+wrapped:	hi	1
+wrapped:	<42>
+42

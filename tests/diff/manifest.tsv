@@ -152,3 +152,4 @@ pass	close_messages	__close gets no 2nd argument without an error; non-closable 
 pass	named_vararg	Lua 5.5 `...t`: t is a read-only {args..., n = count}; `...` reads t[1..t.n]; improper n raises
 pass	strict_global	Lua 5.5 strict globals: a free name in the scope of a global declaration is a compile error
 pass	goto_into_scope	a goto may not jump into a local's scope: compile error at the label
+pass	global_init	`global x = v` raises when x is already defined; values first, then check+store right to left; function statements redefine builtins

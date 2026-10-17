@@ -1478,6 +1478,15 @@ static Stmt *parse_label(Parser *p) {
     return s;
 }
 
+/* The globals-table index of `name`, declaring it on first use (the same
+ * index a read of the name resolves to). */
+static int global_index(Parser *p, const char *name, size_t name_len) {
+    int g = globals_lookup(p, name, name_len);
+    if (g < 0) g = globals_declare(p, name, name_len);
+    if (g < 0) set_error(p, "too many globals");
+    return g;
+}
+
 static Stmt *parse_global(Parser *p) {
     int line = peek(p)->line;
     advance(p); /* global */
@@ -1489,11 +1498,29 @@ static Stmt *parse_global(Parser *p) {
      * consuming the `function` keyword. */
     if (peek(p)->kind == TOK_KW_FUNCTION) {
         const Token *fname = peek_at(p, 1);
+        if (fname->kind == TOK_IDENT && peek_at(p, 2)->kind != TOK_LPAREN) {
+            advance(p); /* function */
+            advance(p); /* the name: report what follows it */
+            set_error(p, "'(' expected");
+            return NULL;
+        }
         if (fname->kind == TOK_IDENT && frame_declare_global(cur_frame(p), fname->start, fname->len, 0) < 0) {
             set_error(p, "too many locals");
             return NULL;
         }
-        return parse_function_stmt(p);
+        Stmt *def = parse_function_stmt(p);
+        if (!def) return NULL;
+        /* It initializes the global, as `global f = function ... end` would
+         * (raising if f is already defined). */
+        int gi = global_index(p, fname->start, fname->len);
+        if (gi < 0) return NULL;
+        Stmt *s = stmt_new(p->pool, STMT_GLOBAL, line);
+        s->as.global_decl.n_names = 1;
+        s->as.global_decl.global_idxs = node_pool_alloc(p->pool, sizeof(int));
+        s->as.global_decl.global_idxs[0] = gi;
+        s->as.global_decl.n_values = 1;
+        s->as.global_decl.values = def->as.assign.values;
+        return s;
     }
 
     /* Optional prefix `<attr>` — `global <const> ...` — applying to every
@@ -1547,9 +1574,8 @@ static Stmt *parse_global(Parser *p) {
     /* Register globals BEFORE parsing values so they can self-reference. */
     int *global_idxs = node_pool_alloc(p->pool, sizeof(int) * n_names);
     for (int i = 0; i < n_names; i++) {
-        int idx = globals_declare(p, names_buf[i]->start, names_buf[i]->len);
+        int idx = global_index(p, names_buf[i]->start, names_buf[i]->len);
         if (idx < 0) {
-            set_error(p, "too many globals");
             ib_free(&names);
             ib_free(&attribs_b);
             return NULL;
@@ -1615,10 +1641,8 @@ static Stmt *parse_function_stmt(Parser *p) {
         set_error(p, buf);
         return NULL;
     }
-    if (kind == VAR_BUILTIN) {
-        set_error(p, "cannot redefine a builtin");
-        return NULL;
-    }
+    /* A builtin name is redefined like `print = function ... end` would:
+     * the assignment writes a new _G entry. */
     /* Build the base expression for the path. */
     Expr *base = expr_new(p->pool, EXPR_VAR, line);
     base->as.var.name = first->start;

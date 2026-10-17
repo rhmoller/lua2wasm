@@ -11,6 +11,23 @@
   ;; this table. \$stdlib_init populates it; codegen emits \$tab_get /
   ;; \$tab_set against it for every global read/write.
   (global $g_globals (mut (ref null $LuaTable)) (ref.null $LuaTable))
+
+  ;; `global name = v` (and `global function name`) on $line: an
+  ;; initialization, which raises "global 'name' already defined" when the
+  ;; global already holds a value (false included), as in reference Lua.
+  (func $global_init (param $key (ref $LuaString)) (param $v anyref) (param $line i32)
+    (if (i32.eqz (ref.is_null (call $tab_get (ref.as_non_null (global.get $g_globals)) (local.get $key))))
+      (then (throw $LuaError (call $raised (call $prefix_error_msg
+        (ref.as_non_null (global.get $g_src_name))
+        (local.get $line)
+        (ref.cast (ref $LuaString) (call $lua_concat
+          (call $lua_concat
+            (struct.new $LuaString   ;; "global '"
+              (array.new_data $LuaArr $str_data (i32.const 1306) (i32.const 8)) (i32.const 0))
+            (local.get $key))
+          (struct.new $LuaString   ;; "' already defined"
+            (array.new_data $LuaArr $str_data (i32.const 1314) (i32.const 17)) (i32.const 0)))))))))
+    (call $tab_set (ref.as_non_null (global.get $g_globals)) (local.get $key) (local.get $v)))
   ;; Shared metatable for all strings: {__index = string}. Built lazily by
   ;; $get_string_mt the first time getmetatable() sees a string.
   (global $g_string_mt  (mut (ref null $LuaTable)) (ref.null $LuaTable))
