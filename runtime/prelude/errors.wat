@@ -4,9 +4,12 @@
   (tag $LuaError (export "LuaError") (param anyref))
 
   ;; The message handler of the innermost active xpcall (null under a pcall
-  ;; and at top level), and how many calls of it are in progress.
+  ;; and at top level), how many calls of it are in progress, and how deep
+  ;; those may nest — a handler raising inside a handler — before the error
+  ;; becomes "error in error handling".
   (global $msgh (mut anyref) (ref.null any))
   (global $msgh_nest (mut i32) (i32.const 0))
+  (global $msgh_max_nest i32 (i32.const 20))
 
   ;; The value a newly raised error carries, built the way reference Lua's
   ;; luaG_errormsg builds it: the innermost xpcall's message handler runs
@@ -22,11 +25,11 @@
   ;; runs with headroom past the stack budget, so a handler still gets to run
   ;; after a stack overflow.
   (func $raised (param $e anyref) (result anyref)
-    (local $h anyref) (local $outer i32)
+    (local $h anyref) (local $outer i32) (local $reraised i32)
     (local.set $h (global.get $msgh))
     (if (i32.eqz (ref.is_null (local.get $h)))
       (then
-        (if (i32.ge_u (global.get $msgh_nest) (i32.const 20))
+        (if (i32.ge_u (global.get $msgh_nest) (global.get $msgh_max_nest))
           (then (return (struct.new $LuaString
             (array.new_data $LuaArr $str_data (i32.const 1208) (i32.const 23)) (i32.const 0)))))
         (local.set $outer (i32.eqz (global.get $msgh_nest)))
@@ -42,13 +45,12 @@
             (br $handled))
           ;; The handler raised: that error, already handled, replaces this one.
           (local.set $e)
-          (global.set $msgh_nest (i32.sub (global.get $msgh_nest) (i32.const 1)))
-          (if (local.get $outer)
-            (then (global.set $stack_cost (i32.add (global.get $stack_cost) (global.get $stack_headroom)))))
-          (throw $LuaError (local.get $e)))
+          (local.set $reraised (i32.const 1)))
         (global.set $msgh_nest (i32.sub (global.get $msgh_nest) (i32.const 1)))
         (if (local.get $outer)
-          (then (global.set $stack_cost (i32.add (global.get $stack_cost) (global.get $stack_headroom)))))))
+          (then (global.set $stack_cost (i32.add (global.get $stack_cost) (global.get $stack_headroom)))))
+        (if (local.get $reraised)
+          (then (throw $LuaError (local.get $e))))))   ;; rethrow: raised by the handler
     (if (result anyref) (ref.is_null (local.get $e))
       (then (struct.new $LuaString
               (array.new_data $LuaArr $str_data (i32.const 768) (i32.const 17)) (i32.const 0)))

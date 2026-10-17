@@ -76,14 +76,18 @@ static void ib_free(ItemBuf *b) {
 }
 
 /* One active declaration of a frame, in declaration order: a local, or a
- * Lua 5.5 global declaration (`global x`, or `global *` with a NULL name),
- * which is lexically scoped the same way. */
+ * Lua 5.5 global declaration, which is lexically scoped the same way. */
+typedef enum {
+    DECL_LOCAL,
+    DECL_GLOBAL,     /* `global NAME` */
+    DECL_GLOBAL_ALL, /* `global *` (no name) */
+} DeclKind;
 typedef struct {
     const char *name;
     size_t name_len;
-    int slot;   /* wasm local index inside this function (-1: a global) */
-    int attrib; /* 0 = none, 1 = <const>, 2 = <close> (milestone 23) */
-    int global; /* 0: a local; 1: `global NAME`; 2: `global *` */
+    int slot;      /* wasm local index inside this function (-1: a global) */
+    int attrib;    /* 0 = none, 1 = <const>, 2 = <close> (milestone 23) */
+    DeclKind kind; /* zero-initialized: a local */
 } LocalSlot;
 
 /* A label still visible, and a forward goto not yet matched to one, with the
@@ -174,11 +178,13 @@ static const Token *advance(Parser *p) { return &p->toks->items[p->pos++]; }
 /* The line of the last token consumed (reference Lua's `lastline`). */
 static int last_line(Parser *p) { return p->pos ? p->toks->items[p->pos - 1].line : peek(p)->line; }
 
-static void set_error(Parser *p, const char *msg) {
+/* Record the first error, at `line` (set_error: the current token's). */
+static void set_error_at(Parser *p, int line, const char *msg) {
     if (!p->ok) return;
-    snprintf(p->error, sizeof(p->error), "line %d: %s", peek(p)->line, msg);
+    snprintf(p->error, sizeof(p->error), "line %d: %s", line, msg);
     p->ok = 0;
 }
+static void set_error(Parser *p, const char *msg) { set_error_at(p, peek(p)->line, msg); }
 
 static int match(Parser *p, TokKind k) {
     if (peek(p)->kind == k) {
@@ -234,8 +240,11 @@ static int frame_declare(FuncFrame *f, const char *name, size_t name_len) {
  * declarations of the name and decides how free names resolve. */
 static int frame_declare_global(FuncFrame *f, const char *name, size_t name_len, int attrib) {
     if (f->local_count >= MAX_LOCALS_PER_FN) return -1;
-    f->locals[f->local_count++] = (LocalSlot){
-        .name = name, .name_len = name_len, .slot = -1, .attrib = attrib, .global = name ? 1 : 2};
+    f->locals[f->local_count++] = (LocalSlot){.name = name,
+                                              .name_len = name_len,
+                                              .slot = -1,
+                                              .attrib = attrib,
+                                              .kind = name ? DECL_GLOBAL : DECL_GLOBAL_ALL};
     return 0;
 }
 
@@ -286,32 +295,26 @@ static int upval_is_const(const Parser *p, int upval_idx) {
  * one, any `global NAME` in scope voids the chunk's implicit `global *`, so
  * the name must be declared. */
 typedef struct {
-    int collective; /* 0: none seen; 1: `global *`; 2: `global<const> *` */
-    int voided;     /* a `global NAME` declaration is in scope */
+    enum { ALL_NONE,
+           ALL_RW,
+           ALL_CONST } collective; /* the innermost `global *` passed */
+    int voided;                    /* a `global NAME` declaration is in scope */
 } FreeNames;
 
-enum { FOUND_NONE,
-       FOUND_LOCAL,
-       FOUND_GLOBAL };
-
-/* Reference Lua's searchvar over one frame, innermost declaration first: a
- * local of the name (*out = its slot) or a global declaration of it (*out = 1
- * if <const>) resolves it; global declarations passed on the way update `fn`. */
-static int frame_search(const FuncFrame *f, const char *name, size_t name_len, FreeNames *fn, int *out) {
+/* Reference Lua's searchvar over one frame, innermost declaration first: the
+ * local or `global` declaration of the name, or NULL. Global declarations
+ * passed on the way update `fn`. */
+static const LocalSlot *frame_search(const FuncFrame *f, const char *name, size_t name_len, FreeNames *fn) {
     for (int i = f->local_count - 1; i >= 0; i--) {
         const LocalSlot *d = &f->locals[i];
-        if (d->global == 2) {
-            if (!fn->collective) fn->collective = d->attrib == 1 ? 2 : 1;
+        if (d->kind == DECL_GLOBAL_ALL) {
+            if (fn->collective == ALL_NONE) fn->collective = d->attrib == 1 ? ALL_CONST : ALL_RW;
             continue;
         }
-        if (d->name_len != name_len || memcmp(d->name, name, name_len) != 0) {
-            if (d->global) fn->voided = 1;
-            continue;
-        }
-        *out = d->global ? d->attrib == 1 : d->slot;
-        return d->global ? FOUND_GLOBAL : FOUND_LOCAL;
+        if (d->name_len == name_len && memcmp(d->name, name, name_len) == 0) return d;
+        if (d->kind == DECL_GLOBAL) fn->voided = 1;
     }
-    return FOUND_NONE;
+    return NULL;
 }
 
 /* Leave a scope: its declarations go out of sight, and a pending goto inside
@@ -344,6 +347,15 @@ static int frame_add_upvalue(FuncFrame *f, UpvalSource src, int idx) {
  * Side effect: adds upvalues to intermediate frames as needed.
  */
 
+/* The globals-table index of `name`, declaring it on first use (the same
+ * index every reference to the name resolves to). */
+static int global_index(Parser *p, const char *name, size_t name_len) {
+    int g = globals_lookup(p, name, name_len);
+    if (g < 0) g = globals_declare(p, name, name_len);
+    if (g < 0) set_error(p, "too many globals");
+    return g;
+}
+
 /* A global name: builtins first, then declared globals, then — matching
  * stock Lua's global-by-default behaviour — auto-declare any other name as a
  * fresh global, so reading an undeclared name yields nil and a bare
@@ -355,12 +367,8 @@ static int resolve_global(Parser *p, const char *name, size_t name_len, VarKind 
         *out_idx = b;
         return 1;
     }
-    int g = globals_lookup(p, name, name_len);
-    if (g < 0) g = globals_declare(p, name, name_len);
-    if (g < 0) {
-        set_error(p, "too many globals");
-        return 0;
-    }
+    int g = global_index(p, name, name_len);
+    if (g < 0) return 0;
     *out_kind = VAR_GLOBAL;
     *out_idx = g;
     return 1;
@@ -369,29 +377,28 @@ static int resolve_global(Parser *p, const char *name, size_t name_len, VarKind 
 static int resolve_in_frame(Parser *p, int frame_idx, const char *name, size_t name_len, FreeNames *fn,
                             int *ro, VarKind *out_kind, int *out_idx) {
     FuncFrame *f = &p->frames[frame_idx];
-    int found;
-    switch (frame_search(f, name, name_len, fn, &found)) {
-    case FOUND_LOCAL:
+    const LocalSlot *d = frame_search(f, name, name_len, fn);
+    if (d && d->kind == DECL_LOCAL) {
         *out_kind = VAR_LOCAL;
-        *out_idx = found;
+        *out_idx = d->slot;
         return 1;
-    case FOUND_GLOBAL:
-        *ro = found;
+    }
+    if (d) { /* a `global NAME` declaration */
+        *ro = d->attrib == 1;
         return resolve_global(p, name, name_len, out_kind, out_idx);
-    default: break;
     }
     if (frame_idx == 0) {
         /* A free name: global by the chunk's implicit `global *`, unless a
          * global declaration in scope voids it. _ENV is never free (in
          * reference Lua it is the chunk's upvalue). */
         int env = name_len == 4 && memcmp(name, "_ENV", 4) == 0;
-        if (!env && !fn->collective && fn->voided) {
+        if (!env && fn->collective == ALL_NONE && fn->voided) {
             char buf[160];
             snprintf(buf, sizeof(buf), "variable '%.*s' not declared", (int)name_len, name);
             set_error(p, buf);
             return 0;
         }
-        *ro = !env && fn->collective == 2;
+        *ro = !env && fn->collective == ALL_CONST;
         return resolve_global(p, name, name_len, out_kind, out_idx);
     }
     /* recurse into parent */
@@ -425,10 +432,9 @@ static int resolve_in_frame(Parser *p, int frame_idx, const char *name, size_t n
 
 static int resolve_name(Parser *p, const char *name, size_t name_len, VarKind *out_kind, int *out_idx,
                         int *ro) {
-    FreeNames fn = {0};
-    int unused = 0;
-    *(ro ? ro : &unused) = 0;
-    return resolve_in_frame(p, p->frame_depth, name, name_len, &fn, ro ? ro : &unused, out_kind, out_idx);
+    FreeNames fn = {.collective = ALL_NONE};
+    *ro = 0;
+    return resolve_in_frame(p, p->frame_depth, name, name_len, &fn, ro, out_kind, out_idx);
 }
 
 /* ============================================================
@@ -1478,48 +1484,36 @@ static Stmt *parse_label(Parser *p) {
     return s;
 }
 
-/* The globals-table index of `name`, declaring it on first use (the same
- * index a read of the name resolves to). */
-static int global_index(Parser *p, const char *name, size_t name_len) {
-    int g = globals_lookup(p, name, name_len);
-    if (g < 0) g = globals_declare(p, name, name_len);
-    if (g < 0) set_error(p, "too many globals");
-    return g;
-}
-
 static Stmt *parse_global(Parser *p) {
     int line = peek(p)->line;
     advance(p); /* global */
 
-    /* `global function name(...) ... end` — combined declaration.
-     * Equivalent to `global name; name = function(...) ... end`: the name
-     * is declared (read-write) before the body, so the body can refer to
-     * it, then the regular function-statement parser takes over without
-     * consuming the `function` keyword. */
-    if (peek(p)->kind == TOK_KW_FUNCTION) {
-        const Token *fname = peek_at(p, 1);
-        if (fname->kind == TOK_IDENT && peek_at(p, 2)->kind != TOK_LPAREN) {
-            advance(p); /* function */
-            advance(p); /* the name: report what follows it */
-            set_error(p, "'(' expected");
+    /* `global function name(...) ... end` declares name (read-write) before
+     * the body, so the body can refer to it, then initializes it as
+     * `global name = function(...) ... end` would (raising if it is already
+     * defined). */
+    if (match(p, TOK_KW_FUNCTION)) {
+        if (peek(p)->kind != TOK_IDENT) {
+            set_error(p, "expected function name");
             return NULL;
         }
-        if (fname->kind == TOK_IDENT && frame_declare_global(cur_frame(p), fname->start, fname->len, 0) < 0) {
-            set_error(p, "too many locals");
-            return NULL;
-        }
-        Stmt *def = parse_function_stmt(p);
-        if (!def) return NULL;
-        /* It initializes the global, as `global f = function ... end` would
-         * (raising if f is already defined). */
+        const Token *fname = advance(p);
         int gi = global_index(p, fname->start, fname->len);
         if (gi < 0) return NULL;
+        if (frame_declare_global(cur_frame(p), fname->start, fname->len, 0) < 0) {
+            set_error(p, "too many declarations");
+            return NULL;
+        }
+        Expr *fn = expr_new(p->pool, EXPR_FUNCTION, line);
+        fn->as.func_expr.func = parse_function_body_ex(p, line, 0);
+        if (!p->ok) return NULL;
         Stmt *s = stmt_new(p->pool, STMT_GLOBAL, line);
         s->as.global_decl.n_names = 1;
         s->as.global_decl.global_idxs = node_pool_alloc(p->pool, sizeof(int));
         s->as.global_decl.global_idxs[0] = gi;
         s->as.global_decl.n_values = 1;
-        s->as.global_decl.values = def->as.assign.values;
+        s->as.global_decl.values = node_pool_alloc(p->pool, sizeof(Expr *));
+        s->as.global_decl.values[0] = fn;
         return s;
     }
 
@@ -1538,7 +1532,7 @@ static Stmt *parse_global(Parser *p) {
     /* Collective form: `global *` / `global<const> *` declares every name
      * not declared otherwise as a global (read-only with <const>). */
     if (match(p, TOK_STAR)) {
-        if (frame_declare_global(cur_frame(p), NULL, 0, default_attrib) < 0) set_error(p, "too many locals");
+        if (frame_declare_global(cur_frame(p), NULL, 0, default_attrib) < 0) set_error(p, "too many declarations");
         return NULL; /* parse_block ignores NULL — no AST node needed */
     }
 
@@ -1546,76 +1540,60 @@ static Stmt *parse_global(Parser *p) {
         set_error(p, "expected identifier after `global`");
         return NULL;
     }
-    ItemBuf names, attribs_b;
+    ItemBuf names, attribs_b, vals;
     ib_init(&names, sizeof(const Token *));
     ib_init(&attribs_b, sizeof(int));
+    ib_init(&vals, sizeof(Expr *));
+#define GLOBAL_FAIL()        \
+    do {                     \
+        ib_free(&names);     \
+        ib_free(&attribs_b); \
+        ib_free(&vals);      \
+        return NULL;         \
+    } while (0)
     do {
         if (peek(p)->kind != TOK_IDENT) {
             set_error(p, "expected identifier");
-            break;
+            GLOBAL_FAIL();
         }
         const Token *nm = advance(p);
-        *(const Token **)ib_push(&names) = nm;
-        int attrib = default_attrib;
-        if (peek(p)->kind == TOK_LT) attrib = parse_attribute(p);
-        if (attrib == 2 && p->ok) {
-            p->ok = 0;
-            snprintf(p->error, sizeof(p->error), "line %d: global variables cannot be to-be-closed", nm->line);
+        int attrib = peek(p)->kind == TOK_LT ? parse_attribute(p) : default_attrib;
+        if (attrib < 0) GLOBAL_FAIL();
+        if (attrib == 2) {
+            set_error_at(p, nm->line, "global variables cannot be to-be-closed");
+            GLOBAL_FAIL();
         }
+        *(const Token **)ib_push(&names) = nm;
         *(int *)ib_push(&attribs_b) = attrib;
-    } while (p->ok && match(p, TOK_COMMA));
-    if (!p->ok) {
-        ib_free(&names);
-        ib_free(&attribs_b);
-        return NULL;
-    }
+    } while (match(p, TOK_COMMA));
     int n_names = (int)names.count;
     const Token **names_buf = names.data;
-    /* Register globals BEFORE parsing values so they can self-reference. */
     int *global_idxs = node_pool_alloc(p->pool, sizeof(int) * n_names);
-    for (int i = 0; i < n_names; i++) {
-        int idx = global_index(p, names_buf[i]->start, names_buf[i]->len);
-        if (idx < 0) {
-            ib_free(&names);
-            ib_free(&attribs_b);
-            return NULL;
-        }
-        global_idxs[i] = idx;
-    }
-    ItemBuf vals;
-    ib_init(&vals, sizeof(Expr *));
+    for (int i = 0; i < n_names; i++)
+        if ((global_idxs[i] = global_index(p, names_buf[i]->start, names_buf[i]->len)) < 0) GLOBAL_FAIL();
     if (match(p, TOK_ASSIGN)) {
         do {
             Expr *v = parse_expr(p);
-            if (!p->ok) {
-                ib_free(&vals);
-                ib_free(&names);
-                ib_free(&attribs_b);
-                return NULL;
-            }
+            if (!p->ok) GLOBAL_FAIL();
             *(Expr **)ib_push(&vals) = v;
         } while (match(p, TOK_COMMA));
     }
     /* The names come into scope after their initializers, as in reference Lua. */
     for (int i = 0; i < n_names; i++)
         if (frame_declare_global(cur_frame(p), names_buf[i]->start, names_buf[i]->len,
-                                 ((int *)attribs_b.data)[i]) < 0)
-            set_error(p, "too many locals");
-    ib_free(&names);
-    ib_free(&attribs_b);
-    if (!p->ok) {
-        ib_free(&vals);
-        return NULL;
-    }
+                                 ((int *)attribs_b.data)[i]) < 0) {
+            set_error(p, "too many declarations");
+            GLOBAL_FAIL();
+        }
     Stmt *s = stmt_new(p->pool, STMT_GLOBAL, line);
     s->as.global_decl.n_names = n_names;
     s->as.global_decl.global_idxs = global_idxs;
     s->as.global_decl.n_values = (int)vals.count;
-    if (vals.count) {
-        s->as.global_decl.values = ib_finish(&vals, p->pool);
-    } else {
-        ib_free(&vals);
-    }
+    s->as.global_decl.values = vals.count ? ib_finish(&vals, p->pool) : NULL;
+    ib_free(&vals);
+    ib_free(&names);
+    ib_free(&attribs_b);
+#undef GLOBAL_FAIL
     return s;
 }
 

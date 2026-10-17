@@ -124,7 +124,7 @@
   ;; runs __close on every scope exit. $g_mkey_close is emitted by codegen
   ;; alongside the other $g_mkey_* keys.
 
-;; Validate a value bound to a <close> variable, at the declaration site
+  ;; Validate a value bound to a <close> variable, at the declaration site
   ;; (on its $line). nil and false are accepted (and never closed); any other
   ;; value must have a __close metamethod, else raise "variable '<name>' got
   ;; a non-closable value" — matching reference Lua, which rejects at the
@@ -197,9 +197,9 @@
   ;; in-flight error (null on a normal exit, when __close gets no 2nd
   ;; argument); it is replaced if a __close itself raises, so a later close
   ;; sees the newest error and the newest error is what finally (re)propagates.
-  ;; Remaining closes still run after one raises. call_depth is re-pinned to the entry
-  ;; depth around each __close so an error unwind doesn't run them at an inflated
-  ;; depth (which would trip the stack-overflow guard); an error unwind also
+  ;; Remaining closes still run after one raises. call_depth is re-pinned to
+  ;; the entry depth around each __close so an error unwind doesn't run them at
+  ;; an inflated depth (which would trip the stack-overflow guard); an unwind also
   ;; gets $stack_headroom, so its closes run even when unwinding a stack
   ;; overflow. $line is where the scope closes (0 on an error unwind), the
   ;; position of an error calling __close.
@@ -239,4 +239,4 @@
     (global.set $call_depth (local.get $depth))
     (global.set $stack_cost (local.get $cost_saved))
     (if (i32.eqz (ref.is_null (local.get $pending)))
-      (then (throw $LuaError (local.get $pending)))))
+      (then (throw $LuaError (local.get $pending)))))   ;; rethrow: raised already

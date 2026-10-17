@@ -177,6 +177,8 @@ static const struct {
     {"$g_tname_string", "string"},
     {"$g_tname_table", "table"},
     {"$g_tname_function", "function"},
+    /* the count field of a vararg table and of table.pack's result */
+    {"$g_key_n", "n"},
 };
 #define N_MKEYS (sizeof(MKEYS) / sizeof(MKEYS[0]))
 

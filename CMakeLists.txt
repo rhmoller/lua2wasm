@@ -327,6 +327,13 @@ add_test(
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
 )
 
+# Every error the runtime raises goes through $raised (xpcall handlers run at
+# the raise point); only marked rethrows may throw bare.
+add_test(
+    NAME test_prelude_raises
+    COMMAND node ${CMAKE_SOURCE_DIR}/scripts/check-raises.mjs ${CMAKE_SOURCE_DIR}
+)
+
 # Freestanding (plain-clang, no-Emscripten) wasm build: assert its output is
 # byte-identical to the native compiler across the e2e fixtures. Builds
 # build-wasm/lua2wasm.wasm via scripts/build-wasm.sh, then diffs WAT + assembled

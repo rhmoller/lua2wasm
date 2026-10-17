@@ -504,7 +504,6 @@
   ;; through `...`.
   (func $vararg_table (param $args (ref $ArgArr)) (result (ref $LuaTable))
     (local $t (ref $LuaTable)) (local $n i32) (local $i i32)
-    (local $nkey (ref $LuaString))
     (local.set $t (call $tab_new))
     (local.set $n (array.len (local.get $args)))
     (block $done (loop $lp
@@ -514,10 +513,7 @@
         (call $args_at (local.get $args) (local.get $i)))
       (local.set $i (i32.add (local.get $i) (i32.const 1)))
       (br $lp)))
-    ;; n = nargs   (key is the single-byte string "n", ASCII 110)
-    (local.set $nkey (struct.new $LuaString
-      (array.new_fixed $LuaArr 1 (i32.const 110)) (i32.const 0)))
-    (call $tab_set (local.get $t) (local.get $nkey)
+    (call $tab_set (local.get $t) (global.get $g_key_n)
       (call $make_int (i64.extend_i32_s (local.get $n))))
     (local.get $t))
 
@@ -526,8 +522,7 @@
   ;; proper 'n'".
   (func $vararg_count (param $t (ref $LuaTable)) (param $line i32) (result i32)
     (local $n anyref) (local $v i64)
-    (local.set $n (call $tab_get_raw (local.get $t)
-      (struct.new $LuaString (array.new_fixed $LuaArr 1 (i32.const 110)) (i32.const 0))))   ;; "n"
+    (local.set $n (call $tab_get_raw (local.get $t) (global.get $g_key_n)))
     (if (i32.eqz (call $is_int (local.get $n)))
       (then (call $throw_lit_at (i32.const 1276) (i32.const 30) (local.get $line))))
     (local.set $v (call $as_int (local.get $n)))

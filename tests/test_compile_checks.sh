@@ -47,7 +47,7 @@ check "function statement"         "line 2: variable 'g' not declared"     'glob
 check "function statement const"   "line 2: attempt to assign to const variable 'f'" 'global<const> *\nfunction f() end'
 check "global function ok"         ok                                      'global x\nglobal function g() return g end'
 check "global function const ok"   ok                                      'global<const> *\nglobal function f() end'
-check "global function dotted"     "line 1: '(' expected"                  'global function T.m() end'
+check "global function dotted"     "line 1: expected ( in function declaration" 'global function T.m() end'
 check "function redefines builtin" ok                                      'function print(...) end\nfunction string.f() end'
 check "field function"             "line 2: variable 'T' not declared"     'global x\nfunction T.m() end'
 check "local function ok"          ok                                      'global x\nlocal function h() end'

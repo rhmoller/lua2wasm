@@ -83,11 +83,17 @@ typedef struct {
     int n_found, cap_found;
 } OnceScan;
 
+/* Is `name` pcall or xpcall, the builtins that call the function they are
+ * handed (once, at the call)? */
+static int is_handoff_name(const char *name, size_t len) {
+    return (len == 5 && memcmp(name, "pcall", 5) == 0) || (len == 6 && memcmp(name, "xpcall", 6) == 0);
+}
+
 /* Is `f` the pcall or xpcall builtin? */
 static int is_handoff(const Expr *f) {
     if (f->kind != EXPR_VAR || f->as.var.kind != VAR_BUILTIN) return 0;
     const char *n = builtin_name(f->as.var.idx);
-    return strcmp(n, "pcall") == 0 || strcmp(n, "xpcall") == 0;
+    return is_handoff_name(n, strlen(n));
 }
 
 static void once_expr(const Expr *e, void *ctx) {
@@ -165,7 +171,7 @@ static void gscan_stmt(const Stmt *s, void *ctx) {
                 g->mentions[t->as.var.idx]++;
             if (t->as.var.kind == VAR_BUILTIN) {
                 const char *n = builtin_name(t->as.var.idx);
-                if (strcmp(n, "pcall") == 0 || strcmp(n, "xpcall") == 0) g->handoff_assigned = 1;
+                if (is_handoff_name(n, strlen(n))) g->handoff_assigned = 1;
             }
         }
     if (s->kind == STMT_GLOBAL && s->as.global_decl.n_values > 0) /* `global x = v` writes x */
@@ -173,10 +179,7 @@ static void gscan_stmt(const Stmt *s, void *ctx) {
             int gi = s->as.global_decl.global_idxs[i];
             if (gi < 0 || gi >= g->ng) continue;
             g->mentions[gi]++;
-            const char *n = g->names[gi].name;
-            size_t len = g->names[gi].name_len;
-            if ((len == 5 && memcmp(n, "pcall", 5) == 0) || (len == 6 && memcmp(n, "xpcall", 6) == 0))
-                g->handoff_assigned = 1;
+            if (is_handoff_name(g->names[gi].name, g->names[gi].name_len)) g->handoff_assigned = 1;
         }
     for_each_own_expr(s, gscan_expr, g);
 }
