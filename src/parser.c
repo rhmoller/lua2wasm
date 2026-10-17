@@ -75,12 +75,31 @@ static void ib_free(ItemBuf *b) {
     b->data = NULL;
 }
 
+/* One active declaration of a frame, in declaration order: a local, or a
+ * Lua 5.5 global declaration (`global x`, or `global *` with a NULL name),
+ * which is lexically scoped the same way. */
 typedef struct {
     const char *name;
     size_t name_len;
-    int slot;   /* wasm local index inside this function */
+    int slot;   /* wasm local index inside this function (-1: a global) */
     int attrib; /* 0 = none, 1 = <const>, 2 = <close> (milestone 23) */
+    int global; /* 0: a local; 1: `global NAME`; 2: `global *` */
 } LocalSlot;
+
+/* A label still visible, and a forward goto not yet matched to one, with the
+ * number of declarations active at each (reference Lua's nactvar). */
+typedef struct {
+    const char *name;
+    size_t name_len;
+    int nactvar;
+} LabelRec;
+typedef struct {
+    const char *name;
+    size_t name_len;
+    int line;
+    int nactvar;
+    int resolved;
+} GotoRec;
 
 typedef struct {
     LocalSlot locals[MAX_LOCALS_PER_FN];
@@ -114,6 +133,15 @@ typedef struct {
 
     GlobalDecl globals[MAX_GLOBALS];
     int n_globals;
+
+    /* goto scope checking: the visible labels and pending forward gotos
+     * (LabelRec / GotoRec); the current function's first entries, and the
+     * current block's first pending goto and active-declaration count. */
+    ItemBuf labels;
+    ItemBuf gotos;
+    size_t fn_labels, fn_gotos;
+    size_t blk_gotos;
+    int blk_nactvar;
 
     char error[256];
     int ok;
@@ -201,6 +229,16 @@ static int frame_declare(FuncFrame *f, const char *name, size_t name_len) {
     return slot;
 }
 
+/* Declare a global name (NULL: the collective `global *`) in the current
+ * scope. It takes no wasm slot, but until the scope ends it shadows outer
+ * declarations of the name and decides how free names resolve. */
+static int frame_declare_global(FuncFrame *f, const char *name, size_t name_len, int attrib) {
+    if (f->local_count >= MAX_LOCALS_PER_FN) return -1;
+    f->locals[f->local_count++] = (LocalSlot){
+        .name = name, .name_len = name_len, .slot = -1, .attrib = attrib, .global = name ? 1 : 2};
+    return 0;
+}
+
 /* Mark the most recently declared local as <const> (read-only). Lua 5.5
  * makes for-loop control variables const (the numeric control var, and the
  * first variable of a generic for); the assignment parser then rejects
@@ -242,14 +280,47 @@ static int upval_is_const(const Parser *p, int upval_idx) {
     return 0;
 }
 
-static int frame_lookup_local(const FuncFrame *f, const char *name, size_t name_len) {
+/* How a name that no declaration resolves (a free name) is treated, as the
+ * search passes global declarations on its way out: the innermost `global *`
+ * in scope decides (read-write, or read-only for `global<const> *`); without
+ * one, any `global NAME` in scope voids the chunk's implicit `global *`, so
+ * the name must be declared. */
+typedef struct {
+    int collective; /* 0: none seen; 1: `global *`; 2: `global<const> *` */
+    int voided;     /* a `global NAME` declaration is in scope */
+} FreeNames;
+
+enum { FOUND_NONE,
+       FOUND_LOCAL,
+       FOUND_GLOBAL };
+
+/* Reference Lua's searchvar over one frame, innermost declaration first: a
+ * local of the name (*out = its slot) or a global declaration of it (*out = 1
+ * if <const>) resolves it; global declarations passed on the way update `fn`. */
+static int frame_search(const FuncFrame *f, const char *name, size_t name_len, FreeNames *fn, int *out) {
     for (int i = f->local_count - 1; i >= 0; i--) {
-        if (f->locals[i].name_len == name_len &&
-            memcmp(f->locals[i].name, name, name_len) == 0) {
-            return f->locals[i].slot;
+        const LocalSlot *d = &f->locals[i];
+        if (d->global == 2) {
+            if (!fn->collective) fn->collective = d->attrib == 1 ? 2 : 1;
+            continue;
         }
+        if (d->name_len != name_len || memcmp(d->name, name, name_len) != 0) {
+            if (d->global) fn->voided = 1;
+            continue;
+        }
+        *out = d->global ? d->attrib == 1 : d->slot;
+        return d->global ? FOUND_GLOBAL : FOUND_LOCAL;
     }
-    return -1;
+    return FOUND_NONE;
+}
+
+/* Leave a scope: its declarations go out of sight, and a pending goto inside
+ * it now stands where the scope began (reference Lua's solvegotos). */
+static void scope_rewind(Parser *p, int mark) {
+    frame_rewind(cur_frame(p), mark);
+    GotoRec *g = p->gotos.data;
+    for (size_t i = p->fn_gotos; i < p->gotos.count; i++)
+        if (g[i].nactvar > mark) g[i].nactvar = mark;
 }
 
 /* Register (or find existing) upvalue in the given frame. Returns upvalue idx. */
@@ -266,57 +337,72 @@ static int frame_add_upvalue(FuncFrame *f, UpvalSource src, int idx) {
  * Returns:
  *   kind = VAR_LOCAL with out_idx = slot in innermost frame
  *   kind = VAR_UPVAL with out_idx = upvalue index in innermost frame
- *   kind = VAR_BUILTIN
- * or returns 0 (NOT_FOUND) on failure.
+ *   kind = VAR_GLOBAL / VAR_BUILTIN for a global name
+ * or returns 0 on failure. *ro is set for a read-only global (declared
+ * <const>, or free under `global<const> *`).
  *
  * Side effect: adds upvalues to intermediate frames as needed.
  */
-static int resolve_in_frame(Parser *p, int frame_idx, const char *name, size_t name_len,
-                            VarKind *out_kind, int *out_idx) {
-    FuncFrame *f = &p->frames[frame_idx];
-    int slot = frame_lookup_local(f, name, name_len);
-    if (slot >= 0) {
-        *out_kind = VAR_LOCAL;
-        *out_idx = slot;
+
+/* A global name: builtins first, then declared globals, then — matching
+ * stock Lua's global-by-default behaviour — auto-declare any other name as a
+ * fresh global, so reading an undeclared name yields nil and a bare
+ * `x = 42` works without a `global x`. */
+static int resolve_global(Parser *p, const char *name, size_t name_len, VarKind *out_kind, int *out_idx) {
+    int b = lookup_builtin(name, name_len);
+    if (b >= 0) {
+        *out_kind = VAR_BUILTIN;
+        *out_idx = b;
         return 1;
     }
+    int g = globals_lookup(p, name, name_len);
+    if (g < 0) g = globals_declare(p, name, name_len);
+    if (g < 0) {
+        set_error(p, "too many globals");
+        return 0;
+    }
+    *out_kind = VAR_GLOBAL;
+    *out_idx = g;
+    return 1;
+}
+
+static int resolve_in_frame(Parser *p, int frame_idx, const char *name, size_t name_len, FreeNames *fn,
+                            int *ro, VarKind *out_kind, int *out_idx) {
+    FuncFrame *f = &p->frames[frame_idx];
+    int found;
+    switch (frame_search(f, name, name_len, fn, &found)) {
+    case FOUND_LOCAL:
+        *out_kind = VAR_LOCAL;
+        *out_idx = found;
+        return 1;
+    case FOUND_GLOBAL:
+        *ro = found;
+        return resolve_global(p, name, name_len, out_kind, out_idx);
+    default: break;
+    }
     if (frame_idx == 0) {
-        /* top-level: builtins first, then declared globals, then — matching
-         * stock Lua's traditional behaviour — auto-declare any other name as
-         * a fresh global. Read of an undeclared name therefore yields the
-         * global's nil initialiser, and a bare `x = 42` works without a
-         * `global x` prefix. Strict mode (compile error on undeclared) is a
-         * future opt-in. */
-        int b = lookup_builtin(name, name_len);
-        if (b >= 0) {
-            *out_kind = VAR_BUILTIN;
-            *out_idx = b;
-            return 1;
-        }
-        int g = globals_lookup(p, name, name_len);
-        if (g < 0) g = globals_declare(p, name, name_len);
-        if (g < 0) {
-            set_error(p, "too many globals");
+        /* A free name: global by the chunk's implicit `global *`, unless a
+         * global declaration in scope voids it. _ENV is never free (in
+         * reference Lua it is the chunk's upvalue). */
+        int env = name_len == 4 && memcmp(name, "_ENV", 4) == 0;
+        if (!env && !fn->collective && fn->voided) {
+            char buf[160];
+            snprintf(buf, sizeof(buf), "variable '%.*s' not declared", (int)name_len, name);
+            set_error(p, buf);
             return 0;
         }
-        *out_kind = VAR_GLOBAL;
-        *out_idx = g;
-        return 1;
+        *ro = !env && fn->collective == 2;
+        return resolve_global(p, name, name_len, out_kind, out_idx);
     }
     /* recurse into parent */
     VarKind parent_kind;
     int parent_idx;
-    if (!resolve_in_frame(p, frame_idx - 1, name, name_len, &parent_kind, &parent_idx)) {
+    if (!resolve_in_frame(p, frame_idx - 1, name, name_len, fn, ro, &parent_kind, &parent_idx)) {
         return 0;
     }
-    if (parent_kind == VAR_BUILTIN) {
-        *out_kind = VAR_BUILTIN;
-        *out_idx = parent_idx;
-        return 1;
-    }
-    if (parent_kind == VAR_GLOBAL) {
+    if (parent_kind == VAR_BUILTIN || parent_kind == VAR_GLOBAL) {
         /* Globals are visible everywhere — propagate without making an upvalue. */
-        *out_kind = VAR_GLOBAL;
+        *out_kind = parent_kind;
         *out_idx = parent_idx;
         return 1;
     }
@@ -337,9 +423,12 @@ static int resolve_in_frame(Parser *p, int frame_idx, const char *name, size_t n
     return 1;
 }
 
-static int resolve_name(Parser *p, const char *name, size_t name_len,
-                        VarKind *out_kind, int *out_idx) {
-    return resolve_in_frame(p, p->frame_depth, name, name_len, out_kind, out_idx);
+static int resolve_name(Parser *p, const char *name, size_t name_len, VarKind *out_kind, int *out_idx,
+                        int *ro) {
+    FreeNames fn = {0};
+    int unused = 0;
+    *(ro ? ro : &unused) = 0;
+    return resolve_in_frame(p, p->frame_depth, name, name_len, &fn, ro ? ro : &unused, out_kind, out_idx);
 }
 
 /* ============================================================
@@ -482,8 +571,8 @@ static Expr *parse_primary(Parser *p) {
         e->as.var.name = t->start;
         e->as.var.name_len = t->len;
         VarKind kind;
-        int idx;
-        if (!resolve_name(p, t->start, t->len, &kind, &idx)) {
+        int idx, ro;
+        if (!resolve_name(p, t->start, t->len, &kind, &idx, &ro)) {
             char buf[160];
             snprintf(buf, sizeof(buf),
                      "undefined variable `%.*s`",
@@ -493,6 +582,7 @@ static Expr *parse_primary(Parser *p) {
         }
         e->as.var.kind = kind;
         e->as.var.idx = idx;
+        e->as.var.ro = ro;
         return e;
     }
     case TOK_LPAREN: {
@@ -523,6 +613,7 @@ static Expr *parse_primary(Parser *p) {
             t->as.var.name_len = f->vararg_name_len;
             t->as.var.kind = VAR_LOCAL;
             t->as.var.idx = f->vararg_slot;
+            t->as.var.ro = 0;
             e->as.vararg.tab = t;
         }
         return e;
@@ -963,7 +1054,7 @@ static Stmt *parse_if(Parser *p) {
     Block body = {0};
     int mark = frame_mark(cur_frame(p));
     parse_block(p, &body, ARM_STOPS, 3);
-    frame_rewind(cur_frame(p), mark);
+    scope_rewind(p, mark);
     if (!p->ok) {
         ib_free(&arms);
         return NULL;
@@ -981,7 +1072,7 @@ static Stmt *parse_if(Parser *p) {
         Block b = {0};
         int m = frame_mark(cur_frame(p));
         parse_block(p, &b, ARM_STOPS, 3);
-        frame_rewind(cur_frame(p), m);
+        scope_rewind(p, m);
         if (!p->ok) {
             ib_free(&arms);
             return NULL;
@@ -995,7 +1086,7 @@ static Stmt *parse_if(Parser *p) {
         has_else = 1;
         int m = frame_mark(cur_frame(p));
         parse_block1(p, &else_body, TOK_KW_END);
-        frame_rewind(cur_frame(p), m);
+        scope_rewind(p, m);
         if (!p->ok) {
             ib_free(&arms);
             return NULL;
@@ -1020,7 +1111,7 @@ static Stmt *parse_while(Parser *p) {
     Block body = {0};
     int mark = frame_mark(cur_frame(p));
     parse_block1(p, &body, TOK_KW_END);
-    frame_rewind(cur_frame(p), mark);
+    scope_rewind(p, mark);
     expect(p, TOK_KW_END, "end (of while)");
     if (!p->ok) return NULL;
     Stmt *s = stmt_new(p->pool, STMT_WHILE, line);
@@ -1035,7 +1126,7 @@ static Stmt *parse_do(Parser *p) {
     Block body = {0};
     int mark = frame_mark(cur_frame(p));
     parse_block1(p, &body, TOK_KW_END);
-    frame_rewind(cur_frame(p), mark);
+    scope_rewind(p, mark);
     expect(p, TOK_KW_END, "end (of do)");
     if (!p->ok) return NULL;
     Stmt *s = stmt_new(p->pool, STMT_DO, line);
@@ -1074,6 +1165,23 @@ static Stmt *parse_return(Parser *p) {
     return s;
 }
 
+/* <const> enforcement for an assignment target: a const local of this frame,
+ * one captured from an enclosing frame, or a read-only global. */
+static int check_assignable(Parser *p, const Expr *e) {
+    if (e->kind != EXPR_VAR) return 1;
+    int is_const = e->as.var.ro;
+    if (e->as.var.kind == VAR_LOCAL)
+        is_const = frame_local_attrib_by_slot(cur_frame(p), e->as.var.idx) == 1;
+    else if (e->as.var.kind == VAR_UPVAL)
+        is_const = upval_is_const(p, e->as.var.idx);
+    if (!is_const) return 1;
+    char buf[160];
+    snprintf(buf, sizeof(buf), "attempt to assign to const variable '%.*s'", (int)e->as.var.name_len,
+             e->as.var.name);
+    set_error(p, buf);
+    return 0;
+}
+
 static AssignTarget expr_to_target(Expr *e) {
     AssignTarget t = {0};
     if (e->kind == EXPR_VAR) {
@@ -1108,6 +1216,10 @@ static Stmt *parse_ident_stmt(Parser *p) {
 
     ItemBuf targets;
     ib_init(&targets, sizeof(AssignTarget));
+    if (!check_assignable(p, first)) {
+        ib_free(&targets);
+        return NULL;
+    }
     *(AssignTarget *)ib_push(&targets) = expr_to_target(first);
     while (match(p, TOK_COMMA)) {
         Expr *t = parse_prefix_chain(p);
@@ -1120,29 +1232,16 @@ static Stmt *parse_ident_stmt(Parser *p) {
             ib_free(&targets);
             return NULL;
         }
+        if (!check_assignable(p, t)) {
+            ib_free(&targets);
+            return NULL;
+        }
         *(AssignTarget *)ib_push(&targets) = expr_to_target(t);
     }
     expect(p, TOK_ASSIGN, "= (assignment)");
     if (!p->ok) {
         ib_free(&targets);
         return NULL;
-    }
-    /* <const> enforcement: reject assignment to a const variable, whether
-     * it's a local of this frame or captured from an enclosing one. */
-    AssignTarget *tgt = targets.data;
-    for (size_t i = 0; i < targets.count; i++) {
-        if (tgt[i].kind != TGT_VAR) continue;
-        int is_const = 0;
-        if (tgt[i].as.var.kind == VAR_LOCAL)
-            is_const = frame_local_attrib_by_slot(cur_frame(p),
-                                                  tgt[i].as.var.idx) == 1;
-        else if (tgt[i].as.var.kind == VAR_UPVAL)
-            is_const = upval_is_const(p, tgt[i].as.var.idx);
-        if (is_const) {
-            set_error(p, "attempt to assign to const variable");
-            ib_free(&targets);
-            return NULL;
-        }
     }
     ItemBuf vals;
     ib_init(&vals, sizeof(Expr *));
@@ -1194,7 +1293,7 @@ static Stmt *parse_for(Parser *p) {
         frame_mark_last_const(cur_frame(p)); /* numeric control var is const */
         Block body = {0};
         parse_block1(p, &body, TOK_KW_END);
-        frame_rewind(cur_frame(p), mark);
+        scope_rewind(p, mark);
         expect(p, TOK_KW_END, "end (of for)");
         if (!p->ok) return NULL;
         Stmt *s = stmt_new(p->pool, STMT_FOR_NUM, line);
@@ -1256,7 +1355,7 @@ static Stmt *parse_for(Parser *p) {
     ib_free(&names);
     Block body = {0};
     parse_block1(p, &body, TOK_KW_END);
-    frame_rewind(cur_frame(p), mark);
+    scope_rewind(p, mark);
     expect(p, TOK_KW_END, "end (of for)");
     if (!p->ok) {
         ib_free(&exprs);
@@ -1284,7 +1383,7 @@ static Stmt *parse_repeat(Parser *p) {
     expect(p, TOK_KW_UNTIL, "until");
     Expr *cond = parse_expr(p);
     body.end_line = last_line(p); /* the body's <close> vars close after cond */
-    frame_rewind(cur_frame(p), mark);
+    scope_rewind(p, mark);
     if (!p->ok) return NULL;
     Stmt *s = stmt_new(p->pool, STMT_REPEAT, line);
     s->as.repeat.body = body;
@@ -1299,6 +1398,30 @@ static Stmt *parse_break(Parser *p) {
     return s;
 }
 
+/* Is a label of this name visible here: defined earlier in this block or an
+ * enclosing one of the same function? */
+static int label_visible(const Parser *p, const char *name, size_t name_len) {
+    const LabelRec *l = p->labels.data;
+    for (size_t i = p->fn_labels; i < p->labels.count; i++)
+        if (l[i].name_len == name_len && memcmp(l[i].name, name, name_len) == 0) return 1;
+    return 0;
+}
+
+/* Does the label just parsed end its block: only labels and `;` follow before
+ * the block closes? (`until` doesn't count: its condition still sees the
+ * body's locals.) */
+static int label_ends_block(Parser *p) {
+    for (size_t i = 0;; i++) {
+        TokKind k = peek_at(p, i)->kind;
+        if (k == TOK_SEMI) continue;
+        if (k == TOK_DBLCOLON && peek_at(p, i + 1)->kind == TOK_IDENT && peek_at(p, i + 2)->kind == TOK_DBLCOLON) {
+            i += 2;
+            continue;
+        }
+        return k == TOK_KW_END || k == TOK_KW_ELSE || k == TOK_KW_ELSEIF || k == TOK_EOF;
+    }
+}
+
 static Stmt *parse_goto(Parser *p) {
     int line = peek(p)->line;
     advance(p); /* goto */
@@ -1307,6 +1430,11 @@ static Stmt *parse_goto(Parser *p) {
         return NULL;
     }
     const Token *nm = advance(p);
+    /* A jump to a label already visible goes backward and can't enter a
+     * scope; a forward one waits for its label (parse_label). */
+    if (!label_visible(p, nm->start, nm->len))
+        *(GotoRec *)ib_push(&p->gotos) = (GotoRec){
+            .name = nm->start, .name_len = nm->len, .line = line, .nactvar = cur_frame(p)->local_count};
     Stmt *s = stmt_new(p->pool, STMT_GOTO, line);
     s->as.label.name = nm->start;
     s->as.label.name_len = nm->len;
@@ -1326,6 +1454,24 @@ static Stmt *parse_label(Parser *p) {
         return NULL;
     }
     advance(p);
+    /* A label that ends its block stands outside the block's declarations,
+     * so `goto continue` past a local is fine; anywhere else, a pending goto
+     * to it must not jump into the scope of a declaration made since. */
+    int nactvar = label_ends_block(p) ? p->blk_nactvar : cur_frame(p)->local_count;
+    GotoRec *g = p->gotos.data;
+    for (size_t i = p->blk_gotos; i < p->gotos.count; i++) {
+        if (g[i].resolved || g[i].name_len != nm->len || memcmp(g[i].name, nm->start, nm->len) != 0) continue;
+        if (g[i].nactvar < nactvar) {
+            const LocalSlot *d = &cur_frame(p)->locals[g[i].nactvar];
+            char buf[256];
+            snprintf(buf, sizeof(buf), "<goto %.*s> at line %d jumps into the scope of '%.*s'", (int)nm->len,
+                     nm->start, g[i].line, d->name ? (int)d->name_len : 1, d->name ? d->name : "*");
+            set_error(p, buf);
+            return NULL;
+        }
+        g[i].resolved = 1;
+    }
+    *(LabelRec *)ib_push(&p->labels) = (LabelRec){.name = nm->start, .name_len = nm->len, .nactvar = nactvar};
     Stmt *s = stmt_new(p->pool, STMT_LABEL, line);
     s->as.label.name = nm->start;
     s->as.label.name_len = nm->len;
@@ -1337,23 +1483,35 @@ static Stmt *parse_global(Parser *p) {
     advance(p); /* global */
 
     /* `global function name(...) ... end` — combined declaration.
-     * Equivalent to `global name; name = function(...) ... end`. The
-     * regular function-statement parser auto-declares the name as a
-     * global on first reference, so we just hand off without consuming
-     * the `function` keyword. */
+     * Equivalent to `global name; name = function(...) ... end`: the name
+     * is declared (read-write) before the body, so the body can refer to
+     * it, then the regular function-statement parser takes over without
+     * consuming the `function` keyword. */
     if (peek(p)->kind == TOK_KW_FUNCTION) {
+        const Token *fname = peek_at(p, 1);
+        if (fname->kind == TOK_IDENT && frame_declare_global(cur_frame(p), fname->start, fname->len, 0) < 0) {
+            set_error(p, "too many locals");
+            return NULL;
+        }
         return parse_function_stmt(p);
     }
 
-    /* Optional prefix `<attr>` — `global <const> ...`. Parser-accepted,
-     * not enforced yet. */
+    /* Optional prefix `<attr>` — `global <const> ...` — applying to every
+     * name (a per-name attribute wins). */
+    int default_attrib = 0;
     if (peek(p)->kind == TOK_LT) {
-        if (parse_attribute(p) < 0) return NULL;
+        default_attrib = parse_attribute(p);
+        if (default_attrib < 0) return NULL;
+    }
+    if (default_attrib == 2) {
+        set_error(p, "global variables cannot be to-be-closed");
+        return NULL;
     }
 
-    /* Wildcard form: `global <const> *` (or even `global *`) — declare
-     * all unlisted names as globals. We treat it as a no-op marker. */
+    /* Collective form: `global *` / `global<const> *` declares every name
+     * not declared otherwise as a global (read-only with <const>). */
     if (match(p, TOK_STAR)) {
+        if (frame_declare_global(cur_frame(p), NULL, 0, default_attrib) < 0) set_error(p, "too many locals");
         return NULL; /* parse_block ignores NULL — no AST node needed */
     }
 
@@ -1361,29 +1519,28 @@ static Stmt *parse_global(Parser *p) {
         set_error(p, "expected identifier after `global`");
         return NULL;
     }
-    ItemBuf names;
+    ItemBuf names, attribs_b;
     ib_init(&names, sizeof(const Token *));
-    *(const Token **)ib_push(&names) = advance(p);
-    /* Per-name attribute after the first name. */
-    if (peek(p)->kind == TOK_LT) {
-        if (parse_attribute(p) < 0) {
-            ib_free(&names);
-            return NULL;
-        }
-    }
-    while (match(p, TOK_COMMA)) {
+    ib_init(&attribs_b, sizeof(int));
+    do {
         if (peek(p)->kind != TOK_IDENT) {
             set_error(p, "expected identifier");
-            ib_free(&names);
-            return NULL;
+            break;
         }
-        *(const Token **)ib_push(&names) = advance(p);
-        if (peek(p)->kind == TOK_LT) {
-            if (parse_attribute(p) < 0) {
-                ib_free(&names);
-                return NULL;
-            }
+        const Token *nm = advance(p);
+        *(const Token **)ib_push(&names) = nm;
+        int attrib = default_attrib;
+        if (peek(p)->kind == TOK_LT) attrib = parse_attribute(p);
+        if (attrib == 2 && p->ok) {
+            p->ok = 0;
+            snprintf(p->error, sizeof(p->error), "line %d: global variables cannot be to-be-closed", nm->line);
         }
+        *(int *)ib_push(&attribs_b) = attrib;
+    } while (p->ok && match(p, TOK_COMMA));
+    if (!p->ok) {
+        ib_free(&names);
+        ib_free(&attribs_b);
+        return NULL;
     }
     int n_names = (int)names.count;
     const Token **names_buf = names.data;
@@ -1394,11 +1551,11 @@ static Stmt *parse_global(Parser *p) {
         if (idx < 0) {
             set_error(p, "too many globals");
             ib_free(&names);
+            ib_free(&attribs_b);
             return NULL;
         }
         global_idxs[i] = idx;
     }
-    ib_free(&names);
     ItemBuf vals;
     ib_init(&vals, sizeof(Expr *));
     if (match(p, TOK_ASSIGN)) {
@@ -1406,10 +1563,23 @@ static Stmt *parse_global(Parser *p) {
             Expr *v = parse_expr(p);
             if (!p->ok) {
                 ib_free(&vals);
+                ib_free(&names);
+                ib_free(&attribs_b);
                 return NULL;
             }
             *(Expr **)ib_push(&vals) = v;
         } while (match(p, TOK_COMMA));
+    }
+    /* The names come into scope after their initializers, as in reference Lua. */
+    for (int i = 0; i < n_names; i++)
+        if (frame_declare_global(cur_frame(p), names_buf[i]->start, names_buf[i]->len,
+                                 ((int *)attribs_b.data)[i]) < 0)
+            set_error(p, "too many locals");
+    ib_free(&names);
+    ib_free(&attribs_b);
+    if (!p->ok) {
+        ib_free(&vals);
+        return NULL;
     }
     Stmt *s = stmt_new(p->pool, STMT_GLOBAL, line);
     s->as.global_decl.n_names = n_names;
@@ -1436,8 +1606,8 @@ static Stmt *parse_function_stmt(Parser *p) {
     }
     const Token *first = advance(p);
     VarKind kind;
-    int idx;
-    if (!resolve_name(p, first->start, first->len, &kind, &idx)) {
+    int idx, ro;
+    if (!resolve_name(p, first->start, first->len, &kind, &idx, &ro)) {
         char buf[160];
         snprintf(buf, sizeof(buf),
                  "function `%.*s` is not declared (add `global %.*s` first or use `local function`)",
@@ -1455,6 +1625,9 @@ static Stmt *parse_function_stmt(Parser *p) {
     base->as.var.name_len = first->len;
     base->as.var.kind = kind;
     base->as.var.idx = idx;
+    base->as.var.ro = ro;
+    /* `function f()` assigns f itself (`function T.m()` only reads T) */
+    if (peek(p)->kind != TOK_DOT && peek(p)->kind != TOK_COLON && !check_assignable(p, base)) return NULL;
 
     /* Walk .NAME chain (intermediate field access). */
     while (peek(p)->kind == TOK_DOT) {
@@ -1539,6 +1712,13 @@ static Stmt *parse_stmt(Parser *p) {
 static void parse_block(Parser *p, Block *out, const TokKind *stops, int n_stops) {
     Stmt **vec = NULL;
     size_t count = 0, cap = 0;
+    /* The block's labels are visible until it ends; a label in it may take
+     * the gotos pending from here on (its own, and those its nested blocks
+     * leave unresolved). */
+    size_t outer_labels = p->labels.count, outer_gotos = p->blk_gotos;
+    int outer_nactvar = p->blk_nactvar;
+    p->blk_gotos = p->gotos.count;
+    p->blk_nactvar = cur_frame(p)->local_count;
     while (p->ok && !is_block_end(peek(p)->kind, stops, n_stops)) {
         Stmt *st = parse_stmt(p);
         if (!p->ok) break;
@@ -1551,6 +1731,9 @@ static void parse_block(Parser *p, Block *out, const TokKind *stops, int n_stops
     }
     out->count = count;
     out->end_line = last_line(p);
+    p->labels.count = outer_labels;
+    p->blk_gotos = outer_gotos;
+    p->blk_nactvar = outer_nactvar;
     if (count) {
         out->items = node_pool_alloc(p->pool, sizeof(Stmt *) * count);
         memcpy(out->items, vec, sizeof(Stmt *) * count);
@@ -1659,7 +1842,13 @@ static LuaFunc *parse_function_body_ex(Parser *p, int line, int with_self) {
     expect(p, TOK_RPAREN, ")");
 
     Block body = {0};
+    size_t outer_fn_labels = p->fn_labels, outer_fn_gotos = p->fn_gotos;
+    p->fn_labels = p->labels.count;
+    p->fn_gotos = p->gotos.count;
     parse_block1(p, &body, TOK_KW_END);
+    p->gotos.count = p->fn_gotos; /* unmatched: codegen reports "no visible label" */
+    p->fn_labels = outer_fn_labels;
+    p->fn_gotos = outer_fn_gotos;
     expect(p, TOK_KW_END, "end (of function)");
     body.end_line = last_line(p);
     if (p->ok && cur_frame(p)->vararg_slot >= 0) prepend_vararg_decl(p, &body, cur_frame(p), line);
@@ -1690,6 +1879,8 @@ static LuaFunc *parse_function_body_ex(Parser *p, int line, int with_self) {
 ParseResult parse(const TokenList *tokens, NodePool *pool) {
     Parser p = {.toks = tokens, .pool = pool, .ok = 1, .frame_depth = 0, .cur_fn = -1};
     frame_init(&p.frames[0]);
+    ib_init(&p.labels, sizeof(LabelRec));
+    ib_init(&p.gotos, sizeof(GotoRec));
     /* Pre-declare stdlib library tables and well-known globals so user code can name them. */
     globals_declare(&p, "math", 4);
     globals_declare(&p, "string", 6);
@@ -1727,6 +1918,8 @@ ParseResult parse(const TokenList *tokens, NodePool *pool) {
         memcpy(r.globals.items, p.globals, sizeof(GlobalDecl) * p.n_globals);
     }
     if (!p.ok) memcpy(r.error, p.error, sizeof(r.error));
+    ib_free(&p.labels);
+    ib_free(&p.gotos);
     return r;
 }
 

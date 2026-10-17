@@ -8,6 +8,7 @@ BIN="$1"; SRC_DIR="$2"; BUILD_DIR="$3"
 
 # Sanity: a valid `<const>` global still compiles.
 cat > "$BUILD_DIR/global_attr_ok.lua" <<'EOF'
+global print
 global x <const> = 1
 print(x)
 EOF

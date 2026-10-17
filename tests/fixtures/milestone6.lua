@@ -32,7 +32,7 @@ print(ok4)        -- false
 print(outer_msg)  -- "re-raised: inner"
 
 -- using pcall to return value with side-effect
-global counter = 0
+global *; global counter = 0
 local function bumpy()
   counter = counter + 1
   if counter == 2 then error("two!") end

@@ -1,8 +1,8 @@
--- Per-name attribute on a `global` declaration: `global X<const>, Y`.
--- The parser must accept the suffix attribute on each name; full const
--- enforcement on globals is not implemented yet.
+-- Per-name attributes on a `global` declaration: `global X<const>, Y` makes
+-- X and Z read-only (assigning them is a compile-time error, see
+-- tests/test_compile_checks.sh) and leaves Y read-write.
+X, Y, Z = 1, 2, 3
+global print
 global X<const>, Y, Z<const>
-X = 1
-Y = 2
-Z = 3
+Y = X + Z
 print(X, Y, Z)

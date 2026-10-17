@@ -172,6 +172,14 @@ add_test(
             ${CMAKE_SOURCE_DIR}
             ${CMAKE_BINARY_DIR}
 )
+# Compile-time checks reference Lua makes (strict globals, goto into a scope).
+add_test(
+    NAME test_compile_checks
+    COMMAND bash ${CMAKE_SOURCE_DIR}/tests/test_compile_checks.sh
+            $<TARGET_FILE:lua2wasm>
+            ${CMAKE_SOURCE_DIR}
+            ${CMAKE_BINARY_DIR}
+)
 add_test(
     NAME test_e2e_io_read
     COMMAND bash ${CMAKE_SOURCE_DIR}/tests/test_e2e_io_read.sh

@@ -34,6 +34,6 @@ local a2, b2 = {}, {}
 a2.v, b2.v = three()
 print("ab", a2.v, b2.v)
 
--- global decl: value list evaluates left-to-right (f before g)
+global *  -- global decl: value list evaluates left-to-right (f before g)
 global gg = f(), g()
 print("gg=" .. gg)

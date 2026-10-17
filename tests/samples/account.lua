@@ -1,8 +1,7 @@
 -- A simple example of OOP in Lua (from PiL 1, ch. 16).
--- Adapted for lua2wasm: only the `global` declarations have been added; the
--- rest is byte-for-byte the original from lua.org/extras.
+-- The original from lua.org/extras: its globals need no declarations.
 
-global Account = {balance = 0}
+Account = {balance = 0}
 
 function Account:new (o, name)
   o = o or {name=name}
@@ -24,7 +23,7 @@ function Account:show (title)
   print(title or "", self.name, self.balance)
 end
 
-global a = Account:new(nil,"demo")
+a = Account:new(nil,"demo")
 a:show("after creation")
 a:deposit(1000.00)
 a:show("after deposit")

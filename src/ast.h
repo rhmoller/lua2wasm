@@ -114,6 +114,7 @@ struct Expr {
             size_t name_len;
             VarKind kind;
             int idx; /* local slot or upvalue index, depending on kind */
+            int ro;  /* a read-only global: declared <const>, or free under `global<const> *` */
         } var;
         struct {
             Expr *callee;

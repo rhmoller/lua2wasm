@@ -42,7 +42,7 @@ for k in range_iter, 3 do
   print(k)            -- 1, 2, 3
 end
 
--- globals
+global *  -- globals: declared below, the rest stay free
 global counter
 counter = 0
 global bump

@@ -1,12 +1,7 @@
 -- Bisection method for solving non-linear equations.
--- Adapted for lua2wasm: globals are explicitly declared up front; everything
--- else is byte-for-byte the original.
+-- From lua.org/extras: its globals need no declarations.
 
-global delta = 1e-6
-global n
-global bisect
-global solve
-global f
+delta = 1e-6
 
 function bisect(f,a,b,fa,fb)
  local c=(a+b)/2

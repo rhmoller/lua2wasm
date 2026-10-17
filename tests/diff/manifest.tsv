@@ -111,8 +111,6 @@ xfail	mt_gc	__gc finalizers impossible: no bundled GC, no WasmGC finalization ho
 xfail	mt_mode	__mode weak tables impossible: WasmGC has no weak references
 xfail	collectgarbage_count	no managed GC to report live memory for "count"
 xfail	debug_getinfo	nparams/nups/isvararg/linedefined need codegen debug metadata we don't retain
-xfail	strict_global	Lua 5.5 strict-global rejection is compile-time (harness sees <compile-fail>)
-xfail	goto_into_scope	reject goto into a local's scope — compile-time parity (needs parser machinery)
 pass	math_fmod	fuzzer-found: float fmod precision for large magnitudes
 pass	float_mod_sign	fuzzer-found: float % zero-sign follows dividend, not always +0
 pass	format_str_coerce	fuzzer-found: string.format coerces numeric-string args, errors otherwise
@@ -152,3 +150,5 @@ pass	close_xpcall	xpcall handler runs at the raise point, before __close; nil er
 pass	close_lines	error positions at <close> scope exits and non-closable declarations
 pass	close_messages	__close gets no 2nd argument without an error; non-closable and invalid-__close messages
 pass	named_vararg	Lua 5.5 `...t`: t is a read-only {args..., n = count}; `...` reads t[1..t.n]; improper n raises
+pass	strict_global	Lua 5.5 strict globals: a free name in the scope of a global declaration is a compile error
+pass	goto_into_scope	a goto may not jump into a local's scope: compile error at the label

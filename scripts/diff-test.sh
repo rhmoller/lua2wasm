@@ -77,9 +77,18 @@ fi
 
 run_l2w() {
     local lua="$1" base="$2"
-    local wat="$WORK_DIR/diff_$base.wat" wasm="$WORK_DIR/diff_$base.wasm"
+    local wat="$WORK_DIR/diff_$base.wat" wasm="$WORK_DIR/diff_$base.wasm" err
     # shellcheck disable=SC2086  # L2W_FLAGS: extra compiler flags, word-split
-    if ! "$BIN" "$lua" ${L2W_FLAGS:-} -o "$wat" >/dev/null 2>&1; then echo "<compile-fail>"; return; fi
+    if ! err="$("$BIN" "$lua" ${L2W_FLAGS:-} -o "$wat" 2>&1 >/dev/null)"; then
+        # A compile error compares, by line and message, with reference Lua
+        # rejecting the chunk, which `lua` reports as "lua5.5: <chunk>:<line>: <msg>".
+        if [[ "$err" =~ ^parse\ error:\ line\ ([0-9]+):\ (.*)$ ]]; then
+            echo "$LUA_REF: $base.lua:${BASH_REMATCH[1]}: ${BASH_REMATCH[2]}"
+        else
+            echo "<compile-fail>"
+        fi
+        return
+    fi
     if ! "$BUILD_DIR/wat2wasm" -o "$wasm" "$wat" >/dev/null 2>&1; then
         echo "<assemble-fail>"; return
     fi

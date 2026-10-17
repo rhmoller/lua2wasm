@@ -1,1 +1,1 @@
-lua5.5: strict_global.lua:8: variable 'y' not declared
+lua5.5: strict_global.lua:7: variable 'y' not declared
