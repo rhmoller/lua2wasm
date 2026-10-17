@@ -103,12 +103,6 @@ pass	os_difftime	os.difftime(t2,t1) returns the second difference as a float
 pass	os_setlocale	os.setlocale query/"C" returns "C"
 pass	io_default_files	io.input()/io.output() return default handles; io.write routes through them
 pass	math_minmax_ult	min/max use the full < operator; ult coerces int strings, rejects non-integers
-#
-# -- deferred: large milestone (open a discussion before tackling) --
-# Full <close> on early exits needs close calls injected before every
-# return/break/goto crossing a close scope PLUS try_table error-path unwinding
-# — invasive changes to control-flow and exception lowering. Niche feature;
-# natural-block-exit close already works. Kept captured.
 pass	close_early_exit	<close> runs __close on return/break/goto/error exits, reverse order
 #
 # -- blocked by hard constraints / missing metadata (kept captured) --
@@ -154,3 +148,6 @@ pass	run_once_functions	loops of a function called once run resumably: returns t
 pass	builder_results	results built once: table.concat sized fast path and fallback, the shared format/gsub/concat builder re-entered, abandoned by errors, grown past 64 KB
 pass	string_ropes	long .. results are ropes until read: append/prepend/chains/numbers, length/eq/keys/library/format/concat/errors on them
 pass	string_cache	short run-time strings through the lossy cache and the one-byte table: limits, every byte, slot collisions, every path to one key, digits, zeros
+pass	close_xpcall	xpcall handler runs at the raise point, before __close; nil error object; error in error handling
+pass	close_lines	error positions at <close> scope exits and non-closable declarations
+pass	close_messages	__close gets no 2nd argument without an error; non-closable and invalid-__close messages

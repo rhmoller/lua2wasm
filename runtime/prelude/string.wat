@@ -894,7 +894,7 @@
           (then (call $throw_lit (i32.const 368) (i32.const 12))))   ;; "missing size"
         (return (local.get $n) (local.get $newpp))))
     ;; Unknown letter.
-    (throw $LuaError (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 416) (i32.const 14)) (i32.const 0))))
+    (throw $LuaError (call $raised (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 416) (i32.const 14)) (i32.const 0)))))
 
   ;; Add alignment padding so the next $sz-byte write lands at an
   ;; offset that's a multiple of min($sz, $max_align). Raises if that
@@ -1241,7 +1241,7 @@
             (br_if $scan_done (i32.ge_s (local.get $sz) (local.get $str_len)))
             (if (i32.eqz (array.get_u $LuaArr (local.get $str_bytes)
                                               (local.get $sz)))
-              (then (throw $LuaError (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 747) (i32.const 21)) (i32.const 0)))))
+              (then (throw $LuaError (call $raised (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 747) (i32.const 21)) (i32.const 0))))))
             (local.set $sz (i32.add (local.get $sz) (i32.const 1)))
             (br $scan_lp)))
           (call $builder_append (local.get $b) (local.get $str_bytes)
@@ -1257,9 +1257,9 @@
           (local.set $newpp) (local.set $n)
           (local.set $ppos (local.get $newpp))
           (if (i32.lt_s (local.get $n) (i32.const 1))
-            (then (throw $LuaError (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 355) (i32.const 13)) (i32.const 0)))))
+            (then (throw $LuaError (call $raised (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 355) (i32.const 13)) (i32.const 0))))))
           (if (i32.gt_s (local.get $n) (i32.const 16))
-            (then (throw $LuaError (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 355) (i32.const 13)) (i32.const 0)))))
+            (then (throw $LuaError (call $raised (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 355) (i32.const 13)) (i32.const 0))))))
           (local.set $str_bytes (call $str_bytes
             (ref.cast (ref $LuaString)
               (call $args_at (local.get $args) (local.get $arg_idx)))))
@@ -1269,7 +1269,7 @@
           (if (i32.eqz (call $pack_fits_unsigned
                               (i64.extend_i32_u (local.get $str_len))
                               (local.get $n)))
-            (then (throw $LuaError (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 173) (i32.const 17)) (i32.const 0)))))
+            (then (throw $LuaError (call $raised (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 173) (i32.const 17)) (i32.const 0))))))
           ;; Align builder for the length prefix.
           (local.set $blen (struct.get $Builder $len (local.get $b)))
           (local.set $pad
@@ -1308,7 +1308,7 @@
           (local.set $arg_idx (i32.add (local.get $arg_idx) (i32.const 1)))
           (local.set $str_len (array.len (local.get $str_bytes)))
           (if (i32.gt_s (local.get $str_len) (local.get $sz))
-            (then (throw $LuaError (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 173) (i32.const 17)) (i32.const 0)))))
+            (then (throw $LuaError (call $raised (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 173) (i32.const 17)) (i32.const 0))))))
           (call $builder_append (local.get $b) (local.get $str_bytes)
                                 (i32.const 0) (local.get $str_len))
           (local.set $pad (i32.sub (local.get $sz) (local.get $str_len)))
@@ -1478,7 +1478,7 @@
           (block $scan_done_z (loop $scan_lp_z
             (if (i32.ge_u (i32.add (local.get $offset) (local.get $sz))
                           (local.get $subj_len))
-              (then (throw $LuaError (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 173) (i32.const 17)) (i32.const 0)))))
+              (then (throw $LuaError (call $raised (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 173) (i32.const 17)) (i32.const 0))))))
             (br_if $scan_done_z
               (i32.eqz (array.get_u $LuaArr (local.get $subj)
                          (i32.add (local.get $offset) (local.get $sz)))))
@@ -1505,15 +1505,15 @@
           (local.set $newpp) (local.set $n)
           (local.set $ppos (local.get $newpp))
           (if (i32.lt_s (local.get $n) (i32.const 1))
-            (then (throw $LuaError (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 355) (i32.const 13)) (i32.const 0)))))
+            (then (throw $LuaError (call $raised (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 355) (i32.const 13)) (i32.const 0))))))
           (if (i32.gt_s (local.get $n) (i32.const 16))
-            (then (throw $LuaError (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 355) (i32.const 13)) (i32.const 0)))))
+            (then (throw $LuaError (call $raised (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 355) (i32.const 13)) (i32.const 0))))))
           (local.set $offset
             (call $pack_align (local.get $offset)
                               (local.get $n) (local.get $max_align)))
           (if (i32.gt_u (i32.add (local.get $offset) (local.get $n))
                         (local.get $subj_len))
-            (then (throw $LuaError (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 173) (i32.const 17)) (i32.const 0)))))
+            (then (throw $LuaError (call $raised (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 173) (i32.const 17)) (i32.const 0))))))
           (local.set $val (call $pack_read_int (local.get $subj)
                                 (local.get $offset) (local.get $n)
                                 (local.get $endian_le)))
@@ -1521,7 +1521,7 @@
           (local.set $sz (i32.wrap_i64 (local.get $val)))
           (if (i32.gt_u (i32.add (local.get $offset) (local.get $sz))
                         (local.get $subj_len))
-            (then (throw $LuaError (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 173) (i32.const 17)) (i32.const 0)))))
+            (then (throw $LuaError (call $raised (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 173) (i32.const 17)) (i32.const 0))))))
           (local.set $str_bytes
             (array.new $LuaArr (i32.const 0) (local.get $sz)))
           (array.copy $LuaArr $LuaArr
@@ -1541,7 +1541,7 @@
           (local.set $ppos (local.get $newpp))
           (if (i32.gt_u (i32.add (local.get $offset) (local.get $sz))
                         (local.get $subj_len))
-            (then (throw $LuaError (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 173) (i32.const 17)) (i32.const 0)))))
+            (then (throw $LuaError (call $raised (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 173) (i32.const 17)) (i32.const 0))))))
           (local.set $str_bytes
             (array.new $LuaArr (i32.const 0) (local.get $sz)))
           (array.copy $LuaArr $LuaArr
@@ -1565,7 +1565,7 @@
                               (local.get $sz) (local.get $max_align)))
           (if (i32.gt_u (i32.add (local.get $offset) (local.get $sz))
                         (local.get $subj_len))
-            (then (throw $LuaError (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 173) (i32.const 17)) (i32.const 0)))))
+            (then (throw $LuaError (call $raised (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 173) (i32.const 17)) (i32.const 0))))))
           (local.set $val (call $pack_read_int (local.get $subj)
                                 (local.get $offset) (local.get $sz)
                                 (local.get $endian_le)))
@@ -1588,7 +1588,7 @@
                           (local.get $sz) (local.get $max_align)))
       (if (i32.gt_u (i32.add (local.get $offset) (local.get $sz))
                     (local.get $subj_len))
-        (then (throw $LuaError (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 173) (i32.const 17)) (i32.const 0)))))
+        (then (throw $LuaError (call $raised (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 173) (i32.const 17)) (i32.const 0))))))
       (local.set $val (call $pack_read_int (local.get $subj)
                             (local.get $offset) (local.get $sz)
                             (local.get $endian_le)))

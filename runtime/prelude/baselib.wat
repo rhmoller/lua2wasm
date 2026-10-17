@@ -84,109 +84,67 @@
                     (ref.as_non_null (global.get $call_lines))
                     (local.get $idx))
                   (ref.cast (ref $LuaString) (local.get $msg))))))))))
-    (throw $LuaError (local.get $msg))
+    (throw $LuaError (call $raised (local.get $msg)))
     ;; unreachable, but typechecker needs a tail expression:
     (global.get $g_empty_args))
 
-  ;; Reference Lua's luaG_errormsg replaces a nil error object with the
-  ;; string "<no error object>" before delivering it to the catcher (after
-  ;; any message handler has run). error()/error(nil) raises a null anyref,
-  ;; so mirror that substitution at the pcall/xpcall boundary.
-  (func $err_or_noobj (param $e anyref) (result anyref)
-    (if (result anyref) (ref.is_null (local.get $e))
-      (then (struct.new $LuaString
-              (array.new_data $LuaArr $str_data (i32.const 768) (i32.const 17)) (i32.const 0)))
-      (else (local.get $e))))
+  ;; Call `callee` with `args` in protected mode, with `msgh` as the message
+  ;; handler ($raised runs it; null for none). Returns (true, results...) on
+  ;; success, (false, err) on a caught $LuaError, the error already handled.
+  ;; The callee can be any value: $lua_call_any walks __call and raises
+  ;; "attempt to call a non-function value" when the chain bottoms out, so
+  ;; that comes back as (false, errmsg). The call gets the protected call's
+  ;; own line, so error() inside the callee reports the pcall(...) position,
+  ;; as in reference Lua, where pcall adds no visible frame. A caught error
+  ;; restores the call-frame depth, the stack cost and the handler state.
+  (func $protected_call (param $callee anyref) (param $args (ref $ArgArr)) (param $msgh anyref)
+                        (result (ref $ArgArr))
+    (local $results (ref $ArgArr)) (local $r2 (ref $ArgArr)) (local $err anyref)
+    (local $saved_depth i32) (local $cost_saved i32)
+    (local $msgh_saved anyref) (local $nest_saved i32)
+    (local.set $saved_depth (global.get $call_depth))
+    (local.set $cost_saved (global.get $stack_cost))
+    (local.set $msgh_saved (global.get $msgh))
+    (local.set $nest_saved (global.get $msgh_nest))
+    (global.set $msgh (local.get $msgh))
+    (block $catch_err (result anyref)
+      (local.set $results
+        (try_table (result (ref $ArgArr)) (catch $LuaError $catch_err)
+          (call $lua_call_any (local.get $callee) (local.get $args) (call $top_line))))
+      (global.set $msgh (local.get $msgh_saved))
+      (local.set $r2 (array.new $ArgArr (ref.null any)
+        (i32.add (array.len (local.get $results)) (i32.const 1))))
+      (array.set $ArgArr (local.get $r2) (i32.const 0) (global.get $g_true))
+      (array.copy $ArgArr $ArgArr (local.get $r2) (i32.const 1)
+        (local.get $results) (i32.const 0) (array.len (local.get $results)))
+      (return (local.get $r2)))
+    (local.set $err)
+    (global.set $call_depth (local.get $saved_depth))
+    (global.set $stack_cost (local.get $cost_saved))
+    (global.set $msgh (local.get $msgh_saved))
+    (global.set $msgh_nest (local.get $nest_saved))
+    (array.new_fixed $ArgArr 2 (global.get $g_false) (local.get $err)))
 
-  ;; pcall(f, ...): calls f with the remaining args. Returns (true, results...)
-  ;; on success; (false, err) on caught $LuaError. The callee can be any
-  ;; value — we delegate to $lua_call_any, which walks __call and surfaces
-  ;; a proper "attempt to call a non-function value" error when the chain
-  ;; bottoms out, so pcall(non-function) returns (false, errmsg).
+  ;; pcall(f, ...): f(...) in protected mode, with no message handler (so an
+  ;; enclosing xpcall's handler does not see errors raised inside it).
   (func $builtin_pcall (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
-    (local $callee anyref) (local $f_args (ref $ArgArr))
-    (local $n_total i32) (local $line i32)
-    (local $err anyref) (local $results (ref $ArgArr)) (local $r2 (ref $ArgArr))
-    (local $saved_depth i32) (local $cost_saved i32)
-    (local.set $n_total (array.len (local.get $args)))
-    (if (i32.eqz (local.get $n_total))
-      (then (throw $LuaError (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 620) (i32.const 14)) (i32.const 0)))))
-    (local.set $callee (array.get $ArgArr (local.get $args) (i32.const 0)))
-    ;; f_args = args[1..]. $args_slice does the bulk copy with array.copy.
-    (local.set $f_args (call $args_slice (local.get $args) (i32.const 1)))
-    (local.set $saved_depth (global.get $call_depth))
-    (local.set $cost_saved (global.get $stack_cost))
-    ;; Pass the pcall call-site's line through to lua_call_any so error()
-    ;; inside the callee reports the pcall(...) source position — matches
-    ;; reference Lua, where pcall itself doesn't add a visible frame.
-    (if (i32.gt_s (global.get $call_depth) (i32.const 0))
-      (then (local.set $line (array.get $LineArr
-        (ref.as_non_null (global.get $call_lines))
-        (i32.sub (global.get $call_depth) (i32.const 1))))))
-    (block $catch_err (result anyref)
-      (local.set $results
-        (try_table (result (ref $ArgArr)) (catch $LuaError $catch_err)
-          (call $lua_call_any (local.get $callee) (local.get $f_args) (local.get $line))))
-      (local.set $r2 (array.new $ArgArr (ref.null any)
-        (i32.add (array.len (local.get $results)) (i32.const 1))))
-      (array.set $ArgArr (local.get $r2) (i32.const 0) (global.get $g_true))
-      (array.copy $ArgArr $ArgArr (local.get $r2) (i32.const 1)
-        (local.get $results) (i32.const 0) (array.len (local.get $results)))
-      (return (local.get $r2)))
-    (local.set $err)
-    (global.set $call_depth (local.get $saved_depth))
-    (global.set $stack_cost (local.get $cost_saved))
-    (array.new_fixed $ArgArr 2 (global.get $g_false)
-      (call $err_or_noobj (local.get $err))))
+    (if (i32.eqz (array.len (local.get $args)))
+      (then (throw $LuaError (call $raised (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 620) (i32.const 14)) (i32.const 0))))))
+    (call $protected_call (array.get $ArgArr (local.get $args) (i32.const 0))
+      (call $args_slice (local.get $args) (i32.const 1)) (ref.null any)))
 
-  ;; xpcall(f, msgh, ...): like pcall, but on error calls msgh(err) and
-  ;; uses its first return value as the error returned. If msgh itself
-  ;; throws, the new error replaces the original.
+  ;; xpcall(f, msgh, ...): like pcall, with msgh as the message handler. It
+  ;; runs where an error is raised, before the stack unwinds; its first
+  ;; result is the error xpcall returns. msgh must be a function.
   (func $builtin_xpcall (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
-    (local $callee anyref) (local $msgh anyref) (local $f_args (ref $ArgArr))
-    (local $n_total i32) (local $line i32)
-    (local $err anyref) (local $results (ref $ArgArr)) (local $r2 (ref $ArgArr))
-    (local $handled anyref) (local $saved_depth i32) (local $cost_saved i32)
-    (local.set $n_total (array.len (local.get $args)))
-    (if (i32.lt_s (local.get $n_total) (i32.const 2))
-      (then (throw $LuaError (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 620) (i32.const 14)) (i32.const 0)))))
-    (local.set $callee (array.get $ArgArr (local.get $args) (i32.const 0)))
-    (local.set $msgh   (array.get $ArgArr (local.get $args) (i32.const 1)))
-    ;; f_args = args[2..]. $args_slice does the bulk copy with array.copy.
-    (local.set $f_args (call $args_slice (local.get $args) (i32.const 2)))
-    (local.set $saved_depth (global.get $call_depth))
-    (local.set $cost_saved (global.get $stack_cost))
-    (if (i32.gt_s (global.get $call_depth) (i32.const 0))
-      (then (local.set $line (array.get $LineArr
-        (ref.as_non_null (global.get $call_lines))
-        (i32.sub (global.get $call_depth) (i32.const 1))))))
-    (block $catch_err (result anyref)
-      (local.set $results
-        (try_table (result (ref $ArgArr)) (catch $LuaError $catch_err)
-          (call $lua_call_any (local.get $callee) (local.get $f_args) (local.get $line))))
-      (local.set $r2 (array.new $ArgArr (ref.null any)
-        (i32.add (array.len (local.get $results)) (i32.const 1))))
-      (array.set $ArgArr (local.get $r2) (i32.const 0) (global.get $g_true))
-      (array.copy $ArgArr $ArgArr (local.get $r2) (i32.const 1)
-        (local.get $results) (i32.const 0) (array.len (local.get $results)))
-      (return (local.get $r2)))
-    (local.set $err)
-    (global.set $call_depth (local.get $saved_depth))
-    (global.set $stack_cost (local.get $cost_saved))
-    (block $msgh_throw (result anyref)
-      (local.set $handled (call $args_first
-        (try_table (result (ref $ArgArr)) (catch $LuaError $msgh_throw)
-          (call $lua_call_any (local.get $msgh)
-            (array.new_fixed $ArgArr 1 (local.get $err)) (local.get $line)))))
-      (return (array.new_fixed $ArgArr 2 (global.get $g_false)
-        (call $err_or_noobj (local.get $handled)))))
-    (local.set $handled)
-    (global.set $call_depth (local.get $saved_depth))
-    (global.set $stack_cost (local.get $cost_saved))
-    (array.new_fixed $ArgArr 2 (global.get $g_false)
-      (call $err_or_noobj (local.get $handled))))
+    (local $msgh anyref)
+    (local.set $msgh (call $args_at (local.get $args) (i32.const 1)))
+    (if (i32.eqz (ref.test (ref $LuaClosure) (local.get $msgh)))
+      (then (call $throw_lit (i32.const 1042) (i32.const 17))))   ;; "function expected"
+    (call $protected_call (array.get $ArgArr (local.get $args) (i32.const 0))
+      (call $args_slice (local.get $args) (i32.const 2)) (local.get $msgh)))
 
   ;; warn(...): hand a concatenated string to the host. Accepts (and
   ;; silently ignores) the "@on"/"@off" control messages.
@@ -260,7 +218,7 @@
                 (ref.as_non_null (global.get $call_lines))
                 (local.get $idx))
               (ref.cast (ref $LuaString) (local.get $msg))))))))
-    (throw $LuaError (local.get $msg))
+    (throw $LuaError (call $raised (local.get $msg)))
     (global.get $g_empty_args))
 
   ;; rawlen(v): byte length for strings, table-border length for tables.
@@ -278,7 +236,7 @@
         (then (return (array.new_fixed $ArgArr 1
                 (call $make_int (i64.extend_i32_u
                   (call $str_length (ref.cast (ref $LuaString) (local.get $v)))))))))))
-    (throw $LuaError (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 698) (i32.const 24)) (i32.const 0)))
+    (throw $LuaError (call $raised (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 698) (i32.const 24)) (i32.const 0))))
     (global.get $g_empty_args))
 
   ;; rawset(t, k, v): table write without consulting __newindex.
@@ -312,7 +270,7 @@
     (local $t anyref)
     (local.set $t (call $args_at (local.get $args) (i32.const 0)))
     (if (i32.eqz (ref.test (ref $LuaTable) (local.get $t)))
-      (then (throw $LuaError (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 684) (i32.const 14)) (i32.const 0)))))
+      (then (throw $LuaError (call $raised (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 684) (i32.const 14)) (i32.const 0))))))
     (array.new_fixed $ArgArr 1
       (call $tab_get_raw
         (ref.cast (ref $LuaTable) (local.get $t))
@@ -334,7 +292,7 @@
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
     (local $sel anyref) (local $bytes (ref $LuaArr)) (local $n i32) (local $idx i32)
     (local.set $n (array.len (local.get $args)))
-    (if (i32.eqz (local.get $n)) (then (throw $LuaError (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 620) (i32.const 14)) (i32.const 0)))))
+    (if (i32.eqz (local.get $n)) (then (throw $LuaError (call $raised (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 620) (i32.const 14)) (i32.const 0))))))
     (local.set $sel (call $args_at (local.get $args) (i32.const 0)))
     (if (ref.test (ref $LuaString) (local.get $sel))
       (then
@@ -352,7 +310,7 @@
       (then (local.set $idx (i32.add (i32.sub (local.get $n) (i32.const 1))
                                       (i32.add (local.get $idx) (i32.const 1))))))
     (if (i32.lt_s (local.get $idx) (i32.const 1))
-      (then (throw $LuaError (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 155) (i32.const 18)) (i32.const 0)))))
+      (then (throw $LuaError (call $raised (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 155) (i32.const 18)) (i32.const 0))))))
     (call $args_slice (local.get $args) (local.get $idx)))
 
   (func $builtin_type (type $LuaFn)
@@ -361,7 +319,7 @@
     ;; an implicit nil. assert(not pcall(type)) in the upstream suite
     ;; relies on this.
     (if (i32.eqz (array.len (local.get $args)))
-      (then (throw $LuaError (call $prefix_error_msg
+      (then (throw $LuaError (call $raised (call $prefix_error_msg
         (ref.as_non_null (global.get $g_src_name))
         (if (result i32) (i32.gt_s (global.get $call_depth) (i32.const 0))
           (then (array.get $LineArr
@@ -370,7 +328,7 @@
           (else (i32.const 0)))
         (struct.new $LuaString
           (array.new_data $LuaArr $str_data
-            (i32.const 93) (i32.const 36)) (i32.const 0))))))
+            (i32.const 93) (i32.const 36)) (i32.const 0)))))))
     ;; type() ignores __name (it reports the basic type); $objtypename, used
     ;; by tostring and error messages, is the __name-aware variant.
     (array.new_fixed $ArgArr 1 (call $basic_type_name (call $args_at (local.get $args) (i32.const 0)))))
@@ -638,7 +596,7 @@
         (if (i32.eqz (ref.is_null
               (call $tab_get_raw (ref.as_non_null (local.get $cur))
                 (ref.as_non_null (global.get $g_mkey_metatable)))))
-          (then (throw $LuaError (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 634) (i32.const 35)) (i32.const 0)))))))
+          (then (throw $LuaError (call $raised (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 634) (i32.const 35)) (i32.const 0))))))))
     (if (ref.is_null (local.get $mt))
       (then (struct.set $LuaTable $meta (local.get $t) (ref.null $LuaTable)))
       (else (struct.set $LuaTable $meta (local.get $t)
@@ -708,7 +666,7 @@
     (local $err anyref) (local $idx i32)
     (local.set $name (call $args_at (local.get $args) (i32.const 0)))
     (if (i32.eqz (ref.test (ref $LuaString) (local.get $name)))
-      (then (throw $LuaError (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 669) (i32.const 15)) (i32.const 0)))))
+      (then (throw $LuaError (call $raised (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 669) (i32.const 15)) (i32.const 0))))))
     ;; Fetch package, package.loaded, package.preload from _G.
     (local.set $key_pkg (struct.new $LuaString
       (array.new_data $LuaArr $str_data
@@ -761,7 +719,7 @@
               (ref.as_non_null (global.get $call_lines))
               (local.get $idx))
             (ref.cast (ref $LuaString) (local.get $err))))))
-        (throw $LuaError (local.get $err))))
+        (throw $LuaError (call $raised (local.get $err)))))
     ;; Call loader(name).
     (local.set $r (call $args_first
       (call $lua_call_any (local.get $loader)

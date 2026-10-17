@@ -14,6 +14,11 @@
   ;; that, since frame sizes differ by an order of magnitude across functions.
   (global $stack_cost (mut i32) (i32.const 0))
   (global $stack_budget i32 (i32.const 819200))
+  ;; How far past the budget an error's message handler and the <close>
+  ;; handlers of an error unwind may go, so they still run after a stack
+  ;; overflow (reference Lua runs both with extra stack, the closes only once
+  ;; the stack has unwound to the protected call).
+  (global $stack_headroom i32 (i32.const 65536))
   (global $call_weights (mut (ref null $LineArr)) (ref.null $LineArr))
 
   ;; --- call frames ---
@@ -192,11 +197,11 @@
                        (ref.as_non_null (global.get $g_mkey_call))))
       (if (ref.is_null (local.get $mm))
         (then (throw $LuaError
-          (call $prefix_error_msg
+          (call $raised (call $prefix_error_msg
             (ref.as_non_null (global.get $g_src_name))
             (local.get $line)
             (struct.new $LuaString
-              (array.new_data $LuaArr $str_data (i32.const 93) (i32.const 36)) (i32.const 0))))))
+              (array.new_data $LuaArr $str_data (i32.const 93) (i32.const 36)) (i32.const 0)))))))
       ;; Prepend the original callee so __call sees `self`.
       (local.set $args (call $merge_args
         (array.new_fixed $ArgArr 1 (local.get $v))
@@ -205,11 +210,11 @@
       (local.set $i (i32.add (local.get $i) (i32.const 1)))
       (br_if $resolve (i32.lt_s (local.get $i) (i32.const 200))))
     (throw $LuaError
-      (call $prefix_error_msg
+      (call $raised (call $prefix_error_msg
         (ref.as_non_null (global.get $g_src_name))
         (local.get $line)
         (struct.new $LuaString
-          (array.new_data $LuaArr $str_data (i32.const 93) (i32.const 36)) (i32.const 0)))))
+          (array.new_data $LuaArr $str_data (i32.const 93) (i32.const 36)) (i32.const 0))))))
 
   (func $args_first (param $args (ref $ArgArr)) (result anyref)
     (if (result anyref) (i32.eqz (array.len (local.get $args)))

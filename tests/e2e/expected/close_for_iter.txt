@@ -12,7 +12,7 @@ ok=false is_string=true
 k=1
 k=2
 -- non-closable closing value is a catchable error --
-false	close_for_iter:30: variable got a non-closable value
+false	close_for_iter:30: variable '(for state)' got a non-closable value
 -- nested for-loops close inner then outer --
 a=1 b=1
 close inner err=nil

@@ -8,7 +8,7 @@
 #define MAX_BLOCK_LABELS 64  /* ::labels:: declared in one block */
 #define MAX_DISPATCH_IDS 128 /* label-bearing blocks per function */
 
-static void emit_close_upto(CG *c, int target, const char *err_wat, int depth);
+static void emit_close_upto(CG *c, int target, int line, int depth);
 static void emit_block_stmts(CG *c, const Block *b, int depth);
 static void emit_block(CG *c, const Block *b, int depth);
 
@@ -603,7 +603,7 @@ static void emit_return(CG *c, const Stmt *s, int depth) {
          * enclosing function returns, as it would after a close. */
         if (c->in_main) emit_values_dropped(c, values, 0, n_values, depth);
         else emit_return_values(c, values, n_values, depth);
-        if (c->close_count > 0) emit_close_upto(c, 0, "(ref.null any)", depth);
+        if (c->close_count > 0) emit_close_upto(c, 0, s->line, depth);
         if (!c->in_main) emit_line(c, depth, "(local.set $ol_ret)\n");
         emit_linef(c, depth, "(local.set $ol_status (i32.const %d))\n", OL_RETURN);
         emit_line(c, depth, "(br $ol_exit)\n");
@@ -616,7 +616,7 @@ static void emit_return(CG *c, const Stmt *s, int depth) {
          * (e.g. `return print("hi")`). Drop each result after
          * evaluation, close what is open, then exit. */
         emit_values_dropped(c, values, 0, n_values, depth);
-        if (c->close_count > 0) emit_close_upto(c, 0, "(ref.null any)", depth);
+        if (c->close_count > 0) emit_close_upto(c, 0, s->line, depth);
         emit_line(c, depth, "return\n");
         return;
     }
@@ -628,7 +628,7 @@ static void emit_return(CG *c, const Stmt *s, int depth) {
          * `return f()` here is NOT a tail call — the locals must close after
          * f() returns. */
         emit_return_values(c, values, n_values, depth);
-        emit_close_upto(c, 0, "(ref.null any)", depth);
+        emit_close_upto(c, 0, s->line, depth);
         emit_line(c, depth, "return\n");
         return;
     }
@@ -929,9 +929,11 @@ static void emit_for_gen(CG *c, const Stmt *s, int depth) {
     int for_close = for_gen_has_closing(s);
     int pre_close_base = c->close_count;
     if (for_close) {
-        emit_line(c, depth, "(call $tbc_push (ref.as_non_null (local.get $tbc)) "
-                            "(call $args_at (ref.as_non_null (local.get $tmp_args)) "
-                            "(i32.const 3)))\n");
+        char kb[160];
+        emit_linef(c, depth, "(call $tbc_push (ref.as_non_null (local.get $tbc)) "
+                             "(call $args_at (ref.as_non_null (local.get $tmp_args)) "
+                             "(i32.const 3)) %s (i32.const %d))\n",
+                   kstr_expr(c, "(for state)", 11, kb, sizeof kb), s->line);
         c->close_count++;
     }
 
@@ -1037,7 +1039,7 @@ static void emit_for_gen(CG *c, const Stmt *s, int depth) {
      * break already closed it (down to pre_close_base) before branching here,
      * so this is a no-op on that path; an error/goto exit closed it via $tbc. */
     if (for_close) {
-        emit_close_upto(c, pre_close_base, "(ref.null any)", depth);
+        emit_close_upto(c, pre_close_base, s->as.for_gen.end_line, depth);
         c->close_count = pre_close_base;
     }
     c->break_depth--;
@@ -1118,17 +1120,19 @@ static void emit_local_stmt(CG *c, const Stmt *s, int depth) {
         for (int i = 0; i < n_names; i++) {
             if (s->as.local.attribs[i] != 2) continue;
             int slot = s->as.local.local_idxs[i];
+            char kb[160];
+            const char *name = kstr_expr(c, s->as.local.names[i], s->as.local.name_lens[i], kb, sizeof kb);
             emit_indent(c, depth);
             if (slot_is_boxed(c, slot))
                 wat_appendf(c->w,
                             "(call $tbc_push (ref.as_non_null (local.get $tbc)) "
-                            "(struct.get $Box $v (local.get $L%d)))\n",
-                            slot);
+                            "(struct.get $Box $v (local.get $L%d)) %s (i32.const %d))\n",
+                            slot, name, s->line);
             else
                 wat_appendf(c->w,
                             "(call $tbc_push (ref.as_non_null (local.get $tbc)) "
-                            "(local.get $L%d))\n",
-                            slot);
+                            "(local.get $L%d) %s (i32.const %d))\n",
+                            slot, name, s->line);
             c->close_count++;
         }
     }
@@ -1179,7 +1183,7 @@ static void emit_repeat(CG *c, const Stmt *s, int depth) {
     emit_truthy(c, s->as.repeat.cond, depth + 2);
     emit_line(c, depth + 2, "i32.eqz\n");
     if (c->close_count > rbase)
-        emit_close_upto(c, rbase, "(ref.null any)", depth + 2);
+        emit_close_upto(c, rbase, s->as.repeat.body.end_line, depth + 2);
     c->close_count = rbase;
     emit_linef(c, depth + 2, "br_if $cont_%d\n", label);
     emit_line(c, depth + 1, ")\n");
@@ -1195,7 +1199,7 @@ static void emit_break(CG *c, const Stmt *s, int depth) {
     int label = c->break_labels[c->break_depth - 1];
     /* Close to-be-closed locals declared inside this loop before leaving. */
     int base = c->break_close_count[c->break_depth - 1];
-    if (c->close_count > base) emit_close_upto(c, base, "(ref.null any)", depth);
+    if (c->close_count > base) emit_close_upto(c, base, s->line, depth);
     emit_linef(c, depth, "br $brk_%d\n", label);
 }
 
@@ -1206,7 +1210,7 @@ static void emit_goto(CG *c, const Stmt *s, int depth) {
      * leaving, close any to-be-closed vars whose scope the jump exits
      * (down to the count live at the target label). */
     if (c->close_count > s->as.label.close_base)
-        emit_close_upto(c, s->as.label.close_base, "(ref.null any)", depth);
+        emit_close_upto(c, s->as.label.close_base, s->line, depth);
     emit_linef(c, depth, "(local.set $next_%d (i32.const %d))\n",
                s->as.label.block_dispatch_id, s->as.label.target_segment_idx);
     emit_linef(c, depth, "(br $dispatch_%d)\n", s->as.label.block_dispatch_id);
@@ -1358,22 +1362,25 @@ static int count_fn_close(const Block *b) {
     return n;
 }
 
-/* Emit a close of the to-be-closed stack down to `target`, with the given 2nd
- * __close argument (null on a structured exit). */
-static void emit_close_upto(CG *c, int target, const char *err_wat, int depth) {
+/* Emit a structured exit's close of the to-be-closed stack down to `target`
+ * (no error object). `line` is where the scope is left: an error calling a
+ * __close is reported there. */
+static void emit_close_upto(CG *c, int target, int line, int depth) {
     emit_linef(c, depth, "(call $close_upto (ref.as_non_null (local.get $tbc)) "
-                         "(i32.const %d) %s)\n",
-               target, err_wat);
+                         "(i32.const %d) (ref.null any) (i32.const %d))\n",
+               target, line);
 }
 
 /* The locals and prologue a function/main body needs for <close> support:
- * the per-activation $tbc stack and a snapshot of call_depth at entry (so the
- * error catch can run __close at the right depth). Only emitted when the body
- * actually declares a to-be-closed variable. */
+ * the per-activation $tbc stack and snapshots of call_depth and stack_cost at
+ * entry (so the error catch can run __close at the right depth, below the
+ * stack budget even when unwinding a stack overflow). Only emitted when the
+ * body actually declares a to-be-closed variable. */
 static void emit_tbc_locals(WatBuilder *w, int has_close) {
     if (!has_close) return;
     wat_append(w, "    (local $tbc (ref null $Tbc))\n");
     wat_append(w, "    (local $close_depth i32)\n");
+    wat_append(w, "    (local $close_cost i32)\n");
 }
 
 static void emit_tbc_init(WatBuilder *w, int n_total) {
@@ -1381,13 +1388,15 @@ static void emit_tbc_init(WatBuilder *w, int n_total) {
                    "(ref.null any) (i32.const %d)) (i32.const 0)))\n",
                 n_total);
     wat_append(w, "    (local.set $close_depth (global.get $call_depth))\n");
+    wat_append(w, "    (local.set $close_cost (global.get $stack_cost))\n");
 }
 
 /* Emit a function/main body. With to-be-closed vars, wrap it in one
  * function-level error catch: structured exits (return/break/goto/fall-through)
  * drain the $tbc stack themselves; an error unwind lands here, restores the
- * entry depth, closes whatever is still open with the error object, and
- * rethrows (via $close_upto, which always throws when given an error). */
+ * entry depth and stack cost, closes whatever is still open with the error
+ * object, and rethrows (via $close_upto, which always throws when given an
+ * error; $raised never makes one null). */
 static void emit_close_body(CG *c, const Block *body, int has_close, int depth) {
     c->close_count = 0;
     if (!has_close) {
@@ -1404,8 +1413,9 @@ static void emit_close_body(CG *c, const Block *body, int has_close, int depth) 
     emit_line(c, depth + 1, ")\n"); /* fnclose_catch: caught error value on stack */
     emit_line(c, depth + 1, "(local.set $tmp_any)\n");
     emit_line(c, depth + 1, "(global.set $call_depth (local.get $close_depth))\n");
+    emit_line(c, depth + 1, "(global.set $stack_cost (local.get $close_cost))\n");
     emit_line(c, depth + 1, "(call $close_upto (ref.as_non_null (local.get $tbc)) "
-                            "(i32.const 0) (local.get $tmp_any))\n");
+                            "(i32.const 0) (local.get $tmp_any) (i32.const 0))\n");
     emit_line(c, depth + 1, "(unreachable)\n");
     emit_line(c, depth, ")\n"); /* fnclose_done */
 }
@@ -1548,7 +1558,7 @@ static void emit_block(CG *c, const Block *b, int depth) {
     int base = c->close_count;
     emit_block_stmts(c, b, depth);
     /* STMT_LOCAL bumped close_count for each <close> it emitted; close them. */
-    if (c->close_count > base) emit_close_upto(c, base, "(ref.null any)", depth);
+    if (c->close_count > base) emit_close_upto(c, base, b->end_line, depth);
     c->close_count = base;
 }
 

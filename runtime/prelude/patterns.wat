@@ -1000,7 +1000,7 @@
                         (then (call $builder_append (local.get $b) (local.get $sub)
                                 (local.get $match_start)
                                 (i32.sub (local.get $match_end) (local.get $match_start))))
-                        (else (throw $LuaError (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 722) (i32.const 25)) (i32.const 0))))))
+                        (else (throw $LuaError (call $raised (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 722) (i32.const 25)) (i32.const 0)))))))
                     (else
                       (call $builder_append_cap (local.get $b)
                         (local.get $sub) (local.get $caps)
@@ -1038,7 +1038,7 @@
               (local.get $match_start)
               (i32.sub (local.get $match_end) (local.get $match_start)))
             (return)))
-        (throw $LuaError (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 722) (i32.const 25)) (i32.const 0)))))
+        (throw $LuaError (call $raised (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 722) (i32.const 25)) (i32.const 0))))))
     (if (ref.test (ref $LuaString) (local.get $v))
       (then
         (local.set $bytes (call $str_bytes
@@ -1053,7 +1053,7 @@
         (call $builder_append (local.get $b) (local.get $bytes)
           (i32.const 0) (array.len (local.get $bytes)))
         (return)))
-    (throw $LuaError (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 722) (i32.const 25)) (i32.const 0))))
+    (throw $LuaError (call $raised (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 722) (i32.const 25)) (i32.const 0)))))
 
   ;; Table repl: $tab[first_capture_or_whole_match] is the replacement.
   (func $apply_repl_table
@@ -1156,7 +1156,7 @@
         (else (if (ref.test (ref $LuaClosure) (local.get $repl_v))
           (then (local.set $repl_kind (i32.const 2))
                 (local.set $repl_bytes (array.new $LuaArr (i32.const 0) (i32.const 0))))
-          (else (throw $LuaError (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 722) (i32.const 25)) (i32.const 0)))))))))
+          (else (throw $LuaError (call $raised (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 722) (i32.const 25)) (i32.const 0))))))))))
     (local.set $start_ppos (call $pat_anchor_start (local.get $pat)))
     (local.set $anchored (local.get $start_ppos))
     (local.set $b (call $builder_take))

@@ -306,10 +306,10 @@
     ;; so build the message directly instead of via $throw_lit.
     (local.set $err (struct.new $LuaString
       (array.new_data $LuaArr $str_data (i32.const 237) (i32.const 24)) (i32.const 0)))
-    (throw $LuaError (call $prefix_error_msg
+    (throw $LuaError (call $raised (call $prefix_error_msg
       (ref.as_non_null (global.get $g_src_name))
       (local.get $line)
-      (ref.cast (ref $LuaString) (local.get $err)))))
+      (ref.cast (ref $LuaString) (local.get $err))))))
 
   (func $get_metamethod (param $v anyref) (param $key (ref $LuaString)) (result anyref)
     (local $t (ref $LuaTable)) (local $mt (ref null $LuaTable))
@@ -542,5 +542,5 @@
       (local.set $v (local.get $mm))
       (local.set $depth (i32.add (local.get $depth) (i32.const 1)))
       (if (i32.gt_s (local.get $depth) (i32.const 200))
-        (then (throw $LuaError (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 541) (i32.const 42)) (i32.const 0)))))
+        (then (throw $LuaError (call $raised (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 541) (i32.const 42)) (i32.const 0))))))
       (br $top))))

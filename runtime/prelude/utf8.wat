@@ -500,12 +500,12 @@
       ;; extended (5/6-byte) UTF-8; reject out of range before truncating.
       (if (i32.or (i64.lt_s (local.get $cp) (i64.const 0))
                   (i64.gt_s (local.get $cp) (i64.const 0x7FFFFFFF)))
-        (then (throw $LuaError (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 155) (i32.const 18)) (i32.const 0)))))
+        (then (throw $LuaError (call $raised (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 155) (i32.const 18)) (i32.const 0))))))
       (local.set $w (call $utf8_encode
         (local.get $buf) (local.get $pos)
         (i32.wrap_i64 (local.get $cp)) (i32.const 1)))
       (if (i32.lt_s (local.get $w) (i32.const 0))
-        (then (throw $LuaError (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 155) (i32.const 18)) (i32.const 0)))))
+        (then (throw $LuaError (call $raised (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 155) (i32.const 18)) (i32.const 0))))))
       (local.set $pos (i32.add (local.get $pos) (local.get $w)))
       (local.set $i (i32.add (local.get $i) (i32.const 1)))
       (br $lp)))

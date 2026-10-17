@@ -135,7 +135,7 @@
         (local.set $r
           (call $call_mm1 (local.get $mm) (local.get $v) (ref.null any) (ref.null any) (i32.const 1)))
         (if (i32.eqz (ref.test (ref $LuaString) (local.get $r)))
-          (then (throw $LuaError (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 508) (i32.const 33)) (i32.const 0)))))
+          (then (throw $LuaError (call $raised (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 508) (i32.const 33)) (i32.const 0))))))
         (return (ref.cast (ref $LuaString) (local.get $r)))))
     (if (ref.is_null (local.get $v))
       (then (return (struct.new $LuaString

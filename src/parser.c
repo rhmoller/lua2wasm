@@ -139,6 +139,8 @@ static const Token *peek_at(Parser *p, size_t off) {
     return &p->toks->items[i];
 }
 static const Token *advance(Parser *p) { return &p->toks->items[p->pos++]; }
+/* The line of the last token consumed (reference Lua's `lastline`). */
+static int last_line(Parser *p) { return p->pos ? p->toks->items[p->pos - 1].line : peek(p)->line; }
 
 static void set_error(Parser *p, const char *msg) {
     if (!p->ok) return;
@@ -857,6 +859,12 @@ static Stmt *parse_local(Parser *p) {
     int n_names = (int)names.count;
     const Token **names_buf = names.data;
     int *attribs_buf = attribs_b.data;
+    int n_close = 0;
+    for (int i = 0; i < n_names; i++) n_close += attribs_buf[i] == 2;
+    if (n_close > 1) {
+        set_error(p, "multiple to-be-closed variables in local list");
+        LOCAL_FAIL();
+    }
     /* Parse RHS values BEFORE declaring locals — Lua scoping rule. */
     ItemBuf vals;
     ib_init(&vals, sizeof(Expr *));
@@ -889,14 +897,24 @@ static Stmt *parse_local(Parser *p) {
         }
     }
     int *attribs = NULL;
+    const char **attrib_names = NULL;
+    size_t *attrib_name_lens = NULL;
     if (any_attrib) {
         attribs = node_pool_alloc(p->pool, sizeof(int) * n_names);
-        for (int i = 0; i < n_names; i++) attribs[i] = attribs_buf[i];
+        attrib_names = node_pool_alloc(p->pool, sizeof(const char *) * n_names);
+        attrib_name_lens = node_pool_alloc(p->pool, sizeof(size_t) * n_names);
+        for (int i = 0; i < n_names; i++) {
+            attribs[i] = attribs_buf[i];
+            attrib_names[i] = names_buf[i]->start;
+            attrib_name_lens[i] = names_buf[i]->len;
+        }
     }
     Stmt *s = stmt_new(p->pool, STMT_LOCAL, line);
     s->as.local.n_names = n_names;
     s->as.local.local_idxs = local_idxs;
     s->as.local.attribs = attribs;
+    s->as.local.names = attrib_names;
+    s->as.local.name_lens = attrib_name_lens;
     s->as.local.n_values = n_values;
     if (n_values) {
         s->as.local.values = ib_finish(&vals, p->pool);
@@ -1233,6 +1251,7 @@ static Stmt *parse_for(Parser *p) {
     s->as.for_gen.n_exprs = (int)exprs.count;
     s->as.for_gen.exprs = ib_finish(&exprs, p->pool);
     s->as.for_gen.body = body;
+    s->as.for_gen.end_line = last_line(p);
     return s;
 }
 
@@ -1245,6 +1264,7 @@ static Stmt *parse_repeat(Parser *p) {
     /* `until cond` is evaluated in scope where the loop's locals are still visible */
     expect(p, TOK_KW_UNTIL, "until");
     Expr *cond = parse_expr(p);
+    body.end_line = last_line(p); /* the body's <close> vars close after cond */
     frame_rewind(cur_frame(p), mark);
     if (!p->ok) return NULL;
     Stmt *s = stmt_new(p->pool, STMT_REPEAT, line);
@@ -1511,6 +1531,7 @@ static void parse_block(Parser *p, Block *out, const TokKind *stops, int n_stops
         vec[count++] = st;
     }
     out->count = count;
+    out->end_line = last_line(p);
     if (count) {
         out->items = node_pool_alloc(p->pool, sizeof(Stmt *) * count);
         memcpy(out->items, vec, sizeof(Stmt *) * count);
@@ -1584,6 +1605,7 @@ static LuaFunc *parse_function_body_ex(Parser *p, int line, int with_self) {
     Block body = {0};
     parse_block1(p, &body, TOK_KW_END);
     expect(p, TOK_KW_END, "end (of function)");
+    body.end_line = last_line(p);
 
     fn->n_params = n_params;
     fn->n_locals = cur_frame(p)->next_slot;

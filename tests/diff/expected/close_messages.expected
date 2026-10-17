@@ -1,0 +1,17 @@
+scope	1	nil
+return	1	nil
+break	1	nil
+goto	1	nil
+error	2	E
+for	1	nil
+after-raise	2	B
+false	variable 'x' got a non-closable value
+false	variable 'bad_one' got a non-closable value
+false	variable 'q' got a non-closable value
+false	variable '(for state)' got a non-closable value
+false	attempt to call a nil value (metamethod 'close')
+false	attempt to call a number value (metamethod 'close')
+false	attempt to call a Thing value (metamethod 'close')
+a1 sees	attempt to call a string value (metamethod 'close')
+false	12
+callable	0

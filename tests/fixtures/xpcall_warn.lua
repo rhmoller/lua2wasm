@@ -14,9 +14,9 @@ print(xpcall(function(a, b) return a + b end,
 print(xpcall(function() return 1, 2, 3 end,
              function(e) return e end))                    -- true    1    2    3
 
--- xpcall: handler that itself throws — its error replaces the original.
+-- xpcall: a handler that always throws ends in "error in error handling".
 print(xpcall(function() error("first") end,
-             function(e) error("from handler") end))       -- false   from handler
+             function(e) error("from handler") end))       -- false   error in error handling
 
 -- xpcall: handler is a closure that can capture state.
 local count = 0

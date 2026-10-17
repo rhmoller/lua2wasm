@@ -3,6 +3,57 @@
 
   (tag $LuaError (export "LuaError") (param anyref))
 
+  ;; The message handler of the innermost active xpcall (null under a pcall
+  ;; and at top level), and how many calls of it are in progress.
+  (global $msgh (mut anyref) (ref.null any))
+  (global $msgh_nest (mut i32) (i32.const 0))
+
+  ;; The value a newly raised error carries, built the way reference Lua's
+  ;; luaG_errormsg builds it: the innermost xpcall's message handler runs
+  ;; here, where the error is raised and before anything unwinds (so a
+  ;; <close> variable's __close receives the handler's result), then a nil
+  ;; error object becomes "<no error object>". Every raise is
+  ;; `(throw $LuaError (call $raised v))`; only rethrowing an error already
+  ;; raised (the close machinery) throws the value bare.
+  ;;
+  ;; The handler stays installed while it runs, so an error it raises is
+  ;; handled in turn, and that result is what propagates; one that keeps
+  ;; raising ends in "error in error handling". The outermost handler call
+  ;; runs with headroom past the stack budget, so a handler still gets to run
+  ;; after a stack overflow.
+  (func $raised (param $e anyref) (result anyref)
+    (local $h anyref) (local $outer i32)
+    (local.set $h (global.get $msgh))
+    (if (i32.eqz (ref.is_null (local.get $h)))
+      (then
+        (if (i32.ge_u (global.get $msgh_nest) (i32.const 20))
+          (then (return (struct.new $LuaString
+            (array.new_data $LuaArr $str_data (i32.const 1208) (i32.const 23)) (i32.const 0)))))
+        (local.set $outer (i32.eqz (global.get $msgh_nest)))
+        (global.set $msgh_nest (i32.add (global.get $msgh_nest) (i32.const 1)))
+        (if (local.get $outer)
+          (then (global.set $stack_cost (i32.sub (global.get $stack_cost) (global.get $stack_headroom)))))
+        (block $handled
+          (block $hcatch (result anyref)
+            (local.set $e (call $args_first
+              (try_table (result (ref $ArgArr)) (catch $LuaError $hcatch)
+                (call $lua_call_any (local.get $h)
+                  (array.new_fixed $ArgArr 1 (local.get $e)) (call $top_line)))))
+            (br $handled))
+          ;; The handler raised: that error, already handled, replaces this one.
+          (local.set $e)
+          (global.set $msgh_nest (i32.sub (global.get $msgh_nest) (i32.const 1)))
+          (if (local.get $outer)
+            (then (global.set $stack_cost (i32.add (global.get $stack_cost) (global.get $stack_headroom)))))
+          (throw $LuaError (local.get $e)))
+        (global.set $msgh_nest (i32.sub (global.get $msgh_nest) (i32.const 1)))
+        (if (local.get $outer)
+          (then (global.set $stack_cost (i32.add (global.get $stack_cost) (global.get $stack_headroom)))))))
+    (if (result anyref) (ref.is_null (local.get $e))
+      (then (struct.new $LuaString
+              (array.new_data $LuaArr $str_data (i32.const 768) (i32.const 17)) (i32.const 0)))
+      (else (local.get $e))))
+
   ;; Build "<src>:<line>: <msg>" as a new $LuaString.
   (func $prefix_error_msg
     (param $src (ref $LuaString)) (param $line i32) (param $msg (ref $LuaString))
@@ -59,7 +110,7 @@
           (ref.as_non_null (global.get $call_lines))
           (local.get $idx))
         (local.get $msg)))))
-    (throw $LuaError (local.get $err)))
+    (throw $LuaError (call $raised (local.get $err))))
 
   ;; Same, but the message is a string-pool literal addressed by
   ;; (offset, length). Saves the boilerplate at the ~dozen sites that
@@ -73,11 +124,11 @@
   ;; Positioned variant of $throw_lit: prefix the literal with "<src>:<line>: "
   ;; using the error's own source line rather than the topmost call frame's.
   (func $throw_lit_at (param $off i32) (param $len i32) (param $line i32)
-    (throw $LuaError (call $prefix_error_msg
+    (throw $LuaError (call $raised (call $prefix_error_msg
       (ref.as_non_null (global.get $g_src_name))
       (local.get $line)
       (struct.new $LuaString
-        (array.new_data $LuaArr $str_data (local.get $off) (local.get $len)) (i32.const 0)))))
+        (array.new_data $LuaArr $str_data (local.get $off) (local.get $len)) (i32.const 0))))))
 
   ;; Argument validators: turn the bare ref.cast a builtin would otherwise do on
   ;; a user argument into a catchable Lua error, so pcall recovers instead of

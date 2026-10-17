@@ -149,7 +149,7 @@
                                (i32.const 42)))   ;; '*'
             (then (local.set $b0 (i32.const 1))))
           (if (i32.le_s (local.get $blen) (local.get $b0))
-            (then (throw $LuaError (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 416) (i32.const 14)) (i32.const 0)))))
+            (then (throw $LuaError (call $raised (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 416) (i32.const 14)) (i32.const 0))))))
           (local.set $b1 (array.get_u $LuaArr (local.get $bytes) (local.get $b0)))
           ;; map first non-'*' char to a mode
           (if (i32.eq (local.get $b1) (i32.const 108))         ;; 'l'
@@ -160,7 +160,7 @@
                 (then (local.set $mode (i32.const 2)))
                 (else (if (i32.eq (local.get $b1) (i32.const 110)) ;; 'n'
                   (then (local.set $mode (i32.const -1)))    ;; sentinel: number
-                  (else (throw $LuaError (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 416) (i32.const 14)) (i32.const 0)))))))))))
+                  (else (throw $LuaError (call $raised (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 416) (i32.const 14)) (i32.const 0))))))))))))
           (if (i32.eq (local.get $mode) (i32.const -1))
             (then (local.set $val (call $read_src_num (local.get $fd))))
             (else (if (i32.eq (local.get $mode) (i32.const 2))
@@ -175,7 +175,7 @@
           ;; integer count — up to N bytes
           (local.set $count (i32.wrap_i64 (call $as_int (local.get $fmt))))
           (if (i32.lt_s (local.get $count) (i32.const 0))
-            (then (throw $LuaError (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 416) (i32.const 14)) (i32.const 0)))))
+            (then (throw $LuaError (call $raised (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 416) (i32.const 14)) (i32.const 0))))))
           (local.set $val (call $read_n_str (local.get $fd) (local.get $count)))))
       (array.set $ArgArr (local.get $out) (local.get $i) (local.get $val))
       (local.set $i (i32.add (local.get $i) (i32.const 1)))

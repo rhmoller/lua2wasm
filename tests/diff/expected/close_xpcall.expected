@@ -1,0 +1,35 @@
+false	h<E>
+before-close	H(E) a:h<E>
+false	h<E2>
+close-raises	H(E1) b:h<E1> H(E2) a:h<E2>
+false	h<E3>
+normal-exit-raises	c:nil H(E3) a:h<E3>
+false	inner
+false	h<outer>
+pcall-shields	i:inner H(outer) a:h<outer>
+false	h2
+false	h<outer>
+nested-xpcall	H2 i:h2 H(outer)
+false	idx
+runtime-error	H:string a:idx
+false	h<F>
+for-closing	H(F) for:h<F>
+false	h<E>
+pcall-in-close	H(E) pc:deep
+15
+loop	x1:1 x2:2 x3:3 x4:4 x5:5
+false	<no error object>
+nil-pcall	a:<no error object>
+false	<no error object>
+nil-for	f:<no error object>
+false	h<nil>
+nil-xpcall	H(nil) a:h<nil>
+false	<no error object>
+nil-from-close	a:<no error object>
+false	error in error handling
+false	error in error handling
+handler-raises	a:error in error handling
+false	h2:retry
+false
+false
+false	SO:true

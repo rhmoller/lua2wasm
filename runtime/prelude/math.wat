@@ -172,7 +172,7 @@
       (then
         (local.set $iy (call $as_int (local.get $b)))
         (if (i64.eqz (local.get $iy))
-          (then (throw $LuaError (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 455) (i32.const 24)) (i32.const 0)))))
+          (then (throw $LuaError (call $raised (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 455) (i32.const 24)) (i32.const 0))))))
         (return (array.new_fixed $ArgArr 1
           (call $make_int (i64.rem_s (call $as_int (local.get $a))
                                       (local.get $iy)))))))
@@ -343,7 +343,7 @@
       (then (return (array.new_fixed $ArgArr 1
               (call $make_int (call $rng_next))))))
     (if (i64.gt_s (local.get $lo) (local.get $hi))
-      (then (throw $LuaError (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 355) (i32.const 13)) (i32.const 0)))))
+      (then (throw $LuaError (call $raised (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 355) (i32.const 13)) (i32.const 0))))))
     ;; range = hi - lo + 1; pick uniform via mod (good enough for our
     ;; purposes; the bias is < 1/2^32 for any range < 2^32).
     (local.set $range (i64.add (i64.sub (local.get $hi) (local.get $lo)) (i64.const 1)))

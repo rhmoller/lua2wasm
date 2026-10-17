@@ -67,8 +67,8 @@ static const char PRELUDE[] = {
  * LITERAL_SLAB below; verify_literal_slab() checks that LITERAL_PREFIX and
  * that map agree, so an edit to one without the other fails the build
  * instead of silently corrupting messages or reading past the slab. */
-#define LITERAL_PREFIX     "niltruefalse<float>numberstringtablefunctionboolean__index__add__eq\tLua 5.5'for' step is zeroattempt to call a non-function value__callmodule '' not loadedvalue out of rangedata does not fitinvalid UTF-8 codeattempt to perform arithmeticattempt to index a valuetable index is niltable index is NaNtoo largeyearmonthdayhourminsecwdayydayisdsttable overflowout of limitsmissing sizevariable-length formatnot power of 2invalid formatattempt to divide by zeroattempt to perform 'n%0'attempt to compare two values'__tostring' must return a string'__newindex' chain too long; possible loopattempt to close a non-closable valuevalue expectedcannot change a protected metatablestring expectedtable expectedtable or string expectedinvalid replacement valuestring contains zeros<no error object>invalid value in table for 'concat'base out of rangeposition out of boundsinitial position is a continuation bytefield missing in date tablewrong number of argumentsnumber expected, got stack overflownumber has no integer representationinvalid key to 'next'function expectedfield is not an integervariable got a non-closable valueinvalid order function for sortingbad 'for' limit (bad 'for' step (bad 'for' initial value ()"
-#define LITERAL_PREFIX_LEN 1208
+#define LITERAL_PREFIX     "niltruefalse<float>numberstringtablefunctionboolean__index__add__eq\tLua 5.5'for' step is zeroattempt to call a non-function value__callmodule '' not loadedvalue out of rangedata does not fitinvalid UTF-8 codeattempt to perform arithmeticattempt to index a valuetable index is niltable index is NaNtoo largeyearmonthdayhourminsecwdayydayisdsttable overflowout of limitsmissing sizevariable-length formatnot power of 2invalid formatattempt to divide by zeroattempt to perform 'n%0'attempt to compare two values'__tostring' must return a string'__newindex' chain too long; possible loopattempt to close a non-closable valuevalue expectedcannot change a protected metatablestring expectedtable expectedtable or string expectedinvalid replacement valuestring contains zeros<no error object>invalid value in table for 'concat'base out of rangeposition out of boundsinitial position is a continuation bytefield missing in date tablewrong number of argumentsnumber expected, got stack overflownumber has no integer representationinvalid key to 'next'function expectedfield is not an integervariable got a non-closable valueinvalid order function for sortingbad 'for' limit (bad 'for' step (bad 'for' initial value ()error in error handlingattempt to call a  value (metamethod 'close')"
+#define LITERAL_PREFIX_LEN 1276
 static_assert(sizeof(LITERAL_PREFIX) - 1 == LITERAL_PREFIX_LEN,
               "LITERAL_PREFIX_LEN must match the byte length of LITERAL_PREFIX");
 
@@ -135,7 +135,7 @@ static const struct {
     {698, "table or string expected"},                   /* $builtin_rawlen */
     {722, "invalid replacement value"},                  /* gsub replacement paths */
     {747, "string contains zeros"},                      /* $builtin_string_pack 'z' */
-    {768, "<no error object>"},                          /* $err_or_noobj */
+    {768, "<no error object>"},                          /* $raised */
     {785, "invalid value in table for 'concat'"},        /* $builtin_table_concat */
     {820, "base out of range"},                          /* $builtin_tonumber */
     {837, "position out of bounds"},                     /* $builtin_utf8_offset */
@@ -148,12 +148,16 @@ static const struct {
     {1021, "invalid key to 'next'"},                     /* $builtin_next */
     {1042, "function expected"},                         /* $builtin_table_sort */
     {1059, "field is not an integer"},                   /* $os_date_field */
-    {1082, "variable got a non-closable value"},         /* $check_closable */
+    {1082, "variable "},                                 /* $check_closable */
+    {1091, "got a non-closable value"},                  /* $check_closable */
     {1115, "invalid order function for sorting"},        /* $partition */
     {1149, "bad 'for' limit ("},                         /* $for_limit / $for_prep */
     {1166, "bad 'for' step ("},                          /* $for_prep */
     {1182, "bad 'for' initial value ("},                 /* $for_prep */
     {1207, ")"},                                         /* $for_error */
+    {1208, "error in error handling"},                   /* $raised */
+    {1231, "attempt to call a "},                        /* $call_close */
+    {1249, " value (metamethod 'close')"},               /* $call_close */
 };
 
 /* Returns the offending entry's string on drift between LITERAL_PREFIX and
@@ -914,27 +918,13 @@ static void emit_embed_api(CG *c) {
         "                        (ref.cast (ref $ArgArr) (local.get $args)) (i32.const 0)))\n"
         /* Protected call: returns an ArgArr [ok_bool, ...results-or-error], the
          * Lua pcall convention, so the host never has to catch a wasm
-         * exception. Restores $call_depth on a caught error (the throw leaves
-         * the callee's frames un-popped) so later calls aren't corrupted. */
+         * exception. $protected_call restores the call-frame state on a caught
+         * error (the throw leaves the callee's frames un-popped) so later calls
+         * aren't corrupted, and runs the callee with no message handler even
+         * when the host is called from inside an xpcall. */
         "  (func (export \"lua_pcall\") (param $fn anyref) (param $args anyref) (result anyref)\n"
-        "    (local $results (ref $ArgArr)) (local $r2 (ref $ArgArr))\n"
-        "    (local $err anyref) (local $depth i32)\n"
-        "    (local.set $depth (global.get $call_depth))\n"
-        "    (block $caught (result anyref)\n"
-        "      (local.set $results\n"
-        "        (try_table (result (ref $ArgArr)) (catch $LuaError $caught)\n"
-        "          (call $lua_call_any (local.get $fn)\n"
-        "                              (ref.cast (ref $ArgArr) (local.get $args)) (i32.const 0))))\n"
-        "      (local.set $r2 (array.new $ArgArr (ref.null any)\n"
-        "        (i32.add (array.len (local.get $results)) (i32.const 1))))\n"
-        "      (array.set $ArgArr (local.get $r2) (i32.const 0) (global.get $g_true))\n"
-        "      (array.copy $ArgArr $ArgArr (local.get $r2) (i32.const 1)\n"
-        "        (local.get $results) (i32.const 0) (array.len (local.get $results)))\n"
-        "      (return (local.get $r2)))\n"
-        "    (local.set $err)\n"
-        "    (global.set $call_depth (local.get $depth))\n"
-        "    (array.new_fixed $ArgArr 2 (global.get $g_false)\n"
-        "      (call $err_or_noobj (local.get $err))))\n"
+        "    (call $protected_call (local.get $fn)\n"
+        "      (ref.cast (ref $ArgArr) (local.get $args)) (ref.null any)))\n"
         /* Table marshaling: build/read/write Lua tables across the boundary.
          * Keys are ordinary Lua values (lua_make_int / lua_str_new). */
         "  (func (export \"lua_table_new\") (result anyref) (call $tab_new))\n"

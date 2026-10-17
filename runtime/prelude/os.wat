@@ -81,7 +81,7 @@
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
     (local $written i32)
     (if (i32.eqz (array.len (local.get $args)))
-      (then (throw $LuaError (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 669) (i32.const 15)) (i32.const 0)))))
+      (then (throw $LuaError (call $raised (struct.new $LuaString (array.new_data $LuaArr $str_data (i32.const 669) (i32.const 15)) (i32.const 0))))))
     (local.set $written
       (call $host_os_getenv (call $args_at (local.get $args) (i32.const 0))))
     (if (i32.lt_s (local.get $written) (i32.const 0))

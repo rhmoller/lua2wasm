@@ -172,6 +172,10 @@ typedef enum {
 struct Block {
     Stmt **items;
     size_t count;
+    /* The line reference Lua is on when it leaves the block normally: that of
+     * the last token before the block ends (a function body's `end`, the end
+     * of a repeat's `until` condition). Where its <close> variables close. */
+    int end_line;
 };
 
 typedef struct {
@@ -206,8 +210,10 @@ struct Stmt {
     union {
         struct { /* local a [, b, c] [= e1 [, e2, ...]] */
             int n_names;
-            int *local_idxs; /* one per name */
-            int *attribs;    /* one per name: 0 = none, 1 = const, 2 = close (m23). NULL if none have any. */
+            int *local_idxs;    /* one per name */
+            int *attribs;       /* one per name: 0 = none, 1 = const, 2 = close (m23). NULL if none have any. */
+            const char **names; /* with attribs: the names, for <close> errors */
+            size_t *name_lens;
             int n_values;
             Expr **values; /* may be 0 if no init */
         } local;
@@ -260,6 +266,7 @@ struct Stmt {
             int n_exprs;
             Expr **exprs;
             Block body;
+            int end_line; /* its `end`, where the closing value closes */
         } for_gen;
         struct { /* repeat body until cond */
             Block body;

@@ -36,3 +36,17 @@ if "$BIN" "$BUILD_DIR/attributes_const_reject.lua" -o "$BUILD_DIR/attributes_con
     echo "FAIL: <const> reassignment was accepted" >&2
     exit 1
 fi
+
+# A local list may declare only one to-be-closed variable, in either the
+# per-name or the prefix (`local <close> a, b`) form; rejected at compile time.
+for decl in 'local a <close>, b <close> = nil, nil' 'local <close> a, b = nil, nil'; do
+    printf '%s\n' "$decl" > "$BUILD_DIR/attributes_multi_close.lua"
+    if ERR="$("$BIN" "$BUILD_DIR/attributes_multi_close.lua" -o "$BUILD_DIR/attributes_multi_close.wat" 2>&1)"; then
+        echo "FAIL: multiple <close> variables were accepted: $decl" >&2
+        exit 1
+    fi
+    if [[ "$ERR" != *"multiple to-be-closed variables"* ]]; then
+        echo "FAIL: unexpected error for '$decl': $ERR" >&2
+        exit 1
+    fi
+done
