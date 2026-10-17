@@ -29,6 +29,19 @@ print(g.a, g.b)
 local r = {}
 r[1], r[1.0], r[2] = "x", "y", "z"
 print(r[1], r[2], #r)
+-- ...also when a later target reassigns the key or the table local, and when
+-- the values come from one multi-value call
+local function two(x, y) return x, y end
+local tk, ik = {}, 1
+tk[ik], ik = two("a", 2)
+print(tk[1], tk[2], ik)
+local tt, old = {}, nil
+old = tt
+tt[1], tt = two("x", {})
+print(old[1], tt[1])
+local tv, iv = {}, 1
+tv[iv], iv = "p", 2
+print(tv[1], tv[2], iv)
 
 -- evaluation order: tables and keys first, then values (the manual leaves
 -- this undefined; reference Lua and lua2wasm both do it left to right)

@@ -354,6 +354,16 @@ add_test(
             ${CMAKE_SOURCE_DIR}
             ${CMAKE_BINARY_DIR}
 )
+# And through the boxed fallback (-O0), which must match reference Lua too —
+# the specialized paths can hide a fallback bug from the default run.
+add_test(
+    NAME test_diff_reference_o0
+    COMMAND ${CMAKE_COMMAND} -E env L2W_FLAGS=-O0 DIFF_WORK_DIR=${CMAKE_BINARY_DIR}/diff_o0
+            bash ${CMAKE_SOURCE_DIR}/scripts/diff-test.sh
+            $<TARGET_FILE:lua2wasm>
+            ${CMAKE_SOURCE_DIR}
+            ${CMAKE_BINARY_DIR}
+)
 
 # --- formatting ---------------------------------------------------------
 # `format` rewrites src/ in place; `format-check` fails if anything is unformatted.

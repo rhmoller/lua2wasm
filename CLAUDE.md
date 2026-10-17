@@ -81,7 +81,8 @@ Numeric/call specialization (int/float unboxing, typed direct-call entries,
 comparison specialization) is **on by default**; `-O0` selects the boxed
 fallback. The two are behaviour-identical (goldens are shared), so the e2e
 suite runs each fixture both ways: the default loop exercises the specialized
-path, a `-O0` loop (`test_e2e_o0_*`) guards the fallback.
+path, a `-O0` loop (`test_e2e_o0_*`) guards the fallback, and
+`test_diff_reference_o0` reruns the differential cases at `-O0`.
 
 Loops of run-once code (the main chunk, a local function it calls once) are
 outlined into functions that return every 64K iterations so V8 can switch them

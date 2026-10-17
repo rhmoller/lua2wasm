@@ -455,6 +455,16 @@ static int emit_assign_multi_cells(CG *c, const Stmt *s, int depth) {
     return 1;
 }
 
+/* Is local `slot` a variable target of assignment `s`? Stores run right to
+ * left, so such a target may change it before an index target's store. */
+static int assign_sets_local(const Stmt *s, int slot) {
+    for (int i = 0; i < s->as.assign.n_targets; i++) {
+        const AssignTarget *t = &s->as.assign.targets[i];
+        if (t->kind == TGT_VAR && t->as.var.kind == VAR_LOCAL && t->as.var.idx == slot) return 1;
+    }
+    return 0;
+}
+
 static void emit_assign(CG *c, const Stmt *s, int depth) {
     int n_targets = s->as.assign.n_targets;
     int n_values = s->as.assign.n_values;
@@ -494,17 +504,20 @@ static void emit_assign(CG *c, const Stmt *s, int depth) {
     /* An index target whose table and key are non-captured locals (or the
      * key a literal) has a static address too: evaluating the values first
      * can't change it, and neither can an earlier store's __newindex (locals
-     * are unreachable from metamethods unless captured). Such targets store
-     * through emit_target_open like single stores — keeping the int / maybe /
-     * constant-key fast paths (`q[i], q[j] = q[j], q[i]`). */
+     * are unreachable from metamethods unless captured) — unless one of those
+     * locals is itself a target of this statement (`t[i], i = f()`). Such
+     * targets store through emit_target_open like single stores — keeping the
+     * int / maybe / constant-key fast paths (`q[i], q[j] = q[j], q[i]`). */
     int has_index = 0;
     for (int i = 0; i < n_targets; i++) {
         AssignTarget *t = &s->as.assign.targets[i];
         if (t->kind == TGT_VAR) continue;
         const Expr *tb = t->as.index.table, *k = t->as.index.key;
-        int tb_static = tb->kind == EXPR_VAR && tb->as.var.kind == VAR_LOCAL && !slot_is_boxed(c, tb->as.var.idx);
+        int tb_static = tb->kind == EXPR_VAR && tb->as.var.kind == VAR_LOCAL && !slot_is_boxed(c, tb->as.var.idx) &&
+                        !assign_sets_local(s, tb->as.var.idx);
         int k_static = k->kind == EXPR_INT || k->kind == EXPR_FLOAT || k->kind == EXPR_STRING ||
-                       (k->kind == EXPR_VAR && k->as.var.kind == VAR_LOCAL && !slot_is_boxed(c, k->as.var.idx));
+                       (k->kind == EXPR_VAR && k->as.var.kind == VAR_LOCAL && !slot_is_boxed(c, k->as.var.idx) &&
+                        !assign_sets_local(s, k->as.var.idx));
         if (!(tb_static && k_static)) {
             has_index = 1;
             break;
