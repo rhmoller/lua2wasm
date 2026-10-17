@@ -50,3 +50,14 @@ for decl in 'local a <close>, b <close> = nil, nil' 'local <close> a, b = nil, n
         exit 1
     fi
 done
+
+# A named vararg table (`...t`) is a read-only local: assigning it is rejected.
+printf 'local function f(...t) t = {} end\n' > "$BUILD_DIR/attributes_vararg_ro.lua"
+if ERR="$("$BIN" "$BUILD_DIR/attributes_vararg_ro.lua" -o "$BUILD_DIR/attributes_vararg_ro.wat" 2>&1)"; then
+    echo "FAIL: assignment to a named vararg table was accepted" >&2
+    exit 1
+fi
+if [[ "$ERR" != *"const variable"* ]]; then
+    echo "FAIL: unexpected error for vararg table assignment: $ERR" >&2
+    exit 1
+fi

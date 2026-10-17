@@ -151,3 +151,4 @@ pass	string_cache	short run-time strings through the lossy cache and the one-byt
 pass	close_xpcall	xpcall handler runs at the raise point, before __close; nil error object; error in error handling
 pass	close_lines	error positions at <close> scope exits and non-closable declarations
 pass	close_messages	__close gets no 2nd argument without an error; non-closable and invalid-__close messages
+pass	named_vararg	Lua 5.5 `...t`: t is a read-only {args..., n = count}; `...` reads t[1..t.n]; improper n raises

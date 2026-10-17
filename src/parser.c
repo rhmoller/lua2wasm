@@ -90,6 +90,10 @@ typedef struct {
     UpvalueRef upvalues[MAX_UPVALS_PER_FN];
     int n_upvalues;
     int is_vararg; /* `...` is bound in this frame's scope */
+    /* A named vararg table (`...t`): its slot (-1: none) and name. */
+    int vararg_slot;
+    const char *vararg_name;
+    size_t vararg_name_len;
     /* Escape-analysis: captured[s] == 1 iff slot s is referenced as an
      * upvalue by some descendant function. Set lazily during name
      * resolution; consumed when the LuaFunc is finalised. */
@@ -170,6 +174,7 @@ static void frame_init(FuncFrame *f) {
     f->next_slot = 0;
     f->n_upvalues = 0;
     f->is_vararg = 0;
+    f->vararg_slot = -1;
     memset(f->captured, 0, sizeof(f->captured));
 }
 
@@ -502,11 +507,25 @@ static Expr *parse_primary(Parser *p) {
     }
     case TOK_ELLIPSIS: {
         advance(p);
-        if (!cur_frame(p)->is_vararg) {
+        FuncFrame *f = cur_frame(p);
+        if (!f->is_vararg) {
             set_error(p, "cannot use `...` outside a vararg function");
             return NULL;
         }
-        return expr_new(p->pool, EXPR_VARARG, line);
+        Expr *e = expr_new(p->pool, EXPR_VARARG, line);
+        e->as.vararg.tab = NULL;
+        e->as.vararg.pack = 0;
+        if (f->vararg_slot >= 0) {
+            /* `...` reads the named vararg table, by slot: a later local of
+             * the same name does not change what it means. */
+            Expr *t = expr_new(p->pool, EXPR_VAR, line);
+            t->as.var.name = f->vararg_name;
+            t->as.var.name_len = f->vararg_name_len;
+            t->as.var.kind = VAR_LOCAL;
+            t->as.var.idx = f->vararg_slot;
+            e->as.vararg.tab = t;
+        }
+        return e;
     }
     case TOK_KW_FUNCTION: {
         advance(p);
@@ -1550,6 +1569,33 @@ static LuaFunc *parse_function_body(Parser *p, int line) {
     return parse_function_body_ex(p, line, /*with_self*/ 0);
 }
 
+/* A function with a named vararg table (`...t`) starts its body with the
+ * declaration `local <const> t = <the extra arguments as a table>`, so every
+ * analysis sees t as an ordinary read-only local. */
+static void prepend_vararg_decl(Parser *p, Block *body, const FuncFrame *f, int line) {
+    Expr *pack = expr_new(p->pool, EXPR_VARARG, line);
+    pack->as.vararg.tab = NULL;
+    pack->as.vararg.pack = 1;
+    Stmt *s = stmt_new(p->pool, STMT_LOCAL, line);
+    s->as.local.n_names = 1;
+    s->as.local.local_idxs = node_pool_alloc(p->pool, sizeof(int));
+    s->as.local.local_idxs[0] = f->vararg_slot;
+    s->as.local.attribs = node_pool_alloc(p->pool, sizeof(int));
+    s->as.local.attribs[0] = 1;
+    s->as.local.names = node_pool_alloc(p->pool, sizeof(const char *));
+    s->as.local.names[0] = f->vararg_name;
+    s->as.local.name_lens = node_pool_alloc(p->pool, sizeof(size_t));
+    s->as.local.name_lens[0] = f->vararg_name_len;
+    s->as.local.n_values = 1;
+    s->as.local.values = node_pool_alloc(p->pool, sizeof(Expr *));
+    s->as.local.values[0] = pack;
+    Stmt **items = node_pool_alloc(p->pool, sizeof(Stmt *) * (body->count + 1));
+    items[0] = s;
+    if (body->count) memcpy(items + 1, body->items, sizeof(Stmt *) * body->count);
+    body->items = items;
+    body->count++;
+}
+
 static LuaFunc *parse_function_body_ex(Parser *p, int line, int with_self) {
     if (p->n_funcs >= MAX_FUNCS) {
         set_error(p, "too many functions");
@@ -1580,12 +1626,22 @@ static LuaFunc *parse_function_body_ex(Parser *p, int line, int with_self) {
         do {
             if (peek(p)->kind == TOK_ELLIPSIS) {
                 advance(p);
-                cur_frame(p)->is_vararg = 1;
-                /* Lua 5.5 "named vararg": `...name` binds the varargs to
-                 * `name` as a table. Parser accepts the identifier; full
-                 * binding semantics are not yet implemented (the body sees
-                 * the regular `...` form but `name` resolves to nil). */
-                if (peek(p)->kind == TOK_IDENT) advance(p);
+                FuncFrame *f = cur_frame(p);
+                f->is_vararg = 1;
+                /* Lua 5.5 named vararg table: `...name` makes `name` a
+                 * read-only local holding {extra args..., n = count}. It is
+                 * declared by a `local <const>` the body starts with (below). */
+                if (peek(p)->kind == TOK_IDENT) {
+                    const Token *vn = advance(p);
+                    f->vararg_slot = frame_declare(f, vn->start, vn->len);
+                    if (f->vararg_slot < 0) {
+                        set_error(p, "too many locals");
+                        break;
+                    }
+                    frame_mark_last_const(f);
+                    f->vararg_name = vn->start;
+                    f->vararg_name_len = vn->len;
+                }
                 break;
             }
             if (peek(p)->kind != TOK_IDENT) {
@@ -1606,6 +1662,7 @@ static LuaFunc *parse_function_body_ex(Parser *p, int line, int with_self) {
     parse_block1(p, &body, TOK_KW_END);
     expect(p, TOK_KW_END, "end (of function)");
     body.end_line = last_line(p);
+    if (p->ok && cur_frame(p)->vararg_slot >= 0) prepend_vararg_decl(p, &body, cur_frame(p), line);
 
     fn->n_params = n_params;
     fn->n_locals = cur_frame(p)->next_slot;

@@ -1,0 +1,31 @@
+table	0	nil	nil	nil	0
+table	3	1	nil	3	3
+table	2	nil	nil	nil	2
+1	nil	0	nil	nil
+1	2	2	3	4
+true	1	1
+true	changed	two
+1	1
+4	a	nil	nil	nil
+10	10	2	10
+3	15	2	4	start	4	5	6
+2	7	nil
+1	nil	3
+2,4,6
+1=a,2=b,n=2
+true	3	1	2	3
+2
+3
+3	4
+late	late	x
+0	2	1	2
+table	2
+1	4	4
+5
+300000
+number	false	vararg table has no proper 'n'
+string	false	vararg table has no proper 'n'
+number	false	vararg table has no proper 'n'
+number	false	vararg table has no proper 'n'
+boolean	false	vararg table has no proper 'n'
+false	vararg table has no proper 'n'

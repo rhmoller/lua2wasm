@@ -111,6 +111,9 @@ void for_each_subexpr(const Expr *e, ExprVisit fn, void *ctx) {
             fn(e->as.table_ctor.entries[i].value, ctx);
         }
         break;
+    case EXPR_VARARG:
+        if (e->as.vararg.tab) fn(e->as.vararg.tab, ctx); /* `...t`: reads t */
+        break;
     default: break;
     }
 }

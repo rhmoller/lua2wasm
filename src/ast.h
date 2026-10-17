@@ -147,6 +147,14 @@ struct Expr {
             Expr **args;
             size_t nargs;
         } method_call;
+        struct { /* `...` */
+            /* In a function with a named vararg table (`...t`): a read of t,
+             * since `...` then stands for t's values 1..t.n. NULL otherwise. */
+            Expr *tab;
+            /* Set on the initializer of t's declaration, which builds the
+             * table from the extra arguments. */
+            int pack;
+        } vararg;
     } as;
 };
 

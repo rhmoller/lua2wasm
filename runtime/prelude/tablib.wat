@@ -498,8 +498,11 @@
     (array.new_fixed $ArgArr 1 (local.get $a2)))
 
   ;; table.pack(...): returns { [1] = a1, ..., [n] = an, n = nargs }.
-  (func $builtin_table_pack (type $LuaFn)
-    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
+  ;; --- named vararg tables (`function f(...t)`) ---
+  ;; t is {extra args..., n = count}, built at entry (and by table.pack);
+  ;; `...` then stands for t's values 1..t.n, read raw, so changes to t show
+  ;; through `...`.
+  (func $vararg_table (param $args (ref $ArgArr)) (result (ref $LuaTable))
     (local $t (ref $LuaTable)) (local $n i32) (local $i i32)
     (local $nkey (ref $LuaString))
     (local.set $t (call $tab_new))
@@ -516,7 +519,50 @@
       (array.new_fixed $LuaArr 1 (i32.const 110)) (i32.const 0)))
     (call $tab_set (local.get $t) (local.get $nkey)
       (call $make_int (i64.extend_i32_s (local.get $n))))
-    (array.new_fixed $ArgArr 1 (local.get $t)))
+    (local.get $t))
+
+  ;; t.n for a `...` read on $line, raw. As in reference Lua it must be an
+  ;; integer (not a float) in [0, INT_MAX/2], else "vararg table has no
+  ;; proper 'n'".
+  (func $vararg_count (param $t (ref $LuaTable)) (param $line i32) (result i32)
+    (local $n anyref) (local $v i64)
+    (local.set $n (call $tab_get_raw (local.get $t)
+      (struct.new $LuaString (array.new_fixed $LuaArr 1 (i32.const 110)) (i32.const 0))))   ;; "n"
+    (if (i32.eqz (call $is_int (local.get $n)))
+      (then (call $throw_lit_at (i32.const 1276) (i32.const 30) (local.get $line))))
+    (local.set $v (call $as_int (local.get $n)))
+    (if (i64.gt_u (local.get $v) (i64.const 1073741823))
+      (then (call $throw_lit_at (i32.const 1276) (i32.const 30) (local.get $line))))
+    (i32.wrap_i64 (local.get $v)))
+
+  ;; `...` as a value list: t[1..t.n]. Expanding more values than reference
+  ;; Lua's stack holds (1,000,000) raises its "stack overflow".
+  (func $vararg_values (param $t anyref) (param $line i32) (result (ref $ArgArr))
+    (local $tab (ref $LuaTable)) (local $n i32) (local $i i32) (local $out (ref $ArgArr))
+    (local.set $tab (ref.cast (ref $LuaTable) (local.get $t)))
+    (local.set $n (call $vararg_count (local.get $tab) (local.get $line)))
+    (if (i32.gt_u (local.get $n) (i32.const 1000000))
+      (then (call $throw_lit_at (i32.const 971) (i32.const 14) (local.get $line))))   ;; "stack overflow"
+    (if (i32.eqz (local.get $n)) (then (return (global.get $g_empty_args))))
+    (local.set $out (array.new $ArgArr (ref.null any) (local.get $n)))
+    (loop $lp
+      (array.set $ArgArr (local.get $out) (local.get $i)
+        (call $tab_get_arr_idx (local.get $tab) (i32.add (local.get $i) (i32.const 1))))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br_if $lp (i32.lt_u (local.get $i) (local.get $n))))
+    (local.get $out))
+
+  ;; `...` as one value: t[1] when t.n > 0, else nil.
+  (func $vararg_first (param $t anyref) (param $line i32) (result anyref)
+    (local $tab (ref $LuaTable))
+    (local.set $tab (ref.cast (ref $LuaTable) (local.get $t)))
+    (if (result anyref) (call $vararg_count (local.get $tab) (local.get $line))
+      (then (call $tab_get_arr_idx (local.get $tab) (i32.const 1)))
+      (else (ref.null any))))
+
+  (func $builtin_table_pack (type $LuaFn)
+    (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))
+    (array.new_fixed $ArgArr 1 (call $vararg_table (local.get $args))))
 
   (func $builtin_table_unpack (type $LuaFn)
     (param $self (ref $LuaClosure)) (param $args (ref $ArgArr)) (result (ref $ArgArr))

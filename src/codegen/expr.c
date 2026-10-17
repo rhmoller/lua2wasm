@@ -467,14 +467,22 @@ static void emit_unop(CG *c, const Expr *e, int depth) {
 /* ----- calls ----- */
 
 /* An expression whose value in a multi-value position is a full $ArgArr
- * (call/method-call/vararg) rather than a single anyref. */
+ * (call/method-call/vararg) rather than a single anyref. A named vararg
+ * table's initializer is the one `...` that is a single value (the table). */
 int is_multival_tail(const Expr *e) {
     if (e->paren) return 0; /* `(f())` is adjusted to a single value */
     return e->kind == EXPR_CALL ||
            e->kind == EXPR_METHOD_CALL ||
-           e->kind == EXPR_VARARG;
+           (e->kind == EXPR_VARARG && !e->as.vararg.pack);
 }
 void emit_multival_array(CG *c, const Expr *e, int depth) {
+    if (e->kind == EXPR_VARARG && e->as.vararg.tab) {
+        /* `...` in a function with a named vararg table: t's values 1..t.n */
+        emit_line(c, depth, "(call $vararg_values\n");
+        emit_expr(c, e->as.vararg.tab, depth + 1);
+        emit_linef(c, depth + 1, "(i32.const %d))\n", e->line);
+        return;
+    }
     if (e->kind == EXPR_VARARG) {
         emit_line(c, depth, "(local.get $varargs)\n");
         return;
@@ -1205,7 +1213,15 @@ void emit_expr(CG *c, const Expr *e, int depth) {
         break;
     }
     case EXPR_VARARG:
-        emit_line(c, depth, "(call $args_first (local.get $varargs))\n");
+        if (e->as.vararg.pack) {
+            emit_line(c, depth, "(call $vararg_table (local.get $varargs))\n");
+        } else if (e->as.vararg.tab) {
+            emit_line(c, depth, "(call $vararg_first\n");
+            emit_expr(c, e->as.vararg.tab, depth + 1);
+            emit_linef(c, depth + 1, "(i32.const %d))\n", e->line);
+        } else {
+            emit_line(c, depth, "(call $args_first (local.get $varargs))\n");
+        }
         break;
     }
 }
